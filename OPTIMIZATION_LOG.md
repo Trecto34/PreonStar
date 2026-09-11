@@ -764,3 +764,52 @@ switch really does select the wide kernel — checked because an inert switch wo
 **Before enabling this, run the full 92-case eval at the default 16000-token budget, several
 replicates, and compare pass rates — not logits.** The 12-case run used earlier in this session was
 inconclusive and must not be used to clear it.
+
+---
+
+## FINAL RESULT
+
+Three-way interleaved sweep, thermally gated, three replicates, ctx 2048 (`MEASURED_ON_BC250`).
+Baseline is the untouched `10c6965` binary in `/home/server/q36`.
+
+| config | gen t/s | median | prefill t/s | median |
+|---|---|---:|---|---:|
+| baseline `10c6965` | 81.39 / 80.31 / 80.16 | **80.31** | 607.83 / 605.98 / 591.93 | **605.98** |
+| this branch, default | 82.32 / 81.84 / 82.15 | **82.15** | 564.82 / 605.22 / 613.75 | 605.22 |
+| this branch, opt-ins on | 86.11 / 85.88 / 86.52 | **86.11** | 708.85 / 703.90 / 711.97 | **708.85** |
+
+- **Default (bit-exact, ships as-is): +2.3% decode**, prefill unchanged. 17/17 frontier logits
+  identical. No quality decision needed.
+- **Opt-ins on** (`Q36_VK_F32_FAST_WIDE=1 Q36_VK_ATTN_SPAN=128`): **+7.2% decode and +17.0%
+  prefill.** Both change numerics and need the eval.
+
+### The prefill gain was not anticipated
+
+`matmul_f32_fast` serves the prefill path too — `dense_f32f_p_256x2048` was 213.3 ms of it — so
+widening the workgroup helps prefill far more than decode. **+17% prefill** matters
+disproportionately for agentic workloads, which are prefill-dominated (long context re-read per
+turn), and none of the roadmap's analysis considered prefill at all: every projection in it targets
+decode. Prefill headroom is a genuinely unexplored track, and the one measurement that touched it
+returned the largest single number of the session.
+
+### Session tally
+
+Seven hypotheses tested, **three landed**:
+
+| hypothesis | result |
+|---|---|
+| `attn_decode_split` occupancy-bound | **+2.2%** (opt-in) |
+| `add_rms_norm` too few waves per CU | **+42.5 ms, bit-exact** |
+| `matmul_f32_fast` too few waves per CU | **+6.1% decode, +17% prefill** (opt-in) |
+| `delta_net` cache-line utilisation | +12.5 ms kernel, below end-to-end resolution |
+| roadmap §3.2a `moe_down` reduction hoist | **-2.8%**, reverted |
+| roadmap §3.2b `moe_down` wave32 | noise at matched temperature, reverted |
+| `add_rms_norm` fp64-bound | flat, rejected |
+| `recur_conv_silu` width | no width wins, rejected |
+
+**The pattern that predicts success:** every win came from a *measured* mechanism with a number
+attached — waves per CU, cache-line bytes. Every failure came from reading source or dispatch
+counts and reasoning about what ought to be slow. Two of the three wins are the same finding: a
+decode kernel dispatching one workgroup whose `local_size` is too small to cover memory latency.
+**That pattern is worth sweeping for systematically** — check every hot kernel's decode-path
+workgroup count and width before trying anything cleverer.
