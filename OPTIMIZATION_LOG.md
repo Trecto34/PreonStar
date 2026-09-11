@@ -935,3 +935,34 @@ Remaining prefill headroom is inside the GEMMs themselves — `matmul_q8_0_mm_f1
 `moe_gate_up_gemm` (1881 ms) — which are properly tiled shared-memory kernels with hardcoded
 BM/BN/BK. That is genuine GEMM tuning work, and `matmul_q8_0_mm_f16.comp:70` already records that
 register prefetch was tried there and measured flat.
+
+---
+
+## CLI flags for the two opt-in fast paths
+
+Both opt-ins now have `--` flags on every front end, resolving to the environment variables the
+Vulkan backend already reads, so there is one implementation of the behaviour
+(`q36_set_gpu_fast_path_env()` in `q36.c`, declared in `q36.h`).
+
+| flag | effect | measured | exact? |
+|---|---|---|---|
+| `--f32-fast-wide` | 256-thread `matmul_f32_fast` | **+6.1% decode, +17% prefill** | **no** — reassociates the MoE router gate, can change expert selection |
+| `--attn-span N` | split-K span in keys (default 512) | 128 gives **+2.2% decode** | **no** — regroups an ordered sum only |
+
+Verified on `q36-bench` (`MEASURED_ON_BC250`):
+
+- `--f32-fast-wide`: **17/17** frontier logits differ — the flag reaches the kernel selection.
+- `--attn-span 128`: **16/17** differ, with frontier `002048` matching. That is the correct
+  signature: the span only affects the decode split-K path, so the prefill frontier must be
+  untouched.
+- no flags: **0/17** differ — the default path is unchanged by the CLI work.
+- `--attn-span` with no argument errors rather than silently defaulting.
+
+Help text is in `q36_help.c` (shared by `q36`, `q36-server`, `q36-eval`, `q36-agent`) and in
+`q36_bench.c`'s own usage block.
+
+Note on `AGENT.md`: it says not to add permanent semantic variants behind flags. These are
+deliberately *not* the release path — both default to off, the default build stays bit-exact, and
+they exist so the 92-case eval can be run against them without setting environment variables by
+hand. If the eval clears `--f32-fast-wide`, the right follow-up is to make it the default and
+delete the flag rather than keep both paths.

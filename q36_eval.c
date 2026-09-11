@@ -1730,6 +1730,10 @@ static eval_config parse_options(int argc, char **argv) {
                         "q36-eval: --simulate-used-memory must be a positive GiB value, e.g. 64GB\n");
                 exit(2);
             }
+        } else if (!strcmp(arg, "--f32-fast-wide")) {
+            q36_set_gpu_fast_path_env("Q36_VK_F32_FAST_WIDE", "1");
+        } else if (!strcmp(arg, "--attn-span")) {
+            q36_set_gpu_fast_path_env("Q36_VK_ATTN_SPAN", need_arg(&i, argc, argv, arg));
         } else if (!strcmp(arg, "--prefill-chunk")) {
             int v = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
             if (v <= 0) {

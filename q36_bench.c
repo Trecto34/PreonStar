@@ -85,6 +85,8 @@ static void usage(FILE *fp) {
         "      Select Metal on Apple Silicon, Vulkan on Linux, or CPU.\n"
         "  -t, --threads N        CPU helper threads.\n"
         "  --prefill-chunk N      Override GPU graph prefill width. Default: auto; resident GPU resolves to 1024.\n"
+        "  --f32-fast-wide        Opt-in 256-thread f32 matvec: faster, but reassociates the MoE router gate.\n"
+        "  --attn-span N          Split-K span in keys. Default 512; 128 is faster but regroups an ordered sum.\n"
         "  --quality              Prefer exact kernels where applicable.\n"
         "  -ctk, --cache-type-k TYPE\n"
         "                         KV cache K type: f16, q8_0, or q4_0.\n"
@@ -265,6 +267,10 @@ static bench_config parse_options(int argc, char **argv) {
             c.csv_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.threads = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--f32-fast-wide")) {
+            q36_set_gpu_fast_path_env("Q36_VK_F32_FAST_WIDE", "1");
+        } else if (!strcmp(arg, "--attn-span")) {
+            q36_set_gpu_fast_path_env("Q36_VK_ATTN_SPAN", need_arg(&i, argc, argv, arg));
         } else if (!strcmp(arg, "--prefill-chunk")) {
             c.prefill_chunk = (uint32_t)parse_int(
                 need_arg(&i, argc, argv, arg), arg);

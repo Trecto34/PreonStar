@@ -176,6 +176,10 @@ static void print_model_runtime(FILE *fp, const help_colors *c,
     opt(fp, c, "--simulate-used-memory NGB", "Diagnostic: lock N GiB before model load to simulate a smaller-memory machine.");
     opt(fp, c, "--prefill-chunk N",
         "GPU graph prefill chunk size. Default: auto; resident GPU resolves to 1024.");
+    opt(fp, c, "--f32-fast-wide",
+        "Opt-in 256-thread f32 matvec. Faster, but reassociates the MoE router gate.");
+    opt(fp, c, "--attn-span N",
+        "Attention split-K span in keys. Default: 512. 128 is faster; regroups an ordered sum.");
     if (full) {
         if (tool != Q36_HELP_BENCH) {
             opt(fp, c, "--mtp FILE", "Optional MTP support GGUF used for draft-token probes.");

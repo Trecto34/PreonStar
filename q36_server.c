@@ -10492,6 +10492,10 @@ static void usage(FILE *fp) {
         "  -t, --threads N\n"
         "      CPU helper threads for lightweight host-side work.\n"
         "  --prefill-chunk N\n"
+        "  --f32-fast-wide\n"
+        "      Opt-in 256-thread f32 matvec. Faster, but reassociates the MoE router gate.\n"
+        "  --attn-span N\n"
+        "      Attention split-K span in keys. Default: 512. 128 is faster; regroups an ordered sum.\n"
         "      GPU graph prefill chunk size. Default: auto; resident GPU resolves to 1024.\n"
         "  --quality\n"
         "      Prefer exact kernels where faster approximate paths exist; MTP uses strict verification.\n"
@@ -10657,6 +10661,10 @@ static server_config parse_options(int argc, char **argv) {
             c.default_tokens = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--f32-fast-wide")) {
+            q36_set_gpu_fast_path_env("Q36_VK_F32_FAST_WIDE", "1");
+        } else if (!strcmp(arg, "--attn-span")) {
+            q36_set_gpu_fast_path_env("Q36_VK_ATTN_SPAN", need_arg(&i, argc, argv, arg));
         } else if (!strcmp(arg, "--prefill-chunk")) {
             c.engine.prefill_chunk = (uint32_t)parse_int_arg(
                     need_arg(&i, argc, argv, arg), arg);

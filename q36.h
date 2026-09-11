@@ -191,6 +191,9 @@ q36_context_memory q36_context_memory_estimate_with_prefill(
         q36_backend backend,
         int ctx_size,
         uint32_t prefill_chunk);
+/* Sets an opt-in GPU fast-path switch (see q36.c).  Front ends only. */
+void q36_set_gpu_fast_path_env(const char *name, const char *value);
+
 q36_context_memory q36_context_memory_estimate_configured(
         q36_backend backend,
         int ctx_size,

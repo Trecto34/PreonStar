@@ -135,6 +135,10 @@ static void usage(FILE *fp) {
         "  --simulate-used-memory SIZEGB\n"
         "      Reduce automatic SSD cache planning by pretending SIZEGB is already used.\n"
         "  --prefill-chunk N\n"
+        "  --f32-fast-wide\n"
+        "      Opt-in 256-thread f32 matvec. Faster, but reassociates the MoE router gate.\n"
+        "  --attn-span N\n"
+        "      Attention split-K span in keys. Default: 512. 128 is faster; regroups an ordered sum.\n"
         "      Override prompt prefill chunk size. Default: auto (resident Metal resolves to 1024).\n"
         "\n"
         "Prompt and generation:\n"
@@ -1611,6 +1615,10 @@ static cli_config parse_options(int argc, char **argv) {
                         "q36: --simulate-used-memory must be a positive GiB value, e.g. 64GB\n");
                 exit(2);
             }
+        } else if (!strcmp(arg, "--f32-fast-wide")) {
+            q36_set_gpu_fast_path_env("Q36_VK_F32_FAST_WIDE", "1");
+        } else if (!strcmp(arg, "--attn-span")) {
+            q36_set_gpu_fast_path_env("Q36_VK_ATTN_SPAN", need_arg(&i, argc, argv, arg));
         } else if (!strcmp(arg, "--prefill-chunk")) {
             int v = parse_int(need_arg(&i, argc, argv, arg), arg);
             if (v <= 0) {

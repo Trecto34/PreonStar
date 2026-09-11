@@ -951,6 +951,24 @@ static uint32_t q36_q4_0_row_bytes(uint32_t n) {
     return ((n + Q36_QK4_0 - 1u) / Q36_QK4_0) * Q36_Q4_0_BYTES;
 }
 
+/* Two opt-in GPU fast paths measure faster but change numerics, so they stay
+ * off unless asked for.  Every front end exposes the same two flags and both
+ * resolve to the environment variables the Vulkan backend already reads, so
+ * there is exactly one implementation of the behaviour.
+ *
+ *   --f32-fast-wide   256-thread matmul_f32_fast.  Measured +6.1% decode and
+ *                     +17% prefill, but it reassociates the MoE router gate,
+ *                     which can change which experts a token selects.
+ *   --attn-span N     split-K span in keys (default 512).  128 measured +2.2%
+ *                     decode; it only regroups an ordered sum.
+ *
+ * Both are documented with their measurements in OPTIMIZATION_LOG.md.  Neither
+ * is bit-exact, so neither is on by default. */
+void q36_set_gpu_fast_path_env(const char *name, const char *value) {
+    if (!name || !value) return;
+    setenv(name, value, 1);
+}
+
 const char *q36_kv_cache_type_name(q36_kv_cache_type type) {
     switch (type) {
     case Q36_KV_CACHE_F16: return "f16";
