@@ -643,3 +643,32 @@ The attention split-K span (`Q36_VK_ATTN_SPAN=128`) adds a further **+2.2%** mea
 12-case eval run to check it was inconclusive (4 passed vs 4 passed, but 7 of 12 cases exhausted
 their token budget — my budget was 3000 against a 16000 default, so the test mostly measured
 whether cases finished). Settling it needs the full 92-case suite at the real budget.
+
+---
+
+## Remaining addressable pool (measured, not estimated)
+
+Recovered so far: **55 ms of roughly 900 ms** of measured below-roofline decode time — about 6% of
+the pool. The pool is not exhausted; these bandwidth figures are measured, and the gap to roofline
+is real.
+
+| kernel | ms | achieved GB/s | % of roofline | ms if at roofline |
+|---|---:|---:|---:|---:|
+| `moe_down_q2k_sum_decode` | 155 | 85 | **24%** | ~37 |
+| `moe_gate_up_decode` | 144 | 153 | **43%** | ~61 |
+| `matmul_f32_fast` | 72 | 54 | **15%** | ~11 |
+| `attn_decode_split` (post-span) | 91 | ~25 | 7% | — |
+| `recur_conv_silu_decode` | 105 | compute-bound | — | width tested, no win |
+| `router_topk` | 57 | not examined | — | — |
+
+The first three total **262 ms of a ~1836 ms budget (14%)**; full recovery would be **+17%**, half
+recovery **+8%**. Neither is a prediction of what the work will yield — it is the size of the gap.
+
+**Method note for the next round.** Six hypotheses were tested this session and two landed. Both
+winners came from a *measured mechanism* with a number attached — wave count per CU for
+`add_rms_norm`, cache-line utilisation for `delta_net`. All four failures came from reading source
+or dispatch counts and reasoning about what *ought* to be slow. Start from the profiler's
+per-dispatch numbers, not from the shader.
+
+Next target: `moe_down_q2k_sum_decode`, 155 ms at 24% of roofline, 2048 workgroups per dispatch.
+Note the §3.2 reduction hoist was already tried here and measured -2.8%, so the cost is elsewhere.
