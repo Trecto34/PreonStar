@@ -603,3 +603,43 @@ result is consistent and the change is free, but it should not be counted as mea
 **Why the win is smaller than the coalescing argument suggests:** the state is loaded into registers
 once per dispatch and the token loop then runs from registers, so the strided access is paid twice
 per dispatch rather than per token. The inner loop was never the thing being fixed.
+
+---
+
+## END-TO-END RESULT: +1.8% to +2.3% decode, bit-exact
+
+The only number that counts. Untouched `10c6965` binary in `/home/server/q36` against this branch's
+build, alternating, thermally gated, three replicates each, ctx 2048 (`MEASURED_ON_BC250`):
+
+| build | gen t/s | median | prefill t/s |
+|---|---|---:|---|
+| baseline `10c6965` | 81.58 / 80.39 / 80.32 | **80.39** | 609.19 / 559.29 / 611.03 |
+| this branch | 82.34 / 82.23 / 82.05 | **82.23** | 595.09 / 608.29 / 612.35 |
+
+**+1.80% on means, +2.29% on medians.** Passes the roadmap's strict acceptance rule: the
+candidate's minimum (82.05) beats the baseline's maximum (81.58). Prefill is unchanged, as
+intended — every change targets decode.
+
+All of it is **bit-exact**: 17/17 frontier logits identical. No quality decision is required to
+ship this.
+
+Both figures sit below this morning's 84.3 t/s baseline because the board's idle floor drifted from
+44 C to ~60 C over the session. Absolute numbers from different times of day are not comparable;
+the interleaved design is what makes this A/B valid.
+
+### Predicted vs measured, and why they differ
+
+Per-kernel savings totalled 42.5 + 12.5 = 55 ms of a ~1836 ms budget, predicting **+3.1%**.
+Measured **+1.8 to +2.3%**. The gap is expected: the profiler's `gpu_ms` figures sum to ~5.6% more
+than wall-clock because dispatches overlap, so part of the saved kernel time was already hidden
+behind other work. **Summed per-kernel deltas systematically overstate end-to-end gain** — a
+reason to distrust any roadmap estimate built by adding kernel rows together, including the
+original +25-30% projection.
+
+### Available but not enabled
+
+The attention split-K span (`Q36_VK_ATTN_SPAN=128`) adds a further **+2.2%** measured, for roughly
+**+4.5% total**. It is left off because it is a reassociation that changes output text, and the
+12-case eval run to check it was inconclusive (4 passed vs 4 passed, but 7 of 12 cases exhausted
+their token budget — my budget was 3000 against a 16000 default, so the test mostly measured
+whether cases finished). Settling it needs the full 92-case suite at the real budget.
