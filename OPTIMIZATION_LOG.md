@@ -672,3 +672,45 @@ per-dispatch numbers, not from the shader.
 
 Next target: `moe_down_q2k_sum_decode`, 155 ms at 24% of roofline, 2048 workgroups per dispatch.
 Note the §3.2 reduction hoist was already tried here and measured -2.8%, so the cost is elsewhere.
+
+---
+
+## moe_down wave32 forcing (roadmap §3.2b) — NO WIN, reverted
+
+`moe_down_q2k_sum_decode` declares `local_size_x = 32` on a subgroup-64 device, so every workgroup
+occupies a wave64 with half its lanes permanently inactive. The roadmap proposed forcing wave32
+and flagged bit-exactness as "argued, not proven".
+
+**Bit-exactness: proven, not argued — 17/17 frontier logits identical.** The `-0.0` concern about
+`subgroupAdd` over inactive lanes does not materialise on this workload.
+
+**Speed: nothing.** Interleaved A/B on one binary via a `Q36_VK_WAVE32` switch
+(`MEASURED_ON_BC250`):
+
+| wave32 | entry C | `moe_down` ms | gen t/s |
+|---:|---:|---:|---:|
+| on | 56 | 156.109 | 78.16 |
+| off | 60 | 161.171 | 76.99 |
+| on | 61 | 163.630 | 76.35 |
+| off | 61 | 164.551 | 76.25 |
+
+Only the last two share an entry temperature: **163.630 vs 164.551, a 0.6% difference — noise.**
+The attractive 156.1 came from the one run that started 5 C cooler, which is precisely the confound
+the thermal gate exists to expose. Reverted.
+
+**Why the mechanism was wrong:** idle lanes cost ALU throughput, and this kernel is not ALU-bound.
+The 32 active lanes issue the same memory requests either way, so halving the wave width changes
+nothing about the traffic.
+
+### So what does limit moe_down to 85 GB/s?
+
+Not occupancy: 2048 workgroups of one wave each is ~51 waves per CU across 40 CUs. Not lane
+utilisation, per above. Not the reduction structure — the §3.2(a) hoist was already measured at
+**-2.8%**.
+
+The remaining candidate is **access locality**: each workgroup gathers eight *routed* expert rows,
+selected per token, at scattered offsets in the weight buffer (~164 bytes each at `base_u16 + i *
+Q2K_U16`). Scattered short reads is the defining access pattern of a routed MoE and is not
+obviously fixable at the kernel level. Three of its four plausible causes are now eliminated by
+measurement; treat 85 GB/s as possibly near this kernel's practical ceiling rather than as 4x of
+available headroom.
