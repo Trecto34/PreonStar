@@ -1185,11 +1185,24 @@ static bool q36_vk_use_attn_splitk(void) {
  * against a ~360 GB/s roofline, i.e. it is occupancy-bound rather than
  * bandwidth-bound.  A narrower span buys occupancy.
  *
- * DIAGNOSTIC ONLY, and NOT bit-exact: the combine reduces the per-span
- * partials in order, so changing the span count regroups that summation and
- * changes rounding.  Kept at 512 by default so the release path is
- * unchanged; Q36_VK_ATTN_SPAN exists to measure what occupancy is worth
- * before deciding whether to pay for it. */
+ * NOT bit-exact: attn_combine walks the per-span partials sequentially in
+ * f32, rescaling by exp(m - nm) at each step, so changing the span count
+ * regroups that reduction and changes rounding.
+ *
+ * The cost of narrowing scales with context, in BOTH directions, and this is
+ * why the default stays 512:
+ *
+ *   spans = kv_max / span, so at ctx 32768 a 128-key span puts 256 sequential
+ *   f32 rescales in the chain where 512 puts 64.  Online softmax keeps that
+ *   bounded, not free -- drift grows with span count, hence with context.
+ *
+ *   attn_combine's own cost grows the same way: measured 10.302 -> 14.870 ms
+ *   at ctx 2048 going 512 -> 128, and that term scales with span count while
+ *   the split-side saving does not.
+ *
+ * The +2.2% for span 128 was measured at ctx 2048 only (16 spans vs 4) and
+ * MUST NOT be assumed to hold at long context -- neither the gain nor the
+ * numerical cost has been measured beyond 2064. */
 static uint32_t q36_vk_attn_span(void) {
     static int cached = -1;
     if (cached < 0) {

@@ -966,3 +966,60 @@ deliberately *not* the release path — both default to off, the default build s
 they exist so the 92-case eval can be run against them without setting environment variables by
 hand. If the eval clears `--f32-fast-wide`, the right follow-up is to make it the default and
 delete the flag rather than keep both paths.
+
+---
+
+## CORRECTION: `--attn-span` was validated only at short context, and both its cost and its
+## benefit scale with context
+
+The `+2.2%` recorded for `Q36_VK_ATTN_SPAN=128` was measured at **ctx 2048 only**. It was presented
+earlier in this log, and recommended to the user, without that qualification. Both the numerical
+cost and the speed benefit depend on context length, so the result does not generalise.
+
+### Mechanism
+
+`attn_combine` walks the per-span partials **sequentially in f32** with online-softmax rescaling:
+
+```glsl
+for (uint s = 1u; s < spans; s++) {
+    float nm = max(m, ms);
+    float r  = exp(m - nm);
+    float rs = exp(ms - nm);
+    acc = acc*r + ...;
+}
+```
+
+One rescale per span, and `spans = kv_max / span_width`:
+
+| context | span 512 | span 128 |
+|---|---:|---:|
+| 2048 | 4 | 16 |
+| 8192 | 16 | 64 |
+| 32768 | 64 | **256** |
+
+At 32k, span 128 puts **256 sequential f32 rescales** in the chain where the default puts 64. The
+running max keeps this *bounded*, which is the point of online softmax — bounded is not zero, and
+drift grows with span count and therefore with context.
+
+### The benefit shrinks the same way
+
+`attn_combine`'s own cost rose **10.302 -> 14.870 ms** at ctx 2048 going 512 -> 128
+(`MEASURED_ON_BC250`). That term scales with span count; the split-side saving does not. So at long
+context the combine overhead grows while the saving stays flat, and the net gain may approach zero
+or invert.
+
+### What is actually established
+
+- Parity verified at **ctx 2048-2064 only** (16 spans vs 4): 16/17 frontier logits differ, with the
+  prefill frontier correctly unchanged.
+- **No data at all** for ctx 8192, 16384 or 32768 — neither throughput nor logit divergence.
+
+### Consequence
+
+`--attn-span` now carries the caveat in every help string and beside
+`q36_vk_attn_span()`. For long-context and agentic work the default 512 should be kept.
+`--f32-fast-wide` does **not** share this property: its cost is per token and independent of
+context, so the +6.1% decode / +17% prefill holds regardless of prompt length.
+
+**Open measurement:** span 512 vs 128 at ctx 8192 and 16384, recording both throughput and frontier
+logit divergence. Until that exists, treat `--attn-span 128` as a short-context-only tuning.

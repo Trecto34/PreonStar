@@ -22,8 +22,15 @@ Shipping result so far, ctx 2048, interleaved and thermally gated:
 | branch default (bit-exact) | 82.15 (+2.3%) | 605.22 |
 | branch + opt-ins | 86.11 (+7.2%) | **708.85 (+17.0%)** |
 
-Opt-ins are `Q36_VK_F32_FAST_WIDE=1` and `Q36_VK_ATTN_SPAN=128`. Both change numerics and are off
-by default pending an eval — see `OPTIMIZATION_LOG.md`.
+Opt-ins are `--f32-fast-wide` and `--attn-span 128` (or the matching `Q36_VK_*` env vars). Both
+change numerics and are off by default pending an eval — see `OPTIMIZATION_LOG.md`.
+
+**Caveat on `--attn-span`:** its +2.2% was measured at ctx 2048 only. `attn_combine` does one
+sequential f32 rescale per span, and `spans = kv_max / span_width`, so narrowing to 128 puts 256
+rescales in the chain at ctx 32768 against 64 for the default. Both the rounding drift and
+`attn_combine`'s own cost (10.302 -> 14.870 ms at ctx 2048) scale with span count, so the gain may
+vanish or invert at long context. It is unmeasured beyond ctx 2064. `--f32-fast-wide` has no such
+context dependence.
 
 **The +17% prefill was accidental.** It came from widening `matmul_f32_fast`, which serves prefill
 as well as decode. Nobody was aiming at prefill, and it returned the largest number of the session.

@@ -179,7 +179,8 @@ static void print_model_runtime(FILE *fp, const help_colors *c,
     opt(fp, c, "--f32-fast-wide",
         "Opt-in 256-thread f32 matvec. Faster, but reassociates the MoE router gate.");
     opt(fp, c, "--attn-span N",
-        "Attention split-K span in keys. Default: 512. 128 is faster; regroups an ordered sum.");
+        "Attention split-K span in keys. Default: 512. 128 measured +2.2% at ctx 2048 only; "
+        "error and combine cost both scale with context/span, so it is NOT validated for long context.");
     if (full) {
         if (tool != Q36_HELP_BENCH) {
             opt(fp, c, "--mtp FILE", "Optional MTP support GGUF used for draft-token probes.");
