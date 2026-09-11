@@ -147,6 +147,7 @@ typedef struct {
     q36_vk_kernel vision_attention;
     q36_vk_kernel matmul_f32;
     q36_vk_kernel matmul_f32_fast;
+    q36_vk_kernel matmul_f32_fast_w256;
     q36_vk_kernel add;
     q36_vk_kernel directional_steering;
     q36_vk_kernel rms_norm;
@@ -2907,6 +2908,7 @@ int q36_gpu_init(void) {
     q36_vk.vision_attention = Q36_VK_KERNEL("vulkan/vision_attention.spv", 2, 4, 1u << 1);
     q36_vk.matmul_f32 = Q36_VK_KERNEL("vulkan/matmul_f32.spv", 3, 16, 1u << 2);
     q36_vk.matmul_f32_fast = Q36_VK_KERNEL("vulkan/matmul_f32_fast.spv", 3, 16, 1u << 2);
+    q36_vk.matmul_f32_fast_w256 = Q36_VK_KERNEL("vulkan/matmul_f32_fast_w256.spv", 3, 16, 1u << 2);
     q36_vk.add = Q36_VK_KERNEL("vulkan/add.spv", 3, 4, 1u << 2);
     q36_vk.directional_steering = Q36_VK_KERNEL("vulkan/directional_steering.spv", 2, 16, 1u << 0);
     q36_vk.rms_norm = Q36_VK_KERNEL("vulkan/rms_norm.spv", 3, 12, 1u << 2);
@@ -3471,6 +3473,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.add);
     q36_vk_kernel_destroy(&q36_vk.matmul_f32);
     q36_vk_kernel_destroy(&q36_vk.matmul_f32_fast);
+    q36_vk_kernel_destroy(&q36_vk.matmul_f32_fast_w256);
     q36_vk_kernel_destroy(&q36_vk.matmul_f16);
     q36_vk_kernel_destroy(&q36_vk.vision_matmul_f16);
     q36_vk_kernel_destroy(&q36_vk.vision_attention);
@@ -4131,7 +4134,9 @@ static int q36_vk_matmul_dense(q36_vk_kernel *kernel,
     const char *op = "dense_f16";
     if (kernel != &q36_vk.matmul_f16) {
         op = q36_vk.prof_ops
-                 ? q36_vk_f32_op_name(in_dim, out_dim, n_tok, kernel == &q36_vk.matmul_f32_fast)
+                 ? q36_vk_f32_op_name(in_dim, out_dim, n_tok,
+                                      kernel == &q36_vk.matmul_f32_fast ||
+                                      kernel == &q36_vk.matmul_f32_fast_w256)
                  : "dense_f32";
     }
     int ok = q36_vk_run_unlocked(op, kernel, bindings, &push, sizeof(push),
@@ -4286,9 +4291,14 @@ int q36_gpu_matmul_f32_scaled_tensor(q36_gpu_tensor *out,
      * here would force a flush now that nothing else reads activations back
      * during decode. The vec4 f32 kernel is the normal path; --quality or
      * Q36_VK_F32_FAST=0 retains the fp64 accumulation for exact routing. */
+    /* The 256-thread variant is much faster but changes the router gate's
+     * summation order, so it is opt-in until an eval clears it. */
+    q36_vk_kernel *fast_kernel = &q36_vk.matmul_f32_fast;
+    if (getenv("Q36_VK_F32_FAST_WIDE") && getenv("Q36_VK_F32_FAST_WIDE")[0] == '1')
+        fast_kernel = &q36_vk.matmul_f32_fast_w256;
     if (!q36_gpu_quality &&
         q36_vk_matmul_dense(q36_vk_use_f32_fast() && (in_dim & 3u) == 0u
-                                ? &q36_vk.matmul_f32_fast : &q36_vk.matmul_f32,
+                                ? fast_kernel : &q36_vk.matmul_f32,
                             out, model_map, model_size, weight_offset,
                             elems * sizeof(float), in_dim, out_dim, x, n_tok, scale)) {
         return 1;

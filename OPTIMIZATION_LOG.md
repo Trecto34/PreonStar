@@ -714,3 +714,53 @@ Q2K_U16`). Scattered short reads is the defining access pattern of a routed MoE 
 obviously fixable at the kernel level. Three of its four plausible causes are now eliminated by
 measurement; treat 85 GB/s as possibly near this kernel's practical ceiling rather than as 4x of
 available headroom.
+
+---
+
+## matmul_f32_fast 64 -> 256 threads — +6.1% end-to-end, but NOT bit-exact. Opt-in.
+
+The largest single speed result of the session, and the one that must not ship on my judgment alone.
+
+Same shape as `add_rms_norm`: the `_1xN` router/shared-expert gate dispatches **one workgroup of 64
+threads — a single wave64** — 5,120 times per 128 tokens. `n4 = in_dim/4 = 512`, so at 64 threads
+each thread walks 8 iterations with nothing else in flight to cover the latency.
+
+Interleaved A/B, thermally gated (`MEASURED_ON_BC250`):
+
+| threads | entry C | `matmul_f32_fast` ms | gen t/s |
+|---:|---:|---:|---:|
+| 64 (stock) | 60 | 295.217 | 76.36 |
+| **256** | 61 | **249.983** | **80.58** |
+| 512 | 61 | 256.908 | 79.85 |
+| 64 (stock) | 61 | 300.714 | 75.34 |
+| **256** | 61 | **246.954** | **80.36** |
+| 512 | 61 | 260.574 | 79.77 |
+
+Mean 298.0 -> 248.5 ms (**-49.5 ms, -16.6%**) and gen **75.85 -> 80.47 t/s (+6.1%)**. 512 is worse
+than 256, so 256 is the optimum, not merely "wider is better". Both 256 runs entered at equal or
+hotter temperatures than the 64 runs, so thermal drift works *against* this result.
+
+### Why it is gated
+
+**Not bit-exact: 17/17 frontier logits differ.** At 64 threads `gl_NumSubgroups == 1` and the
+shared-memory combine is skipped entirely; at 256 four subgroup partials are summed through
+`sh_sum` in a different order. Unlike `add_rms_norm` and `delta_net`, there is no fp64 accumulator
+to absorb the reassociation — this kernel accumulates in fp32.
+
+**And it computes the MoE router gate.** Per the roadmap, `ffn_gate_inp` is the most
+quality-sensitive tensor in an 8-of-256 MoE: a rounding flip changes *which experts a token is
+routed to*, not the value of a logit. That is a categorically different risk from the other
+non-exact change (the attention span), and it is why llama.cpp keeps this tensor in F32.
+
+### How it is wired
+
+`Q36_MFF_LOCAL` is a compile-time define; the Makefile builds both
+`vulkan/matmul_f32_fast.spv` (64, default) and `vulkan/matmul_f32_fast_w256.spv` (256). The host
+registers both kernels and selects the wide one only under `Q36_VK_F32_FAST_WIDE=1`.
+
+Verified: default build **0/17 differ** (shipping path unchanged), opt-in **17/17 differ** (the
+switch really does select the wide kernel — checked because an inert switch would look like a pass).
+
+**Before enabling this, run the full 92-case eval at the default 16000-token budget, several
+replicates, and compare pass rates — not logits.** The 12-case run used earlier in this session was
+inconclusive and must not be used to clear it.

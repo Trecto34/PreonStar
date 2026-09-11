@@ -51,6 +51,7 @@ VULKAN_SHADERS := \
 	vulkan/vision_attention.spv \
 	vulkan/matmul_f32.spv \
 	vulkan/matmul_f32_fast.spv \
+	vulkan/matmul_f32_fast_w256.spv \
 	vulkan/add.spv \
 	vulkan/directional_steering.spv \
 	vulkan/add_rms_norm.spv \
@@ -452,6 +453,10 @@ vulkan/%.spv: vulkan/%.comp
 
 vulkan/matmul_f32_fast.spv: vulkan/matmul_f32_fast.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+# Wide variant: faster but not bit-exact (router gate). Opt-in at runtime.
+vulkan/matmul_f32_fast_w256.spv: vulkan/matmul_f32_fast.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MFF_LOCAL=256 -o $@ $<
 
 vulkan/matmul_q8_0.spv: vulkan/matmul_q8_0.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
