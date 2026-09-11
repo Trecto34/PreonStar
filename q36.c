@@ -886,6 +886,39 @@ static uint32_t q36_default_gpu_prefill_cap(void) {
  * 1/chunk.  Measured on UD-Q4_K_M (ctx512, thermal-gated A/B): chunk 512
  * doubles prefill throughput over the resident-path default of 64.  An
  * explicit --prefill-chunk or Q36_VK_PREFILL_CHUNK still wins. */
+/* GFX1013 runs every dispatch on the gfx ring under amdgpu's 10 s TDR, and
+ * a timeout there destroys the context outright.  Two independent costs
+ * scale with the prefill chunk and both are unbounded without a cap:
+ *
+ *   - attention work per dispatch.  Shapes that miss the specialised
+ *     attn_prefill_qtile2 shader (it requires head_dim 256 and GQA exactly
+ *     8) fall back to attn_prefill_qtile, which has been measured to cross
+ *     the watchdog at ctx >= 12288 with a 1024-token chunk.
+ *   - scratch memory, which grows ~206 KB per chunk token: a 4096 chunk
+ *     costs +634 MB, a 6x violation of the SPEEDUP.md 100 MB budget.
+ *
+ * A 4096 chunk was also measured at 202 t/s prefill against 616 t/s at
+ * 1024, so the absolute cap costs nothing anyone wants.  The GQA test is a
+ * secondary guard: the 35B hybrid is GQA 8 and still crashed at 4096, so
+ * the absolute cap is what actually prevents the observed failure.
+ * Q36_VK_PREFILL_CHUNK_UNSAFE=1 restores the unclamped value. */
+static uint32_t q36_engine_clamp_prefill_cap(uint32_t cap) {
+    static int warned;
+    if (!q36_gpu_device_is_gfx1013()) return cap;
+    if (getenv("Q36_VK_PREFILL_CHUNK_UNSAFE")) return cap;
+    uint32_t limit = (Q36_N_HEAD_KV && (Q36_N_HEAD / Q36_N_HEAD_KV) == 8u) ? 1024u : 256u;
+    if (cap <= limit) return cap;
+    if (!warned) {
+        warned = 1;
+        fprintf(stderr,
+                "q36: clamping prefill chunk %u -> %u on GFX1013 (GQA %u); a larger chunk "
+                "can exceed the 10 s amdgpu watchdog and destroy the GPU context. "
+                "Set Q36_VK_PREFILL_CHUNK_UNSAFE=1 to override.\n",
+                cap, limit, Q36_N_HEAD_KV ? Q36_N_HEAD / Q36_N_HEAD_KV : 0u);
+    }
+    return limit;
+}
+
 static uint32_t q36_engine_gpu_prefill_cap(const q36_engine *e) {
 #ifdef Q36_METAL
     if (e->ssd_streaming) {
@@ -898,9 +931,11 @@ static uint32_t q36_engine_gpu_prefill_cap(const q36_engine *e) {
         return cap;
     }
 #endif
-    if (e->prefill_cap_override) return e->prefill_cap_override;
-    if (e->ssd_streaming && !getenv("Q36_VK_PREFILL_CHUNK")) return 512;
-    return q36_default_gpu_prefill_cap();
+    uint32_t cap;
+    if (e->prefill_cap_override) cap = e->prefill_cap_override;
+    else if (e->ssd_streaming && !getenv("Q36_VK_PREFILL_CHUNK")) cap = 512;
+    else cap = q36_default_gpu_prefill_cap();
+    return q36_engine_clamp_prefill_cap(cap);
 }
 #endif
 

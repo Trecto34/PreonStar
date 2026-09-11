@@ -1817,6 +1817,39 @@ typedef struct {
 static q36_vk_cb_slot q36_vk_ring[Q36_VK_CB_RING];
 static uint32_t q36_vk_ring_cur;
 
+/* Device-lost latch.  A gfx ring timeout (amdgpu's 10 s TDR) destroys the
+ * context: every subsequent Vulkan call against this device fails, and
+ * RADV's command buffer handle becomes unusable, so recording into it
+ * segfaults inside vkEndCommandBuffer rather than returning an error.
+ * Once any submit-path call reports VK_ERROR_DEVICE_LOST we latch here and
+ * fail every later batch operation at its entry point.  The latch is
+ * deliberately one-way: there is no recover-and-continue path, because the
+ * dispatches that were in flight produced no results and silently resuming
+ * would corrupt the forward pass.  q36_session_sync() turns the failed pass
+ * into an error string for the caller. */
+static bool q36_vk_device_lost;
+/* Q36_VK_FAULT_INJECT_LOST=<n>: force the n-th vkQueueSubmit to report
+ * device loss, so the latch and its unwind can be tested without provoking
+ * a real TDR.  Diagnostic only; 0 (unset) disables it. */
+static uint64_t q36_vk_fault_inject_lost;
+static uint64_t q36_vk_submit_calls;
+
+static int q36_vk_ok(VkResult rc, const char *what) {
+    if (rc == VK_SUCCESS) return 1;
+    if (rc == VK_ERROR_DEVICE_LOST && !q36_vk_device_lost) {
+        q36_vk_device_lost = true;
+        fprintf(stderr,
+                "q36: Vulkan device lost during %s -- the GPU context was destroyed "
+                "(usually an amdgpu ring timeout; check `journalctl -k` for "
+                "\"ring gfx_0.0.0 timeout\").  All further GPU work is refused; "
+                "restart the process.  Lower --prefill-chunk if this reproduces.\n",
+                what);
+    }
+    return 0;
+}
+
+static bool q36_vk_device_lost_unlocked(void) { return q36_vk_device_lost; }
+
 static bool q36_vk_gpu_busy_unlocked(void) {
     if (q36_vk_batch_recording) return true;
     for (uint32_t i = 0; i < Q36_VK_CB_RING; i++) {
@@ -1828,6 +1861,7 @@ static bool q36_vk_gpu_busy_unlocked(void) {
 static int q36_vk_slot_wait_unlocked(q36_vk_cb_slot *s) {
     VkResult rc = VK_SUCCESS;
     if (!s->pending) return 1;
+    if (q36_vk_device_lost) { s->pending = false; return 0; }
     /* Decode batches finish in tens of microseconds; spinning on the fence
      * status dodges the syscall + thread wakeup of a blocking wait. */
     for (uint32_t spin = 0; spin < 4096; spin++) {
@@ -1835,16 +1869,23 @@ static int q36_vk_slot_wait_unlocked(q36_vk_cb_slot *s) {
         if (rc != VK_NOT_READY) break;
     }
     if (rc == VK_NOT_READY) rc = vkWaitForFences(q36_vk.device, 1, &s->fence, VK_TRUE, UINT64_MAX);
+    if (rc != VK_SUCCESS) {
+        /* A lost device never signals this fence; drop the slot so callers
+         * unwind instead of waiting on it again. */
+        s->pending = false;
+        return q36_vk_ok(rc, "fence wait");
+    }
     vkResetFences(q36_vk.device, 1, &s->fence);
     if (s->pool) vkResetDescriptorPool(q36_vk.device, s->pool, 0);
     s->pending = false;
-    if (rc == VK_SUCCESS && s->seq > q36_vk_completed_seq) q36_vk_completed_seq = s->seq;
-    return rc == VK_SUCCESS;
+    if (s->seq > q36_vk_completed_seq) q36_vk_completed_seq = s->seq;
+    return 1;
 }
 
 static int q36_vk_submit_current_unlocked(bool host_read) {
     q36_vk_cb_slot *s = &q36_vk_ring[q36_vk_ring_cur];
     if (!q36_vk_batch_recording) return 1;
+    if (q36_vk_device_lost) return 0;
     if (host_read) {
         /* Host ops read these buffers right after the fence.  The fence's
          * implicit host visibility is not reliable on the BC-250's RADV
@@ -1860,14 +1901,28 @@ static int q36_vk_submit_current_unlocked(bool host_read) {
                              VK_PIPELINE_STAGE_HOST_BIT,
                              0, 1, &host_barrier, 0, NULL, 0, NULL);
     }
-    if (vkEndCommandBuffer(q36_vk.command_buffer) != VK_SUCCESS) return 0;
+    {
+        VkResult rc = vkEndCommandBuffer(q36_vk.command_buffer);
+        if (rc != VK_SUCCESS) {
+            q36_vk_batch_recording = false;
+            return q36_vk_ok(rc, "vkEndCommandBuffer");
+        }
+    }
     {
         VkSubmitInfo si = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .commandBufferCount = 1,
             .pCommandBuffers = &q36_vk.command_buffer,
         };
-        if (vkQueueSubmit(q36_vk.queue, 1, &si, s->fence) != VK_SUCCESS) return 0;
+        VkResult rc = vkQueueSubmit(q36_vk.queue, 1, &si, s->fence);
+        if (rc == VK_SUCCESS && q36_vk_fault_inject_lost &&
+            ++q36_vk_submit_calls == q36_vk_fault_inject_lost) {
+            rc = VK_ERROR_DEVICE_LOST;
+        }
+        if (rc != VK_SUCCESS) {
+            q36_vk_batch_recording = false;
+            return q36_vk_ok(rc, "vkQueueSubmit");
+        }
     }
     s->pending = true;
     s->seq = ++q36_vk_submit_seq;
@@ -1936,6 +1991,7 @@ static int q36_vk_flush_unlocked(void) {
 
 static int q36_vk_begin_batch_unlocked(VkCommandBuffer *cmd_out) {
     q36_vk_cb_slot *slot = &q36_vk_ring[q36_vk_ring_cur];
+    if (q36_vk_device_lost) return 0;
     if (!slot->cb) {
         VkCommandBufferAllocateInfo cai = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1956,7 +2012,8 @@ static int q36_vk_begin_batch_unlocked(VkCommandBuffer *cmd_out) {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         };
-        if (vkBeginCommandBuffer(q36_vk.command_buffer, &bi) != VK_SUCCESS) return 0;
+        VkResult rc = vkBeginCommandBuffer(q36_vk.command_buffer, &bi);
+        if (rc != VK_SUCCESS) return q36_vk_ok(rc, "vkBeginCommandBuffer");
         q36_vk_batch_recording = true;
     }
     if (cmd_out) *cmd_out = q36_vk.command_buffer;
@@ -2668,11 +2725,13 @@ static int q36_vk_alloc_descriptor_unlocked(q36_vk_kernel *k, VkDescriptorSet *s
     };
     VkResult rc = vkAllocateDescriptorSets(q36_vk.device, &ai, set);
     if (rc == VK_SUCCESS) return 1;
+    if (rc == VK_ERROR_DEVICE_LOST) return q36_vk_ok(rc, "vkAllocateDescriptorSets");
     /* The pool's live sets belong to the open batch; rotate to the next
      * ring slot (its pool was reset when its fence completed). */
     if (!q36_vk_submit_eager_unlocked()) return 0;
     ai.descriptorPool = q36_vk.descriptor_pool;
     rc = vkAllocateDescriptorSets(q36_vk.device, &ai, set);
+    if (rc == VK_ERROR_DEVICE_LOST) return q36_vk_ok(rc, "vkAllocateDescriptorSets");
     return rc == VK_SUCCESS;
 }
 
@@ -2685,6 +2744,7 @@ static int q36_vk_run_unlocked(
         uint32_t                    groups_x,
         uint32_t                    groups_y,
         uint32_t                    groups_z) {
+    if (q36_vk_device_lost) return 0;
     const char *prof_op = q36_vk_prof_op_name(op);
     uint64_t prof_t0 = q36_vk_now_ns();
     uint64_t groups_total = (uint64_t)groups_x * groups_y * groups_z;
@@ -2796,6 +2856,11 @@ int q36_gpu_init(void) {
     if (!getcwd(q36_vk.shader_root, sizeof(q36_vk.shader_root)))
         q36_vk.shader_root[0] = '\0';
     q36_vk.prof_ops = getenv("Q36_VK_PROF_OP") || getenv("Q36_VK_PROF") || getenv("Q36_VK_PROF_KERNEL");
+    {
+        const char *env = getenv("Q36_VK_FAULT_INJECT_LOST");
+        q36_vk_fault_inject_lost = env ? strtoull(env, NULL, 10) : 0;
+        q36_vk_submit_calls = 0;
+    }
     /* write_mask marks the bindings each shader writes; the lazy-flush
      * tracker uses it so host reads of input-only tensors do not submit
      * the open batch. */
@@ -3244,7 +3309,9 @@ static void q36_vk_prof_report(void) {
 
 void q36_gpu_cleanup(void) {
     pthread_mutex_lock(&q36_vk_mu);
-    if (q36_vk.device) vkDeviceWaitIdle(q36_vk.device);
+    /* Teardown after device loss must not wait on a queue that will never
+     * drain; the objects are still destroyable. */
+    if (q36_vk.device && !q36_vk_device_lost) vkDeviceWaitIdle(q36_vk.device);
     q36_vk_stream_profile_report();
     q36_vk_batch_recording = false;
     q36_vk_batch_count = 0;
@@ -3462,6 +3529,9 @@ void *q36_gpu_tensor_contents(q36_gpu_tensor *tensor) {
     uint64_t offset = 0;
     q36_gpu_tensor *root = q36_gpu_tensor_root(tensor, &offset);
     if (!root || !root->data || offset > root->bytes) return NULL;
+    /* After device loss the bytes behind this pointer are whatever the
+     * dead batch left there; refuse rather than hand back stale results. */
+    if (q36_vk_device_lost) return NULL;
     bool flush = false;
     pthread_mutex_lock(&q36_vk_mu);
     if (q36_vk_gpu_busy_unlocked()) {
@@ -3601,7 +3671,27 @@ int q36_gpu_synchronize(void) {
     pthread_mutex_lock(&q36_vk_mu);
     int ok = q36_vk_flush_reason_unlocked("submit_wait_explicit");
     pthread_mutex_unlock(&q36_vk_mu);
-    return ok && vkDeviceWaitIdle(q36_vk.device) == VK_SUCCESS;
+    if (!ok || q36_vk_device_lost) return 0;
+    return q36_vk_ok(vkDeviceWaitIdle(q36_vk.device), "vkDeviceWaitIdle");
+}
+
+int q36_gpu_device_lost(void) {
+    pthread_mutex_lock(&q36_vk_mu);
+    int lost = q36_vk_device_lost_unlocked();
+    pthread_mutex_unlock(&q36_vk_mu);
+    return lost;
+}
+
+int q36_gpu_device_is_gfx1013(void) {
+    /* The BC-250 (1002:13fe) is the only board this backend detects, and
+     * its GPU is GFX10.1/gfx1013.  q36_gpu_init() is idempotent and the
+     * engine already calls it at open; calling it again keeps this correct
+     * if that order ever changes, and returns 0 if the GPU is unavailable. */
+    if (!q36_gpu_init()) return 0;
+    pthread_mutex_lock(&q36_vk_mu);
+    int is_gfx1013 = q36_vk.bc250 ? 1 : 0;
+    pthread_mutex_unlock(&q36_vk_mu);
+    return is_gfx1013;
 }
 
 int q36_gpu_set_model_map(const void *model_map, uint64_t model_size) {
@@ -3943,6 +4033,25 @@ void q36_gpu_prof_report(const char *label) {
     q36_vk_prof_report();
 }
 
+/* The f32 dense path carries two dispatches with very different costs and
+ * reported them under one "dense_f32" profiler row, which hid what the time
+ * was actually spent on: the MoE router gate [n_embd, n_expert] runs
+ * n_expert workgroups, while the shared-expert gate [n_embd, 1] runs a
+ * single workgroup and pays a full pipeline round-trip for 8 KB.  Tagging by
+ * shape mirrors q36_vk_q8_0_op_name(); it is diagnostic naming only and
+ * changes no dispatch.  Names are literals, so no allocation or thread
+ * safety concerns, and the strings only materialise when profiling is on. */
+static const char *q36_vk_f32_op_name(uint64_t in_dim, uint64_t out_dim, uint64_t n_tok, bool fast) {
+    if (n_tok == 1) {
+        if (out_dim == 1) return fast ? "dense_f32f_d_1xN" : "dense_f32_d_1xN";
+        if (in_dim == 2048 && out_dim == 256) return fast ? "dense_f32f_d_256x2048" : "dense_f32_d_256x2048";
+        return fast ? "dense_f32f_d_other" : "dense_f32_d_other";
+    }
+    if (out_dim == 1) return fast ? "dense_f32f_p_1xN" : "dense_f32_p_1xN";
+    if (in_dim == 2048 && out_dim == 256) return fast ? "dense_f32f_p_256x2048" : "dense_f32_p_256x2048";
+    return fast ? "dense_f32f_p_other" : "dense_f32_p_other";
+}
+
 static int q36_vk_matmul_dense(q36_vk_kernel *kernel,
                                q36_gpu_tensor *out,
                                const void *model_map,
@@ -3981,8 +4090,13 @@ static int q36_vk_matmul_dense(q36_vk_kernel *kernel,
     /* out_dim workgroups; the f16/f32 shaders index rows by global id, so
      * trailing groups simply exit.  These dense paths see little runtime
      * use: f32 matvecs run on the host and this model has no f16 matvec. */
-    int ok = q36_vk_run_unlocked(kernel == &q36_vk.matmul_f16 ? "dense_f16" : "dense_f32",
-                                 kernel, bindings, &push, sizeof(push),
+    const char *op = "dense_f16";
+    if (kernel != &q36_vk.matmul_f16) {
+        op = q36_vk.prof_ops
+                 ? q36_vk_f32_op_name(in_dim, out_dim, n_tok, kernel == &q36_vk.matmul_f32_fast)
+                 : "dense_f32";
+    }
+    int ok = q36_vk_run_unlocked(op, kernel, bindings, &push, sizeof(push),
                                  (uint32_t)out_dim, (uint32_t)n_tok, 1);
     pthread_mutex_unlock(&q36_vk_mu);
     return ok;

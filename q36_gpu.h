@@ -59,6 +59,17 @@ int q36_gpu_flush_commands(void);
 int q36_gpu_end_commands(void);
 int q36_gpu_synchronize(void);
 
+/* True once the GPU context has been destroyed under us (an amdgpu ring
+ * timeout is the usual cause).  Latched and one-way: every later GPU call
+ * fails, and the process must be restarted.  Lets callers tell "the device
+ * died" apart from an ordinary op failure when reporting an error. */
+int q36_gpu_device_lost(void);
+
+/* True when the active device is the BC-250's GFX1013 GPU.  Callers use it
+ * to apply the watchdog-driven prefill-chunk cap; safe to call before the
+ * GPU is up, since it initialises on demand. */
+int q36_gpu_device_is_gfx1013(void);
+
 int q36_gpu_set_model_map(const void *model_map, uint64_t model_size);
 int q36_gpu_set_model_fd(int fd);
 int q36_gpu_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size);
