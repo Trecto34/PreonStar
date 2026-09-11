@@ -279,11 +279,14 @@ vulkan/delta_net_cols.spv: vulkan/delta_net_cols.comp
 vulkan/delta_net_cols_f16.spv: vulkan/delta_net_cols.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_STATE_F16=1 -o $@ $<
 
+# Q36_COLS=32: a workgroup covers 32 j columns, so its state reads consume
+# whole 128-byte cache lines instead of 32 bytes of each.  Must stay in step
+# with the reg_cols default in q36_vulkan.c, which sizes the dispatch grid.
 vulkan/delta_net_decode_reg.spv: vulkan/delta_net_decode_reg.comp
-	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_COLS=32 -o $@ $<
 
 vulkan/delta_net_decode_reg_f16.spv: vulkan/delta_net_decode_reg.comp
-	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_STATE_F16=1 -o $@ $<
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_STATE_F16=1 -DQ36_COLS=32 -o $@ $<
 
 vulkan/attn_decode_fused.spv: vulkan/attn_decode_fused.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<

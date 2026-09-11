@@ -550,3 +550,56 @@ fix direction depends on the dispatch shape, and is **not** "always widen":
 
 `recur_conv_silu_decode` has no shared memory and no barriers -- every thread maps to one channel
 via `gl_GlobalInvocationID` -- so any workgroup width is bit-exact by construction there.
+
+---
+
+## recur_conv_silu_decode: workgroup width — NO WIN, rejected
+
+Tested 64 / 256 / 1024 threads, interleaved and gated (`MEASURED_ON_BC250`):
+
+| threads | rep 1 | rep 2 |
+|---:|---:|---:|
+| 256 (stock) | 105.6 | **137.7** |
+| 64 | 105.9 | 105.0 |
+| 1024 | 107.3 | 125.1 |
+
+No width is faster; 64 is merely the most *consistent*. Unlike `add_rms_norm` this kernel already
+dispatches ~32 workgroups of 4 waves (128 waves total), which is enough to keep the machine busy,
+and it has no shared memory or barriers — each thread maps one channel via `gl_GlobalInvocationID`.
+Its 105 ms is real work (the `exp()` in `sigmoid_stable`, the tap loop), not idle silicon. Kept at
+256.
+
+Note the 30% spread on the 256 and 1024 replicates: the 61 C thermal gate is no longer controlling
+well, because the board's idle floor drifted from 44 C at session start to 58-60 C. Single numbers
+from late in the session are worth less than early ones.
+
+---
+
+## delta_net_decode_reg: COLS 8 -> 32 — 12.5 ms, bit-exact, below end-to-end resolution
+
+`subgroupClusteredAdd(sk, LANES)` forces `lane` to be the fast-varying index, so the state access
+`s[mat + (r*LANES + lane)*N + j]` is contiguous in `j` but strided by `N` floats in `lane`. With
+`COLS = 8`, a workgroup spans only 8 `j` values = 32 bytes of every 128-byte cache line — about 25%
+memory efficiency, consistent with the ~40 GB/s measured against a ~360 GB/s roofline.
+
+`COLS = 32` makes a workgroup consume whole cache lines. `local_size_x` becomes `8 * COLS = 256`
+and the dispatch grid drops from `state_dim/8 = 16` to `state_dim/32 = 4` in y.
+
+| COLS | entry C | `delta_net_decode_reg_f16` ms | gen t/s |
+|---:|---:|---:|---:|
+| 8 | 60 | 200.529 | 76.35 |
+| 32 | 61 | **186.326** | 75.65 |
+| 8 | 61 | 195.404 | 74.86 |
+| 32 | 61 | **184.505** | 75.55 |
+
+Mean 198.0 -> 185.4 ms: **-6.3%, 12.5 ms**, same direction in both replicates. Bit-exact, 17/17,
+both hand-swapped and as built by default — each output element's arithmetic is unchanged, only
+which thread computes it.
+
+**Honest caveat: end-to-end throughput did not move** (75.61 vs 75.60 t/s). 12.5 ms of a ~1836 ms
+budget predicts +0.68%, which is below what this board can resolve. Kept because the kernel-level
+result is consistent and the change is free, but it should not be counted as measured throughput.
+
+**Why the win is smaller than the coalescing argument suggests:** the state is loaded into registers
+once per dispatch and the token loop then runs from registers, so the strided access is paid twice
+per dispatch rather than per token. The inner loop was never the thing being fixed.

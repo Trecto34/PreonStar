@@ -6445,7 +6445,19 @@ int q36_gpu_delta_net_decode_tensor(q36_gpu_tensor *state,
                      reg ? &q36_vk.delta_net_decode_reg :
                            &q36_vk.delta_net_decode;
             name = "delta_net_decode";
-            groups_y = state_dim / (reg ? 8u : 32u);
+            /* COLS for the register kernel: Q36_VK_DELTA_COLS selects the
+             * .spv variant's column count so the grid matches it.  The default
+             * 32 must match -DQ36_COLS in the Makefile rule; the env override
+             * only works against a .spv built with the same value. */
+            uint32_t reg_cols = 32u;
+            if (reg) {
+                const char *env = getenv("Q36_VK_DELTA_COLS");
+                if (env && env[0]) {
+                    unsigned long v = strtoul(env, NULL, 10);
+                    if (v == 8ul || v == 16ul || v == 32ul) reg_cols = (uint32_t)v;
+                }
+            }
+            groups_y = state_dim / (reg ? reg_cols : 32u);
         } else if (q36_vk_use_delta_fast_prefill()) {
             kernel = &q36_vk.delta_net_fast;
             name = "delta_net_fast";

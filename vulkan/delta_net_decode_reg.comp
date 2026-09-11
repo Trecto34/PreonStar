@@ -6,7 +6,15 @@
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_clustered : require
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+#ifndef Q36_COLS
+#define Q36_COLS 8
+#endif
+/* One workgroup owns LANES*COLS threads: LANES lanes per clustered reduction,
+ * COLS distinct j columns.  The state read s[mat + (r*LANES+lane)*N + j] is
+ * contiguous in j and strided by N floats in lane, so COLS controls how much
+ * of each 128-byte cache line a workgroup actually consumes: COLS=8 uses 32
+ * bytes of every line, COLS=32 uses all 128. */
+layout(local_size_x = (8 * Q36_COLS), local_size_y = 1, local_size_z = 1) in;
 
 #ifdef Q36_STATE_F16
 layout(set = 0, binding = 0) buffer State { float16_t s[]; };
@@ -27,7 +35,7 @@ layout(push_constant) uniform Push {
 
 const uint N = 128u;
 const uint LANES = 8u;
-const uint COLS = 8u;
+const uint COLS = uint(Q36_COLS);
 const uint ROWS = N / LANES;
 
 void main(void) {
