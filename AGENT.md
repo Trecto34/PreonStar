@@ -47,8 +47,13 @@ GGUF runner. The goal is a small, readable, high-performance C codebase.
 
 ## Hardware Targets
 
-- AMD BC-250 (RDNA 2, 24 CUs / 1536 shaders, 16 GB unified GDDR6) via
-  Vulkan/RADV on Linux. Codename "Cyan Skillfish", cut-down PS5 APU.
+- AMD BC-250 (GFX10.1/gfx1013, 16 GB unified GDDR6) via Vulkan/RADV on Linux.
+  Codename "Cyan Skillfish", cut-down PS5 APU. No cooperative-matrix or mesh
+  shader support, so there are no matrix cores to target.
+- CU count is board-dependent: 24 stock, 40 with the optional kernel unlock
+  described in BC250.md. Check with `RADV_DEBUG=info` before doing any
+  occupancy work — whether a dispatch fills the device depends on it, and the
+  right fix for an under-filled kernel differs accordingly.
 - Unified memory, ~10-14 GB usable for the model after OS and KV cache.
 - Weight buffers map directly from GGUF with no copy via
   VK_EXT_external_memory_host. No staging-buffer path.

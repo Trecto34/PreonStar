@@ -43,8 +43,11 @@ QuarkStar has two native GPU backends:
   `int64`. Subgroup arithmetic, 16-bit storage, and native `float16` are
   detected at runtime; optimized kernels fall back when an optional feature
   is unavailable.
-* **AMD BC-250** (Cyan Skillfish, 24 CUs, 16 GB unified GDDR6) is the primary
-  tested Vulkan device. Its vendor/device ID selects the tuned fast path
+* **AMD BC-250** (Cyan Skillfish, 24 CUs stock or 40 with the optional kernel
+  unlock, 16 GB unified GDDR6) is the primary tested Vulkan device. The
+  published benchmarks below were taken on an unlocked 40-CU board; confirm
+  which your board reports with `RADV_DEBUG=info`, since occupancy tuning and
+  any "workgroups per CU" reasoning depend on it. Its vendor/device ID selects the tuned fast path
   automatically. Follow [BC250.md](BC250.md) for the RADV, UMA, kernel-memory,
   governor, build, and optional 40-CU setup.
 * **Apple Silicon M1 or newer** with macOS 11 or newer and Xcode or the Command
@@ -1130,6 +1133,46 @@ to validate a new GPU. Before calling another Vulkan device supported, run the
 isolated kernel suite and the short CPU/GPU parity gate, then record prefill
 and decode throughput at the intended context sizes.
 
+#### Prefill chunk safety clamp
+
+On GFX1013 the prefill chunk is clamped (to 1024, or 256 when the model's GQA
+ratio is not 8) after any `--prefill-chunk` override, because the override is
+exactly the value that can push one attention dispatch past the kernel watchdog
+and destroy the GPU context. The clamp also feeds the context-memory estimate,
+so scratch is sized for the chunk that will actually run rather than the one
+requested — scratch grows with chunk width, and sizing for an unclamped request
+reserves memory that is never touched.
+
+`Q36_VK_PREFILL_CHUNK_UNSAFE=1` restores the raw value. It is not recommended:
+beyond the watchdog risk, a chunk wider than the clamp has measured *slower* on
+this hardware as well as larger, so the clamp costs nothing in practice. Sweep
+`--prefill-chunk` on your own board if you want to confirm the optimum for it.
+
+#### Optional GPU fast paths
+
+Two kernel variants trade bit-exactness for speed. Both are **off by default**,
+both are available as flags on every front end (`q36`, `q36-server`, `q36-bench`,
+`q36-eval`, `q36-agent`), and both also read an equivalent `Q36_VK_*` environment
+variable.
+
+| flag | what it changes | exactness |
+| --- | --- | --- |
+| `--f32-fast-wide` | Runs the f32 matvec with a 256-thread workgroup instead of 64. The narrow form dispatches a single wave for the router and shared-expert gates, which cannot cover memory latency. | **Not bit-exact.** Four subgroup partials are combined through shared memory instead of one subgroup reducing alone, and this kernel computes the MoE router gate, so a rounding flip can change *which experts* a token selects. Validate with the evaluation harness, not with a logits diff. |
+| `--attn-span N` | Split-K span width in keys for decode attention (default 512). Narrower spans raise occupancy, since decode dispatches `n_head * spans` workgroups. | **Not bit-exact.** `attn_combine` reduces the per-span partials sequentially in f32, so a different span count regroups that sum. |
+
+`--attn-span` has a property worth understanding before using it: the number of
+spans is `context / span`, and `attn_combine` performs one f32 rescale per span.
+Narrowing the span therefore lengthens that sequential chain in proportion to
+context, and `attn_combine`'s own cost grows the same way while the saving on the
+split side does not. A span that helps at short context can be neutral or
+negative at long context, and the rounding accumulates further as well. Measure
+at the context length you actually run. `--f32-fast-wide` has no such context
+dependence; its cost is per token.
+
+Throughput figures for both, along with the per-kernel measurements behind them,
+are recorded in [OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md); they were taken on a
+single BC-250 and will differ on other boards and cooling setups.
+
 ### Metal device and compatibility policy
 
 Like DS4, a normal local Metal process uses `MTLCreateSystemDefaultDevice`.
@@ -1269,6 +1312,27 @@ a first answer:
 ./q36 --dump-logprobs /tmp/out.json --logprobs-top-k 20 --temp 0 -p "..."
 ./q36-server --trace /tmp/q36-trace.txt ...
 ```
+
+### GPU device loss
+
+A GPU hang — most often the kernel watchdog firing on a dispatch that ran too
+long — destroys the Vulkan context. Every subsequent call against that device
+fails, and the driver's command buffer is no longer safe to record into.
+
+The backend latches this the first time a submit-path call reports
+`VK_ERROR_DEVICE_LOST`. It prints one diagnostic naming the call that failed,
+refuses all further GPU work, and fails the forward pass so the caller reports
+an error instead of returning results that were never computed. The latch is
+one-way by design: dispatches in flight when the context died produced nothing,
+so there is no safe way to resume. Restart the process.
+
+If it reproduces, lower `--prefill-chunk`; a chunk large enough to push one
+dispatch past the watchdog is the usual cause. On the OS side the kernel log
+records the reset — on Linux with amdgpu, look for a ring timeout in
+`journalctl -k`.
+
+`Q36_VK_FAULT_INJECT_LOST=<n>` forces the n-th submit to report device loss, so
+the unwind path can be exercised without provoking a real hang. Diagnostic only.
 
 - `--dump-tokens` tokenizes the `-p` or `--prompt-file` string exactly as
   written, recognizes Qwen protocol specials (`<|im_start|>`, `<|im_end|>`,
