@@ -5,11 +5,25 @@
  * sum[i]  = a[i] + b[i]                (written back, becomes the residual)
  * norm[i] = rmsnorm(sum)[i] * w[i]
  *
- * The add is the same f32 add and the reduction the same fp64
- * strided-then-shared order as add.comp followed by rms_norm.comp, so the
- * fused path is bit-identical to the unfused one.  sum may alias a or b. */
+ * The add is the same f32 add as add.comp, and the reduction keeps the same
+ * fp64 strided-then-shared structure as rms_norm.comp.  sum may alias a or b.
+ *
+ * local_size is 1024, not 256.  Decode dispatches this with rows = 1, so one
+ * workgroup owns the whole row on a single CU: at 256 threads that is four
+ * wave64s, far too few to cover DRAM latency, and the kernel measured ~3.2
+ * GB/s against a ~360 GB/s roofline.  Sixteen waves cover it far better --
+ * measured 130.3 ms -> 87.8 ms across the run (MEASURED_ON_BC250, interleaved
+ * and temperature-gated).
+ *
+ * Widening the workgroup deepens the shared-memory reduction tree from 256
+ * leaves to 1024, so the partial sums are combined in a different order.  That
+ * reassociation is NOT bit-exact by construction, but the accumulator is fp64
+ * throughout and only the final scale is rounded to fp32, so the difference
+ * sits far below fp32 resolution: all 17 frontier logit dumps are byte-identical
+ * to the 256-thread build (MEASURED_ON_BC250).  Keep the fp64 accumulator --
+ * an fp32 one would make this reassociation visible. */
 
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer A {
     float a[];
@@ -36,14 +50,14 @@ layout(push_constant) uniform Push {
     float eps;
 } pc;
 
-shared double sh_sum[256];
+shared double sh_sum[1024];
 
 void main(void) {
     uint row = gl_WorkGroupID.x;
     uint lid = gl_LocalInvocationID.x;
     uint base = row * pc.n;
     double ss = 0.0;
-    for (uint i = lid; i < pc.n; i += 256u) {
+    for (uint i = lid; i < pc.n; i += 1024u) {
         float x = a[base + i] + b[base + i];
         s[base + i] = x;
         ss += double(x) * double(x);
@@ -51,12 +65,12 @@ void main(void) {
     memoryBarrierBuffer();
     sh_sum[lid] = ss;
     barrier();
-    for (uint sh = 128u; sh > 0u; sh >>= 1u) {
+    for (uint sh = 512u; sh > 0u; sh >>= 1u) {
         if (lid < sh) sh_sum[lid] += sh_sum[lid + sh];
         barrier();
     }
     float scale = inversesqrt(float(sh_sum[0] / double(pc.n)) + pc.eps);
-    for (uint i = lid; i < pc.n; i += 256u) {
+    for (uint i = lid; i < pc.n; i += 1024u) {
         y[base + i] = (s[base + i] * scale) * w[i];
     }
 }

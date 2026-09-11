@@ -392,3 +392,161 @@ roofline — 21x below it. It is unambiguously occupancy-bound.
 Barrier elision is already hazard-based (`q36_vulkan.c:2803`), so these dispatches are separated by
 genuine data dependencies; there is no free win from dropping barriers. The lever is fewer, wider
 dispatches — fusion for the norm/conv rows, and a narrower split-K span for attention.
+
+---
+
+## 2.3 — glslc shim documented
+
+`glslc:10` accepts and discards `-O`. Documented in the script why that is correct rather than a
+bug: `glslangValidator` has no `-O` (only `-Os`/`-Od`), `spirv-opt -O` output was byte-identical to
+the current `-Os` output on six of the eight hot shaders, and RADV's ACO backend re-schedules from
+SPIR-V anyway. Explicit warning added against "fixing" it by switching to `/usr/bin/glslc`, which
+would rewrite ~100 `.spv` blobs and put every one back through the parity gate for no measured gain.
+Delta: 0, as the roadmap predicted.
+
+---
+
+## NEW — attention split-K span (not in the roadmap)
+
+The largest *measured* win of the session, and it came from the dispatch-cost table rather than
+from the roadmap.
+
+`attn_decode_split` hardcoded a 512-key span. Decode dispatches `n_head * n_spans` workgroups, so
+at ctx 2048 that is 16 * 5 = **80 workgroups on a 40-CU board** — two per CU. The kernel moves
+~17 MB/token of KV cache, about **17 GB/s against a ~360 GB/s roofline**, i.e. 21x below it. It is
+occupancy-bound, not bandwidth-bound.
+
+Span is now a push constant (`Q36_VK_ATTN_SPAN`, default 512). Default path verified bit-exact,
+17/17 frontiers.
+
+Interleaved, temperature-gated at 55-56 C entry, ctx 2048 (`MEASURED_ON_BC250`):
+
+| span | split ms | combine ms | attention total | gen t/s |
+|---:|---:|---:|---:|---:|
+| 512 | 119.939 | 10.302 | 130.24 | 77.37 |
+| 256 | 90.046 | 11.888 | 101.93 | 78.24 |
+| 128 | 76.067 | 14.870 | 90.94 | 79.07 |
+| 512 | 121.563 | 10.384 | 131.95 | 76.87 |
+| 256 | 90.043 | 11.924 | 101.97 | 78.00 |
+
+Reproducible to three decimals (90.046 / 90.043). **+2.2% end-to-end at ctx 2048.**
+
+**The important caveat is visible in the combine column:** it *rises* as the span narrows
+(10.3 -> 14.9 ms), because more spans mean more partials to reduce. 4x the parallelism buys 1.43x
+on the split, not 4x. Occupancy fixes on this board have a hard floor, and any estimate that
+assumes linear scaling from added parallelism is wrong.
+
+Not bit-exact: `attn_combine` reduces partials in span order, so a different span count regroups
+that sum. This is a **reassociation, not a precision loss** — the same values added in a different
+order. Left at 512 by default pending a decision on the parity bar.
+
+---
+
+## Failed hypotheses (recorded so they are not retried)
+
+Four hypotheses were tested this session; **one held**. Recording the failures, because each was
+plausible and each cost a measurement cycle.
+
+| # | hypothesis | verdict | evidence |
+|---|---|---|---|
+| 1 | `moe_down` reduction hoist gives +5-6% (roadmap §3.2) | **FALSE** | -2.8%, interleaved A/B |
+| 2 | Decode is launch-latency bound; 32-group dispatches waste the GPU | **FALSE** | `delta_gates` does 32 groups in 1.11 us vs `add_rms_norm`'s 12.40 us -- same shape, 11x the time, so launch cost is ~1.1 us and fusion would save ~11.6 ms (+0.6%), not ~78 ms |
+| 3 | `add_rms_norm` is slow because of `double` accumulation on a chip with poor FP64 | **FALSE** | base 129.414 / 127.508 ms vs fp32 128.394 / 125.897 ms — ~1%, within noise |
+| 4 | `attn_decode_split` is occupancy-bound | **TRUE** | +2.2%, reproducible |
+
+**The common error in 2 and 3:** reasoning from dispatch *counts* and source *inspection* instead
+of measuring what the dispatch actually costs. Hypothesis 2 was additionally built on a pooling
+artifact — `add_rms_norm`'s "32 groups/dispatch" is the average of prefill dispatches (1024 rows)
+and decode dispatches (**1 row**), the exact same defect item 2.1 fixed for the f32 row.
+
+**What is actually true about `add_rms_norm`:** decode runs it with `rows = 1`, and the shader is
+`local_size_x = 256`, one workgroup per row. So each of ~10,240 decode calls occupies **one
+workgroup on one CU out of 40**, moving ~40 KB in 12.4 us — about **3.2 GB/s**. The cost is the
+shape, not the arithmetic. The fix is a multi-workgroup two-pass reduction, not fusion and not
+lower precision.
+
+---
+
+## Why the engine sits at ~56% of the memory roofline
+
+At 84.3 t/s and 2404 MB/token the engine achieves **~203 GB/s** against a ~360 GB/s roofline. That
+average hides two very different populations (`MEASURED_ON_BC250` + arithmetic from the byte model):
+
+| | share of decode time | achieved bandwidth |
+|---|---:|---:|
+| Q8_0 weight matvecs (79% of bytes) | ~44% | **~360 GB/s — at roofline** |
+| everything else (21% of bytes) | ~56% | **~77 GB/s — 21% of roofline** |
+
+This is the single most useful framing of the project:
+
+- **~44% of decode time is already perfect** and cannot be improved by any engine work. Only
+  reducing bytes moves it — that is the entire justification for Phase 4.
+- **~56% of decode time runs far below roofline** because those kernels are not bandwidth-limited
+  at all. That is the pool Phase 3 can address.
+
+The two tracks are disjoint. Neither can reach the other's half.
+
+---
+
+## Phase 4 blocker discovered: the quantizer cannot re-type an existing quantized file
+
+`gguf-tools/qwen36-quantize.c:948` rejects any source tensor that is not BF16/F16/F32, and
+`classify_tensor` (`:874`) only assigns Q8_0 when the source is BF16/F16 — otherwise it preserves
+the source type. So Recipe A **cannot** be produced from the current
+`Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf`; it requires the original full-precision
+Qwen3.6-35B (~70 GB at BF16).
+
+Free space on this box is **67 GB**, which is not enough for a 70 GB source plus an ~11 GB output.
+Phase 4 therefore needs external storage before any of its code changes matter. This should have
+been checked before Phase 4 was scheduled.
+
+---
+
+## add_rms_norm: 1024-thread workgroup — 42.5 ms saved, bit-exact
+
+The largest measured win of the session.
+
+Decode dispatches `add_rms_norm` with `rows = 1`, and the shader is one workgroup per row, so a
+single workgroup owned the entire 2048-element row on **one CU out of 40** — about 10,240 times per
+128 tokens, moving ~40 KB per call at roughly **3.2 GB/s** against a ~360 GB/s roofline.
+
+At `local_size_x = 256` that workgroup is four wave64s, far too few to cover DRAM latency. Widening
+to 1024 gives sixteen waves on the same CU.
+
+Interleaved A/B, thermally gated (`MEASURED_ON_BC250`):
+
+| threads | entry C | `add_rms_norm` ms | gen t/s |
+|---:|---:|---:|---:|
+| 256 | 59 | 129.048 | 75.62 |
+| 1024 | 61 | **87.165** | 76.28 |
+| 256 | 61 | 131.568 | 73.95 |
+| 1024 | 61 | **88.365** | 75.42 |
+
+Mean 130.3 -> 87.8 ms: **-32.6%, 42.5 ms off the decode path**, consistent across both replicates.
+
+**Bit-exact in practice: 17/17 frontier logit dumps byte-identical.** Deepening the reduction tree
+from 256 to 1024 leaves reassociates the partial sums, which is not bit-exact by construction, but
+the accumulator is fp64 and only the final scale is rounded to fp32, so the difference lands far
+below fp32 resolution. The fp64 accumulator is load-bearing for this and must not be "optimised"
+to fp32 — the earlier fp32 experiment measured no speed gain anyway (129.4/127.5 vs 128.4/125.9 ms).
+
+### Why the earlier hypotheses missed this
+
+The correct diagnosis needed two corrections: the "32 groups/dispatch" figure was a prefill/decode
+pooling artifact (decode is **1** group), and the cost was neither launch overhead (~1.1 us, from
+`delta_gates`) nor fp64 arithmetic (measured flat). It was wave occupancy inside a single
+workgroup, which none of the three earlier hypotheses named.
+
+### Generalisation, and its limit
+
+The same "too few waves" question applies to any decode kernel dispatching one workgroup. But the
+fix direction depends on the dispatch shape, and is **not** "always widen":
+
+| kernel | local_size | decode groups | right direction |
+|---|---:|---:|---|
+| `add_rms_norm` | 256 -> **1024** | 1 | widen: more waves on the one CU |
+| `recur_conv_silu_decode` | 256 | ~32 | **narrow**: 32 workgroups leaves 8 of 40 CUs idle |
+| `router_topk` | 256 | 1 per token | neither: top-k over exactly 256 experts, 1 thread each |
+
+`recur_conv_silu_decode` has no shared memory and no barriers -- every thread maps to one channel
+via `gl_GlobalInvocationID` -- so any workgroup width is bit-exact by construction there.
