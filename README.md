@@ -1169,9 +1169,9 @@ negative at long context, and the rounding accumulates further as well. Measure
 at the context length you actually run. `--f32-fast-wide` has no such context
 dependence; its cost is per token.
 
-Throughput figures for both, along with the per-kernel measurements behind them,
-are recorded in [OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md); they were taken on a
-single BC-250 and will differ on other boards and cooling setups.
+Measure both on your own board before relying on either. Their benefit depends
+on the device's CU count, its thermal headroom and the context length you run,
+so a figure quoted from one machine will not transfer.
 
 ### Metal device and compatibility policy
 
