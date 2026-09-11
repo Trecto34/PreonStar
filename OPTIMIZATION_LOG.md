@@ -813,3 +813,59 @@ counts and reasoning about what ought to be slow. Two of the three wins are the 
 decode kernel dispatching one workgroup whose `local_size` is too small to cover memory latency.
 **That pattern is worth sweeping for systematically** — check every hot kernel's decode-path
 workgroup count and width before trying anything cleverer.
+
+---
+
+## moe_gate_up_decode 64 -> 128 threads — NO WIN (-17%), reverted. And the rule that explains it.
+
+| threads | entry C | `moe_gate_up_decode` ms | gen t/s |
+|---:|---:|---:|---:|
+| 64 | 56 | 138.172 | 78.07 |
+| 128 | 60 | 167.149 | 75.64 |
+| 64 | 61 | 144.579 | 76.08 |
+| 128 | 61 | **169.860** | 74.80 |
+
+At matched entry temperature, 128 threads is **17% slower**. Reverted.
+
+### The refined rule
+
+Widening a workgroup helps only when the dispatch has almost no workgroups:
+
+| kernel | groups/dispatch | widening result |
+|---|---:|---|
+| `add_rms_norm` | **1** | **-33%** |
+| `matmul_f32_fast` `_1xN` | **1** | **-16%**, +6.1% end-to-end |
+| `delta_net_decode_reg` | 512 | -6% (via COLS, cache lines — different mechanism) |
+| `recur_conv_silu_decode` | 32 | no width wins |
+| `moe_gate_up_decode` | **4096** | **+17% slower** |
+
+With 4096 workgroups the machine is already full, so a second subgroup buys no parallelism and
+costs a cross-subgroup `sh_gate` combine plus an extra `barrier()` in **every** workgroup. The
+overhead scales with workgroup count, which is exactly why it is catastrophic here and free where
+there is only one workgroup.
+
+**Corollary: the "too few waves" vein is mined out for decode.** The only genuinely starved decode
+kernels were the two dispatching a single workgroup, and both are now fixed. Note also that the
+pooled `groups/dispatch` column is only trustworthy for `*_decode` shaders — for any kernel used in
+both phases it averages prefill and decode, the same artifact that hid `add_rms_norm`'s true shape.
+
+Also worth recording: `moe_gate_up_decode`'s `shared float sh_gate[2]` with `acc += sh_gate[1]` is
+hardcoded for exactly two subgroups. Any widening past 128 threads would **silently drop subgroups
+2 and 3** and produce wrong results, not merely slow ones.
+
+---
+
+## Where the remaining headroom actually is
+
+Decode occupancy work is done. What is left, in order of size:
+
+1. **Prefill — entirely unexplored.** Every one of the roadmap's thirteen items targets decode, and
+   no prefill kernel has been examined. Yet the two largest kernels in the whole profile live
+   there: `matmul_q8_0_mm_f16` (**2173 ms**) and `moe_gate_up_gemm` (**1881 ms**), with
+   `attn_prefill_qtile2` (1108 ms) and `moe_down_gemm` (1092 ms) behind them. The single change
+   that touched prefill by accident returned **+17%**, the largest result of the session. For
+   agentic workloads, which re-read long context every turn, this is the track that matters most.
+2. **`moe_down_q2k_sum_decode` restructured to 64 threads.** It is the only hot kernel running
+   *half* a wave (32 threads on a 64-wide machine). Forcing wave32 did nothing, but genuinely
+   reshaping the algorithm to a full wave is a different change and was not attempted.
+3. **Phase 4 requant** — still blocked on disk space for the ~70 GB source model.
