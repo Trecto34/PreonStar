@@ -869,3 +869,69 @@ Decode occupancy work is done. What is left, in order of size:
    *half* a wave (32 threads on a 64-wide machine). Forcing wave32 did nothing, but genuinely
    reshaping the algorithm to a full wave is a different change and was not attempted.
 3. **Phase 4 requant** — still blocked on disk space for the ~70 GB source model.
+
+---
+
+## Prefill investigation: chunk 1024 is the measured optimum, and the 2048 cliff is explained
+
+### Chunk size is already optimal (zero-code, bit-exact by construction)
+
+ctx 4096, interleaved, gated (`MEASURED_ON_BC250`):
+
+| chunk | prefill t/s |
+|---:|---:|
+| 512 | 450.19 / 420.75 |
+| **1024** | **495.82 / 493.16** |
+| 2048 | 179.85 / 177.04 |
+
+**1024 is the optimum, not merely a safe value** — which independently validates the clamp shipped
+this morning. 512 is worse, and 2048 collapses by 2.8x.
+
+### The 2048 cliff: a host readback, not memory and not the kernels
+
+GPU kernel time at 2048 is only 12-15% worse (`matmul_q8_0_mm_f16` 5039 -> 5625 ms,
+`attn_prefill_qtile2` 5224 -> 6023 ms) while wall-clock prefill is 2.8x worse. The loss is host-side:
+
+| | chunk 1024 | chunk 2048 |
+|---|---:|---:|
+| `submit_wait_moe_gate_up_selected` | — | **50,646 ms** |
+| `submit_eager` | 15,533 ms | 79 ms |
+| flushes | **16** | **170** |
+
+`q36_gpu_matmul_iq_quant_scaled_tensor` and `q36_vk_moe_matvec` build MoE tiles on the GPU only
+when `n_slot <= 4096`; otherwise they pull the expert selection back to the host, which forces a
+flush and a fence wait. `n_slot = tokens * 8`, so chunk 2048 gives 16384 and always falls back.
+
+### Two hypotheses tested against it, both refuted
+
+**1. Allocator fallback past `Q36_VK_PRIVATE_LIMIT` (512 MB).** At chunk 1024 scratch sits within
+3 MB of the cap, so this looked compelling. Made the limit tunable and tested:
+
+| chunk | limit | prefill t/s | scratch/limit |
+|---:|---:|---:|---|
+| 1024 | 512 MB | 493.20 | 533/536 MB |
+| 2048 | 512 MB | 177.24 | 438/536 MB |
+| 2048 | 1536 MB | 188.96 | 572/1610 MB |
+| 1024 | 1536 MB | 491.59 | 617/1610 MB |
+
+The limit demonstrably took effect (scratch rose above the old cap) but bought only 177 -> 189.
+**The control refutes it outright:** at chunk 1024, raising the limit moved 84 MB from arena to
+private and throughput did not move (493.20 -> 491.59). The arena path is not slow. Reverted.
+
+**2. Call-site guard too tight.** `q36_vk_moe_tiles_gpu()` validates `n_slot <= 8192` internally
+while both call sites guarded at 4096 — half the supported range. Raised both to 8192, bit-exact
+(17/17), and measured: chunk 1024 unchanged (that path was never taken there — stall row absent
+both before and after), chunk 2048 unchanged at 177.98/176.38 with the 45,437 ms stall still
+present, because 16384 exceeds the helper's own hard limit. Reverted.
+
+### Conclusion: this direction is closed
+
+Fixing the 2048 stall requires extending the GPU tile builder past 8192 slots — a real change, not
+a constant. And it would not pay: GPU kernel time at 2048 is already 12-15% worse than at 1024, so
+even with the stall fully removed, chunk 2048 would not beat chunk 1024. **Chunk 1024 stands as the
+optimum and the prefill chunk track is finished.**
+
+Remaining prefill headroom is inside the GEMMs themselves — `matmul_q8_0_mm_f16` (2173 ms) and
+`moe_gate_up_gemm` (1881 ms) — which are properly tiled shared-memory kernels with hardcoded
+BM/BN/BK. That is genuine GEMM tuning work, and `matmul_q8_0_mm_f16.comp:70` already records that
+register prefetch was tried there and measured flat.
