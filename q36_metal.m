@@ -1242,6 +1242,12 @@ int q36_gpu_flush_commands(void) { return q36_metal_wait(); }
 int q36_gpu_end_commands(void) { return q36_metal_wait(); }
 int q36_gpu_synchronize(void) { return q36_metal_wait(); }
 
+/* Metal has no equivalent of a lost Vulkan device to latch, and gfx1013 is
+ * an AMD GPU that cannot be the active device here; both queries are
+ * constant so the shared engine code can call them unconditionally. */
+int q36_gpu_device_lost(void) { return 0; }
+int q36_gpu_device_is_gfx1013(void) { return 0; }
+
 int q36_gpu_set_model_map(const void *map, uint64_t size) {
     if (!map || !size) return 0;
     if (map != q36_model_map || size != q36_model_size) {

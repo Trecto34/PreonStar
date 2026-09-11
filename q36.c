@@ -1471,6 +1471,16 @@ q36_context_memory q36_context_memory_estimate_configured(
     m.prefill_cap = cpu_prefill_cap;
 #endif
     if (prefill_chunk != 0) m.prefill_cap = prefill_chunk;
+#ifndef Q36_NO_GPU
+    /* Size scratch for the chunk that will actually run.  The graph path
+     * clamps the chunk for watchdog safety, so estimating against the
+     * unclamped request overshoots by ~206 KB per token of the difference --
+     * a 4096 request against a 1024 cap reserves an extra 634 MB that is
+     * never touched, on a board with ~15 GiB of unified memory. */
+    if (q36_backend_uses_graph(backend)) {
+        m.prefill_cap = q36_engine_clamp_prefill_cap(m.prefill_cap);
+    }
+#endif
     m.raw_cap = q36_backend_uses_graph(backend) ? (uint32_t)ctx_size : 0;
     m.comp_cap = 0;
     if (q36_backend_uses_graph(backend)) {

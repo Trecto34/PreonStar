@@ -157,3 +157,89 @@ What the split does confirm is the *shape* of the §3.1(a) argument: `dense_f32f
 That is pure launch latency and is what the pair-fuse would remove. The `_256x2048` row at
 56.189 ms over 1,310,720 groups is real work by comparison.
 
+
+---
+
+## 1.3 — GFX1013 prefill-chunk clamp
+
+**Status: done. Parity clean. Removes the memory footgun and makes the crashing invocation safe.**
+
+### The change
+
+New `q36_gpu_device_is_gfx1013()` (`q36_gpu.h`, implemented in `q36_vulkan.c` against the existing
+BC-250 device-id test, with a constant-0 stub added to `q36_metal.m` so the shared engine code can
+call it unconditionally).
+
+`q36_engine_clamp_prefill_cap()` caps the chunk at **1024**, or **256** when GQA != 8, and is
+applied **after** the `--prefill-chunk` override — the override is precisely the input that
+crashed the engine, so clamping before it would have been useless.
+`Q36_VK_PREFILL_CHUNK_UNSAFE=1` restores the raw value. The warning prints once per process.
+
+### Finding: clamping the runtime alone was not enough
+
+The first working version clamped `q36_engine_gpu_prefill_cap()` only. Testing showed the run
+still reserved **960.30 MiB** and still reported `prefill_chunk=4096`:
+
+```
+q36-bench: context buffers 960.30 MiB (scratch=880.97 MiB, ..., prefill_chunk=4096)
+q36: clamping prefill chunk 4096 -> 1024 on GFX1013 (GQA 8)
+```
+
+`q36_context_memory_estimate_configured()` takes the chunk straight from the caller and never
+consults the engine cap, so `q36-bench`, `q36-server` and the engine each sized scratch from the
+unclamped request. **The +634 MB footgun this item exists to remove was still fully present**, and
+the clamp message was actively misleading — it announced a cap that the allocator ignored.
+
+Fixed by clamping inside the estimator itself, the one chokepoint all three callers share.
+
+### Verification (`MEASURED_ON_BC250`)
+
+`--prefill-chunk 4096`, ctx 2048:
+
+| | before | after |
+|---|---:|---:|
+| context buffers | 960.30 MiB | **300.28 MiB** |
+| scratch | 880.97 MiB | **220.96 MiB** |
+| reported chunk | 4096 | **1024** |
+| prefill t/s | — | 608.70 |
+| gen t/s | — | 81.35 |
+
+**660 MiB reclaimed**, matching the ~634 MB the roadmap predicted from ~206 KB per chunk token.
+
+Independent confirmation of the roadmap's throughput claim, via the escape hatch
+(`Q36_VK_PREFILL_CHUNK_UNSAFE=1`, genuinely running chunk 4096): **188.50 t/s prefill against
+608.70 clamped**, a 3.2x penalty. The roadmap recorded 202 vs 616 from an earlier session. So the
+clamp costs nothing anyone wants — the unclamped path is both slower and 660 MiB heavier.
+
+No amdgpu timeout, reset or wedged events were logged during the unclamped run (it survives at
+ctx 2048; the original crash needed a longer context).
+
+---
+
+## 2.2 — rope_qwen / quantize_q8_0 forced wave32
+
+**Status: done. Bit-exactness is provable here, not merely argued.**
+
+Verified before editing, in each `.comp` source (`MEASURED_ON_BC250`):
+
+| shader | local_size_x | cross-lane builtin uses |
+|---|---:|---:|
+| `rope_qwen.comp` | 32 | **0** |
+| `rope_qwen_mrope.comp` | 32 | **0** |
+| `quantize_q8_0.comp` | 32 | **0** |
+
+With `local_size_x = 32` and no lane-crossing operation anywhere in the shader, wave width cannot
+influence a result bit — on wave64 the upper 32 lanes are simply inactive. This is the distinction
+the roadmap draws against §3.2(b), where `subgroupAdd` over wave64 makes the same change
+argued-but-unproven.
+
+Replaced the ad-hoc condition in the pipeline-creation path with an explicit table, and wrote down
+the precondition so nothing gets added to it without the check:
+
+```c
+static const char *const q36_vk_force_wave32[] = {
+    "delta_net_cols.spv", "rope_qwen.spv", "rope_qwen_mrope.spv", "quantize_q8_0.spv",
+};
+```
+
+`dense_*_mmq.spv` keeps its existing pattern match.

@@ -1496,9 +1496,25 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
         .requiredSubgroupSize = 32u,
     };
-    if (q36_vk.subgroup_size_control &&
-        ((strstr(k->path, "dense_") && strstr(k->path, "_mmq.spv")) ||
-         strstr(k->path, "delta_net_cols.spv"))) {
+    /* Shaders that declare local_size_x = 32 and use no cross-lane operation
+     * at all.  On wave64 the upper half of every wave is inactive, and since
+     * nothing reads a neighbouring lane the wave width cannot change a
+     * single result bit -- forcing wave32 only stops wasting half of each
+     * wave.  Each entry was checked for zero cross-lane builtin uses in its
+     * .comp source; do not add a shader here without that check, because
+     * for a shader that does reduce across lanes the two widths are not
+     * interchangeable. */
+    static const char *const q36_vk_force_wave32[] = {
+        "delta_net_cols.spv",
+        "rope_qwen.spv",
+        "rope_qwen_mrope.spv",
+        "quantize_q8_0.spv",
+    };
+    bool force_wave32 = strstr(k->path, "dense_") && strstr(k->path, "_mmq.spv");
+    for (size_t i = 0; !force_wave32 && i < sizeof(q36_vk_force_wave32) / sizeof(*q36_vk_force_wave32); i++) {
+        force_wave32 = strstr(k->path, q36_vk_force_wave32[i]) != NULL;
+    }
+    if (q36_vk.subgroup_size_control && force_wave32) {
         stage.pNext = &subgroup_size;
         stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
