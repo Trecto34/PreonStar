@@ -1,4 +1,26 @@
 #!/bin/sh
+#
+# glslc-compatible front end over glslangValidator, so the Makefile can call
+# the same command line whether or not shaderc is installed.
+#
+# The Makefile passes -O, which is accepted and ignored below.  That looks
+# like a bug and is not:
+#
+#   - glslangValidator has no -O.  It offers only -Os (optimise for size) and
+#     -Od (disable optimisation), so there is no "-O" to forward.
+#   - Optimising the SPIR-V further buys nothing here.  spirv-opt -O output
+#     was byte-identical to the current -Os output on six of the eight hot
+#     shaders (matmul_q8_0_f32b, matmul_q8_0_f32b_pair, matmul_f32_fast,
+#     moe_gate_up_decode, moe_down_q2k_sum_decode, add_rms_norm); only
+#     attn_decode_split (-0.7% instructions) and delta_net_decode_reg
+#     differed at all.
+#   - RADV's ACO backend does its own scheduling and register allocation from
+#     the SPIR-V, so front-end optimisation level is largely irrelevant to the
+#     machine code that actually runs.
+#
+# Do not "fix" this by switching to /usr/bin/glslc: it would rewrite all ~100
+# .spv blobs for no measured gain, and every one of them would then need to go
+# back through the bit-exactness gate.
 
 out=
 src=

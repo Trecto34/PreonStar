@@ -243,3 +243,152 @@ static const char *const q36_vk_force_wave32[] = {
 ```
 
 `dense_*_mmq.spv` keeps its existing pattern match.
+
+---
+
+## Re-derived decode budget (supersedes the roadmap's kernel table)
+
+`MEASURED_ON_BC250`, ctx 2048, 128 decode tokens, `Q36_VK_PROF_KERNEL=1`, single run.
+Decode rows only: op rows tagged `_d_`, plus shaders that exist only on the decode path.
+
+| row | gpu_ms /128tok | % of decode | roadmap said |
+|---|---:|---:|---|
+| `dense_q8_0_d_pair` | 283.7 | 15.5% | 285 — matches, at roofline |
+| `delta_net_decode_reg_f16` | 191.0 | 10.4% | 127, in the "measure first" bucket |
+| `dense_q8_0_d_vocabx2048` (output head) | 186.7 | 10.2% | folded into the 392 q8_0 row |
+| `moe_down_q2k_sum_decode` | 164.1 | 8.9% | 165 — matches |
+| `moe_gate_up_decode` | 143.9 | 7.8% | 145 — matches |
+| `dense_q8_0_d_2048x4096` | 131.8 | 7.2% | folded into the 392 q8_0 row |
+| `attn_decode_split` | 127.8 | 7.0% | 128 — matches |
+| `add_rms_norm` (decode share) | ~127 | 6.9% | 112 |
+| `recur_conv_silu_decode` | 105.2 | 5.7% | 57 |
+| `dense_q8_0_d_8192x2048` | 62.4 | 3.4% | folded into the 392 q8_0 row |
+| **`matmul_f32_fast` (both shapes)** | **72.5** | **3.9%** | **197 — wrong by 2.7x** |
+| `router_topk` (decode share) | ~55 | 3.0% | 55 — matches |
+| `shared_gate_up_decode` | 37.5 | 2.0% | 65 for both shared kernels |
+| `shared_down_tail_decode` | 25.2 | 1.4% | (as above) |
+| `dense_q8_0_d_512x2048` | 10.1 | 0.6% | — |
+
+Decode total reconciles to **~1836 ms**, against the roadmap's 1814 ms. The *total* was right; the
+*attribution* was not. Cross-check on the one row I split: prefill 220.3 + decode 72.5 = 292.8 vs
+the 296.7 ms shader-level total for `matmul_f32_fast` — consistent to 1.3%.
+
+### Consequences for Phase 3
+
+**§3.1 (`matmul_f32_fast`) drops from rank #1 to roughly rank #11.** The row is 3.9% of decode, so
+deleting it entirely would yield at most **+4.1%**. The realistic change — fusing the 5,120
+single-workgroup `_1xN` dispatches (19.5 ms) and unrolling the `_256x2048` loop (53.0 ms, perhaps
+30% recoverable) — is about 35 ms, i.e. **+1.9%**, against the roadmap's projected **+7 to +9%**.
+That is a ~4x overstatement, and the 1.5 d estimate makes it the worst effort-to-return item in
+Phase 3. **Demoted.**
+
+**The corrected ranking for bit-exact decode work:**
+
+| new rank | row | ms | why |
+|---|---|---:|---|
+| 1 | `moe_down_q2k_sum_decode` | 164.1 | 8 serialised round-trips + `subgroupAdd` per output row; roadmap's §3.2 hoist applies unchanged |
+| 2 | `delta_net_decode_reg_f16` | 191.0 | largest addressable row; roadmap deferred it unmeasured |
+| 3 | `moe_gate_up_decode` | 143.9 | §3.3 ROWS=4 |
+| 4 | `add_rms_norm` | ~127 | fusion candidate, 10,560 dispatches |
+| — | `dense_q8_0_d_*` (674.6 total) | | at ~360 GB/s roofline; bytes-only, Phase 4 |
+| — | `matmul_f32_fast` | 72.5 | demoted from #1 |
+
+`delta_net_decode_reg_f16` is the notable one: at 191.0 ms it is the single largest row that is not
+already at the memory roofline, and the roadmap put it in the "measure before cutting" bucket at a
+recorded 127 ms. It runs 3,960 dispatches over the 30 recurrent Gated-DeltaNet layers.
+
+---
+
+## Methodology finding: sequential runs drift thermally, and it is large enough to fake a result
+
+Measuring §3.2(a) exposed a problem that invalidates naive before/after comparison on this box.
+
+Four consecutive `Q36_VK_PROF_KERNEL=1` runs of the **same binary**, back to back
+(`MEASURED_ON_BC250`):
+
+| run | `moe_down_q2k_sum_decode` ms | `moe_gate_up_decode` ms (untouched) | gen t/s |
+|---|---:|---:|---:|
+| 1 | 167.0 | 141.8 | — |
+| 2 | 168.7 | 143.0 | 74.66 |
+| 3 | 170.8 | 144.7 | 74.26 |
+| 4 | 175.3 | 148.8 | 73.00 |
+
+Every row drifts monotonically upward, including kernels no edit touched, and decode falls from
+the 84.3 t/s baseline to **73.0 t/s — a 13% loss with no code change at all**. GPU idle
+temperature was 44 C at the start of the session and 63 C immediately after this block.
+
+**Consequences:**
+
+1. A sequential A-then-B comparison on this hardware can manufacture a regression of >10%, or hide
+   an improvement of the same size, purely from run ordering. The roadmap's median-of-5 protocol
+   does not protect against this, because it assumes noise is random rather than monotonic drift.
+2. **My first reading of §3.2(a) was wrong.** I recorded 164.054 -> 167.033 ms and called the hoist
+   a small regression. That delta is smaller than the drift measured above across identical
+   binaries, so it was not a measurement of the change.
+3. This is the same failure mode I flagged in `BENCH_27B_RESULTS.md`, where sustained clocks sat at
+   580-680 MHz against a 1580-1760 MHz reference band. It is a property of the box, not of that
+   benchmark.
+
+**Protocol adopted for all A/B work from here:**
+
+- **Interleave** variants (A,B,A,B,...) rather than running blocks, so drift is shared equally
+  instead of loading onto whichever variant ran second.
+- **Cool to a fixed gate** (GPU package <= 52 C, sampled from `hwmon1/temp1_input`) before every
+  measured run, with the entry temperature recorded alongside the result.
+- Swap the `.spv` file rather than rebuilding: shaders are loaded from `vulkan/` at runtime, so
+  both variants run on a byte-identical binary and the comparison cannot pick up a compiler or
+  link difference.
+- Record start and end temperature per run and reject any pair whose entry temperatures differ by
+  more than a few degrees.
+
+---
+
+## 3.2(a) — moe_down reduction hoist: REVERTED, the roadmap's +5-6% was negative
+
+Implemented as specified: hold eight per-expert accumulators, reduce after the loop. Parity passed
+17/17, so the change was correct — it just was not faster.
+
+Interleaved A/B, cooled to a matched entry temperature before each run, `.spv` swapped on a
+byte-identical binary (`MEASURED_ON_BC250`):
+
+| variant | entry C | `moe_down_q2k_sum_decode` ms | gen t/s |
+|---|---:|---:|---:|
+| base | 56 | 156.738 | 76.32 |
+| hoist | 56 | 160.081 | 76.77 |
+| base | 55 | 154.136 | 76.95 |
+| hoist | 56 | 159.272 | 76.76 |
+
+Base ~155.4 ms, hoist ~159.7 ms: the hoist is **~2.8% slower** on the kernel row, consistently, in
+both replicates. End-to-end decode is flat (76.3-77.0, within noise). Reverted.
+
+Note the baseline here is ~155 ms against the 164.054 ms first recorded for the same code — the
+original figure was heat-inflated by ~6%, which is why the cooled interleaved protocol was needed
+to see the real sign of the effect.
+
+**Why the premise was wrong:** the roadmap argued that eight `subgroupAdd` calls serialise eight
+memory round-trips. But nothing in expert *u+1*'s loads depends on expert *u*'s reduction — only
+lane 0's running `sum` does — so ACO was already free to overlap them. The hoist added an 8-float
+accumulator array and register pressure, and bought no parallelism that was not already available.
+
+---
+
+## Finding: decode is dispatch-bound, not bandwidth-bound, in the rows the roadmap deferred
+
+Per-dispatch costs from the profile (`MEASURED_ON_BC250`). This board has **40 CUs**.
+
+| kernel | dispatches | groups/dispatch | us/dispatch | ms |
+|---|---:|---:|---:|---:|
+| `add_rms_norm` | 10,560 | **32** | 12.4 | 130.9 |
+| `attn_decode_split` | 1,280 | **80** | 99.8 | 127.8 |
+| `recur_conv_silu_decode` | 3,960 | **32** | 26.6 | 105.2 |
+| `delta_net_decode_reg_f16` | 3,960 | 512 | 48.2 | 191.0 |
+
+A 32-workgroup dispatch uses **less than one workgroup per CU**. `attn_decode_split` runs two per
+CU. Together these rows are **364 ms, ~20% of decode**, executed on a nearly idle GPU.
+
+`attn_decode_split` moves roughly 17 MB/token of KV cache, i.e. ~17 GB/s against the ~360 GB/s
+roofline — 21x below it. It is unambiguously occupancy-bound.
+
+Barrier elision is already hazard-based (`q36_vulkan.c:2803`), so these dispatches are separated by
+genuine data dependencies; there is no free win from dropping barriers. The lever is fewer, wider
+dispatches — fusion for the norm/conv rows, and a narrower split-K span for attention.

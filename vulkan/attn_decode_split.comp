@@ -49,10 +49,16 @@ layout(push_constant) uniform Push {
     uint v_type;
     uint k_row_bytes;
     uint v_row_bytes;
+    uint span_keys;
 } pc;
 
 #define TILE 64u
-#define SPAN 512u
+/* Span width in keys, supplied by the host so occupancy can be tuned without
+ * a shader variant.  n_head * n_spans workgroups are dispatched, so a
+ * narrower span trades more partials for more parallelism.  Changing it is
+ * NOT bit-exact: attn_combine reduces the partials in span order, so a
+ * different span count regroups that sum. */
+#define SPAN (pc.span_keys)
 
 shared float sh_q[256];
 shared float sh_w[TILE];

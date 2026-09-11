@@ -1178,6 +1178,28 @@ static bool q36_vk_use_attn_splitk(void) {
     return q36_vk_have_subgroups(true) && q36_vk_env_default_on("Q36_VK_ATTN_SPLITK");
 }
 
+/* Width in keys of one split-K span.  Decode dispatches n_head * n_spans
+ * workgroups, so on this 40-CU board the stock 512 gives 16 * 5 = 80
+ * workgroups at ctx 2048 -- two per CU, and the kernel measures ~17 GB/s
+ * against a ~360 GB/s roofline, i.e. it is occupancy-bound rather than
+ * bandwidth-bound.  A narrower span buys occupancy.
+ *
+ * DIAGNOSTIC ONLY, and NOT bit-exact: the combine reduces the per-span
+ * partials in order, so changing the span count regroups that summation and
+ * changes rounding.  Kept at 512 by default so the release path is
+ * unchanged; Q36_VK_ATTN_SPAN exists to measure what occupancy is worth
+ * before deciding whether to pay for it. */
+static uint32_t q36_vk_attn_span(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("Q36_VK_ATTN_SPAN");
+        long v = env && env[0] ? strtol(env, NULL, 10) : 512;
+        if (v < 64 || v > 4096 || (v & (v - 1)) != 0) v = 512;
+        cached = (int)v;
+    }
+    return (uint32_t)cached;
+}
+
 static uint32_t q36_vk_kv_cache_row_bytes(uint32_t type, uint32_t n) {
     if (type == 0u) return n * (uint32_t)sizeof(uint16_t);
     if (type == 1u) return ((n + Q36_VK_QK8_0 - 1u) / Q36_VK_QK8_0) * 34u;
@@ -2942,7 +2964,7 @@ int q36_gpu_init(void) {
     q36_vk.attn_post = Q36_VK_KERNEL("vulkan/attn_post.spv", 4, 28, (1u << 0) | (1u << 3));
     q36_vk.attn_reduce = Q36_VK_KERNEL("vulkan/attn_reduce.spv", 4, 28, 1u << 3);
     q36_vk.attn_decode_fused = Q36_VK_KERNEL("vulkan/attn_decode_fused.spv", 6, 40, 1u << 5);
-    q36_vk.attn_decode_split = Q36_VK_KERNEL("vulkan/attn_decode_split.spv", 5, 40, 1u << 4);
+    q36_vk.attn_decode_split = Q36_VK_KERNEL("vulkan/attn_decode_split.spv", 5, 44, 1u << 4);
     q36_vk.attn_prefill_qtile = Q36_VK_KERNEL("vulkan/attn_prefill_qtile.spv", 5, 48, 1u << 4);
     q36_vk.attn_prefill_qtile2 = Q36_VK_KERNEL("vulkan/attn_prefill_qtile2.spv", 5, 48, 1u << 4);
     q36_vk.attn_combine = Q36_VK_KERNEL("vulkan/attn_combine.spv", 4, 32, 1u << 3);
@@ -6754,7 +6776,8 @@ int q36_gpu_attn_decode_tensor(q36_gpu_tensor *out,
          * from n_head workgroups to n_head * spans.  A single-span split is
          * bit-identical to the fused kernel (span 0 seeds its max with the
          * sink), so gating on kv_max keeps per-token n_tok-invariance. */
-        uint32_t n_spans = (kv_max + 511u) / 512u;
+        uint32_t span_keys = q36_vk_attn_span();
+        uint32_t n_spans = (kv_max + span_keys - 1u) / span_keys;
         if (n_spans > 1u && head_dim <= 256u && q36_vk_use_attn_splitk()) {
             uint64_t part_bytes = (uint64_t)n_tok * n_head * n_spans * (head_dim + 2u) * sizeof(float);
             struct {
@@ -6768,8 +6791,10 @@ int q36_gpu_attn_decode_tensor(q36_gpu_tensor *out,
                 uint32_t v_type;
                 uint32_t k_row_bytes;
                 uint32_t v_row_bytes;
+                uint32_t span_keys;
             } spush = { pos0, n_head, n_head_kv, head_dim, n_spans, has_sinks ? 1u : 0u,
-                        k_cache_type, v_cache_type, k_cache_row_bytes, v_cache_row_bytes };
+                        k_cache_type, v_cache_type, k_cache_row_bytes, v_cache_row_bytes,
+                        span_keys };
             struct {
                 uint32_t pos0;
                 uint32_t n_head;
@@ -6780,7 +6805,7 @@ int q36_gpu_attn_decode_tensor(q36_gpu_tensor *out,
                 uint32_t span_keys;
                 uint32_t tok0;
             } cpush = { pos0, n_head, head_dim, n_spans,
-                        (uint32_t)qg_stride, has_sinks ? 1u : 0u, 512u, 0 };
+                        (uint32_t)qg_stride, has_sinks ? 1u : 0u, span_keys, 0 };
             pthread_mutex_lock(&q36_vk_mu);
             /* The partials scratch lives on the runtime and only grows: an
              * alloc/free per attention call showed up as ~0.2ms of host
