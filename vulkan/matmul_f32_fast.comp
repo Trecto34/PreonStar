@@ -47,7 +47,10 @@ layout(push_constant) uniform Push {
     float scale;
 } pc;
 
-shared float sh_sum[2];
+/* One slot per subgroup: 64 threads is one wave64 (or two wave32) and the
+ * combine below is skipped, but the wide build has four, so a fixed [2]
+ * wrote past the array. */
+shared float sh_sum[Q36_MFF_LOCAL / 32u];
 
 void main(void) {
     uint out_row = gl_WorkGroupID.x;
