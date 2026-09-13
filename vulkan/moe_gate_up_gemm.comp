@@ -48,10 +48,16 @@ const uint BM = 64u;
 const uint KK = 8u;
 
 shared uint sh_grid[512];
-/* [m][kk] f16vec4 lanes, one pad slot against LDS bank conflicts. */
-shared f16vec4 Ag[BM][KK + 1u];
-shared f16vec4 Au[BM][KK + 1u];
-shared f16vec4 Bs[SLOT_TILE][KK + 1u];
+/* [m][kk] f16vec4 lanes, k XOR-swizzled by the row/slot index.  The pad slot
+ * this layout used to carry never survived the toolchain (RADV reports LDS at
+ * the unpadded size), leaving sixteen 64-bit lane reads on a 64-byte stride --
+ * two banks, an 8-way conflict.  The swizzle spreads them over all 32 banks at
+ * no LDS cost and only permutes storage, so results are bit-identical: with the
+ * register tile below, 1635 -> 1018 ms across a ctx-2048 run (MEASURED_ON_BC250). */
+#define Q36_SWZ(i) (((i) >> 1u) & 7u)   /* mask is KK - 1 */
+shared f16vec4 Ag[BM][KK];
+shared f16vec4 Au[BM][KK];
+shared f16vec4 Bs[SLOT_TILE][KK];
 shared float Dg[BM];
 shared float Du[BM];
 shared uint sh_slot[SLOT_TILE];
@@ -78,14 +84,22 @@ void main(void) {
     uint base_u16 = (expert * pc.mid_dim + (row < pc.mid_dim ? row : 0u)) * row_u16;
     uint bc = tid >> 3u;      /* staged slot 0..31 */
     uint bkk = tid & 7u;
-    uint tx = tid & 31u;      /* output slot lane */
-    uint ty = tid >> 5u;      /* output row lane: rows ty + 8*i */
+    uint sl = tid & 15u;      /* output slot lane: slots sl + 16*j */
+    uint ry = tid >> 4u;      /* output row lane: rows ry + 16*i */
 
-    float accg[8];
-    float accu[8];
-    for (uint i = 0u; i < 8u; i++) {
-        accg[i] = 0.0;
-        accu[i] = 0.0;
+    /* 4-row x 2-slot register tile per thread instead of 8x1: the same 16
+     * accumulators and the same per-output k order, but each Ag/Au lane
+     * read now feeds two slots, cutting inner-loop LDS reads per FMA pair
+     * from 17:32 to 10:32.  Worth -7% on its own and -22% once the LDS reads
+     * above are conflict-free; a 2-row x 4-slot tile measured slightly worse
+     * than this one with the swizzle in place (MEASURED_ON_BC250). */
+    float accg[4][2];
+    float accu[4][2];
+    for (uint i = 0u; i < 4u; i++) {
+        for (uint j = 0u; j < 2u; j++) {
+            accg[i][j] = 0.0;
+            accu[i][j] = 0.0;
+        }
     }
     barrier();
 
@@ -109,16 +123,17 @@ void main(void) {
             vec4 g1 = vec4(unpack8(sh_grid[gqs * 2u + 1u]));
             g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
             g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (bitCount(gsign) & 1) != 0));
-            Ag[ar][sub * 2u] = f16vec4(g0 * 0.015625);
-            Ag[ar][sub * 2u + 1u] = f16vec4(g1 * 0.015625);
+            uint sa = Q36_SWZ(ar);
+            Ag[ar][(sub * 2u) ^ sa] = f16vec4(g0 * 0.015625);
+            Ag[ar][(sub * 2u + 1u) ^ sa] = f16vec4(g1 * 0.015625);
 
             uint usign = bitfieldExtract(uss, int(sbit), 7);
             vec4 u0 = vec4(unpack8(sh_grid[uqs * 2u]));
             vec4 u1 = vec4(unpack8(sh_grid[uqs * 2u + 1u]));
             u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
             u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (bitCount(usign) & 1) != 0));
-            Au[ar][sub * 2u] = f16vec4(u0 * 0.015625);
-            Au[ar][sub * 2u + 1u] = f16vec4(u1 * 0.015625);
+            Au[ar][(sub * 2u) ^ sa] = f16vec4(u0 * 0.015625);
+            Au[ar][(sub * 2u + 1u) ^ sa] = f16vec4(u1 * 0.015625);
 
             if (sub == 0u) {
                 float gd = unpackHalf2x16(uint(gw[gb])).x;
@@ -130,41 +145,53 @@ void main(void) {
         /* Stage B: 32 slots x 32 elements, rounded once to f16. */
         if (bc < SLOT_TILE) {
             bool live = sh_slot[bc] != INVALID;
-            Bs[bc][bkk] = live ? f16vec4(xv[sh_x4[bc] + kb * 8u + bkk]) : f16vec4(0.0hf);
+            Bs[bc][bkk ^ Q36_SWZ(bc)] = live ? f16vec4(xv[sh_x4[bc] + kb * 8u + bkk]) : f16vec4(0.0hf);
         }
         barrier();
 
-        f16vec2 pkg[8];
-        f16vec2 pku[8];
-        for (uint i = 0u; i < 8u; i++) {
-            pkg[i] = f16vec2(0.0hf);
-            pku[i] = f16vec2(0.0hf);
-        }
-        for (uint kk = 0u; kk < KK; kk++) {
-            f16vec4 b = Bs[tx][kk];
-            for (uint i = 0u; i < 8u; i++) {
-                f16vec4 ag = Ag[ty + 8u * i][kk];
-                f16vec4 au = Au[ty + 8u * i][kk];
-                pkg[i] = fma(ag.zw, b.zw, fma(ag.xy, b.xy, pkg[i]));
-                pku[i] = fma(au.zw, b.zw, fma(au.xy, b.xy, pku[i]));
+        f16vec2 pkg[4][2];
+        f16vec2 pku[4][2];
+        for (uint i = 0u; i < 4u; i++) {
+            for (uint j = 0u; j < 2u; j++) {
+                pkg[i][j] = f16vec2(0.0hf);
+                pku[i][j] = f16vec2(0.0hf);
             }
         }
-        for (uint i = 0u; i < 8u; i++) {
-            accg[i] = fma(Dg[ty + 8u * i], float(pkg[i].x) + float(pkg[i].y), accg[i]);
-            accu[i] = fma(Du[ty + 8u * i], float(pku[i].x) + float(pku[i].y), accu[i]);
+        for (uint kk = 0u; kk < KK; kk++) {
+            f16vec4 b0 = Bs[sl][kk ^ Q36_SWZ(sl)];
+            f16vec4 b1 = Bs[sl + 16u][kk ^ Q36_SWZ(sl + 16u)];
+            for (uint i = 0u; i < 4u; i++) {
+                uint arow = ry + 16u * i;
+                f16vec4 ag = Ag[arow][kk ^ Q36_SWZ(arow)];
+                f16vec4 au = Au[arow][kk ^ Q36_SWZ(arow)];
+                pkg[i][0] = fma(ag.zw, b0.zw, fma(ag.xy, b0.xy, pkg[i][0]));
+                pkg[i][1] = fma(ag.zw, b1.zw, fma(ag.xy, b1.xy, pkg[i][1]));
+                pku[i][0] = fma(au.zw, b0.zw, fma(au.xy, b0.xy, pku[i][0]));
+                pku[i][1] = fma(au.zw, b1.zw, fma(au.xy, b1.xy, pku[i][1]));
+            }
+        }
+        for (uint i = 0u; i < 4u; i++) {
+            float dg = Dg[ry + 16u * i];
+            float du = Du[ry + 16u * i];
+            for (uint j = 0u; j < 2u; j++) {
+                accg[i][j] = fma(dg, float(pkg[i][j].x) + float(pkg[i][j].y), accg[i][j]);
+                accu[i][j] = fma(du, float(pku[i][j].x) + float(pku[i][j].y), accu[i][j]);
+            }
         }
         barrier();
     }
 
-    uint slot = sh_slot[tx];
-    if (slot == INVALID) return;
     float gsc = pc.has_gate_scales != 0u ? gate_scales[expert] : 1.0;
     float usc = pc.has_up_scales != 0u ? up_scales[expert] : 1.0;
-    for (uint i = 0u; i < 8u; i++) {
-        uint r = row0 + ty + 8u * i;
-        if (r >= pc.mid_dim) continue;
-        float g = accg[i] * gsc;
-        float v = accu[i] * usc;
-        y[slot * pc.mid_dim + r] = (g / (1.0f + exp(-g))) * v;
+    for (uint j = 0u; j < 2u; j++) {
+        uint slot = sh_slot[sl + 16u * j];
+        if (slot == INVALID) continue;
+        for (uint i = 0u; i < 4u; i++) {
+            uint r = row0 + ry + 16u * i;
+            if (r >= pc.mid_dim) continue;
+            float g = accg[i][j] * gsc;
+            float v = accu[i][j] * usc;
+            y[slot * pc.mid_dim + r] = (g / (1.0f + exp(-g))) * v;
+        }
     }
 }

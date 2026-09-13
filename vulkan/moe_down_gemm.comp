@@ -39,8 +39,17 @@ const uint INVALID = 0xffffffffu;
 const uint BM = 64u;
 const uint KK = 8u;
 
-shared f16vec4 As[BM][KK + 1u];
-shared f16vec4 Bs[SLOT_TILE][KK + 1u];
+/* [m][kk] f16vec4 lanes, k XOR-swizzled by the row/slot index.  The [KK+1]
+ * pad this layout used to carry never reached the hardware: the ninth column
+ * is never accessed, the toolchain re-lays the array out without it, and RADV
+ * reports LDS at exactly the unpadded size.  The sixteen 64-bit lane reads
+ * then sat on a 64-byte stride -- two banks, an 8-way conflict.  Swizzling k
+ * by (index >> 1) & 7 spreads them over all 32 banks at no LDS cost, and it
+ * only permutes where a value lives, so results are bit-identical.  With the
+ * register tile below, 929 -> 584 ms across a ctx-2048 run (MEASURED_ON_BC250). */
+#define Q36_SWZ(i) (((i) >> 1u) & 7u)   /* mask is KK - 1 */
+shared f16vec4 As[BM][KK];
+shared f16vec4 Bs[SLOT_TILE][KK];
 shared uint sh_slot[SLOT_TILE];
 
 void main(void) {
@@ -59,12 +68,19 @@ void main(void) {
     uint base_u16 = (expert * pc.out_dim + (row < pc.out_dim ? row : 0u)) * row_u16;
     uint bc = tid >> 3u;
     uint bkk = tid & 7u;
-    uint tx = tid & 31u;
-    uint ty = tid >> 5u;
+    uint sl = tid & 15u;      /* output slot lane: slots sl + 16*j */
+    uint ry = tid >> 4u;      /* output row lane: rows ry + 16*i */
     uint mid4 = pc.in_dim / 4u;
 
-    float acc[8];
-    for (uint i = 0u; i < 8u; i++) acc[i] = 0.0;
+    /* 4-row x 2-slot register tile per thread instead of 8x1: same
+     * accumulator count and same per-output k order, but each As lane read
+     * feeds two slots, so inner-loop LDS reads per 16 FMA pairs fall from
+     * 9 to 6.  Note the ordering: this remap measured +16% (worse) while the
+     * reads above were still 8-way bank-conflicted, and -22% once they were
+     * not.  Fix conflicts before tuning LDS traffic (MEASURED_ON_BC250). */
+    float acc[4][2];
+    for (uint i = 0u; i < 4u; i++)
+        for (uint j = 0u; j < 2u; j++) acc[i][j] = 0.0;
     barrier();
 
     uint n_kb = pc.blocks * 8u;
@@ -86,35 +102,44 @@ void main(void) {
             uint p1 = uint(wb[q0w + 2u]) | (uint(wb[q0w + 3u]) << 16u);
             vec4 q0 = vec4(unpack8((p0 >> (2u * j)) & 0x03030303u));
             vec4 q1 = vec4(unpack8((p1 >> (2u * j)) & 0x03030303u));
-            As[ar][sub * 2u] = f16vec4(q0 * sc1 - sc2);
-            As[ar][sub * 2u + 1u] = f16vec4(q1 * sc1 - sc2);
+            uint sa = Q36_SWZ(ar);
+            As[ar][(sub * 2u) ^ sa] = f16vec4(q0 * sc1 - sc2);
+            As[ar][(sub * 2u + 1u) ^ sa] = f16vec4(q1 * sc1 - sc2);
         }
         /* Stage B: 32 slots x 32 mid elements, rounded once to f16. */
         if (bc < SLOT_TILE) {
             uint slot = sh_slot[bc];
-            Bs[bc][bkk] = slot != INVALID ? f16vec4(mid[slot * mid4 + kb * 8u + bkk])
-                                          : f16vec4(0.0hf);
+            Bs[bc][bkk ^ Q36_SWZ(bc)] = slot != INVALID ? f16vec4(mid[slot * mid4 + kb * 8u + bkk])
+                                                        : f16vec4(0.0hf);
         }
         barrier();
 
-        f16vec2 pk[8];
-        for (uint i = 0u; i < 8u; i++) pk[i] = f16vec2(0.0hf);
+        f16vec2 pk[4][2];
+        for (uint i = 0u; i < 4u; i++)
+            for (uint j = 0u; j < 2u; j++) pk[i][j] = f16vec2(0.0hf);
         for (uint kk = 0u; kk < KK; kk++) {
-            f16vec4 b = Bs[tx][kk];
-            for (uint i = 0u; i < 8u; i++) {
-                f16vec4 a = As[ty + 8u * i][kk];
-                pk[i] = fma(a.zw, b.zw, fma(a.xy, b.xy, pk[i]));
+            f16vec4 b0 = Bs[sl][kk ^ Q36_SWZ(sl)];
+            f16vec4 b1 = Bs[sl + 16u][kk ^ Q36_SWZ(sl + 16u)];
+            for (uint i = 0u; i < 4u; i++) {
+                uint arow = ry + 16u * i;
+                f16vec4 a = As[arow][kk ^ Q36_SWZ(arow)];
+                pk[i][0] = fma(a.zw, b0.zw, fma(a.xy, b0.xy, pk[i][0]));
+                pk[i][1] = fma(a.zw, b1.zw, fma(a.xy, b1.xy, pk[i][1]));
             }
         }
-        for (uint i = 0u; i < 8u; i++) acc[i] += float(pk[i].x) + float(pk[i].y);
+        for (uint i = 0u; i < 4u; i++)
+            for (uint j = 0u; j < 2u; j++)
+                acc[i][j] += float(pk[i][j].x) + float(pk[i][j].y);
         barrier();
     }
 
-    uint slot = sh_slot[tx];
-    if (slot == INVALID) return;
     float sc = pc.has_scales != 0u ? scales[expert] : 1.0;
-    for (uint i = 0u; i < 8u; i++) {
-        uint r = row0 + ty + 8u * i;
-        if (r < pc.out_dim) y[slot * pc.out_dim + r] = acc[i] * sc;
+    for (uint j = 0u; j < 2u; j++) {
+        uint slot = sh_slot[sl + 16u * j];
+        if (slot == INVALID) continue;
+        for (uint i = 0u; i < 4u; i++) {
+            uint r = row0 + ry + 16u * i;
+            if (r < pc.out_dim) y[slot * pc.out_dim + r] = acc[i][j] * sc;
+        }
     }
 }
