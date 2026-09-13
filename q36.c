@@ -957,13 +957,19 @@ static uint32_t q36_q4_0_row_bytes(uint32_t n) {
  * there is exactly one implementation of the behaviour.
  *
  *   --f32-fast-wide   256-thread matmul_f32_fast.  Measured +6.1% decode and
- *                     +17% prefill, but it reassociates the MoE router gate,
- *                     which can change which experts a token selects.
+ *                     +17% prefill on a short benchmark, but it reassociates
+ *                     the MoE router gate, which can change which experts a
+ *                     token selects.  That is not a theoretical risk: on one
+ *                     BC-250, long-context chat with tool calling degenerated
+ *                     into unterminated generation with this flag on.
  *   --attn-span N     split-K span in keys (default 512).  128 measured +2.2%
- *                     decode; it only regroups an ordered sum.
+ *                     decode at ctx 2048; it only regroups an ordered sum, but
+ *                     the span count is context/span, so both the rounding and
+ *                     attn_combine's own cost grow with context while the
+ *                     saving does not.  Not validated for long context.
  *
- * Both are documented with their measurements in OPTIMIZATION_LOG.md.  Neither
- * is bit-exact, so neither is on by default. */
+ * Neither is bit-exact, so neither is on by default, and neither is passed by
+ * the shipped launcher scripts. */
 void q36_set_gpu_fast_path_env(const char *name, const char *value) {
     if (!name || !value) return;
     setenv(name, value, 1);

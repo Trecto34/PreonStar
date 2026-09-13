@@ -10487,13 +10487,14 @@ static void usage(FILE *fp) {
         "      KV cache K type: f16, q8_0, or q4_0. Default: Vulkan/Metal resident q8_0, otherwise f16\n"
         "  -ctv, --cache-type-v TYPE\n"
         "      KV cache V type: f16, q8_0, or q4_0. Default: Vulkan/Metal resident q4_0, otherwise f16\n"
-        "  -n, --tokens N\n"
+        "  -n, --tokens N          (alias: --default-tokens)\n"
         "      Default max output tokens when the client omits a limit. Default: 262144 (256K)\n"
         "  -t, --threads N\n"
         "      CPU helper threads for lightweight host-side work.\n"
         "  --prefill-chunk N\n"
         "  --f32-fast-wide\n"
         "      Opt-in 256-thread f32 matvec. Faster, but reassociates the MoE router gate.\n"
+        "      Benchmarking only: observed to break long-context chat. See README.md.\n"
         "  --attn-span N\n"
         "      Attention split-K span in keys. Default: 512. 128 measured +2.2%% at ctx 2048 only;\n"
         "      error and combine cost both scale with context/span. Not validated for long context.\n"
@@ -10658,7 +10659,7 @@ static server_config parse_options(int argc, char **argv) {
                 exit(2);
             }
             cache_type_v_set = true;
-        } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) {
+        } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens") || !strcmp(arg, "--default-tokens")) {
             c.default_tokens = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int_arg(need_arg(&i, argc, argv, arg), arg);

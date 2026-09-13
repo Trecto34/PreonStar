@@ -86,6 +86,7 @@ static void usage(FILE *fp) {
         "  -t, --threads N        CPU helper threads.\n"
         "  --prefill-chunk N      Override GPU graph prefill width. Default: auto; resident GPU resolves to 1024.\n"
         "  --f32-fast-wide        Opt-in 256-thread f32 matvec: faster, but reassociates the MoE router gate.\n"
+        "                         Benchmarking only; observed to break long-context chat.\n"
         "  --attn-span N          Split-K span in keys. Default 512. 128 measured +2.2%% at ctx 2048 only;\n"
         "                         error and combine cost both scale with context/span. Not validated long-context.\n"
         "  --quality              Prefer exact kernels where applicable.\n"

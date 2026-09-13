@@ -137,6 +137,7 @@ static void usage(FILE *fp) {
         "  --prefill-chunk N\n"
         "  --f32-fast-wide\n"
         "      Opt-in 256-thread f32 matvec. Faster, but reassociates the MoE router gate.\n"
+        "      Benchmarking only: observed to break long-context chat. See README.md.\n"
         "  --attn-span N\n"
         "      Attention split-K span in keys. Default: 512. 128 measured +2.2%% at ctx 2048 only;\n"
         "      error and combine cost both scale with context/span. Not validated for long context.\n"

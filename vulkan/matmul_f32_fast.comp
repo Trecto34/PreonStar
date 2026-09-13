@@ -15,13 +15,17 @@
 #ifndef Q36_MFF_LOCAL
 #define Q36_MFF_LOCAL 64
 #endif
-/* Q36_MFF_LOCAL=256 is measurably much faster (see OPTIMIZATION_LOG.md) but is
- * NOT bit-exact: at 64 threads gl_NumSubgroups is 1 and the shared-memory
- * combine below is skipped entirely, while at 256 four subgroup partials are
- * summed through sh_sum in a different order.  This kernel computes the MoE
- * router gate, where a rounding flip changes which experts a token selects
- * rather than nudging a logit -- hence the default stays 64 and the wide
- * variant is opt-in behind Q36_VK_F32_FAST_WIDE, pending an eval. */
+/* Q36_MFF_LOCAL=256 measures much faster on a short benchmark (+6.1% decode,
+ * +17% prefill on one BC-250) but is NOT bit-exact: at 64 threads
+ * gl_NumSubgroups is 1 and the shared-memory combine below is skipped
+ * entirely, while at 256 four subgroup partials are summed through sh_sum in a
+ * different order.  This kernel computes the MoE router gate, where a rounding
+ * flip changes which experts a token selects rather than nudging a logit.
+ *
+ * That failure mode has been observed, not just predicted: with the wide
+ * variant enabled, long-context chat with tool calling on one BC-250
+ * degenerated into unterminated generation.  The default therefore stays 64,
+ * and 256 remains opt-in behind Q36_VK_F32_FAST_WIDE for benchmarking only. */
 layout(local_size_x = Q36_MFF_LOCAL, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Weights {

@@ -1157,8 +1157,19 @@ variable.
 
 | flag | what it changes | exactness |
 | --- | --- | --- |
-| `--f32-fast-wide` | Runs the f32 matvec with a 256-thread workgroup instead of 64. The narrow form dispatches a single wave for the router and shared-expert gates, which cannot cover memory latency. | **Not bit-exact.** Four subgroup partials are combined through shared memory instead of one subgroup reducing alone, and this kernel computes the MoE router gate, so a rounding flip can change *which experts* a token selects. Validate with the evaluation harness, not with a logits diff. |
+| `--f32-fast-wide` | Runs the f32 matvec with a 256-thread workgroup instead of 64. The narrow form dispatches a single wave for the router and shared-expert gates, which cannot cover memory latency. | **Not bit-exact, and known to fail in production use.** Four subgroup partials are combined through shared memory instead of one subgroup reducing alone, and this kernel computes the MoE router gate, so a rounding flip can change *which experts* a token selects. Treat it as a benchmarking switch only. Validate with the evaluation harness, not with a logits diff. |
 | `--attn-span N` | Split-K span width in keys for decode attention (default 512). Narrower spans raise occupancy, since decode dispatches `n_head * spans` workgroups. | **Not bit-exact.** `attn_combine` reduces the per-span partials sequentially in f32, so a different span count regroups that sum. |
+
+`--f32-fast-wide` is the more dangerous of the two, and its danger is not
+hypothetical. The short-benchmark gain is real, but the flag perturbs the input
+to the router softmax rather than a final logit, so the damage is discrete: a
+token either routes to the same eight experts or to different ones. On one
+BC-250, enabling it for ordinary long-context chat with tool calling produced a
+degenerate failure — the sampled distribution collapsed, the end-of-turn token
+stopped being selected, and generation ran on until it hit the token budget.
+A logits diff at short context will not predict this, because the short context
+is exactly where the perturbation stays below the routing threshold. If you
+enable it at all, enable it for measurement runs, not for a served endpoint.
 
 `--attn-span` has a property worth understanding before using it: the number of
 spans is `context / span`, and `attn_combine` performs one f32 rescale per span.

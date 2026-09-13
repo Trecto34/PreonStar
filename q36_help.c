@@ -177,7 +177,8 @@ static void print_model_runtime(FILE *fp, const help_colors *c,
     opt(fp, c, "--prefill-chunk N",
         "GPU graph prefill chunk size. Default: auto; resident GPU resolves to 1024.");
     opt(fp, c, "--f32-fast-wide",
-        "Opt-in 256-thread f32 matvec. Faster, but reassociates the MoE router gate.");
+        "Opt-in 256-thread f32 matvec. Faster, but reassociates the MoE router gate: "
+        "benchmarking only, observed to break long-context chat.");
     opt(fp, c, "--attn-span N",
         "Attention split-K span in keys. Default: 512. 128 measured +2.2% at ctx 2048 only; "
         "error and combine cost both scale with context/span, so it is NOT validated for long context.");
