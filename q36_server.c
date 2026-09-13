@@ -977,8 +977,10 @@ static void request_sampling(const request *r, float *temperature, int *top_k,
     *min_p = r->min_p;
 }
 
+static bool g_force_nothink;  /* --nothink / --no-think */
+
 static q36_think_mode think_mode_from_enabled(bool enabled, q36_think_mode effort) {
-    if (!enabled || effort == Q36_THINK_NONE) return Q36_THINK_NONE;
+    if (g_force_nothink || !enabled || effort == Q36_THINK_NONE) return Q36_THINK_NONE;
     return effort == Q36_THINK_MAX ? Q36_THINK_MAX : Q36_THINK_HIGH;
 }
 
@@ -10541,6 +10543,8 @@ static void usage(FILE *fp) {
         "      Add Access-Control-Allow-* headers and answer browser preflight requests.\n"
         "\n"
         "Thinking and sampling:\n"
+        "  --nothink, --no-think\n"
+        "      Force-disable thinking/reasoning for all models, overriding client thinking controls.\n"
         "  ignore_eos=true requires explicit temperature=0; stop strings and context limits still apply.\n"
         "  Chat requests default to thinking mode with high effort.\n"
         "  Only reasoning_effort=max or output_config.effort=max requests Think Max.\n"
@@ -10682,6 +10686,8 @@ static server_config parse_options(int argc, char **argv) {
             c.mixed_prefill_quantum = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--cors")) {
             c.enable_cors = true;
+        } else if (!strcmp(arg, "--nothink") || !strcmp(arg, "--no-think")) {
+            g_force_nothink = true;
         } else if (!strcmp(arg, "--kv-disk-dir")) {
             c.kv_disk_dir = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--kv-disk-space-mb")) {
@@ -11762,6 +11768,11 @@ static void test_reasoning_effort_mapping(void) {
     TEST_ASSERT(min_ctx == 98304);
     TEST_ASSERT(q36_think_mode_for_context(Q36_THINK_MAX, (int)min_ctx - 1) == Q36_THINK_HIGH);
     TEST_ASSERT(q36_think_mode_for_context(Q36_THINK_MAX, (int)min_ctx) == Q36_THINK_MAX);
+    TEST_ASSERT(think_mode_from_enabled(true, Q36_THINK_HIGH) == Q36_THINK_HIGH);
+    g_force_nothink = true;
+    TEST_ASSERT(think_mode_from_enabled(true, Q36_THINK_HIGH) == Q36_THINK_NONE);
+    TEST_ASSERT(think_mode_from_enabled(true, Q36_THINK_MAX) == Q36_THINK_NONE);
+    g_force_nothink = false;
 }
 
 static void test_api_thinking_controls_parse(void) {
@@ -14027,6 +14038,16 @@ static void test_server_streaming_options(void) {
     c = parse_options(6, explicit_argv);
     TEST_ASSERT(c.engine.cache_type_k == Q36_KV_CACHE_Q8_0);
     TEST_ASSERT(c.engine.cache_type_v == Q36_KV_CACHE_Q4_0);
+
+    char *nothink_argv[] = {"q36-server", "--nothink"};
+    c = parse_options(2, nothink_argv);
+    TEST_ASSERT(g_force_nothink);
+    g_force_nothink = false;
+
+    char *nothink_dash_argv[] = {"q36-server", "--no-think"};
+    c = parse_options(2, nothink_dash_argv);
+    TEST_ASSERT(g_force_nothink);
+    g_force_nothink = false;
 
     char *batched_argv[] = {
         "q36-server", "--batched-session", "4",
