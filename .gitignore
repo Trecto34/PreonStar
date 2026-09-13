@@ -40,3 +40,12 @@ TODO.md
 
 /tests/test_prompt_prefix
 /tests/test_quality_api
+
+# Local BC-250 launcher scripts.  These hardcode one machine's paths
+# (/home/server/q36-opt, /home/server/.q36/kv-cache), bind 0.0.0.0:8000 and
+# assume a specific thread count and KV budget, so they are deliberately not
+# part of the repository.  Keep your own copies untracked.
+/start-qwen36.sh
+/start-server.sh
+/start-server-bg.sh
+/stop-server.sh
