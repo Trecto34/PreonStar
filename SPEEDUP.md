@@ -23,6 +23,35 @@ This file is a rulebook for implementing new Quarkstar speedups and kernel optim
 
   How large this effect is depends entirely on the individual machine's cooling, ambient temperature and power limits; measure it on yours before trusting any sequential comparison. It is not a small correction — on one marginally cooled board, consecutive runs of an unmodified binary fell 13% while the idle floor rose about 16 °C over a session.
 
+* **Measure occupancy before changing a tile size, and get the shader names into the dump.** On
+  RADV, `RADV_DEBUG=shaderstats` prints VGPR/SGPR/LDS and waves-per-SIMD per pipeline but does not
+  name the shader, and the on-disk pipeline cache means a second run prints nothing at all. Run it
+  as `MESA_SHADER_CACHE_DISABLE=true Q36_VK_SHADER_TRACE=1 RADV_DEBUG=shaderstats ...`: the trace
+  names each pipeline as it is built, immediately before its stats block, and disabling the cache
+  forces every shader to be compiled again. Attribute the rows, then compute what actually limits
+  the kernel — LDS bytes against 64 KB per CU, VGPRs against the register file — before proposing a
+  larger or smaller tile. Reasoning about the source instead has produced wrong diagnoses here more
+  than once.
+
+* **A `[K + 1]` pad against LDS bank conflicts can be silently removed.** The classic trick of
+  declaring `shared T tile[M][K + 1]` and only ever accessing `[0..K-1]` leaves the pad column dead,
+  and the toolchain is free to lay the array out without it — restoring exactly the power-of-two
+  stride the pad existed to break. Check it: compute the padded and unpadded sizes by hand and
+  compare both against the LDS size the driver reports for that shader. If the unpadded number is
+  the one you see, the pad is not doing anything, and sixteen 64-bit lane reads at a 64-byte stride
+  share two banks — an 8-way conflict. Prefer an XOR swizzle of the fast index by the slow one
+  (`tile[m][k ^ ((m >> 1) & (K - 1))]`, written and read the same way): it cannot be optimised away,
+  costs no extra LDS, and only permutes where a value lives, so results stay bit-identical. On one
+  BC-250 this was worth 14-35% on three staged GEMM kernels whose pads had all been removed.
+
+* **The same defect appears with no pad involved, whenever a lane-derived stride is a whole number of
+  bank sweeps.** If each lane reads the same offset inside its own chunk of a shared array, and the
+  chunks sit a multiple of (banks x dword) apart, every lane lands on the same banks. Check any shared
+  array indexed as `lane_group * chunk + offset`: one attention kernel here gave each lane quad its own
+  64-float chunk of a q row, and 64 floats is exactly two sweeps of 32 banks, so all four quads
+  collided — 14% of that kernel, recovered with four dwords of pad per chunk. A pad placed *between*
+  live elements is safe from the removal described above, because none of it is dead.
+
 * **Do not add per-kernel savings together to predict end-to-end gain.** The profiler's `gpu_ms` values sum to more than wall-clock because dispatches overlap, so part of any saved kernel time was already hidden behind other work. Confirm every change with an end-to-end interleaved A/B against an unmodified binary rather than with the sum of its kernel rows.
 
 * **Watch for prefill/decode pooling in the profiler.** A kernel used in both phases reports a single row averaging the two, and its averaged `groups/dispatch` is meaningless for either phase — a kernel can show tens of workgroups on average while dispatching exactly one during decode. Give shape-tagged op names to any kernel whose time you are attributing before trusting its row.

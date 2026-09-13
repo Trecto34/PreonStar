@@ -1160,25 +1160,38 @@ variable.
 | `--f32-fast-wide` | Runs the f32 matvec with a 256-thread workgroup instead of 64. The narrow form dispatches a single wave for the router and shared-expert gates, which cannot cover memory latency. | **Not bit-exact, and known to fail in production use.** Four subgroup partials are combined through shared memory instead of one subgroup reducing alone, and this kernel computes the MoE router gate, so a rounding flip can change *which experts* a token selects. Treat it as a benchmarking switch only. Validate with the evaluation harness, not with a logits diff. |
 | `--attn-span N` | Split-K span width in keys for decode attention (default 512). Narrower spans raise occupancy, since decode dispatches `n_head * spans` workgroups. | **Not bit-exact.** `attn_combine` reduces the per-span partials sequentially in f32, so a different span count regroups that sum. |
 
-`--f32-fast-wide` is the more dangerous of the two, and its danger is not
-hypothetical. The short-benchmark gain is real, but the flag perturbs the input
-to the router softmax rather than a final logit, so the damage is discrete: a
-token either routes to the same eight experts or to different ones. On one
-BC-250, enabling it for ordinary long-context chat with tool calling produced a
-degenerate failure — the sampled distribution collapsed, the end-of-turn token
-stopped being selected, and generation ran on until it hit the token budget.
+`--f32-fast-wide` is the more dangerous of the two, and it is also the smaller
+of the two. Isolating the kernel it changes, rather than reading whole-run
+throughput, puts the entire flag at about **half a percent of GPU time** on one
+BC-250: 39 ms of a 7.3 s profile, split as 27.7 ms on the router gate and 11.3 ms
+on the shared-expert gate. Earlier, larger figures for this flag came from
+whole-run comparisons on a thermally drifting board and did not survive
+per-kernel isolation. Its danger, by contrast, is not hypothetical. The flag
+perturbs the input to the router softmax rather than a final logit, so the
+damage is discrete: a token either routes to the same eight experts or to
+different ones. On one BC-250, enabling it for ordinary long-context chat with
+tool calling produced a degenerate failure — the sampled distribution collapsed,
+the end-of-turn token stopped being selected, and generation ran on until it hit
+the token budget.
 A logits diff at short context will not predict this, because the short context
 is exactly where the perturbation stays below the routing threshold. If you
 enable it at all, enable it for measurement runs, not for a served endpoint.
+Routing only the single-row matvecs (the shared-expert gate) to the wide kernel,
+leaving the router gate narrow, was measured as well: it is the safe half, and it
+is worth 0.15% of GPU time, which is not enough to justify a second code path.
 
 `--attn-span` has a property worth understanding before using it: the number of
 spans is `context / span`, and `attn_combine` performs one f32 rescale per span.
 Narrowing the span therefore lengthens that sequential chain in proportion to
 context, and `attn_combine`'s own cost grows the same way while the saving on the
 split side does not. A span that helps at short context can be neutral or
-negative at long context, and the rounding accumulates further as well. Measure
-at the context length you actually run. `--f32-fast-wide` has no such context
-dependence; its cost is per token.
+negative at long context, and the rounding accumulates further as well. That is
+not a caution about something unmeasured: on one BC-250, span 128 against the
+default 512 gave **+2.2% decode at ctx 2048, +1.2% at 8192 and -1.9% at 16384**,
+so the gain inverts somewhere between 8 K and 16 K, exactly as the per-span
+rescale chain predicts. Prefill is unaffected at any context, because the flag
+only reaches the decode split. Measure at the context length you actually run.
+`--f32-fast-wide` has no such context dependence; its cost is per token.
 
 Measure both on your own board before relying on either. Their benefit depends
 on the device's CU count, its thermal headroom and the context length you run,
