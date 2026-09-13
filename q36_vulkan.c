@@ -1427,10 +1427,29 @@ static void q36_vk_kernel_destroy(q36_vk_kernel *k) {
 static void *q36_read_file(const char *path, size_t *len_out) {
     char rooted[PATH_MAX];
     FILE *fp = NULL;
-    if (path && path[0] != '/' && q36_vk.shader_root[0] &&
+    const char *env_dir = getenv("Q36_SHADER_DIR");
+    if (path && path[0] != '/' && env_dir && env_dir[0] &&
+        snprintf(rooted, sizeof(rooted), "%s/%s", env_dir, path) < (int)sizeof(rooted)) {
+        fp = fopen(rooted, "rb");
+    }
+    if (!fp && path && path[0] != '/' && q36_vk.shader_root[0] &&
         snprintf(rooted, sizeof(rooted), "%s/%s",
                  q36_vk.shader_root, path) < (int)sizeof(rooted)) {
         fp = fopen(rooted, "rb");
+    }
+    if (!fp && path && path[0] != '/') {
+        char exe[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            char *slash = strrchr(exe, '/');
+            if (slash) {
+                *slash = '\0';
+                if (snprintf(rooted, sizeof(rooted), "%s/%s", exe, path) < (int)sizeof(rooted)) {
+                    fp = fopen(rooted, "rb");
+                }
+            }
+        }
     }
     if (!fp) fp = fopen(path, "rb");
     if (!fp) return NULL;
