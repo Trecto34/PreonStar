@@ -41,6 +41,12 @@ TODO.md
 /tests/test_prompt_prefix
 /tests/test_quality_api
 
+# Working notes for the optimization effort: session logs, handoffs, raw
+# benchmark captures and the original roadmap.  These are a lab notebook for
+# one board, not engine documentation -- the conclusions worth keeping are
+# promoted into README.md, BC250.md and SPEEDUP.md instead.
+/.optimizations/
+
 # Local BC-250 launcher scripts.  These hardcode one machine's paths
 # (/home/server/q36-opt, /home/server/.q36/kv-cache), bind 0.0.0.0:8000 and
 # assume a specific thread count and KV budget, so they are deliberately not
