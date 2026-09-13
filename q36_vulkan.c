@@ -1559,6 +1559,10 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
         .stage = stage,
         .layout = k->layout,
     };
+    /* Q36_VK_SHADER_TRACE=1 names each pipeline as it is built, so an
+     * RADV_DEBUG=shaderstats dump (which prints VGPR/LDS with no shader
+     * name) can be attributed to a shader. */
+    if (getenv("Q36_VK_SHADER_TRACE")) fprintf(stderr, "q36: building pipeline %s\n", k->path);
     rc = vkCreateComputePipelines(q36_vk.device, VK_NULL_HANDLE, 1, &cpci, NULL, &k->pipeline);
     if (rc != VK_SUCCESS) {
         fprintf(stderr, "q36: vkCreateComputePipelines failed for %s (%d)\n", k->path, rc);
@@ -4530,8 +4534,7 @@ static int q36_vk_matmul_q8_0_mm(q36_gpu_tensor *out,
         uint32_t gx = out32 ? 1u :
                       f16 ? (uint32_t)((out_dim + 127u) / 128u) :
                             (uint32_t)((out_dim + 63u) / 64u);
-        uint32_t gy = out32 ? (uint32_t)((n_tok + 63u) / 64u) :
-                              (uint32_t)((n_tok + 63u) / 64u);
+        uint32_t gy = (uint32_t)((n_tok + 63u) / 64u);
         ok = q36_vk_run_unlocked(op, kernel, bindings, &push, sizeof(push),
                                  gx, gy, 1);
     }
