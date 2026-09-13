@@ -55,7 +55,19 @@ layout(push_constant) uniform Push {
 #define K_HEAD_BYTES 272u
 #define V_HEAD_BYTES 144u
 
-shared float sh_q[QT * HQ * HD];
+/* sh_q rows carry four 64-float chunks, one per lane quad, and every lane reads
+ * its own quad's chunk at the same offset inside it.  At a plain 256-float row
+ * stride those four addresses differ by 64 dwords -- a whole multiple of the 32
+ * LDS banks -- so all four land on the same four banks: a 4-way conflict on the
+ * hottest read in the kernel.  Four dwords of pad per chunk shift each quad by
+ * four banks instead, for 1024 bytes of LDS that still leaves three workgroups
+ * per CU.  Unlike a trailing [K+1] pad this one sits between live elements, so
+ * the toolchain cannot drop it, and it only moves values: 925 -> 794 ms across a
+ * ctx-2048 run, 17/17 frontier logit dumps unchanged (MEASURED_ON_BC250). */
+#define Q36_QCHUNK 68u                       /* 64 floats + 4 pad */
+#define Q36_QSTRIDE (4u * Q36_QCHUNK)        /* one q row */
+#define Q36_QIDX(r, d) ((r) * Q36_QSTRIDE + ((d) >> 6u) * Q36_QCHUNK + ((d) & 63u))
+shared float sh_q[QT * HQ * Q36_QSTRIDE];
 shared float sh_w[QT * HQ * TILE];
 
 float dot4(vec4 a, vec4 b) {
@@ -99,7 +111,7 @@ void main(void) {
         uint ti = r / HQ;
         uint j = r & (HQ - 1u);
         uint d = e & (HD - 1u);
-        sh_q[e] = ti < tn ?
+        sh_q[Q36_QIDX(r, d)] = ti < tn ?
             q[((tok0 + ti) * pc.n_head + h0 + j) * HD + d] : 0.0;
     }
     barrier();
@@ -158,7 +170,7 @@ void main(void) {
                             vec4 kv = vec4(unpack8(int(sw)));
                             uint qi = p * 64u + 4u * k;
                             for (uint rr = 0u; rr < ROWS; rr++) {
-                                uint qb = (r0 + rr) * HD + qi;
+                                uint qb = Q36_QIDX(r0 + rr, qi);
                                 s0[rr] += dot4(kv, vec4(sh_q[qb], sh_q[qb + 1u],
                                                        sh_q[qb + 2u], sh_q[qb + 3u]));
                             }
@@ -168,7 +180,7 @@ void main(void) {
                             vec4 kv = vec4(unpack8(int(kc[wi + 9u + k])));
                             uint qi = p * 64u + 32u + 4u * k;
                             for (uint rr = 0u; rr < ROWS; rr++) {
-                                uint qb = (r0 + rr) * HD + qi;
+                                uint qb = Q36_QIDX(r0 + rr, qi);
                                 s1[rr] += dot4(kv, vec4(sh_q[qb], sh_q[qb + 1u],
                                                        sh_q[qb + 2u], sh_q[qb + 3u]));
                             }
