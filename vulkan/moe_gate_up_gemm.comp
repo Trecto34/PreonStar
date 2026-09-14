@@ -117,6 +117,8 @@ void main(void) {
 
     uint swz_sl = Q36_SWZ(sl);
     uint swz_ry = Q36_SWZ(ry);
+    uint arow[4];
+    for (uint i = 0u; i < 4u; i++) arow[i] = ry + 16u * i;
 
     uint n_kb = pc.blocks * 8u;
     for (uint kb = 0u; kb < n_kb; kb++) {
@@ -176,9 +178,8 @@ void main(void) {
             f16vec4 b1 = Bs[sl + 16u][kkb];
             uint kka = kk ^ swz_ry;
             for (uint i = 0u; i < 4u; i++) {
-                uint arow = ry + 16u * i;
-                f16vec4 ag = Ag[arow][kka];
-                f16vec4 au = Au[arow][kka];
+                f16vec4 ag = Ag[arow[i]][kka];
+                f16vec4 au = Au[arow[i]][kka];
                 pkg[i][0] = fma(ag.zw, b0.zw, fma(ag.xy, b0.xy, pkg[i][0]));
                 pkg[i][1] = fma(ag.zw, b1.zw, fma(ag.xy, b1.xy, pkg[i][1]));
                 pku[i][0] = fma(au.zw, b0.zw, fma(au.xy, b0.xy, pku[i][0]));
@@ -186,9 +187,8 @@ void main(void) {
             }
         }
         for (uint i = 0u; i < 4u; i++) {
-            uint arow = ry + 16u * i;
-            float dg = Dg[arow];
-            float du = Du[arow];
+            float dg = Dg[arow[i]];
+            float du = Du[arow[i]];
             for (uint j = 0u; j < 2u; j++) {
                 accg[i][j] = fma(dg, float(pkg[i][j].x) + float(pkg[i][j].y), accg[i][j]);
                 accu[i][j] = fma(du, float(pku[i][j].x) + float(pku[i][j].y), accu[i][j]);

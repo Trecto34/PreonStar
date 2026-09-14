@@ -148,6 +148,7 @@ int main(void) {
     run_bench(2048, 2048, 1024, 20);
     run_bench(7168, 2048, 1024, 20);
     run_bench(2048, 7168, 1024, 20);
+    run_bench(32, 2048, 1024, 20);
 
     q36_gpu_cleanup();
     return 0;

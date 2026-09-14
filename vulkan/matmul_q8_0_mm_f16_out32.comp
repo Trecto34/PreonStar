@@ -10,7 +10,7 @@
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Weights { uint16_t wb16[]; };
-layout(set = 0, binding = 1) readonly buffer X { float xv[]; };
+layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
 
 layout(push_constant) uniform Push {
@@ -42,36 +42,54 @@ void main(void) {
     float acc[8];
     for (uint i = 0u; i < 8u; i++) acc[i] = 0.0;
 
+    uint r_a = tid >> 3u;
+    uint kk_a = tid & 7u;
+    uint swz_ra = kk_a ^ Q36_SWZ(r_a);
+    uint base_a = (r_a * pc.blocks) * Q8_0_U16;
+    uint q_off_a = 1u + kk_a * 2u;
+
+    uint c_b[2];
+    uint b_k[2];
+    uint xbase_b[2];
+    bool live_b[2];
+    for (uint i = 0u; i < 2u; i++) {
+        uint idx = tid + i * 256u;
+        uint c = idx >> 3u;
+        uint kk = idx & 7u;
+        uint col = col0 + c;
+        c_b[i] = c;
+        b_k[i] = kk ^ Q36_SWZ(c);
+        live_b[i] = col < pc.n_tok;
+        xbase_b[i] = live_b[i] ? (col * (pc.blocks * 8u) + kk) : 0u;
+    }
+
+    uint swz_row = Q36_SWZ(row);
+    uint swz_col[8];
+    for (uint i = 0u; i < 8u; i++) {
+        swz_col[i] = Q36_SWZ(col_lane + i * 8u);
+    }
+
     for (uint kb = 0u; kb < pc.blocks; kb++) {
         {
-            uint r = tid >> 3u;
-            uint kk = tid & 7u;
-            uint base = (r * pc.blocks + kb) * Q8_0_U16;
-            uint q = base + 1u + kk * 2u;
+            uint q = base_a + q_off_a;
             uint p = uint(wb16[q]) | (uint(wb16[q + 1u]) << 16u);
-            As[r][kk ^ Q36_SWZ(r)] = f16vec4(unpack8(int(p))) * float16_t(0.0078125);
-            if (kk == 0u) Ds[r] = unpackHalf2x16(uint(wb16[base])).x * 128.0;
+            As[r_a][swz_ra] = f16vec4(unpack8(int(p))) * float16_t(0.0078125);
+            if (kk_a == 0u) Ds[r_a] = unpackHalf2x16(uint(wb16[base_a])).x * 128.0;
+            base_a += Q8_0_U16;
         }
         for (uint i = 0u; i < 2u; i++) {
-            uint idx = tid + i * 256u;
-            uint c = idx >> 3u;
-            uint kk = idx & 7u;
-            uint col = col0 + c;
-            uint xbase = col * in_dim + kb * BK + kk * 4u;
-            bool live = col < pc.n_tok;
-            vec4 v = live ? vec4(xv[xbase], xv[xbase + 1u],
-                                 xv[xbase + 2u], xv[xbase + 3u]) :
-                            vec4(0.0);
-            Bs[c][kk ^ Q36_SWZ(c)] = f16vec4(v);
+            vec4 v = live_b[i] ? xv[xbase_b[i]] : vec4(0.0);
+            Bs[c_b[i]][b_k[i]] = f16vec4(v);
+            xbase_b[i] += 8u;
         }
         barrier();
 
         f16vec2 pk[8];
         for (uint i = 0u; i < 8u; i++) pk[i] = f16vec2(0.0hf);
         for (uint kk = 0u; kk < KK; kk++) {
-            f16vec4 a = As[row][kk ^ Q36_SWZ(row)];
+            f16vec4 a = As[row][kk ^ swz_row];
             for (uint i = 0u; i < 8u; i++) {
-                f16vec4 b = Bs[col_lane + i * 8u][kk ^ Q36_SWZ(col_lane + i * 8u)];
+                f16vec4 b = Bs[col_lane + i * 8u][kk ^ swz_col[i]];
                 pk[i] = fma(a.zw, b.zw, fma(a.xy, b.xy, pk[i]));
             }
         }

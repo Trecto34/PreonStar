@@ -96,6 +96,8 @@ void main(void) {
 
     uint swz_sl = Q36_SWZ(sl);
     uint swz_ry = Q36_SWZ(ry);
+    uint arow[4];
+    for (uint i = 0u; i < 4u; i++) arow[i] = ry + 16u * i;
 
     uint n_kb = pc.blocks * 8u;
     for (uint kb = 0u; kb < n_kb; kb++) {
@@ -135,8 +137,7 @@ void main(void) {
             f16vec4 b1 = Bs[sl + 16u][kkb];
             uint kka = kk ^ swz_ry;
             for (uint i = 0u; i < 4u; i++) {
-                uint arow = ry + 16u * i;
-                f16vec4 a = As[arow][kka];
+                f16vec4 a = As[arow[i]][kka];
                 pk[i][0] = fma(a.zw, b0.zw, fma(a.xy, b0.xy, pk[i][0]));
                 pk[i][1] = fma(a.zw, b1.zw, fma(a.xy, b1.xy, pk[i][1]));
             }

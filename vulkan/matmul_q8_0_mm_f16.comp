@@ -27,7 +27,7 @@ layout(set = 0, binding = 0) readonly buffer Weights {
 };
 
 layout(set = 0, binding = 1) readonly buffer X {
-    float xv[];
+    vec4 xv[];
 };
 
 layout(set = 0, binding = 2) writeonly buffer Output {
@@ -96,11 +96,15 @@ void main(void) {
     uint sb = Q36_SWZ(c);
     uint b_k0 = (kk_b + 0u) ^ sb;
     uint b_k1 = (kk_b + 1u) ^ sb;
-    uint xbase_step = col_ok ? BK : 0u;
-    uint xbase = col_ok ? (col * in_dim + kk_b * 4u) : 0u;
+    uint xbase_step = col_ok ? (BK / 4u) : 0u;
+    uint xbase = col_ok ? (col * (pc.blocks * (BK / 4u)) + kk_b) : 0u;
 
     uint swz_tx = Q36_SWZ(tx);
     uint swz_ty = Q36_SWZ(ty);
+    uint arow[8];
+    for (uint i = 0u; i < 8u; i++) arow[i] = ty + 16u * i;
+    uint brow[4];
+    for (uint j = 0u; j < 4u; j++) brow[j] = tx + 16u * j;
 
     for (uint kb = 0u; kb < pc.blocks; kb++) {
         /* Stage A: 128 rows x 32 elems, 16 consecutive elems per thread
@@ -123,8 +127,8 @@ void main(void) {
         }
         /* Stage B: 64 tokens x 32 elems, rounded once to f16. */
         {
-            vec4 x0 = col_ok ? vec4(xv[xbase + 0u], xv[xbase + 1u], xv[xbase + 2u], xv[xbase + 3u]) : vec4(0.0);
-            vec4 x1 = col_ok ? vec4(xv[xbase + 4u], xv[xbase + 5u], xv[xbase + 6u], xv[xbase + 7u]) : vec4(0.0);
+            vec4 x0 = col_ok ? xv[xbase + 0u] : vec4(0.0);
+            vec4 x1 = col_ok ? xv[xbase + 1u] : vec4(0.0);
             Bs[c][b_k0] = f16vec4(x0);
             Bs[c][b_k1] = f16vec4(x1);
             xbase += xbase_step;
@@ -137,13 +141,13 @@ void main(void) {
         [[unroll]]
         for (uint kk = 0u; kk < KK; kk++) {
             uint kkb = kk ^ swz_tx;
-            f16vec4 b0 = Bs[tx +  0u][kkb];
-            f16vec4 b1 = Bs[tx + 16u][kkb];
-            f16vec4 b2 = Bs[tx + 32u][kkb];
-            f16vec4 b3 = Bs[tx + 48u][kkb];
+            f16vec4 b0 = Bs[brow[0]][kkb];
+            f16vec4 b1 = Bs[brow[1]][kkb];
+            f16vec4 b2 = Bs[brow[2]][kkb];
+            f16vec4 b3 = Bs[brow[3]][kkb];
             uint kka = kk ^ swz_ty;
             for (uint i = 0u; i < 8u; i++) {
-                f16vec4 a = As[ty + 16u * i][kka];
+                f16vec4 a = As[arow[i]][kka];
                 pk[i][0] = fma(a.zw, b0.zw, fma(a.xy, b0.xy, pk[i][0]));
                 pk[i][1] = fma(a.zw, b1.zw, fma(a.xy, b1.xy, pk[i][1]));
                 pk[i][2] = fma(a.zw, b2.zw, fma(a.xy, b2.xy, pk[i][2]));
@@ -151,7 +155,7 @@ void main(void) {
             }
         }
         for (uint i = 0u; i < 8u; i++) {
-            float d = Ds[ty + 16u * i];
+            float d = Ds[arow[i]];
             for (uint j = 0u; j < 4u; j++) {
                 acc[i][j] = fma(d, float(pk[i][j].x) + float(pk[i][j].y), acc[i][j]);
             }
