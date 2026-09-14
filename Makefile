@@ -401,6 +401,14 @@ tests/test_norm_rope_kv.o: tests/test_norm_rope_kv.c q36_gpu.h
 $(NORM_ROPE_KV_TEST): tests/test_norm_rope_kv.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
+MATMUL_Q8_TEST := tests/test_matmul_q8
+
+tests/test_matmul_q8.o: tests/test_matmul_q8.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(MATMUL_Q8_TEST): tests/test_matmul_q8.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
 q36-quality-score: gguf-tools/quality-testing/score_openrouter
 
 gguf-tools/quality-testing/score_openrouter: gguf-tools/quality-testing/score_openrouter.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)

@@ -3,6 +3,7 @@
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : enable
 
 /* Prefill Q8_0 GEMM, packed-f16 variant of matmul_q8_0_mm. 128x64
  * output tile per 256-thread workgroup, an 8x4 register tile per
@@ -75,57 +76,74 @@ void main(void) {
     for (uint i = 0u; i < 8u; i++)
         for (uint j = 0u; j < 4u; j++) acc[i][j] = 0.0;
 
+    uint r = tid >> 1u;
+    uint kk_a = (tid & 1u) * 4u;
+    uint row = row0 + r;
+    bool row_ok = row < pc.out_dim;
+    uint sa = Q36_SWZ(r);
+    uint a_k0 = (kk_a + 0u) ^ sa;
+    uint a_k1 = (kk_a + 1u) ^ sa;
+    uint a_k2 = (kk_a + 2u) ^ sa;
+    uint a_k3 = (kk_a + 3u) ^ sa;
+    uint q_off = 1u + kk_a * 2u;
+    uint base_step = row_ok ? Q8_0_U16 : 0u;
+    uint base = row_ok ? (row * pc.blocks) * Q8_0_U16 : 0u;
+
+    uint c = tid >> 2u;
+    uint kk_b = (tid & 3u) * 2u;
+    uint col = col0 + c;
+    bool col_ok = col < pc.n_tok;
+    uint sb = Q36_SWZ(c);
+    uint b_k0 = (kk_b + 0u) ^ sb;
+    uint b_k1 = (kk_b + 1u) ^ sb;
+    uint xbase_step = col_ok ? BK : 0u;
+    uint xbase = col_ok ? (col * in_dim + kk_b * 4u) : 0u;
+
+    uint swz_tx = Q36_SWZ(tx);
+    uint swz_ty = Q36_SWZ(ty);
+
     for (uint kb = 0u; kb < pc.blocks; kb++) {
         /* Stage A: 128 rows x 32 elems, 16 consecutive elems per thread
-         * so one d load and four u32-equivalent qs loads cover them.
-         * (A registered prefetch of block kb+1 was tried and measured
-         * flat: the extra VGPRs cost more occupancy than the hidden
-         * latency bought.) */
+         * so one d load and four u32-equivalent qs loads cover them. */
         {
-            uint r = tid >> 1u;
-            uint kk = (tid & 1u) * 4u;
-            uint row = row0 + r;
-            uint base = row < pc.out_dim ? (row * pc.blocks + kb) * Q8_0_U16 : 0u;
-            uint q = base + 1u + kk * 2u;
+            uint q = base + q_off;
             uint p0 = uint(wb16[q + 0u]) | (uint(wb16[q + 1u]) << 16u);
             uint p1 = uint(wb16[q + 2u]) | (uint(wb16[q + 3u]) << 16u);
             uint p2 = uint(wb16[q + 4u]) | (uint(wb16[q + 5u]) << 16u);
             uint p3 = uint(wb16[q + 6u]) | (uint(wb16[q + 7u]) << 16u);
-            uint sa = Q36_SWZ(r);
-            As[r][(kk + 0u) ^ sa] = f16vec4(unpack8(int(p0))) * float16_t(0.0078125);
-            As[r][(kk + 1u) ^ sa] = f16vec4(unpack8(int(p1))) * float16_t(0.0078125);
-            As[r][(kk + 2u) ^ sa] = f16vec4(unpack8(int(p2))) * float16_t(0.0078125);
-            As[r][(kk + 3u) ^ sa] = f16vec4(unpack8(int(p3))) * float16_t(0.0078125);
+            As[r][a_k0] = f16vec4(unpack8(int(p0))) * float16_t(0.0078125);
+            As[r][a_k1] = f16vec4(unpack8(int(p1))) * float16_t(0.0078125);
+            As[r][a_k2] = f16vec4(unpack8(int(p2))) * float16_t(0.0078125);
+            As[r][a_k3] = f16vec4(unpack8(int(p3))) * float16_t(0.0078125);
             if ((tid & 1u) == 0u) {
-                float d = row < pc.out_dim ? unpackHalf2x16(uint(wb16[base])).x : 0.0;
+                float d = row_ok ? unpackHalf2x16(uint(wb16[base])).x : 0.0;
                 Ds[r] = d * 128.0;
             }
+            base += base_step;
         }
         /* Stage B: 64 tokens x 32 elems, rounded once to f16. */
         {
-            uint c = tid >> 2u;
-            uint kk = (tid & 3u) * 2u;
-            uint col = col0 + c;
-            uint xbase = col * in_dim + kb * BK + kk * 4u;
-            bool ok = col < pc.n_tok;
-            vec4 x0 = ok ? vec4(xv[xbase + 0u], xv[xbase + 1u], xv[xbase + 2u], xv[xbase + 3u]) : vec4(0.0);
-            vec4 x1 = ok ? vec4(xv[xbase + 4u], xv[xbase + 5u], xv[xbase + 6u], xv[xbase + 7u]) : vec4(0.0);
-            uint sb = Q36_SWZ(c);
-            Bs[c][(kk + 0u) ^ sb] = f16vec4(x0);
-            Bs[c][(kk + 1u) ^ sb] = f16vec4(x1);
+            vec4 x0 = col_ok ? vec4(xv[xbase + 0u], xv[xbase + 1u], xv[xbase + 2u], xv[xbase + 3u]) : vec4(0.0);
+            vec4 x1 = col_ok ? vec4(xv[xbase + 4u], xv[xbase + 5u], xv[xbase + 6u], xv[xbase + 7u]) : vec4(0.0);
+            Bs[c][b_k0] = f16vec4(x0);
+            Bs[c][b_k1] = f16vec4(x1);
+            xbase += xbase_step;
         }
         barrier();
 
         f16vec2 pk[8][4];
         for (uint i = 0u; i < 8u; i++)
             for (uint j = 0u; j < 4u; j++) pk[i][j] = f16vec2(0.0hf);
+        [[unroll]]
         for (uint kk = 0u; kk < KK; kk++) {
-            f16vec4 b0 = Bs[tx +  0u][kk ^ Q36_SWZ(tx +  0u)];
-            f16vec4 b1 = Bs[tx + 16u][kk ^ Q36_SWZ(tx + 16u)];
-            f16vec4 b2 = Bs[tx + 32u][kk ^ Q36_SWZ(tx + 32u)];
-            f16vec4 b3 = Bs[tx + 48u][kk ^ Q36_SWZ(tx + 48u)];
+            uint kkb = kk ^ swz_tx;
+            f16vec4 b0 = Bs[tx +  0u][kkb];
+            f16vec4 b1 = Bs[tx + 16u][kkb];
+            f16vec4 b2 = Bs[tx + 32u][kkb];
+            f16vec4 b3 = Bs[tx + 48u][kkb];
+            uint kka = kk ^ swz_ty;
             for (uint i = 0u; i < 8u; i++) {
-                f16vec4 a = As[ty + 16u * i][kk ^ Q36_SWZ(ty + 16u * i)];
+                f16vec4 a = As[ty + 16u * i][kka];
                 pk[i][0] = fma(a.zw, b0.zw, fma(a.xy, b0.xy, pk[i][0]));
                 pk[i][1] = fma(a.zw, b1.zw, fma(a.xy, b1.xy, pk[i][1]));
                 pk[i][2] = fma(a.zw, b2.zw, fma(a.xy, b2.xy, pk[i][2]));
@@ -144,9 +162,10 @@ void main(void) {
     for (uint j = 0u; j < 4u; j++) {
         uint col = col0 + tx + 16u * j;
         if (col >= pc.n_tok) continue;
+        uint y_base = col * pc.out_dim;
         for (uint i = 0u; i < 8u; i++) {
             uint row = row0 + ty + 16u * i;
-            if (row < pc.out_dim) y[col * pc.out_dim + row] = acc[i][j] * pc.scale;
+            if (row < pc.out_dim) y[y_base + row] = acc[i][j] * pc.scale;
         }
     }
 }
