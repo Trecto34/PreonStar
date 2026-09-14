@@ -40,6 +40,9 @@ TODO.md
 
 /tests/test_prompt_prefix
 /tests/test_quality_api
+/tests/test_topk8
+/tests/test_attn_decode
+/Karpathy
 
 # Working notes for the optimization effort: session logs, handoffs, raw
 # benchmark captures and the original roadmap.  These are a lab notebook for

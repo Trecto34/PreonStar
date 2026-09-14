@@ -385,6 +385,14 @@ tests/test_topk8.o: tests/test_topk8.c q36_gpu.h
 $(TOPK8_TEST): tests/test_topk8.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
+ATTN_DECODE_TEST := tests/test_attn_decode
+
+tests/test_attn_decode.o: tests/test_attn_decode.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(ATTN_DECODE_TEST): tests/test_attn_decode.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
 q36-quality-score: gguf-tools/quality-testing/score_openrouter
 
 gguf-tools/quality-testing/score_openrouter: gguf-tools/quality-testing/score_openrouter.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
