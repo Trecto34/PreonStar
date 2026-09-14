@@ -3,6 +3,7 @@
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : enable
 
 /* Routed Q2_K down projection GEMM for prefill batches: one workgroup
  * owns a 64-out-row x 32-slot tile of one expert's token group. Weights
@@ -83,6 +84,19 @@ void main(void) {
         for (uint j = 0u; j < 2u; j++) acc[i][j] = 0.0;
     barrier();
 
+    uint sa = Q36_SWZ(ar);
+    uint a_k0 = (sub * 2u) ^ sa;
+    uint a_k1 = (sub * 2u + 1u) ^ sa;
+    uint sub_half = sub >> 1u;
+    uint sub_4 = sub * 4u;
+
+    bool slot_valid = (bc < SLOT_TILE) && (sh_slot[bc] != INVALID);
+    uint b_k = (bc < SLOT_TILE) ? (bkk ^ Q36_SWZ(bc)) : 0u;
+    uint b_base = slot_valid ? (sh_slot[bc] * mid4 + bkk) : 0u;
+
+    uint swz_sl = Q36_SWZ(sl);
+    uint swz_ry = Q36_SWZ(ry);
+
     uint n_kb = pc.blocks * 8u;
     for (uint kb = 0u; kb < n_kb; kb++) {
         uint sb = kb >> 3u;
@@ -93,36 +107,36 @@ void main(void) {
         {
             uint bb = base_u16 + sb * Q2K_U16;
             vec2 dm = unpackHalf2x16(uint(wb[bb + 40u]) | (uint(wb[bb + 41u]) << 16u));
-            uint g = 8u * half_ + 2u * j + (sub >> 1u);
+            uint g = 8u * half_ + 2u * j + sub_half;
             uint scw = (uint(wb[bb + (g >> 1u)]) >> (8u * (g & 1u))) & 255u;
             float sc1 = dm.x * float(scw & 0xFu);
             float sc2 = dm.y * float((scw >> 4u) & 0xFu);
-            uint q0w = bb + 8u + 16u * half_ + sub * 4u;
+            uint q0w = bb + 8u + 16u * half_ + sub_4;
             uint p0 = uint(wb[q0w + 0u]) | (uint(wb[q0w + 1u]) << 16u);
             uint p1 = uint(wb[q0w + 2u]) | (uint(wb[q0w + 3u]) << 16u);
             vec4 q0 = vec4(unpack8((p0 >> (2u * j)) & 0x03030303u));
             vec4 q1 = vec4(unpack8((p1 >> (2u * j)) & 0x03030303u));
-            uint sa = Q36_SWZ(ar);
-            As[ar][(sub * 2u) ^ sa] = f16vec4(q0 * sc1 - sc2);
-            As[ar][(sub * 2u + 1u) ^ sa] = f16vec4(q1 * sc1 - sc2);
+            As[ar][a_k0] = f16vec4(q0 * sc1 - sc2);
+            As[ar][a_k1] = f16vec4(q1 * sc1 - sc2);
         }
         /* Stage B: 32 slots x 32 mid elements, rounded once to f16. */
         if (bc < SLOT_TILE) {
-            uint slot = sh_slot[bc];
-            Bs[bc][bkk ^ Q36_SWZ(bc)] = slot != INVALID ? f16vec4(mid[slot * mid4 + kb * 8u + bkk])
-                                                        : f16vec4(0.0hf);
+            Bs[bc][b_k] = slot_valid ? f16vec4(mid[b_base + kb * 8u]) : f16vec4(0.0hf);
         }
         barrier();
 
         f16vec2 pk[4][2];
         for (uint i = 0u; i < 4u; i++)
             for (uint j = 0u; j < 2u; j++) pk[i][j] = f16vec2(0.0hf);
+        [[unroll]]
         for (uint kk = 0u; kk < KK; kk++) {
-            f16vec4 b0 = Bs[sl][kk ^ Q36_SWZ(sl)];
-            f16vec4 b1 = Bs[sl + 16u][kk ^ Q36_SWZ(sl + 16u)];
+            uint kkb = kk ^ swz_sl;
+            f16vec4 b0 = Bs[sl      ][kkb];
+            f16vec4 b1 = Bs[sl + 16u][kkb];
+            uint kka = kk ^ swz_ry;
             for (uint i = 0u; i < 4u; i++) {
                 uint arow = ry + 16u * i;
-                f16vec4 a = As[arow][kk ^ Q36_SWZ(arow)];
+                f16vec4 a = As[arow][kka];
                 pk[i][0] = fma(a.zw, b0.zw, fma(a.xy, b0.xy, pk[i][0]));
                 pk[i][1] = fma(a.zw, b1.zw, fma(a.xy, b1.xy, pk[i][1]));
             }

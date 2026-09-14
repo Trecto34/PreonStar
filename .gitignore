@@ -43,6 +43,9 @@ TODO.md
 /tests/test_topk8
 /tests/test_attn_decode
 /tests/test_norm_rope_kv
+/tests/test_matmul_q8
+/tests/test_moe_gate_up
+/tests/test_moe_down
 /Karpathy
 
 # Working notes for the optimization effort: session logs, handoffs, raw

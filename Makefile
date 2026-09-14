@@ -409,6 +409,23 @@ tests/test_matmul_q8.o: tests/test_matmul_q8.c q36_gpu.h
 $(MATMUL_Q8_TEST): tests/test_matmul_q8.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
+MOE_GATE_UP_TEST := tests/test_moe_gate_up
+
+tests/test_moe_gate_up.o: tests/test_moe_gate_up.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(MOE_GATE_UP_TEST): tests/test_moe_gate_up.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
+MOE_DOWN_TEST := tests/test_moe_down
+
+tests/test_moe_down.o: tests/test_moe_down.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(MOE_DOWN_TEST): tests/test_moe_down.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
+
 q36-quality-score: gguf-tools/quality-testing/score_openrouter
 
 gguf-tools/quality-testing/score_openrouter: gguf-tools/quality-testing/score_openrouter.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
