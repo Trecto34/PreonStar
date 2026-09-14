@@ -1,5 +1,10 @@
 #version 460
 
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+
 /* Fused RMS norm + Qwen RoPE + quantized KV store (Q8_0 K / Q4_0 V).
  * Same dataflow as rms_norm_rope_kv_qwen.comp but writes quantized blocks
  * instead of f16.  One workgroup (256 threads) per (head, token). */
@@ -18,14 +23,9 @@ layout(push_constant) uniform Push {
 } pc;
 
 shared double sh_sum[256];
-shared float sh_k[256];
-shared float sh_v[256];
-shared float sh_red[256];
-shared uint  sh_ri[256];
-shared uint  sh_scale_k[8];
-shared uint  sh_scale_v[8];
-shared int   sh_qk[256];
-shared int   sh_qv[256];
+shared float sh_kv[256];
+shared uint  sh_scale[8];
+shared int   sh_q[256];
 
 int nearest_int(float f) {
     precise float g = f + 12582912.0;  /* keep the fma contractor away */
@@ -64,7 +64,7 @@ void main(void) {
         barrier();
     }
     float nscale = inversesqrt(float(sh_sum[0] / 256.0) + pc.eps);
-    sh_k[lid] = input_value * nscale * w[lid];
+    sh_kv[lid] = input_value * nscale * w[lid];
     barrier();
 
     /* Phase 2: Qwen RoPE */
@@ -77,38 +77,27 @@ void main(void) {
         uint axis = (lid < 11u) ? 0u : (lid < 22u) ? 1u : 2u;
         float c = cos(theta[axis]);
         float s = sin(theta[axis]);
-        float x0 = sh_k[lid];
-        float x1 = sh_k[lid + 32u];
-        sh_k[lid] = x0 * c - x1 * s;
-        sh_k[lid + 32u] = x0 * s + x1 * c;
+        float x0 = sh_kv[lid];
+        float x1 = sh_kv[lid + 32u];
+        sh_kv[lid] = x0 * c - x1 * s;
+        sh_kv[lid + 32u] = x0 * s + x1 * c;
     }
     barrier();
 
-    /* Phase 3: Load V */
-    sh_v[lid] = v[row * 256u + lid];
-    barrier();
-
-    /* Phase 4: Quantize K to Q8_0 and write.
+    /* Phase 3: Quantize K to Q8_0 and write.
      * 8 blocks of 32, threads [b*32..b*32+31] handle block b. */
     {
         uint blk = lid >> 5u;
         uint lane = lid & 31u;
-        float kval = sh_k[lid];
-        sh_red[lid] = abs(kval);
-        barrier();
-        for (uint s = 16u; s > 0u; s >>= 1u) {
-            if (lane < s) sh_red[lid] = max(sh_red[lid], sh_red[lid + s]);
-            barrier();
-        }
-        float amax = sh_red[blk * 32u];
-        barrier();
+        float kval = sh_kv[lid];
+        float amax = subgroupClusteredMax(abs(kval), 32u);
         /* fp64 divide: f32 division is 2.5 ulp on RADV, the host is exact */
         float d  = float(double(amax) / 127.0);
         /* fp64 divide: f32 rcp is 2.5 ulp on RADV, the host divide is exact */
         float id = d != 0.0 ? float(double(1.0) / double(d)) : 0.0;
         precise float pk = kval * id;
-        sh_qk[lid] = clamp(id != 0.0 ? nearest_int(pk) : 0, -128, 127);
-        if (lane == 0u) sh_scale_k[blk] = f16_rte(d);
+        sh_q[lid] = clamp(id != 0.0 ? nearest_int(pk) : 0, -128, 127);
+        if (lane == 0u) sh_scale[blk] = f16_rte(d);
         barrier();
         /* Pack 272 bytes = 68 uints per head */
         uint head_bytes = (256u / 32u) * 34u;
@@ -120,8 +109,8 @@ void main(void) {
                 uint b = bp / 34u;
                 uint off = bp - b * 34u;
                 uint bv = (off < 2u)
-                    ? (sh_scale_k[b] >> (off * 8u)) & 0xFFu
-                    : uint(sh_qk[b * 32u + off - 2u]) & 0xFFu;
+                    ? (sh_scale[b] >> (off * 8u)) & 0xFFu
+                    : uint(sh_q[b * 32u + off - 2u]) & 0xFFu;
                 result |= bv << (bi * 8u);
             }
             kc[base_u + lid] = result;
@@ -133,57 +122,43 @@ void main(void) {
     {
         uint blk = lid >> 5u;
         uint lane = lid & 31u;
-        float vval = sh_v[lid];
-        sh_red[lid] = vval;
-        sh_ri[lid] = lane;
-        barrier();
-        /* Ties on |x| keep the lowest index, like the host sequential scan:
-         * the winner's sign decides the sign of d. */
+        float vval = v[row * 256u + lid];
+        sh_kv[lid] = vval;
+        float cur_v = vval;
+        uint cur_idx = lane;
         for (uint s = 16u; s > 0u; s >>= 1u) {
-            if (lane < s) {
-                float a = sh_red[lid];
-                float b = sh_red[lid + s];
-                uint ia = sh_ri[lid];
-                uint ib = sh_ri[lid + s];
-                bool takeb = abs(b) > abs(a) || (abs(b) == abs(a) && ib < ia);
-                sh_red[lid] = takeb ? b : a;
-                sh_ri[lid] = takeb ? ib : ia;
+            float other_v = subgroupShuffleDown(cur_v, s);
+            uint other_idx = subgroupShuffleDown(cur_idx, s);
+            bool take_other = abs(other_v) > abs(cur_v) || (abs(other_v) == abs(cur_v) && other_idx < cur_idx);
+            if (lane < s && take_other) {
+                cur_v = other_v;
+                cur_idx = other_idx;
             }
-            barrier();
         }
-        float extreme = sh_red[blk * 32u];
-        barrier();
+        float extreme = subgroupShuffle(cur_v, gl_SubgroupInvocationID & ~31u);
         float d  = extreme / (-8.0);
         float id = d != 0.0 ? float(double(1.0) / double(d)) : 0.0;
         precise float pv = vval * id + 8.5;
-        sh_qv[lid] = clamp(int(pv), 0, 15);
+        sh_q[lid] = clamp(int(pv), 0, 15);
         barrier();
         /* Keep the compact cache layout, but reduce value reconstruction
          * error with a bounded least-squares scale correction. */
-        if (lane == 0u) {
-            double num = 0.0;
-            int den = 0;
-            uint base = blk * 32u;
-            for (uint i = 0u; i < 32u; i++) {
-                int q = sh_qv[base + i] - 8;
-                num += double(sh_v[base + i]) * double(q);
-                den += q * q;
-            }
-            if (den != 0) {
-                float fit = float(num / double(den));
-                precise float refined = d + (fit - d) * 0.25;
-                sh_red[base] = refined;
-            } else {
-                sh_red[base] = d;
-            }
+        int q = sh_q[lid] - 8;
+        double my_num = double(sh_kv[lid]) * double(q);
+        int my_den = q * q;
+        double num = subgroupClusteredAdd(my_num, 32u);
+        int den = subgroupClusteredAdd(my_den, 32u);
+        float refined_d = d;
+        if (den != 0) {
+            float fit = float(num / double(den));
+            refined_d = d + (fit - d) * 0.25;
         }
-        barrier();
-        d = sh_red[blk * 32u];
+        d = refined_d;
         if (extreme == 0.0) d = uintBitsToFloat(0x80000000u);
         id = d != 0.0 ? float(double(1.0) / double(d)) : 0.0;
         precise float refined = vval * id + 8.5;
-        sh_qv[lid] = clamp(int(refined), 0, 15);
-        if (lane == 0u) sh_scale_v[blk] = f16_rte(d);
+        sh_q[lid] = clamp(int(refined), 0, 15);
+        if (lane == 0u) sh_scale[blk] = f16_rte(d);
         barrier();
         /* Pack 144 bytes = 36 uints per head */
         uint head_bytes = (256u / 32u) * 18u;
@@ -196,11 +171,11 @@ void main(void) {
                 uint off = bp - b * 18u;
                 uint bv;
                 if (off < 2u) {
-                    bv = (sh_scale_v[b] >> (off * 8u)) & 0xFFu;
+                    bv = (sh_scale[b] >> (off * 8u)) & 0xFFu;
                 } else {
                     uint pi = off - 2u;
-                    bv = (uint(sh_qv[b * 32u + pi]) & 0xFu)
-                       | ((uint(sh_qv[b * 32u + pi + 16u]) & 0xFu) << 4u);
+                    bv = (uint(sh_q[b * 32u + pi]) & 0xFu)
+                       | ((uint(sh_q[b * 32u + pi + 16u]) & 0xFu) << 4u);
                 }
                 result |= bv << (bi * 8u);
             }

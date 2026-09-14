@@ -393,6 +393,14 @@ tests/test_attn_decode.o: tests/test_attn_decode.c q36_gpu.h
 $(ATTN_DECODE_TEST): tests/test_attn_decode.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
+NORM_ROPE_KV_TEST := tests/test_norm_rope_kv
+
+tests/test_norm_rope_kv.o: tests/test_norm_rope_kv.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(NORM_ROPE_KV_TEST): tests/test_norm_rope_kv.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
 q36-quality-score: gguf-tools/quality-testing/score_openrouter
 
 gguf-tools/quality-testing/score_openrouter: gguf-tools/quality-testing/score_openrouter.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -491,6 +499,9 @@ vulkan/matmul_q5k_mmq.spv: vulkan/matmul_q5k_mmq.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/matmul_q6k_mmq.spv: vulkan/matmul_q6k_mmq.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/rms_norm_rope_kv_qwen_quant.spv: vulkan/rms_norm_rope_kv_qwen_quant.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 # --- CPU-only objects (-DQ36_NO_GPU) ---
