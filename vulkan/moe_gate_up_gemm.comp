@@ -3,6 +3,7 @@
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : enable
 
 /* Routed IQ2_XXS gate/up/SwiGLU GEMM for prefill batches: one workgroup
  * owns a 64-mid-row x 32-slot tile of one expert's token group. The
@@ -157,13 +158,24 @@ void main(void) {
                 pku[i][j] = f16vec2(0.0hf);
             }
         }
+
+        /* Hoisted swizzle indices and row addressing for inner kk loop */
+        uint swz_sl0 = Q36_SWZ(sl);
+        uint swz_sl1 = Q36_SWZ(sl + 16u);
+        uint arow[4];
+        uint swz_arow[4];
+        for (uint i = 0u; i < 4u; i++) {
+            arow[i] = ry + 16u * i;
+            swz_arow[i] = Q36_SWZ(arow[i]);
+        }
+
+        [[unroll]]
         for (uint kk = 0u; kk < KK; kk++) {
-            f16vec4 b0 = Bs[sl][kk ^ Q36_SWZ(sl)];
-            f16vec4 b1 = Bs[sl + 16u][kk ^ Q36_SWZ(sl + 16u)];
+            f16vec4 b0 = Bs[sl][kk ^ swz_sl0];
+            f16vec4 b1 = Bs[sl + 16u][kk ^ swz_sl1];
             for (uint i = 0u; i < 4u; i++) {
-                uint arow = ry + 16u * i;
-                f16vec4 ag = Ag[arow][kk ^ Q36_SWZ(arow)];
-                f16vec4 au = Au[arow][kk ^ Q36_SWZ(arow)];
+                f16vec4 ag = Ag[arow[i]][kk ^ swz_arow[i]];
+                f16vec4 au = Au[arow[i]][kk ^ swz_arow[i]];
                 pkg[i][0] = fma(ag.zw, b0.zw, fma(ag.xy, b0.xy, pkg[i][0]));
                 pkg[i][1] = fma(ag.zw, b1.zw, fma(ag.xy, b1.xy, pkg[i][1]));
                 pku[i][0] = fma(au.zw, b0.zw, fma(au.xy, b0.xy, pku[i][0]));

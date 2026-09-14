@@ -409,6 +409,22 @@ tests/test_matmul_q8.o: tests/test_matmul_q8.c q36_gpu.h
 $(MATMUL_Q8_TEST): tests/test_matmul_q8.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
+MOE_GATE_UP_TEST := tests/test_moe_gate_up
+
+tests/test_moe_gate_up.o: tests/test_moe_gate_up.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(MOE_GATE_UP_TEST): tests/test_moe_gate_up.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
+MOE_DOWN_TEST := tests/test_moe_down
+
+tests/test_moe_down.o: tests/test_moe_down.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(MOE_DOWN_TEST): tests/test_moe_down.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
 q36-quality-score: gguf-tools/quality-testing/score_openrouter
 
 gguf-tools/quality-testing/score_openrouter: gguf-tools/quality-testing/score_openrouter.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -564,13 +580,15 @@ linenoise_cpu.o: linenoise.c linenoise.h
 rax_cpu.o: rax.c rax.h rax_malloc.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ rax.c
 
-test: all q36_agent_test $(SAMPLING_TEST) $(TOPK8_TEST) test-quality
+test: all q36_agent_test $(SAMPLING_TEST) $(TOPK8_TEST) $(MOE_GATE_UP_TEST) $(MOE_DOWN_TEST) test-quality
 	./q36-eval --self-test-extractors
 	./q36_agent_test
 	python3 tests/test_agent_password.py ./q36_agent_test
 	python3 tests/test_agent_terminal.py ./q36_agent_test
 	./tests/test_sampling
 	./$(TOPK8_TEST)
+	./$(MOE_GATE_UP_TEST)
+	./$(MOE_DOWN_TEST)
 	./q36_test --quant-primitives --ssd-cache-shrink --qwen-tool-call-format --vector-fixtures --server
 
 test-quick: test
