@@ -27,8 +27,9 @@ const uint BN = 64u;
 const uint BK = 32u;
 const uint KK = BK / 4u;
 
-shared f16vec4 As[BM][KK + 1u];
-shared f16vec4 Bs[BN][KK + 1u];
+#define Q36_SWZ(i) (((i) >> 1u) & 7u)   /* mask is KK - 1 */
+shared f16vec4 As[BM][KK];
+shared f16vec4 Bs[BN][KK];
 shared float Ds[BM];
 
 void main(void) {
@@ -48,7 +49,7 @@ void main(void) {
             uint base = (r * pc.blocks + kb) * Q8_0_U16;
             uint q = base + 1u + kk * 2u;
             uint p = uint(wb16[q]) | (uint(wb16[q + 1u]) << 16u);
-            As[r][kk] = f16vec4(unpack8(int(p))) * float16_t(0.0078125);
+            As[r][kk ^ Q36_SWZ(r)] = f16vec4(unpack8(int(p))) * float16_t(0.0078125);
             if (kk == 0u) Ds[r] = unpackHalf2x16(uint(wb16[base])).x * 128.0;
         }
         for (uint i = 0u; i < 2u; i++) {
@@ -61,16 +62,16 @@ void main(void) {
             vec4 v = live ? vec4(xv[xbase], xv[xbase + 1u],
                                  xv[xbase + 2u], xv[xbase + 3u]) :
                             vec4(0.0);
-            Bs[c][kk] = f16vec4(v);
+            Bs[c][kk ^ Q36_SWZ(c)] = f16vec4(v);
         }
         barrier();
 
         f16vec2 pk[8];
         for (uint i = 0u; i < 8u; i++) pk[i] = f16vec2(0.0hf);
         for (uint kk = 0u; kk < KK; kk++) {
-            f16vec4 a = As[row][kk];
+            f16vec4 a = As[row][kk ^ Q36_SWZ(row)];
             for (uint i = 0u; i < 8u; i++) {
-                f16vec4 b = Bs[col_lane + i * 8u][kk];
+                f16vec4 b = Bs[col_lane + i * 8u][kk ^ Q36_SWZ(col_lane + i * 8u)];
                 pk[i] = fma(a.zw, b.zw, fma(a.xy, b.xy, pk[i]));
             }
         }

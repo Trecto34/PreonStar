@@ -115,6 +115,7 @@ VULKAN_SHADERS := \
 	vulkan/kv_store_quant.spv \
 	vulkan/rms_norm_rope_kv_qwen_quant.spv \
 	vulkan/top2.spv \
+	vulkan/topk8.spv \
 	vulkan/moe_gate_up_f32b.spv \
 	vulkan/moe_gate_up_decode.spv \
 	vulkan/moe_down_q2k_f32b.spv \
@@ -152,6 +153,9 @@ vulkan/moe_matvec_fast.spv: vulkan/moe_matvec_fast.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/top2.spv: vulkan/top2.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/topk8.spv: vulkan/topk8.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/recur_norm_gate.spv: vulkan/recur_norm_gate.comp
@@ -373,6 +377,14 @@ q36-eval: q36_eval.o q36_eval_cases.o q36_help.o q36_ssd.o q36_prompt_prefix.o $
 q36_test: q36_test.o rax.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ q36_test.o rax.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS) $(GPU_LDLIBS)
 
+TOPK8_TEST := tests/test_topk8
+
+tests/test_topk8.o: tests/test_topk8.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(TOPK8_TEST): tests/test_topk8.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
 q36-quality-score: gguf-tools/quality-testing/score_openrouter
 
 gguf-tools/quality-testing/score_openrouter: gguf-tools/quality-testing/score_openrouter.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -525,12 +537,13 @@ linenoise_cpu.o: linenoise.c linenoise.h
 rax_cpu.o: rax.c rax.h rax_malloc.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ rax.c
 
-test: all q36_agent_test $(SAMPLING_TEST) test-quality
+test: all q36_agent_test $(SAMPLING_TEST) $(TOPK8_TEST) test-quality
 	./q36-eval --self-test-extractors
 	./q36_agent_test
 	python3 tests/test_agent_password.py ./q36_agent_test
 	python3 tests/test_agent_terminal.py ./q36_agent_test
 	./tests/test_sampling
+	./$(TOPK8_TEST)
 	./q36_test --quant-primitives --ssd-cache-shrink --qwen-tool-call-format --vector-fixtures --server
 
 test-quick: test

@@ -209,6 +209,7 @@ typedef struct {
     q36_vk_kernel kv_store_quant;
     q36_vk_kernel rms_norm_rope_kv_quant;
     q36_vk_kernel top2;
+    q36_vk_kernel topk8;
     q36_vk_kernel moe_gate_up_f32b;
     q36_vk_kernel moe_gate_up_decode;
     q36_vk_kernel moe_down_q2k_f32b;
@@ -254,6 +255,8 @@ typedef struct {
     uint64_t attn_part_bytes;
     q36_gpu_tensor *top2_part;
     uint64_t top2_part_bytes;
+    q36_gpu_tensor *topk8_part;
+    uint64_t topk8_part_bytes;
 } q36_vulkan_runtime;
 
 enum {
@@ -2958,6 +2961,7 @@ int q36_gpu_init(void) {
     q36_vk.rms_norm_rope_kv = Q36_VK_KERNEL("vulkan/rms_norm_rope_kv_qwen.spv", 5, 24,
                                             (1u << 2) | (1u << 4));
     q36_vk.top2 = Q36_VK_KERNEL("vulkan/top2.spv", 3, 12, (1u << 1) | (1u << 2));
+    q36_vk.topk8 = Q36_VK_KERNEL("vulkan/topk8.spv", 3, 12, (1u << 1) | (1u << 2));
     q36_vk.copy_rows = Q36_VK_KERNEL("vulkan/copy_rows.spv", 2, 20, 1u << 1);
     q36_vk.recur_window = Q36_VK_KERNEL("vulkan/recur_window.spv", 3, 12, (1u << 0) | (1u << 2));
     q36_vk.conv_silu = Q36_VK_KERNEL("vulkan/conv_silu.spv", 3, 12, 1u << 2);
@@ -3413,8 +3417,12 @@ void q36_gpu_cleanup(void) {
     q36_vk_tensor_free_unlocked(q36_vk.top2_part);
     q36_vk.top2_part = NULL;
     q36_vk.top2_part_bytes = 0;
+    q36_vk_tensor_free_unlocked(q36_vk.topk8_part);
+    q36_vk.topk8_part = NULL;
+    q36_vk.topk8_part_bytes = 0;
     q36_vk_kernel_destroy(&q36_vk.ffn_tail);
     q36_vk_kernel_destroy(&q36_vk.top2);
+    q36_vk_kernel_destroy(&q36_vk.topk8);
     q36_vk_kernel_destroy(&q36_vk.recur_norm_gate);
     q36_vk_kernel_destroy(&q36_vk.recur_norm_gate_q8_k);
     q36_vk_kernel_destroy(&q36_vk.moe_reduce);
@@ -4545,8 +4553,8 @@ static int q36_vk_matmul_q8_0_mm(q36_gpu_tensor *out,
     if (ok) {
         const q36_gpu_tensor *bindings[3] = { weights, x, out };
         const char *op = q36_vk.prof_ops ? q36_vk_q8_0_op_name(out_dim, blocks, n_tok) : "dense_q8_0";
+        int out32 = n_tok >= 32u && out_dim == 32u && q36_vk_use_q8_mm_f16() && q36_vk_use_q8_mm_f16_out32();
         int f16 = n_tok >= 32u && out_dim >= 64u && q36_vk_use_q8_mm_f16();
-        int out32 = f16 && out_dim == 32u && q36_vk_use_q8_mm_f16_out32();
         q36_vk_kernel *kernel = out32 ? &q36_vk.matmul_q8_0_mm_f16_out32 :
                                 f16 ? &q36_vk.matmul_q8_0_mm_f16 :
                                       &q36_vk.matmul_q8_0_mm;
@@ -7230,6 +7238,49 @@ int q36_gpu_top2_tensor(q36_gpu_tensor *out_ids,
         if (ok) {
             push.pass = 1u;
             ok = q36_vk_run_unlocked("top2_stage2", &q36_vk.top2,
+                                     bindings, &push, sizeof(push), 1, 1, 1);
+        }
+    } else {
+        ok = 0;
+    }
+    pthread_mutex_unlock(&q36_vk_mu);
+    return ok;
+}
+
+int q36_gpu_topk8_tensor(q36_gpu_tensor *out, const q36_gpu_tensor *logits,
+                         uint32_t count) {
+    if (!q36_vk_env_default_on("Q36_VK_TOPK8")) return 0;
+    const uint32_t groups = count < 32768u ?
+        (count + 255u) / 256u : 128u;
+    const uint64_t bytes = (uint64_t)groups * (8u * (sizeof(float) + sizeof(int32_t)));
+    int ok = count != 0u && groups <= 256u &&
+             q36_gpu_tensor_range_ok(logits, 0, (uint64_t)count * sizeof(float)) &&
+             q36_gpu_tensor_range_ok(out, 0, 8u * (sizeof(int32_t) + sizeof(float)));
+    if (!ok) return 0;
+
+    pthread_mutex_lock(&q36_vk_mu);
+    if (!q36_vk.topk8_part || q36_vk.topk8_part_bytes < bytes) {
+        q36_vk_tensor_release_unlocked(q36_vk.topk8_part);
+        q36_vk.topk8_part = q36_vk_tensor_alloc_scratch_unlocked(bytes);
+        q36_vk.topk8_part_bytes = q36_vk.topk8_part ? bytes : 0;
+    }
+    if (q36_vk.topk8_part) {
+        /* Output (binding 2) is one buffer: int ids[8] then float vals[8],
+         * matching topk8.comp's Output block exactly — the caller reads both
+         * halves out of the same `out` tensor at their respective offsets. */
+        const q36_gpu_tensor *bindings[3] = {
+            logits, q36_vk.topk8_part, out,
+        };
+        struct {
+            uint32_t count;
+            uint32_t groups;
+            uint32_t pass;
+        } push = { count, groups, 0u };
+        ok = q36_vk_run_unlocked("topk8_stage1", &q36_vk.topk8,
+                                 bindings, &push, sizeof(push), groups, 1, 1);
+        if (ok) {
+            push.pass = 1u;
+            ok = q36_vk_run_unlocked("topk8_stage2", &q36_vk.topk8,
                                      bindings, &push, sizeof(push), 1, 1, 1);
         }
     } else {

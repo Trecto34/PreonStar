@@ -632,6 +632,15 @@ int q36_gpu_top2_tensor(
         const q36_gpu_tensor *logits,
         uint32_t              count);
 
+/* Exact top-8 F32 entries on the GPU, descending by value (ties broken by
+ * lower index, matching the CPU top-k sampler). `out` is one 64-byte buffer:
+ * int32 ids[8] at offset 0, then float32 vals[8] at offset 32. Unsupported
+ * backends return zero so the caller's host-logit path remains unchanged. */
+int q36_gpu_topk8_tensor(
+        q36_gpu_tensor       *out,
+        const q36_gpu_tensor *logits,
+        uint32_t              count);
+
 /* One routed expert weight: GGUF offset/type of the 3D expert tensor plus the
  * optional per-expert ".scale" tensor (n_expert f32). */
 typedef struct {

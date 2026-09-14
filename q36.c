@@ -776,6 +776,7 @@ typedef struct {
     q36_gpu_tensor *ffn_scalar;
     q36_gpu_tensor *logits;
     q36_gpu_tensor *top2;
+    q36_gpu_tensor *topk8;
     q36_gpu_tensor *scores;
     q36_vulkan_full_attn_cache mtp_full;
     q36_vulkan_recurrent_cache spec_recurrent[Q36_MAX_LAYER];
@@ -5836,6 +5837,7 @@ static void q36_vulkan_runtime_free(q36_vulkan_runtime *rt) {
     q36_gpu_tensor_free(rt->ffn_scalar);
     q36_gpu_tensor_free(rt->logits);
     q36_gpu_tensor_free(rt->top2);
+    q36_gpu_tensor_free(rt->topk8);
     q36_gpu_tensor_free(rt->scores);
     q36_gpu_tensor_free(rt->mtp_full.k);
     q36_gpu_tensor_free(rt->mtp_full.v);
@@ -6132,7 +6134,8 @@ static q36_vulkan_runtime *q36_vulkan_runtime_create(int ctx_size,
 #endif
     rt->logits = q36_gpu_tensor_alloc((uint64_t)Q36_N_VOCAB * sizeof(float));
     rt->top2 = q36_gpu_tensor_alloc(2u * sizeof(int32_t));
-    if (!rt->logits || !rt->top2) goto fail;
+    rt->topk8 = q36_gpu_tensor_alloc(8u * (sizeof(int32_t) + sizeof(float)));
+    if (!rt->logits || !rt->top2 || !rt->topk8) goto fail;
     if (enable_mtp) {
         rt->mtp_full.cap = kv_cap;
         rt->mtp_full.type_k = cache_type_k;
@@ -9611,6 +9614,44 @@ static int q36_sample_full_vocab(const float *logits, uint32_t n_vocab,
     }
 }
 
+/* Shared tail of top-k sampling: given candidate ids/vals already sorted
+ * descending by value (length n, n<=1024), apply the temperature softmax,
+ * the min-p relative floor and top-p cumulative-mass cutoff, then draw one
+ * weighted sample. Used both by the CPU top-k scan below and by the GPU
+ * top-8 fast path in q36_session_sample, so the two stay identical past
+ * candidate selection. */
+static int q36_sample_from_sorted_topk(const int *ids, const float *vals, int n,
+                                       float temperature, float top_p, float min_p,
+                                       uint64_t *rng) {
+    float probs[1024];
+    const float max_logit = vals[0];
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        probs[i] = expf((vals[i] - max_logit) / temperature);
+        sum += probs[i];
+    }
+    if (sum <= 0.0f || !isfinite(sum)) return ids[0];
+
+    const float min_prob = (probs[0] / sum) * min_p;
+    float filtered_sum = 0.0f;
+    int filtered = 0;
+    for (int i = 0; i < n; i++) {
+        float p = probs[i] / sum;
+        if (i > 0 && p < min_prob) break;
+        filtered_sum += probs[i];
+        filtered++;
+        if (filtered_sum / sum >= top_p) break;
+    }
+    if (filtered <= 0) return ids[0];
+
+    float r = q36_sample_rng_f32(rng) * filtered_sum;
+    for (int i = 0; i < filtered; i++) {
+        r -= probs[i];
+        if (r <= 0.0f) return ids[i];
+    }
+    return ids[filtered - 1];
+}
+
 static int q36_sample_top_p_min_p(const float *logits, uint32_t n_vocab,
                                   float temperature, int top_k,
                                   float top_p, float min_p,
@@ -9634,7 +9675,6 @@ static int q36_sample_top_p_min_p(const float *logits, uint32_t n_vocab,
     {
         int ids[1024];
         float vals[1024];
-        float probs[1024];
         int n = 0;
         for (uint32_t i = 0; i < n_vocab; i++) {
             float v = logits[i];
@@ -9652,39 +9692,7 @@ static int q36_sample_top_p_min_p(const float *logits, uint32_t n_vocab,
             }
         }
         if (n == 0) return sample_argmax(logits, n_vocab);
-
-        {
-            const float max_logit = vals[0];
-            float sum = 0.0f;
-            for (int i = 0; i < n; i++) {
-                probs[i] = expf((vals[i] - max_logit) / temperature);
-                sum += probs[i];
-            }
-            if (sum <= 0.0f || !isfinite(sum)) return ids[0];
-
-            {
-                const float min_prob = (probs[0] / sum) * min_p;
-                float filtered_sum = 0.0f;
-                int filtered = 0;
-                for (int i = 0; i < n; i++) {
-                    float p = probs[i] / sum;
-                    if (i > 0 && p < min_prob) break;
-                    filtered_sum += probs[i];
-                    filtered++;
-                    if (filtered_sum / sum >= top_p) break;
-                }
-                if (filtered <= 0) return ids[0];
-
-                {
-                    float r = q36_sample_rng_f32(rng) * filtered_sum;
-                    for (int i = 0; i < filtered; i++) {
-                        r -= probs[i];
-                        if (r <= 0.0f) return ids[i];
-                    }
-                }
-                return ids[filtered - 1];
-            }
-        }
+        return q36_sample_from_sorted_topk(ids, vals, n, temperature, top_p, min_p, rng);
     }
 }
 
@@ -10894,6 +10902,29 @@ int q36_session_argmax_excluding(q36_session *s, int excluded_id) {
 int q36_session_sample(q36_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!s || !s->logits) return -1;
     if (!rng || temperature <= 0.0f) return q36_session_argmax(s);
+#ifndef Q36_NO_GPU
+    /* top_k in [1,8]: skip the full Q36_N_VOCAB logits readback entirely.
+     * q36_gpu_topk8_tensor selects the exact top-8 on-device (see
+     * topk8.comp) and only the 64-byte result crosses to host, instead of
+     * the ~1 MB logits vector q36_session_ensure_logits_host would copy.
+     * Falls through to the CPU path below on any GPU failure. */
+    if (top_k > 0 && top_k <= 8 && q36_engine_uses_vulkan_runtime(s->engine)) {
+        q36_vulkan_runtime *rt = (q36_vulkan_runtime *)s->runtime;
+        struct { int32_t ids[8]; float vals[8]; } topk;
+        if (rt && q36_gpu_topk8_tensor(rt->topk8, rt->logits, Q36_N_VOCAB) &&
+            q36_gpu_tensor_read(rt->topk8, 0, &topk, sizeof(topk))) {
+            int ids[8];
+            float vals[8];
+            for (int i = 0; i < 8; i++) { ids[i] = topk.ids[i]; vals[i] = topk.vals[i]; }
+            /* The GPU always returns the true top-8; a smaller requested
+             * top_k just takes the prefix, since it's already sorted
+             * descending and top_k <= 8 here. */
+            return q36_sample_from_sorted_topk(ids, vals, top_k, temperature,
+                                               top_p <= 0.0f || top_p > 1.0f ? 1.0f : top_p,
+                                               min_p < 0.0f ? 0.0f : min_p, rng);
+        }
+    }
+#endif
     if (!q36_session_ensure_logits_host(s)) return -1;
     return q36_sample_top_p_min_p(s->logits, Q36_N_VOCAB, temperature,
                                   top_k, top_p, min_p, rng, s->sample_probs);

@@ -1,0 +1,122 @@
+#version 460
+
+/* Exact top-8 selection over an arbitrary-length F32 array, same two-pass
+ * grid-stride-then-reduce shape as top2.comp. Generalizes top2's per-thread
+ * "best two" running state to a per-thread sorted 8-slot list, merged
+ * pairwise (classic bounded merge-sort merge, keep first K of 2K) up the
+ * reduction tree instead of top2's insert_pair. A partition's local top-8
+ * always contains every element of that partition that could belong to the
+ * global top-8, so merging partition-local top-8 lists is exact, not
+ * approximate: proof is the same one that makes top2's two-pass shape exact
+ * for K=2.
+ *
+ * Tie-break matches the CPU reference (q36_sample_top_p_min_p's insertion
+ * loop): higher value wins, equal value prefers the lower index. Sentinels
+ * (id=-1, v=-inf) sort last under that same rule, so no special-casing is
+ * needed for a thread whose grid-stride slice is empty (small count) or a
+ * partition that never fills 8 entries. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+const int K = 8;
+
+layout(set = 0, binding = 0) readonly buffer Input { float x[]; };
+
+struct Part8 {
+    float v[K];
+    int   i[K];
+};
+
+layout(set = 0, binding = 1) buffer Partials { Part8 part[]; };
+
+layout(set = 0, binding = 2) writeonly buffer Output {
+    int   ids[K];
+    float vals[K];
+} outp;
+
+layout(push_constant) uniform Push {
+    uint count;
+    uint groups;
+    uint pass;
+} pc;
+
+shared float sv[K][256];
+shared int   si[K][256];
+
+bool better(float av, int ai, float bv, int bi) {
+    return av > bv || (av == bv && ai < bi);
+}
+
+void insert_topk(inout float v[K], inout int idx[K], inout int n, float val, int id) {
+    if (n == K && !better(val, id, v[K - 1], idx[K - 1])) return;
+    int j = n < K ? n++ : K - 1;
+    while (j > 0 && better(val, id, v[j - 1], idx[j - 1])) {
+        v[j] = v[j - 1];
+        idx[j] = idx[j - 1];
+        j--;
+    }
+    v[j] = val;
+    idx[j] = id;
+}
+
+void merge_topk(inout float va[K], inout int ia[K], in float vb[K], in int ib[K]) {
+    float ov[K];
+    int oi[K];
+    int a = 0, b = 0;
+    for (int k = 0; k < K; k++) {
+        bool take_a = a < K && (b >= K || better(va[a], ia[a], vb[b], ib[b]));
+        if (take_a) { ov[k] = va[a]; oi[k] = ia[a]; a++; }
+        else        { ov[k] = vb[b]; oi[k] = ib[b]; b++; }
+    }
+    for (int k = 0; k < K; k++) { va[k] = ov[k]; ia[k] = oi[k]; }
+}
+
+void load_shared(uint lid, out float v[K], out int idx[K]) {
+    for (int k = 0; k < K; k++) { v[k] = sv[k][lid]; idx[k] = si[k][lid]; }
+}
+
+void store_shared(uint lid, in float v[K], in int idx[K]) {
+    for (int k = 0; k < K; k++) { sv[k][lid] = v[k]; si[k][lid] = idx[k]; }
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    float v[K];
+    int idx[K];
+    int n = 0;
+    for (int k = 0; k < K; k++) { v[k] = uintBitsToFloat(0xff800000u); idx[k] = -1; }
+
+    if (pc.pass == 0u) {
+        uint i = gl_WorkGroupID.x * 256u + lid;
+        uint step = pc.groups * 256u;
+        for (; i < pc.count; i += step)
+            insert_topk(v, idx, n, x[i], int(i));
+    } else if (lid < pc.groups) {
+        Part8 p = part[lid];
+        for (int k = 0; k < K; k++) { v[k] = p.v[k]; idx[k] = p.i[k]; }
+    }
+
+    store_shared(lid, v, idx);
+    barrier();
+
+    for (uint step = 128u; step != 0u; step >>= 1u) {
+        if (lid < step) {
+            float ov[K]; int oi[K];
+            load_shared(lid, v, idx);
+            load_shared(lid + step, ov, oi);
+            merge_topk(v, idx, ov, oi);
+            store_shared(lid, v, idx);
+        }
+        barrier();
+    }
+
+    if (lid != 0u) return;
+    load_shared(0u, v, idx);
+    if (pc.pass == 0u) {
+        Part8 p;
+        for (int k = 0; k < K; k++) { p.v[k] = v[k]; p.i[k] = idx[k]; }
+        part[gl_WorkGroupID.x] = p;
+    } else {
+        for (int k = 0; k < K; k++) { outp.ids[k] = idx[k]; outp.vals[k] = v[k]; }
+    }
+}
