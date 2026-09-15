@@ -323,6 +323,7 @@ typedef struct {
     uint64_t max_tensor_bytes;
     q36_kv *kv;
     q36_tensor *tensors;
+    bool owned;
 } q36_model;
 
 typedef struct {
@@ -3503,10 +3504,12 @@ static bool model_get_array(const q36_model *m, const char *key, q36_array_ref *
 
 static void model_close(q36_model *m) {
     if (!m) return;
-    free(m->kv);
-    free(m->tensors);
-    if (m->map) munmap((void *)m->map, (size_t)m->size);
-    if (m->fd >= 0) close(m->fd);
+    if (m->owned) {
+        free(m->kv);
+        free(m->tensors);
+        if (m->map) munmap((void *)m->map, (size_t)m->size);
+        if (m->fd >= 0) close(m->fd);
+    }
     memset(m, 0, sizeof(*m));
     m->fd = -1;
 }
@@ -3586,6 +3589,7 @@ static void model_open(q36_model *m, const char *path, bool graph_mapping) {
     m->fd = fd;
     m->map = map;
     m->size = (uint64_t)st.st_size;
+    m->owned = true;
     c = cursor_at(m, 0);
     if (!cursor_u32(&c, &magic)) q36_die(c.error);
     if (magic != Q36_GGUF_MAGIC) q36_die("model is not a GGUF file");
@@ -4490,6 +4494,78 @@ static void mtp_weights_bind(q36_mtp_weights *w, const q36_model *m) {
     l->ffn_down_exps_scale = tensor_by_namef(m, "blk.%u.ffn_down_exps.scale", il);
     l->ffn_down_shexp_scale = tensor_by_namef(m, "blk.%u.ffn_down_shexp.scale", il);
     mtp_weights_validate_layout(w);
+}
+
+static void mtp_weights_validate_dense_layout(const q36_mtp_weights *w) {
+    const q36_layer_weights *l;
+    if (!w) q36_die("internal error: missing MTP weights while validating dense layout");
+    l = &w->block;
+    tensor_expect_cpu_matrix(w->token_embd, Q36_N_EMBD, Q36_N_VOCAB);
+    tensor_expect_layout(w->output_norm, Q36_TENSOR_F32, 1, Q36_N_EMBD, 0, 0);
+    tensor_expect_cpu_matrix(w->output, Q36_N_EMBD, Q36_N_VOCAB);
+    tensor_expect_optional_plain(w->output_scale, 1, 1, 0, 0);
+    tensor_expect_cpu_matrix(w->eh_proj, Q36_N_EMBD * 2u, Q36_N_EMBD);
+    tensor_expect_layout(w->enorm, Q36_TENSOR_F32, 1, Q36_N_EMBD, 0, 0);
+    tensor_expect_layout(w->hnorm, Q36_TENSOR_F32, 1, Q36_N_EMBD, 0, 0);
+    tensor_expect_layout(w->shared_head_norm, Q36_TENSOR_F32, 1, Q36_N_EMBD, 0, 0);
+
+    tensor_expect_layout(l->attn_norm, Q36_TENSOR_F32, 1, Q36_N_EMBD, 0, 0);
+    tensor_expect_layout(l->post_attention_norm, Q36_TENSOR_F32, 1, Q36_N_EMBD, 0, 0);
+    tensor_expect_cpu_matrix(l->attn_q, Q36_N_EMBD, Q36_N_SSM_INNER * 2u);
+    tensor_expect_layout(l->attn_q_norm, Q36_TENSOR_F32, 1, Q36_N_HEAD_DIM, 0, 0);
+    tensor_expect_cpu_matrix(l->attn_k, Q36_N_EMBD, (uint64_t)Q36_N_HEAD_KV * Q36_N_HEAD_DIM);
+    tensor_expect_layout(l->attn_k_norm, Q36_TENSOR_F32, 1, Q36_N_HEAD_DIM, 0, 0);
+    tensor_expect_cpu_matrix(l->attn_v, Q36_N_EMBD, (uint64_t)Q36_N_HEAD_KV * Q36_N_VALUE_DIM);
+    tensor_expect_cpu_matrix(l->attn_output, Q36_N_SSM_INNER, Q36_N_EMBD);
+    tensor_expect_optional_plain(l->attn_sinks, 1, Q36_N_HEAD, 0, 0);
+    tensor_expect_optional_plain(l->attn_q_scale, 1, 1, 0, 0);
+    tensor_expect_optional_plain(l->attn_k_scale, 1, 1, 0, 0);
+    tensor_expect_optional_plain(l->attn_v_scale, 1, 1, 0, 0);
+    tensor_expect_optional_plain(l->attn_output_scale, 1, 1, 0, 0);
+
+    tensor_expect_cpu_matrix(l->ffn_gate_shexp, Q36_N_EMBD, Q36_N_FF_SHARED);
+    tensor_expect_cpu_matrix(l->ffn_up_shexp, Q36_N_EMBD, Q36_N_FF_SHARED);
+    tensor_expect_cpu_matrix(l->ffn_down_shexp, Q36_N_FF_SHARED, Q36_N_EMBD);
+    tensor_expect_optional_plain(l->ffn_gate_shexp_scale, 1, 1, 0, 0);
+    tensor_expect_optional_plain(l->ffn_up_shexp_scale, 1, 1, 0, 0);
+    tensor_expect_optional_plain(l->ffn_down_shexp_scale, 1, 1, 0, 0);
+}
+
+static void mtp_weights_bind_dense(q36_mtp_weights *w, const q36_model *m) {
+    const uint32_t il = Q36_N_LAYER;
+    q36_layer_weights *l;
+    memset(w, 0, sizeof(*w));
+    w->token_embd = model_find_tensor(m, "token_embd.weight");
+    w->output_norm = model_find_tensor(m, "output_norm.weight");
+    w->output = model_find_tensor(m, "output.weight");
+    w->output_scale = model_find_tensor(m, "output.scale");
+    w->eh_proj = required_tensorf(m, "blk.%u.nextn.eh_proj.weight", il);
+    w->enorm = required_tensorf(m, "blk.%u.nextn.enorm.weight", il);
+    w->hnorm = required_tensorf(m, "blk.%u.nextn.hnorm.weight", il);
+    w->shared_head_norm = required_tensorf(m, "blk.%u.nextn.shared_head_norm.weight", il);
+
+    l = &w->block;
+    l->kind = Q36_LAYER_FULL_ATTN;
+    l->attn_norm = required_tensorf(m, "blk.%u.attn_norm.weight", il);
+    l->post_attention_norm = required_tensorf(m, "blk.%u.post_attention_norm.weight", il);
+    l->attn_q = required_tensorf(m, "blk.%u.attn_q.weight", il);
+    l->attn_q_norm = required_tensorf(m, "blk.%u.attn_q_norm.weight", il);
+    l->attn_k = required_tensorf(m, "blk.%u.attn_k.weight", il);
+    l->attn_k_norm = required_tensorf(m, "blk.%u.attn_k_norm.weight", il);
+    l->attn_v = required_tensorf(m, "blk.%u.attn_v.weight", il);
+    l->attn_output = required_tensorf(m, "blk.%u.attn_output.weight", il);
+    l->attn_sinks = tensor_by_namef(m, "blk.%u.attn_sinks.weight", il);
+    l->attn_q_scale = tensor_by_namef(m, "blk.%u.attn_q.scale", il);
+    l->attn_k_scale = tensor_by_namef(m, "blk.%u.attn_k.scale", il);
+    l->attn_v_scale = tensor_by_namef(m, "blk.%u.attn_v.scale", il);
+    l->attn_output_scale = tensor_by_namef(m, "blk.%u.attn_output.scale", il);
+    l->ffn_gate_shexp = required_tensorf(m, "blk.%u.ffn_gate.weight", il);
+    l->ffn_up_shexp = required_tensorf(m, "blk.%u.ffn_up.weight", il);
+    l->ffn_down_shexp = required_tensorf(m, "blk.%u.ffn_down.weight", il);
+    l->ffn_gate_shexp_scale = tensor_by_namef(m, "blk.%u.ffn_gate.scale", il);
+    l->ffn_up_shexp_scale = tensor_by_namef(m, "blk.%u.ffn_up.scale", il);
+    l->ffn_down_shexp_scale = tensor_by_namef(m, "blk.%u.ffn_down.scale", il);
+    mtp_weights_validate_dense_layout(w);
 }
 #endif
 
@@ -10005,6 +10081,17 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
         e->mtp_ready = true;
         fprintf(stderr, "q36: MTP support model loaded: %s (draft=%d)\n",
                 opt->mtp_path,
+                e->mtp_draft_tokens);
+#endif
+    } else if (Q36_MODEL_DENSE && q36_backend_uses_graph(opt->backend) &&
+               tensor_by_namef(&e->model, "blk.%u.nextn.eh_proj.weight", Q36_N_LAYER)) {
+#ifndef Q36_NO_GPU
+        e->mtp_model = e->model;
+        e->mtp_model.owned = false;
+        mtp_weights_bind_dense(&e->mtp_weights, &e->model);
+        e->mtp_ready = true;
+        fprintf(stderr, "q36: in-file MTP head bound (blk.%u nextn), draft=%d\n",
+                Q36_N_LAYER,
                 e->mtp_draft_tokens);
 #endif
     }

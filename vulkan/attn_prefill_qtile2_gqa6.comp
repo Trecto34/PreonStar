@@ -1,0 +1,294 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_control_flow_attributes : enable
+
+/* Two 64-lane row groups serve two tokens and six GQA heads (dense Qwen3.8
+ * 24/4=6; MoE 24/3=8 uses attn_prefill_qtile2). Each group owns one token;
+ * each lane owns four output dimensions.  Port of attn_prefill_qtile2.comp
+ * with HQ=6/ROWS=6 and %-modulo head decode (6 is not a power of two). */
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Qbuf {
+    float q[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Kcache {
+    uint kc[];
+};
+
+layout(set = 0, binding = 2) readonly buffer Vcache {
+    uint vc[];
+};
+
+layout(set = 0, binding = 3) readonly buffer Sinks {
+    float sinks[];
+};
+
+layout(set = 0, binding = 4) buffer Partials {
+    float part[];
+};
+
+layout(push_constant) uniform Push {
+    uint pos0;
+    uint n_head;
+    uint n_head_kv;
+    uint head_dim;
+    uint n_spans;
+    uint n_tok;
+    uint has_sinks;
+    uint k_type;
+    uint v_type;
+    uint k_row_bytes;
+    uint v_row_bytes;
+    uint tok_base;
+} pc;
+
+#define TILE 64u
+#define SPAN 512u
+#define SPAN_GROUP 8u
+#define HQ 6u
+#define QT 2u
+#define HD 256u
+#define ROWS 6u
+#define VD 4u
+#define K_HEAD_BYTES 272u
+#define V_HEAD_BYTES 144u
+
+/* sh_q rows carry four 64-float chunks, one per lane quad, and every lane reads
+ * its own quad's chunk at the same offset inside it.  At a plain 256-float row
+ * stride those four addresses differ by 64 dwords -- a whole multiple of the 32
+ * LDS banks -- so all four land on the same four banks: a 4-way conflict on the
+ * hottest read in the kernel.  Four dwords of pad per chunk shift each quad by
+ * four banks instead, for 1024 bytes of LDS that still leaves three workgroups
+ * per CU.  Unlike a trailing [K+1] pad this one sits between live elements, so
+ * the toolchain cannot drop it, and it only moves values: 925 -> 794 ms across a
+ * ctx-2048 run, 17/17 frontier logit dumps unchanged (MEASURED_ON_BC250). */
+#define Q36_QCHUNK 68u                       /* 64 floats + 4 pad */
+#define Q36_QSTRIDE (4u * Q36_QCHUNK)        /* one q row */
+#define Q36_QIDX(r, d) ((r) * Q36_QSTRIDE + ((d) >> 6u) * Q36_QCHUNK + ((d) & 63u))
+shared float sh_q[QT * HQ * Q36_QSTRIDE];
+shared float sh_w[QT * HQ * TILE];
+
+float dot4(vec4 a, vec4 b) {
+    return dot(a, b);
+}
+
+uint load_v_u8(uint off) {
+    return (vc[off >> 2u] >> ((off & 3u) * 8u)) & 255u;
+}
+
+float vc_at(uint key, uint kvh, uint i) {
+    uint base = key * pc.v_row_bytes + kvh * V_HEAD_BYTES + (i >> 5u) * 18u;
+    uint scale = load_v_u8(base) | (load_v_u8(base + 1u) << 8u);
+    uint j = i & 31u;
+    uint v = load_v_u8(base + 2u + (j & 15u));
+    v = j < 16u ? v & 15u : v >> 4u;
+    return unpackHalf2x16(scale).x * float(int(v) - 8);
+}
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint rg = tid >> 6u;
+    uint lane = tid & 63u;
+    uint r0 = rg * ROWS;
+    uint kvh = gl_WorkGroupID.x;
+    uint local0 = gl_WorkGroupID.y * QT;
+    uint tok0 = pc.tok_base + local0;
+    uint tn = min(QT, pc.n_tok - local0);
+    uint max_n_kv = pc.pos0 + tok0 + tn;
+    uint group = gl_WorkGroupID.z;
+    uint span_first = group * SPAN_GROUP;
+    uint max_spans = (max_n_kv + SPAN - 1u) / SPAN;
+    uint span_limit = min(span_first + SPAN_GROUP, max_spans);
+    if (span_first >= max_spans) return;
+
+    uint h0 = kvh * HQ;
+    float scale = 1.0 / sqrt(float(HD));
+
+    for (uint e = tid; e < QT * HQ * HD; e += 128u) {
+        uint r = e / HD;
+        uint ti = r / HQ;
+        uint j = r % HQ;
+        uint d = e & (HD - 1u);
+        sh_q[Q36_QIDX(r, d)] = ti < tn ?
+            q[((tok0 + ti) * pc.n_head + h0 + j) * HD + d] : 0.0;
+    }
+    barrier();
+
+    uint v_off[VD];
+    uint nibble_off[VD];
+    bool high_nibble[VD];
+    for (uint v = 0u; v < VD; v++) {
+        uint d = lane + v * 64u;
+        uint blk = d >> 5u;
+        uint j = d & 31u;
+        v_off[v] = kvh * V_HEAD_BYTES + blk * 18u;
+        nibble_off[v] = v_off[v] + 2u + (j & 15u);
+        high_nibble[v] = (j >= 16u);
+    }
+    uint n_kv_rg = pc.pos0 + tok0 + rg + 1u;
+    uint q_base[ROWS];
+    for (uint rr = 0u; rr < ROWS; rr++) {
+        q_base[rr] = (r0 + rr) * Q36_QSTRIDE + (lane & 3u) * Q36_QCHUNK;
+    }
+
+    for (uint span = span_first; span < span_limit; span++) {
+        uint span0 = span * SPAN;
+        uint span_end = min(span0 + SPAN, max_n_kv);
+        float m[ROWS];
+        float l[ROWS];
+        float acc[ROWS][VD];
+        for (uint rr = 0u; rr < ROWS; rr++) {
+            uint r = r0 + rr;
+            uint ti = r / HQ;
+            uint j = r % HQ;
+            m[rr] = span == 0u && pc.has_sinks != 0u && ti < tn ?
+                sinks[h0 + j] : -3.402823466e38;
+            l[rr] = 0.0;
+            for (uint v = 0u; v < VD; v++) acc[rr][v] = 0.0;
+        }
+
+        for (uint base = span0; base < span_end; base += TILE) {
+            uint tile_n = min(TILE, span_end - base);
+
+            for (uint kt = 0u; kt < tile_n; kt += 16u) {
+                uint key_t = kt + (lane >> 2u);
+                float dots[ROWS];
+                for (uint rr = 0u; rr < ROWS; rr++) dots[rr] = 0.0;
+                if (key_t < tile_n) {
+                    uint key = base + key_t;
+                    uint kb = key * pc.k_row_bytes + kvh * K_HEAD_BYTES;
+                    uint wi = (kb + (lane & 3u) * 68u) >> 2u;
+                    uint prev = kc[wi];
+                    float d0 = unpackHalf2x16(prev).x;
+                    float s[ROWS];
+                    for (uint rr = 0u; rr < ROWS; rr++) s[rr] = 0.0;
+                    [[unroll]]
+                    for (uint k = 0u; k < 8u; k++) {
+                        uint next = kc[wi + 1u + k];
+                        uint sw = (prev >> 16u) | (next << 16u);
+                        prev = next;
+                        vec4 kv = vec4(unpack8(int(sw)));
+                        uint qoff = 4u * k;
+                        for (uint rr = 0u; rr < ROWS; rr++) {
+                            uint qb = q_base[rr] + qoff;
+                            s[rr] += dot4(kv, vec4(sh_q[qb], sh_q[qb + 1u],
+                                                   sh_q[qb + 2u], sh_q[qb + 3u]));
+                        }
+                    }
+                    for (uint rr = 0u; rr < ROWS; rr++) {
+                        dots[rr] += d0 * s[rr];
+                        s[rr] = 0.0;
+                    }
+                    float d1 = unpackHalf2x16(prev).y;
+                    [[unroll]]
+                    for (uint k = 0u; k < 8u; k++) {
+                        vec4 kv = vec4(unpack8(int(kc[wi + 9u + k])));
+                        uint qoff = 32u + 4u * k;
+                        for (uint rr = 0u; rr < ROWS; rr++) {
+                            uint qb = q_base[rr] + qoff;
+                            s[rr] += dot4(kv, vec4(sh_q[qb], sh_q[qb + 1u],
+                                                   sh_q[qb + 2u], sh_q[qb + 3u]));
+                        }
+                    }
+                    for (uint rr = 0u; rr < ROWS; rr++)
+                        dots[rr] += d1 * s[rr];
+                }
+                bool row_live = (rg < tn) && (base + key_t < n_kv_rg);
+                bool can_write = ((lane & 3u) == 0u) && (key_t < tile_n) && row_live;
+                for (uint rr = 0u; rr < ROWS; rr++) {
+                    float d = row_live ? dots[rr] : 0.0;
+                    d = subgroupClusteredAdd(d, 4u);
+                    if (can_write)
+                        sh_w[(r0 + rr) * TILE + key_t] = d * scale;
+                }
+            }
+            barrier();
+
+            uint row_tile_n = (rg < tn && base < n_kv_rg) ? min(TILE, n_kv_rg - base) : 0u;
+            for (uint rr = 0u; rr < ROWS; rr++) {
+                uint r = r0 + rr;
+                if (row_tile_n == 0u) continue;
+                float tmax = -3.402823466e38;
+                for (uint t = 0u; t < row_tile_n; t++)
+                    tmax = max(tmax, sh_w[r * TILE + t]);
+                float n = max(m[rr], tmax);
+                float rs = exp(m[rr] - n);
+                l[rr] *= rs;
+                for (uint v = 0u; v < VD; v++) acc[rr][v] *= rs;
+                m[rr] = n;
+            }
+            barrier();
+
+            for (uint rr = 0u; rr < ROWS; rr++) {
+                uint r = r0 + rr;
+                for (uint t = lane; t < row_tile_n; t += 64u)
+                    sh_w[r * TILE + t] = exp(sh_w[r * TILE + t] - m[rr]);
+            }
+            barrier();
+
+            for (uint t = 0u; t < row_tile_n; t++) {
+                uint key_base = (base + t) * pc.v_row_bytes;
+                float vv[VD];
+                [[unroll]]
+                for (uint v = 0u; v < VD; v++) {
+                    uint b = key_base + v_off[v];
+                    uint w0 = vc[b >> 2u];
+                    uint scale = (w0 >> ((b & 2u) * 8u)) & 0xffffu;
+                    uint noff = key_base + nibble_off[v];
+                    uint w1 = (noff >> 2u == b >> 2u) ? w0 : vc[noff >> 2u];
+                    uint byte_val = (w1 >> ((noff & 3u) * 8u)) & 0xffu;
+                    uint val = high_nibble[v] ? (byte_val >> 4u) : (byte_val & 0x0fu);
+                    vv[v] = unpackHalf2x16(scale).x * float(int(val) - 8);
+                }
+                for (uint rr = 0u; rr < ROWS; rr++) {
+                    uint r = r0 + rr;
+                    float w = sh_w[r * TILE + t];
+                    l[rr] += w;
+                    for (uint v = 0u; v < VD; v++) acc[rr][v] += w * vv[v];
+                }
+            }
+            barrier();
+        }
+
+        for (uint rr = 0u; rr < ROWS; rr++) {
+            uint r = r0 + rr;
+            uint ti = r / HQ;
+            uint j = r % HQ;
+            uint tok = tok0 + ti;
+            uint n_kv = pc.pos0 + tok + 1u;
+            uint row_spans = (n_kv + SPAN - 1u) / SPAN;
+            if (ti >= tn || span0 >= n_kv || span_first >= row_spans) continue;
+            uint pbase = (((local0 + ti) * pc.n_head + h0 + j) *
+                          pc.n_spans + group) * (HD + 2u);
+            if (span == span_first) {
+                for (uint v = 0u; v < VD; v++)
+                    part[pbase + lane + v * 64u] = acc[rr][v];
+                if (lane == 0u) {
+                    part[pbase + HD] = m[rr];
+                    part[pbase + HD + 1u] = l[rr];
+                }
+            } else {
+                float gm = part[pbase + HD];
+                float gl = part[pbase + HD + 1u];
+                float n = max(gm, m[rr]);
+                float rp = exp(gm - n);
+                float rs = exp(m[rr] - n);
+                for (uint v = 0u; v < VD; v++) {
+                    float old = part[pbase + lane + v * 64u];
+                    part[pbase + lane + v * 64u] = old * rp + acc[rr][v] * rs;
+                }
+                if (lane == 0u) {
+                    part[pbase + HD] = n;
+                    part[pbase + HD + 1u] = gl * rp + l[rr] * rs;
+                }
+            }
+        }
+        memoryBarrierBuffer();
+        barrier();
+    }
+}
