@@ -3,6 +3,7 @@
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_clustered : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_control_flow_attributes : enable
 
 /* Two 64-lane row groups serve two tokens and eight GQA heads. Each group
  * owns one token; each lane owns four output dimensions. */
@@ -116,6 +117,23 @@ void main(void) {
     }
     barrier();
 
+    uint v_off[VD];
+    uint nibble_off[VD];
+    bool high_nibble[VD];
+    for (uint v = 0u; v < VD; v++) {
+        uint d = lane + v * 64u;
+        uint blk = d >> 5u;
+        uint j = d & 31u;
+        v_off[v] = kvh * V_HEAD_BYTES + blk * 18u;
+        nibble_off[v] = v_off[v] + 2u + (j & 15u);
+        high_nibble[v] = (j >= 16u);
+    }
+    uint n_kv_rg = pc.pos0 + tok0 + rg + 1u;
+    uint q_base[ROWS];
+    for (uint rr = 0u; rr < ROWS; rr++) {
+        q_base[rr] = (r0 + rr) * Q36_QSTRIDE + (lane & 3u) * Q36_QCHUNK;
+    }
+
     for (uint span = span_first; span < span_limit; span++) {
         uint span0 = span * SPAN;
         uint span_end = min(span0 + SPAN, max_n_kv);
@@ -137,67 +155,61 @@ void main(void) {
 
             for (uint kt = 0u; kt < tile_n; kt += 16u) {
                 uint key_t = kt + (lane >> 2u);
-                uint quad = lane & 3u;
                 float dots[ROWS];
                 for (uint rr = 0u; rr < ROWS; rr++) dots[rr] = 0.0;
                 if (key_t < tile_n) {
                     uint key = base + key_t;
                     uint kb = key * pc.k_row_bytes + kvh * K_HEAD_BYTES;
-                    for (uint p = quad; p < 4u; p += 4u) {
-                        uint wi = (kb + p * 68u) >> 2u;
-                        uint prev = kc[wi];
-                        float d0 = unpackHalf2x16(prev).x;
-                        float s[ROWS];
-                        for (uint rr = 0u; rr < ROWS; rr++) s[rr] = 0.0;
-                        for (uint k = 0u; k < 8u; k++) {
-                            uint next = kc[wi + 1u + k];
-                            uint sw = (prev >> 16u) | (next << 16u);
-                            prev = next;
-                            vec4 kv = vec4(unpack8(int(sw)));
-                            uint qi = p * 64u + 4u * k;
-                            for (uint rr = 0u; rr < ROWS; rr++) {
-                                uint qb = Q36_QIDX(r0 + rr, qi);
-                                s[rr] += dot4(kv, vec4(sh_q[qb], sh_q[qb + 1u],
-                                                       sh_q[qb + 2u], sh_q[qb + 3u]));
-                            }
-                        }
+                    uint wi = (kb + (lane & 3u) * 68u) >> 2u;
+                    uint prev = kc[wi];
+                    float d0 = unpackHalf2x16(prev).x;
+                    float s[ROWS];
+                    for (uint rr = 0u; rr < ROWS; rr++) s[rr] = 0.0;
+                    [[unroll]]
+                    for (uint k = 0u; k < 8u; k++) {
+                        uint next = kc[wi + 1u + k];
+                        uint sw = (prev >> 16u) | (next << 16u);
+                        prev = next;
+                        vec4 kv = vec4(unpack8(int(sw)));
+                        uint qoff = 4u * k;
                         for (uint rr = 0u; rr < ROWS; rr++) {
-                            dots[rr] += d0 * s[rr];
-                            s[rr] = 0.0;
+                            uint qb = q_base[rr] + qoff;
+                            s[rr] += dot4(kv, vec4(sh_q[qb], sh_q[qb + 1u],
+                                                   sh_q[qb + 2u], sh_q[qb + 3u]));
                         }
-                        float d1 = unpackHalf2x16(prev).y;
-                        for (uint k = 0u; k < 8u; k++) {
-                            vec4 kv = vec4(unpack8(int(kc[wi + 9u + k])));
-                            uint qi = p * 64u + 32u + 4u * k;
-                            for (uint rr = 0u; rr < ROWS; rr++) {
-                                uint qb = Q36_QIDX(r0 + rr, qi);
-                                s[rr] += dot4(kv, vec4(sh_q[qb], sh_q[qb + 1u],
-                                                       sh_q[qb + 2u], sh_q[qb + 3u]));
-                            }
-                        }
-                        for (uint rr = 0u; rr < ROWS; rr++)
-                            dots[rr] += d1 * s[rr];
                     }
+                    for (uint rr = 0u; rr < ROWS; rr++) {
+                        dots[rr] += d0 * s[rr];
+                        s[rr] = 0.0;
+                    }
+                    float d1 = unpackHalf2x16(prev).y;
+                    [[unroll]]
+                    for (uint k = 0u; k < 8u; k++) {
+                        vec4 kv = vec4(unpack8(int(kc[wi + 9u + k])));
+                        uint qoff = 32u + 4u * k;
+                        for (uint rr = 0u; rr < ROWS; rr++) {
+                            uint qb = q_base[rr] + qoff;
+                            s[rr] += dot4(kv, vec4(sh_q[qb], sh_q[qb + 1u],
+                                                   sh_q[qb + 2u], sh_q[qb + 3u]));
+                        }
+                    }
+                    for (uint rr = 0u; rr < ROWS; rr++)
+                        dots[rr] += d1 * s[rr];
                 }
+                bool row_live = (rg < tn) && (base + key_t < n_kv_rg);
+                bool can_write = ((lane & 3u) == 0u) && (key_t < tile_n) && row_live;
                 for (uint rr = 0u; rr < ROWS; rr++) {
-                    uint r = r0 + rr;
-                    uint ti = r / HQ;
-                    uint n_kv = pc.pos0 + tok0 + ti + 1u;
-                    float d = ti < tn && base + key_t < n_kv ? dots[rr] : 0.0;
+                    float d = row_live ? dots[rr] : 0.0;
                     d = subgroupClusteredAdd(d, 4u);
-                    if ((lane & 3u) == 0u && key_t < tile_n &&
-                        ti < tn && base + key_t < n_kv)
-                        sh_w[r * TILE + key_t] = d * scale;
+                    if (can_write)
+                        sh_w[(r0 + rr) * TILE + key_t] = d * scale;
                 }
             }
             barrier();
 
+            uint row_tile_n = (rg < tn && base < n_kv_rg) ? min(TILE, n_kv_rg - base) : 0u;
             for (uint rr = 0u; rr < ROWS; rr++) {
                 uint r = r0 + rr;
-                uint ti = r / HQ;
-                uint n_kv = pc.pos0 + tok0 + ti + 1u;
-                uint row_tile_n = ti < tn && base < n_kv ?
-                    min(TILE, n_kv - base) : 0u;
                 if (row_tile_n == 0u) continue;
                 float tmax = -3.402823466e38;
                 for (uint t = 0u; t < row_tile_n; t++)
@@ -212,24 +224,27 @@ void main(void) {
 
             for (uint rr = 0u; rr < ROWS; rr++) {
                 uint r = r0 + rr;
-                uint ti = r / HQ;
-                uint n_kv = pc.pos0 + tok0 + ti + 1u;
-                uint row_tile_n = ti < tn && base < n_kv ?
-                    min(TILE, n_kv - base) : 0u;
                 for (uint t = lane; t < row_tile_n; t += 64u)
                     sh_w[r * TILE + t] = exp(sh_w[r * TILE + t] - m[rr]);
             }
             barrier();
 
-            float vv[VD];
-            for (uint t = 0u; t < tile_n; t++) {
-                for (uint v = 0u; v < VD; v++)
-                    vv[v] = vc_at(base + t, kvh, lane + v * 64u);
+            for (uint t = 0u; t < row_tile_n; t++) {
+                uint key_base = (base + t) * pc.v_row_bytes;
+                float vv[VD];
+                [[unroll]]
+                for (uint v = 0u; v < VD; v++) {
+                    uint b = key_base + v_off[v];
+                    uint w0 = vc[b >> 2u];
+                    uint scale = (w0 >> ((b & 2u) * 8u)) & 0xffffu;
+                    uint noff = key_base + nibble_off[v];
+                    uint w1 = (noff >> 2u == b >> 2u) ? w0 : vc[noff >> 2u];
+                    uint byte_val = (w1 >> ((noff & 3u) * 8u)) & 0xffu;
+                    uint val = high_nibble[v] ? (byte_val >> 4u) : (byte_val & 0x0fu);
+                    vv[v] = unpackHalf2x16(scale).x * float(int(val) - 8);
+                }
                 for (uint rr = 0u; rr < ROWS; rr++) {
                     uint r = r0 + rr;
-                    uint ti = r / HQ;
-                    uint n_kv = pc.pos0 + tok0 + ti + 1u;
-                    if (ti >= tn || base + t >= n_kv) continue;
                     float w = sh_w[r * TILE + t];
                     l[rr] += w;
                     for (uint v = 0u; v < VD; v++) acc[rr][v] += w * vv[v];

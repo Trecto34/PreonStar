@@ -393,6 +393,14 @@ tests/test_attn_decode.o: tests/test_attn_decode.c q36_gpu.h
 $(ATTN_DECODE_TEST): tests/test_attn_decode.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
+ATTN_PREFILL_QTILE2_TEST := tests/test_attn_prefill_qtile2
+
+tests/test_attn_prefill_qtile2.o: tests/test_attn_prefill_qtile2.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(ATTN_PREFILL_QTILE2_TEST): tests/test_attn_prefill_qtile2.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
 NORM_ROPE_KV_TEST := tests/test_norm_rope_kv
 
 tests/test_norm_rope_kv.o: tests/test_norm_rope_kv.c q36_gpu.h
