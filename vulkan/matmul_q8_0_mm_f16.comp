@@ -66,8 +66,11 @@ shared float Ds[BM];
 
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
-    uint row0 = gl_WorkGroupID.x * BM;
-    uint col0 = gl_WorkGroupID.y * BN;
+    /* Visit token tiles consecutively for each weight tile. This permutation
+     * changes cache locality only; per-output arithmetic and bounds stay fixed. */
+    uint linear_group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    uint row0 = (linear_group / gl_NumWorkGroups.y) * BM;
+    uint col0 = (linear_group % gl_NumWorkGroups.y) * BN;
     uint tx = tid & 15u;
     uint ty = tid >> 4u;
     uint in_dim = pc.blocks * BK;
