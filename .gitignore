@@ -63,3 +63,5 @@ TODO.md
 /start-server-bg.sh
 /stop-server.sh
 .infino/
+
+/tests/test_matmul_q8_decode

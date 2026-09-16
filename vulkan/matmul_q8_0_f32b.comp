@@ -14,7 +14,7 @@
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Weights {
-    uint16_t wb16[];
+    uint wb[];
 };
 
 layout(set = 0, binding = 1) readonly buffer X {
@@ -53,10 +53,18 @@ void main(void) {
 
     for (uint b = boff; b < pc.blocks; b += bstep) {
         uint base = row_base + b * Q8_0_U16;
-        float d = unpackHalf2x16(uint(wb16[base])).x;
+        uint scale_word = wb[base >> 1u];
+        float d = unpackHalf2x16(scale_word)[base & 1u];
         uint q = base + 1u + (eoff >> 1u);
-        uint p0 = uint(wb16[q + 0u]) | (uint(wb16[q + 1u]) << 16u);
-        uint p1 = uint(wb16[q + 2u]) | (uint(wb16[q + 3u]) << 16u);
+        uint lo = wb[q >> 1u];
+        uint hi = wb[(q >> 1u) + 1u];
+        uint p0 = lo;
+        uint p1 = hi;
+        if ((q & 1u) != 0u) {
+            uint tail = wb[(q >> 1u) + 2u];
+            p0 = (lo >> 16u) | (hi << 16u);
+            p1 = (hi >> 16u) | (tail << 16u);
+        }
         vec4 w0 = vec4(unpack8(int(p0)));
         vec4 w1 = vec4(unpack8(int(p1)));
         uint xi = (b * 32u + eoff) >> 2u;

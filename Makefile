@@ -801,3 +801,10 @@ test-quality: tests/test_prompt_prefix tests/test_quality_api
 
 q36_eval_cases.o: q36_eval_cases.c q36_eval_cases.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_eval_cases.c
+
+# Isolated raw-F32 Q8 decode benchmark, including the vocabulary projection.
+tests/test_matmul_q8_decode.o: tests/test_matmul_q8_decode.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+tests/test_matmul_q8_decode: tests/test_matmul_q8_decode.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
