@@ -55,3 +55,7 @@
 - The inner report finalizer records the gate as evidence and prevents a failed
   compatibility run from being accepted. The outer loop performs preflight and
   postflight gates and defaults to one pass to avoid unattended crash loops.
+- The compatibility gate was run successfully on the BC-250: Qwen3.5/Qwen3.6
+  `qwen35moe` short CPU/Vulkan parity was `OK`, followed by Swift IQ3_XXS at
+  177.84 prefill tok/s and 21.19 generation tok/s, with no lingering GPU
+  process.
