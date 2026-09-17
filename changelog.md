@@ -66,3 +66,5 @@
 - Reduced the shared meta-agent provider watchdog to 180 seconds per tier,
   added fallback-stage output, and exposed `KARPATHY_META_TIMEOUT` for faster
   failure when the provider is unavailable.
+- Added `KARPATHY_SKIP_META=1` to bypass one scheduled meta audit and start the
+  inner pass immediately when persistent cadence state lands on that audit.

@@ -41,3 +41,5 @@ QuarkStar Swift Qwen3.8-27B change log
   seconds per tier, with explicit fallback-stage output and a
   `KARPATHY_META_TIMEOUT` override, so cadence audits cannot appear hung for
   fifteen minutes before falling back.
+- Added `KARPATHY_SKIP_META=1` to the shared orchestrator for an immediate inner
+  pass when persistent cadence state would otherwise start the slower meta audit.
