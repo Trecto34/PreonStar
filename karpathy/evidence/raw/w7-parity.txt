@@ -1,0 +1,28 @@
+### [1] GUARD parity (harness validation) 19:18:29
+gpu-cpu-parity:
+q36-test: gpu-cpu-parity CPU capture short_reasoning_plain
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-test: gpu-cpu-parity GPU replay short_reasoning_plain
+q36-test: gpu-cpu-parity short_reasoning_plain step 0 top1 ref=16 cand=16 top5_overlap=5/5 top15_overlap=14/15 top20_overlap=18/20 top64_overlap=58/64 rms=0.305938 max_abs=1.76614 top15_max_abs=0.802345 top20_max_abs=0.802345
+q36-test: gpu-cpu-parity short_reasoning_plain step 1 top1 ref=21 cand=21 top5_overlap=5/5 top15_overlap=13/15 top20_overlap=19/20 top64_overlap=53/64 rms=0.240865 max_abs=1.89379 top15_max_abs=0.806265 top20_max_abs=1.3539
+q36-test: gpu-cpu-parity short_reasoning_plain step 2 top1 ref=248046 cand=248046 top5_overlap=4/5 top15_overlap=14/15 top20_overlap=20/20 top64_overlap=60/64 rms=0.321703 max_abs=1.45544 top15_max_abs=1.28407 top20_max_abs=1.28407
+gpu-cpu-parity: OK
+q36 tests: ok
+GUARD_EXIT=0
+
+### [2] IQ2_M parity 19:19:03
+gpu-cpu-parity:
+q36-test: gpu-cpu-parity CPU capture short_reasoning_plain
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-test: gpu-cpu-parity GPU replay short_reasoning_plain
+q36-test: gpu-cpu-parity short_reasoning_plain step 0 top1 ref=16 cand=16 top5_overlap=5/5 top15_overlap=15/15 top20_overlap=20/20 top64_overlap=58/64 rms=0.263046 max_abs=1.5687 top15_max_abs=0.727613 top20_max_abs=0.727613
+q36-test: gpu-cpu-parity short_reasoning_plain step 1 top1 ref=21 cand=21 top5_overlap=5/5 top15_overlap=14/15 top20_overlap=20/20 top64_overlap=59/64 rms=0.207966 max_abs=1.20547 top15_max_abs=0.604773 top20_max_abs=0.883236
+q36-test: gpu-cpu-parity short_reasoning_plain step 2 top1 ref=248046 cand=248046 top5_overlap=4/5 top15_overlap=13/15 top20_overlap=20/20 top64_overlap=57/64 rms=0.271629 max_abs=1.52399 top15_max_abs=1.30041 top20_max_abs=1.30041
+gpu-cpu-parity: OK
+q36 tests: ok
+IQ2M_EXIT=0
+### done 19:19:49

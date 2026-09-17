@@ -5,7 +5,8 @@
 straight to `## Open items, ranked`.
 
 Last updated: 2026-09-17 (late session) · repo `/home/server/q36-opt-27b` ·
-branch `experiment/radiance-transfer-bc250` · HEAD `11bb345`.
+branch `experiment/radiance-transfer-bc250` · HEAD `f9d537d` (w7 loader fix
+merged; this docs commit follows it).
 
 ---
 
@@ -23,14 +24,15 @@ Current standing, measured on both engines, ctx 1024:
 | Swift Qwen3.8-27B IQ3_XXS (dense) | 171.09 / 23.19 | 105.43 / 22.13 | **+58.7% / +8.0%** |
 | Qwen3.6-35B-A3B IQ2XXS (MoE guard) | 909.49 / 87.37 | 615.08 / 78.72 | **+47.9% / +11.0%** |
 | RavenX-35B-Q36-IQ2XXS (MoE) | 717.36 / 89.47 | 545.46 / 77.96 | **+31.5% / +14.8%** |
-| Qwen3.8-35B-A3B-IQ2_M (MoE) | **refuses to load** | 529.90 / **91.53** | q36 cannot open it |
+| Qwen3.8-35B-A3B-IQ2_M (MoE) | **116.51 / 29.29** (loads since `f9d537d`) | 529.90 / **91.53** | **−78% / −68%** — kernel selection, §6.1 |
 
 The engine leads on every file it can load. It is already ~1.6x upstream on
 dense prefill. So the remaining work is not "make it fast" — it is "close the
 one file we can't open, and find the next real lever". **No kernel-level
 optimization has been accepted this campaign**; the deliverable so far is a
 trustworthy measurement base, a list of closed dead ends, and one identified
-loader fix that is worth more than any shader edit on the board.
+landed loader fix (`f9d537d`) that closed the one file q36 could not open — and,
+in the process, proved that file's real gap is kernel *selection*, not loading.
 
 ## 2. The document set — what each file is, and when to touch it
 
@@ -141,12 +143,17 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
 
 ## 6. Open items, ranked
 
-1. **The 41-block loader guard — highest value on the board.** q36 refuses
-   `/home/server/q36/gguf/Qwen3.8-35B-A3B-IQ2_M.gguf` with
-   `expected qwen35moe.block_count=40, got 41` (3/3 reps, exit 1). Upstream
-   loads the same file (35.5B, 2.7 bpw, 99/99 layers) and posts **91.53 ± 2.11
-   decode — the fastest MoE decode measured on this box**, above q36's best.
-   This is a loader condition, not a kernel, and no shader work can match it.
+1. **Quant-aware dispatch for the `IQ2_S` / K-quant MoE — the real IQ2_M lever,
+   and now the highest-value item on the board.** The loader fix landed
+   (`f9d537d`), so `Qwen3.8-35B-A3B-IQ2_M` loads and decodes at **116.51 /
+   29.29** where upstream gets **529.90 / 91.53**. The profile says why: its
+   `IQ2_S` experts fall through to generic `moe_matvec` (**11,845 ms = 67% of all
+   GPU time**) and its K-quant trunk to `dense_kquant` (**4,662 ms**), while the
+   guard reaches `moe_iq2_gate_up_gemm` 878.7 + `moe_q2k_down_gemm` 432.6 and
+   `dense_q8_0_p_*` GEMMs (~950 ms). `IQ2_S` support already exists in-tree, so
+   the work is routing these shapes into the per-quant prefill GEMM family:
+   **in-tree prior art, not new shader work.** Evidence:
+   `evidence/raw/w7-iq2m-prof.txt`, ledger §"kernel SELECTION".
 2. **Wave32 for the non-mmq paths.** `q36_vulkan.c:1569-1575` force-waves only
    `delta_net_cols`, `rope_qwen`, `rope_qwen_mrope`, `quantize_q8_0` and the
    `dense_*_mmq` family. Every decode kernel, every MoE kernel and all attn
@@ -184,6 +191,10 @@ Authoritative detail and per-item "reconsider_if" live in
 - **The drain fix is rejected as a speed lever** — +0.45% prefill / +0.43%
   decode, and inert in production (profiler-gated). Keep it only as profiling
   hygiene.
+- **The 41-block IQ2_M refusal is fixed, not open:** `f9d537d` loads it with
+  `--gpu-cpu-parity` OK and no guard regression. Do not re-derive the root cause
+  and do not "relax a check" again — the remaining IQ2_M gap is kernel selection
+  (§6.1).
 - **Thermal drift is not a factor** — 171.96 vs 171.91 prefill hot vs cooled.
   `bench_ab.sh` deliberately does no cool-down.
 - **The roofline is 454.4 GB/s, not ~360** as an earlier report claimed. Do not
@@ -207,7 +218,7 @@ Authoritative detail and per-item "reconsider_if" live in
 | `Qwen3.8-27B-UD-IQ3_S.gguf` | 11484M | qwen3 dense 27B | 166.36 / 21.44 | not measured |
 | `Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf` | 11194M | qwen35moe 40 blk | **909.49 / 87.37** | 615.08 / 78.72 |
 | `RavenX-35B-Q36-IQ2XXS.gguf` | 11194M | qwen35moe 40 blk | 717.36 / 89.47 | 545.46 / 77.96 |
-| `Qwen3.8-35B-A3B-IQ2_M.gguf` | 11977M | qwen35moe **41 blk** | **refused** | 529.90 / 91.53 |
+| `Qwen3.8-35B-A3B-IQ2_M.gguf` | 11977M | qwen35moe **41 blk** | 116.51 / 29.29 | 529.90 / 91.53 |
 
 - The guard is the no-regression reference; `Qwen3.6-35B-A3B-AntirezExperts-
   …gguf` is a **symlink** to it, and `q36moe.gguf` points at the *dense* 27B.
@@ -216,6 +227,9 @@ Authoritative detail and per-item "reconsider_if" live in
 - RavenX out-decodes the guard while its prefill is 21% lower, on a file 128
   bytes different in length: that is quant mix, not layout. There is no single
   "MoE ≈ 900 t/s prefill" figure.
+- IQ2_M **loads** since `f9d537d` but its quant mix (375× `IQ2_S` trunk) misses the
+  fast prefill dispatch, so it is the one file where q36 is far *behind* upstream.
+  Never quote it as a q36 win; see §6.1.
 
 ## 9. Known pitfalls (each of these has cost real time)
 

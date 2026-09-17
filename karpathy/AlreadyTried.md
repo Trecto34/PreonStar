@@ -210,7 +210,8 @@ Same box, same GGUFs, ctx 1024, `-ngl 99`, `llama-bench -p 1024 -n 16 -r 3`.
   (`q36.c:5177`).
 
   ⇒ **Reconsider_if:** extend both gates to the MoE shape *and* route block 40
-  through the embedded-MTP skip. Relaxing the check alone is NOT the fix: the
+  through the embedded-MTP skip. **RESOLVED 2026-09-17 — implemented, measured
+  and accepted as `f9d537d`; see "w7: the 41-block loader fix" below.** Relaxing the check alone is NOT the fix: the
   extra block's weights (~800 MB on a 15.35 GiB unified pool) would load into a
   40-block graph. Verify by loading IQ2_M, then A/B against the guard for
   no-regression.
@@ -249,3 +250,70 @@ Same box, same GGUFs, ctx 1024, `-ngl 99`, `llama-bench -p 1024 -n 16 -r 3`.
   raw CSV (170.91 / 171.68 / +0.45%, identical to an independent Python median).
   **Any A/B verdict this script produced before this fix is unusable — recompute
   it from the CSV.**
+
+## w7: the 41-block loader fix — ACCEPTED as a capability fix, NOT a speed win (2026-09-17)
+
+Commit `f9d537d` on `experiment/w7-moe-nextn` (off `56126ca`), `q36.c` only,
++66/−22. All three dense-gated conditions identified above were extended to the
+MoE shape:
+
+- `config_validate_model`: `embedded_nextn_block = nextn_layers == 1 &&
+  block_count == Q36_N_LAYER + 1`, now accepted for any model kind; the
+  tensor-count gate is `+15` dense / **`+20` MoE** (753 − 733).
+- `q36_tensor_is_disabled_embedded_mtp`: `!Q36_MODEL_DENSE` dropped, so the
+  `blk.<Q36_N_LAYER>.` prefix skip applies to MoE too. `e->mtp_ready` still
+  short-circuits, so sidecar-MTP runs are unaffected; a 40-block file has no
+  `blk.40`, so the guard is unchanged by construction.
+- `weights_validate_layout(w, mixed_moe_quants)`: new `tensor_expect_moe_matrix()`
+  helper. Under the predicate `!Q36_MODEL_DENSE && n_tensors == Q36_TENSOR_COUNT + 20`
+  (exactly the 753-tensor IQ2_M shape) the trunk/non-expert matrix types are
+  accepted with dims still validated (`tensor_expect_cpu_matrix`) instead of the
+  Q4_K/Q5_K/Q6_K/Q8_0 whitelist. **The routed experts keep their original strict
+  `tensor_expect_routed_*` validation.** This is a type-whitelist widening on the
+  trunk, not a check removal, and the predicate cannot reach the guard or any
+  dense file. Describing it as "a validation relaxation" overstates it; describing
+  it as "loads" alone understates nothing but proves nothing either.
+
+Measured:
+
+- **Loads and runs:** `116.51 / 29.29` tps (profiled). The 3/3 refusal is gone.
+- **Quality, specifically targeting the relaxed check:** `q36_test --gpu-cpu-parity`
+  **OK** on IQ2_M — top1 `ref == cand` at all 3 steps (16/16, 21/21, 248046/248046),
+  rms 0.263/0.208/0.272, top15 15/15, 14/15, 13/15. Guard parity also **OK**
+  (top1 16/21/248046 match, rms 0.31/0.24/0.32). A mis-dispatched quant type would
+  break top1 agreement; it does not.
+- **No regression on the guard:** 7-rep interleaved A/B, ctx 1024 —
+  A `713.80` prefill / `88.98` decode (MAD 6.180 / 0.110) vs
+  B `713.85` / `89.12` (MAD 10.570 / 0.080) = **+0.01% / +0.16%** —
+  indistinguishable. `bench_ab.sh`'s `verdict: FAIL (prefill)` is its *speed-gain*
+  semantics, not a regression; read the medians, not the label. A's own rep spread
+  (704.62 → 737.83) also reclassifies the earlier single-run reading of `686.84`
+  as cold-run noise, not a signal.
+- Raw: `evidence/raw/ab-w7-guard.csv`, `w7-parity.txt`, `w7-iq2m-prof.txt`,
+  `w7-guard-patched-prof.txt`. Binary sha256: A `ffd2d262…8883`, B `3264f5dc…afbb`.
+- **Accepted because** it makes a file the engine could not open load *and* decode
+  with verified parity, at zero measured cost to the guard. **Reconsider_if:** a
+  future MoE GGUF of the same 753-tensor shape ships non-trunk types the generic
+  dispatch does not actually handle — the predicate is by tensor count, so it would
+  not re-check the whitelist. Run `--gpu-cpu-parity` before trusting such a file.
+
+## IQ2_M's slowness is kernel SELECTION, not the loader (2026-09-17, decisive)
+
+**Do not look for another loader fix, and do not read "it loads" as a win.**
+IQ2_M under q36 is 4.5×/3.1× slower than upstream on the identical file
+(116.51 / 29.29 vs 529.90 ± 11.48 / 91.53 ± 2.11).
+
+- **Quant inventory** (`gguf-py` `GGUFReader`): IQ2_M's trunk is **375× `IQ2_S`
+  (10.3 GB)**; the guard is **`IQ2_XXS` + `Q2_K`**. Different quant family — and
+  every tuned prefill path in this engine is quant-specific.
+- **Profiled IQ2_M:** `moe_matvec` **11,845 ms = 67% of all GPU time** (generic
+  per-expert matvec) plus `dense_kquant` **4,662 ms**, versus the guard's
+  `moe_iq2_gate_up_gemm` 878.7 + `moe_q2k_down_gemm` 432.6 and `dense_q8_0_p_*`
+  GEMMs (~950 ms) on the *same* binary.
+- `IQ2_S` **is** present in-tree (`moe_matvec.comp`, `moe_matvec_fast.comp`,
+  `dense_extra_*`) — so the lever is **quant-aware dispatch into the per-quant
+  prefill GEMM family**, i.e. in-tree prior art, not new shader work.
+- Corollary, recorded so it is not re-derived: the "IQ2_M is the fastest MoE
+  decode on this box" thesis **does not transfer to q36** until that dispatch
+  exists. Ranking the loader fix as a *speed* item was this campaign's error.
+
