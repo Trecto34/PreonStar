@@ -238,10 +238,12 @@ dedicated bounded-memory profile for the BC-250:
 ```
 
 That profile disables full weight prewarming, uses a 1024-token default
-context, and recycles a 2 GiB dense-weight working set so the 14.6 GiB IQ4_XS
-file does not trigger the host OOM killer. It is necessarily slower than
-IQ3_XXS because weights are reloaded between cache windows. Override the
-working-set size with `Q36_VK_DENSE_WEIGHT_CACHE_GIB` on a larger GPU.
+context, retains a 7 GiB dense-weight prefix, and recycles a separate 2 GiB
+streaming window. This avoids reloading the entire 14.6 GiB IQ4_XS file on
+every token without triggering the host OOM killer. It is still slower than
+IQ3_XXS because the remaining weights are streamed. Override the cache and
+retained-prefix sizes with `Q36_VK_DENSE_WEIGHT_CACHE_GIB` and
+`Q36_VK_DENSE_WEIGHT_PIN_GIB` on a larger GPU.
 
 Then build for the target platform:
 

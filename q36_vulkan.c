@@ -59,6 +59,7 @@ typedef struct q36_gpu_tensor {
     uint64_t write_gen;         /* bumped per recorded write dispatch, so
                                  * derived caches can tell reuses of the
                                  * same buffer apart */
+    struct q36_gpu_tensor *recycled_next; /* bounded dense-weight free list */
 } q36_gpu_tensor;
 
 typedef struct q36_vk_kernel {
@@ -85,6 +86,7 @@ typedef struct q36_vk_weight {
     const void *source;
     uint64_t bytes;
     q36_gpu_tensor *tensor;
+    bool pinned;             /* retained across decode passes in bounded mode */
     struct q36_vk_weight *next;
 } q36_vk_weight;
 
@@ -336,6 +338,7 @@ static bool q36_gpu_dense_model;
 static bool q36_gpu_commands_open;
 static uint64_t q36_gpu_live_bytes;
 static uint64_t q36_gpu_peak_bytes;
+static q36_gpu_tensor *q36_vk_dense_recycled;
 
 /* Routed-expert banks are cached on device like any other weight, which
  * removes the per-token expert staging memcpy.  If the heaps cannot hold
@@ -2142,6 +2145,11 @@ static void q36_vk_weight_cache_free_unlocked(void) {
         free(b);
         b = next;
     }
+    while (q36_vk_dense_recycled) {
+        q36_gpu_tensor *next = q36_vk_dense_recycled->recycled_next;
+        q36_vk_tensor_free_unlocked(q36_vk_dense_recycled);
+        q36_vk_dense_recycled = next;
+    }
     q36_vk.arena = NULL;
     q36_vk.arena_plan = NULL;
     free(q36_vk.arena_plan_sizes);
@@ -2155,15 +2163,25 @@ static void q36_vk_weight_cache_free_unlocked(void) {
  * to bound it for oversized dense models. Eviction happens only after a
  * full queue drain, because cached weights may still be referenced by the
  * command buffer even when the host has finished recording the operation. */
-static uint64_t q36_vk_dense_weight_cache_limit_unlocked(void) {
-    if (!q36_gpu_dense_model) return 0;
-    const char *env = getenv("Q36_VK_DENSE_WEIGHT_CACHE_GIB");
+static uint64_t q36_vk_env_gib(const char *name) {
+    const char *env = getenv(name);
     if (!env || !env[0]) return 0;
     char *end = NULL;
     unsigned long long gib = strtoull(env, &end, 10);
     if (end == env || *end != '\0' || gib == 0 ||
         gib > (unsigned long long)(UINT64_MAX >> 30)) return 0;
     return (uint64_t)gib << 30;
+}
+
+static uint64_t q36_vk_dense_weight_cache_limit_unlocked(void) {
+    if (!q36_gpu_dense_model) return 0;
+    return q36_vk_env_gib("Q36_VK_DENSE_WEIGHT_CACHE_GIB");
+}
+
+static uint64_t q36_vk_dense_weight_pin_limit_unlocked(uint64_t cache_limit) {
+    uint64_t configured = q36_vk_env_gib("Q36_VK_DENSE_WEIGHT_PIN_GIB");
+    if (configured) return configured < cache_limit ? configured : cache_limit;
+    return cache_limit > (2ull << 30) ? cache_limit - (2ull << 30) : 0;
 }
 
 static uint64_t q36_vk_weight_cache_bytes_unlocked(void) {
@@ -2178,6 +2196,80 @@ static uint64_t q36_vk_weight_cache_bytes_unlocked(void) {
         total += bytes;
     }
     return total;
+}
+
+static uint64_t q36_vk_weight_cache_pinned_bytes_unlocked(void) {
+    uint64_t total = 0;
+    for (q36_vk_weight *w = q36_vk.weights; w; w = w->next) {
+        if (!w->pinned) continue;
+        if (UINT64_MAX - total < w->bytes) return UINT64_MAX;
+        total += w->bytes;
+    }
+    return total;
+}
+
+/* Remove the least-recently-used evictable weight. Bounded weights use their
+ * own allocations, so unlike arena views these frees return memory that can
+ * be reused by a later layer without rebuilding the retained prefix. */
+static bool q36_vk_weight_cache_evict_one_unlocked(void) {
+    q36_vk_weight *victim = NULL;
+    q36_vk_weight *victim_prev = NULL;
+    q36_vk_weight *prev = NULL;
+    for (q36_vk_weight *w = q36_vk.weights; w; prev = w, w = w->next) {
+        if (!w->pinned) {
+            victim = w;
+            victim_prev = prev;
+        }
+    }
+    if (!victim) return false;
+    if (victim_prev) victim_prev->next = victim->next;
+    else q36_vk.weights = victim->next;
+    q36_gpu_tensor *tensor = victim->tensor;
+    if (tensor && !tensor->owner) {
+        q36_gpu_live_bytes -= tensor->bytes;
+        tensor->bytes = 0;
+        tensor->gpu_written = false;
+        tensor->last_use_seq = 0;
+        tensor->write_gen = 0;
+        tensor->recycled_next = q36_vk_dense_recycled;
+        q36_vk_dense_recycled = tensor;
+    } else {
+        q36_vk_tensor_free_unlocked(tensor);
+    }
+    free(victim);
+    return true;
+}
+
+/* Reuse the Vulkan allocations for streamed weights. Repeated vkAllocateMemory
+ * and vkFreeMemory calls were measurable once the cache began rotating every
+ * decode pass; copied bytes are overwritten completely on reuse. */
+static q36_gpu_tensor *q36_vk_dense_stream_alloc_unlocked(uint64_t bytes) {
+    const uint64_t need = q36_round_up_u64(bytes ? bytes : 4u, 4u);
+    q36_gpu_tensor *best = NULL;
+    q36_gpu_tensor *best_prev = NULL;
+    q36_gpu_tensor *prev = NULL;
+    for (q36_gpu_tensor *t = q36_vk_dense_recycled; t; prev = t, t = t->recycled_next) {
+        if (t->alloc_bytes < need) continue;
+        if (!best || t->alloc_bytes < best->alloc_bytes) {
+            best = t;
+            best_prev = prev;
+        }
+    }
+    if (best) {
+        if (best_prev) best_prev->recycled_next = best->recycled_next;
+        else q36_vk_dense_recycled = best->recycled_next;
+        best->recycled_next = NULL;
+        best->bytes = bytes;
+        best->owner = NULL;
+        best->offset = 0;
+        best->gpu_written = false;
+        best->last_use_seq = 0;
+        best->write_gen = 0;
+        q36_gpu_live_bytes += bytes;
+        if (q36_gpu_live_bytes > q36_gpu_peak_bytes) q36_gpu_peak_bytes = q36_gpu_live_bytes;
+        return best;
+    }
+    return q36_vk_tensor_alloc_kind_unlocked(bytes, true, false);
 }
 
 /* Suballocate weight bytes from the arena; new blocks prefer the
@@ -2303,21 +2395,38 @@ static q36_gpu_tensor *q36_vk_weight_get_unlocked(const void *source, uint64_t b
         }
     }
 
-    {
-        const uint64_t limit = q36_vk_dense_weight_cache_limit_unlocked();
-        const uint64_t cached = q36_vk_weight_cache_bytes_unlocked();
-        if (limit && (bytes > limit || cached > limit - bytes)) {
-            if (!q36_vk_flush_reason_unlocked("dense_weight_cache_evict")) return NULL;
-            q36_vk_weight_cache_free_unlocked();
+    const uint64_t limit = q36_vk_dense_weight_cache_limit_unlocked();
+    bool pinned = false;
+    if (limit) {
+        const uint64_t pin_limit = q36_vk_dense_weight_pin_limit_unlocked(limit);
+        const uint64_t pinned_bytes = q36_vk_weight_cache_pinned_bytes_unlocked();
+        pinned = pinned_bytes <= pin_limit && bytes <= pin_limit - pinned_bytes;
+        if (!pinned) {
+            if (bytes > limit) return NULL;
+            uint64_t cached = q36_vk_weight_cache_bytes_unlocked();
+            if (cached > limit - bytes) {
+                if (!q36_vk_flush_reason_unlocked("dense_weight_cache_evict")) return NULL;
+                do {
+                    if (!q36_vk_weight_cache_evict_one_unlocked()) return NULL;
+                    cached = q36_vk_weight_cache_bytes_unlocked();
+                } while (cached > limit - bytes);
+            }
         }
     }
 
-    q36_gpu_tensor *tensor = q36_vk_arena_alloc_unlocked(bytes);
+    /* Retained prefix weights use the arena's low-allocation path. Streamed
+     * weights are individually reclaimable so the prefix survives eviction. */
+    q36_gpu_tensor *tensor = pinned ? q36_vk_arena_alloc_unlocked(bytes) :
+                                      (limit ? q36_vk_dense_stream_alloc_unlocked(bytes) :
+                                               q36_vk_arena_alloc_unlocked(bytes));
     if (!tensor) return NULL;
     {
         uint64_t offset = 0;
         q36_gpu_tensor *root = q36_gpu_tensor_root(tensor, &offset);
-        if (q36_vk_weight_copy_parallel) {
+        bool copy_parallel = q36_vk_weight_copy_parallel ||
+                             (limit && bytes >= (1u << 20) &&
+                              q36_vk_env_default_on("Q36_VK_DENSE_WEIGHT_COPY_PARALLEL"));
+        if (copy_parallel) {
             q36_vk_weight_copy_ctx c = { root->data + offset, source, bytes };
             q36_gpu_parallel_for_rows((bytes + ((1u << 20) - 1)) >> 20, 8, q36_vk_weight_copy_rows, &c);
         } else {
@@ -2333,6 +2442,7 @@ static q36_gpu_tensor *q36_vk_weight_get_unlocked(const void *source, uint64_t b
     w->source = source;
     w->bytes = bytes;
     w->tensor = tensor;
+    w->pinned = pinned;
     w->next = q36_vk.weights;
     q36_vk.weights = w;
     return tensor;

@@ -35,14 +35,17 @@ export Q36_VK_GPU_ATTN_POST=${Q36_VK_GPU_ATTN_POST:-1}
 export Q36_VK_GPU_RMS=${Q36_VK_GPU_RMS:-1}
 export Q36_VK_GPU_FFN_TAIL=${Q36_VK_GPU_FFN_TAIL:-1}
 export Q36_VK_GPU_SWIGLU=${Q36_VK_GPU_SWIGLU:-1}
+export Q36_VK_DENSE_WEIGHT_COPY_PARALLEL=${Q36_VK_DENSE_WEIGHT_COPY_PARALLEL:-1}
 
-# IQ4_XS is a 14.6 GiB dense model. Do not prewarm it into the GPU arena;
-# recycle a bounded 2 GiB working set instead. This trades throughput for a
-# reliable run on the 16 GiB BC-250 and can be overridden for larger GPUs.
+# IQ4_XS is a 14.6 GiB dense model. Keep a 7 GiB prefix and recycle a 2 GiB
+# working set; this is the safe profile for the BC-250's 10.2 GiB device-local
+# heap. Full resident prewarm is intentionally disabled because it can trigger
+# the host OOM killer even when Vulkan reports enough aggregate UMA memory.
 case "$MODEL" in
     *IQ4_XS.gguf)
         export Q36_VK_PREWARM=${Q36_VK_PREWARM:-0}
-        export Q36_VK_DENSE_WEIGHT_CACHE_GIB=${Q36_VK_DENSE_WEIGHT_CACHE_GIB:-2}
+        export Q36_VK_DENSE_WEIGHT_CACHE_GIB=${Q36_VK_DENSE_WEIGHT_CACHE_GIB:-9}
+        export Q36_VK_DENSE_WEIGHT_PIN_GIB=${Q36_VK_DENSE_WEIGHT_PIN_GIB:-7}
         ;;
 esac
 
