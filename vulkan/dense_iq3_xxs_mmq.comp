@@ -10,7 +10,7 @@ layout(set = 0, binding = 0) readonly buffer Weights { uint wb[]; };
 layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
 layout(set = 0, binding = 3) readonly buffer Tables { uint tables[]; };
-layout(set = 0, binding = 4) readonly buffer B16 { uint b16[]; };
+layout(set = 0, binding = 4) readonly buffer B16 { uvec4 b16x4[]; };
 
 layout(push_constant) uniform Push {
     uint out_dim;
@@ -122,18 +122,20 @@ void main(void) {
                 }
             }
 
-            for (uint i = lid; i < BN * 2u; i += 128u) {
-                uint lt = i >> 1u;
-                uint kh = i & 1u;
+            for (uint lt = lid; lt < BN; lt += 128u) {
                 uint tok = tok0 + lt;
-                uint dst = lt * STRIDE + 8u * kh;
+                uint dst = lt * STRIDE;
                 if (tok < pc.n_tok) {
-                    uint src = (tok * pc.blocks + qb) * 128u +
-                               slice * 16u + 8u * kh;
-                    [[unroll]] for (uint j = 0u; j < 8u; j++)
-                        buf_b[dst + j] = unpackFloat2x16(b16[src + j]);
+                    uint src = (tok * pc.blocks + qb) * 128u + slice * 16u;
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) {
+                        uvec4 w = b16x4[(src >> 2u) + j];
+                        buf_b[dst + 4u * j + 0u] = unpackFloat2x16(w.x);
+                        buf_b[dst + 4u * j + 1u] = unpackFloat2x16(w.y);
+                        buf_b[dst + 4u * j + 2u] = unpackFloat2x16(w.z);
+                        buf_b[dst + 4u * j + 3u] = unpackFloat2x16(w.w);
+                    }
                 } else {
-                    [[unroll]] for (uint j = 0u; j < 8u; j++)
+                    [[unroll]] for (uint j = 0u; j < 16u; j++)
                         buf_b[dst + j] = f16vec2(0.0);
                 }
             }
