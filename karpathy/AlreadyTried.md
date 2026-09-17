@@ -29,6 +29,7 @@ accepted change, even when the primary target is dense Swift Qwen3.8.
 - **512-thread add/RMS — REJECTED:** Swift kernel 23.64 -> 30.13 ms.
 - **Integer sign-mask IQ3_XXS decode — REJECTED:** Swift decode kernel
   373.83 -> 407.97 ms over 16 generation tokens.
+- **Restaged `dense_iq3_xxs_mmq` (double-buffered A, register-built B) — REJECTED, NEUTRAL (2026-09-17).** codex +71/-63: A double-buffered, `buf_b` deleted (B operand built via `subgroupShuffle`), trailing barrier conditional. Prefill 170.93 (MAD 0.080) -> 170.75 (MAD 0.660) = -0.11%, decode +0.05%, FAIL. Not staging-bound: it already packs f16. Evidence: `evidence/raw/ab-w8-mmq.csv`, patch `evidence/raw/w8-iq3mmq.diff`.
 - **XOR-swizzled IQ3_XXS MMQ staging — REJECTED:** Swift prefill MMQ kernel
   940.28 -> 1309.31 ms at 128-token context. The existing 17-element padded
   stride is faster than the attempted 16-element XOR layout on BC-250.

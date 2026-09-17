@@ -172,6 +172,13 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    to come from restructuring shaders so ACO emits packed `v_pk_fma_f16`
    (bit-identical output). Proven prior art: the friend's `mul_mm.comp` +17-24%
    prefill and the iq3_s GEMV port +14%.
+   **3b. MEASURED NEUTRAL on the hot kernel (2026-09-17).** `dense_iq3_xxs_mmq`
+   already packs f16 (`f16vec2` + packed `fma`, lines 155-159), so the peer
+   mechanism has no unclaimed counterpart there. codex's staging restructure
+   (+71/-63: double-buffered A, `buf_b` deleted, shuffle-built B operand, one
+   barrier dropped) gave prefill 170.93 (MAD 0.080) -> 170.75 (MAD 0.660) =
+   **-0.11%**, decode +0.05% -> FAIL, rejected. Staging/barrier/LDS is CLOSED
+   for this kernel. Evidence: `evidence/raw/ab-w8-mmq.csv`.
 4. **FA LDS staging** (`FA_SHMEM_STAGING=1` in the friend's doc) — reported
    PP +5.4% / TG +12.4%, and it is the largest *unread* gap in that document.
    Not yet verified locally.
