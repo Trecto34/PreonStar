@@ -4167,6 +4167,19 @@ static void tensor_expect_cpu_matrix(const q36_tensor *t,
     tensor_expect_layout(t, t->type, 2, in_dim, out_dim, 0);
 }
 
+static void tensor_expect_moe_matrix(const q36_tensor *t, bool mixed_quants,
+                                     uint32_t baseline_type, bool allow_q6_k,
+                                     uint64_t in_dim, uint64_t out_dim) {
+    if (mixed_quants) {
+        tensor_expect_cpu_matrix(t, in_dim, out_dim);
+    } else if (allow_q6_k) {
+        tensor_expect_layout_or_q6_k_or_q8_0(
+            t, baseline_type, 2, in_dim, out_dim, 0);
+    } else {
+        tensor_expect_layout_or_q8_0(t, baseline_type, 2, in_dim, out_dim, 0);
+    }
+}
+
 static void tensor_expect_routed_gate_up(const q36_tensor *t, uint32_t ndim, uint64_t d0, uint64_t d1, uint64_t d2) {
     uint64_t want[3];
     if (!t) q36_die("internal error: missing routed expert tensor while validating layout");
@@ -4247,7 +4260,7 @@ static int q36_quant_bits_from_type(uint32_t type) {
     }
 }
 
-static void weights_validate_layout(const q36_weights *w) {
+static void weights_validate_layout(const q36_weights *w, bool mixed_moe_quants) {
     if (!w) q36_die("internal error: missing weights while validating layout");
     if (Q36_MODEL_DENSE) {
         tensor_expect_cpu_matrix(w->token_embd, Q36_N_EMBD, Q36_N_VOCAB);
@@ -4287,9 +4300,13 @@ static void weights_validate_layout(const q36_weights *w) {
         }
         return;
     }
-    tensor_expect_layout_or_q8_0(w->token_embd, Q36_TENSOR_Q4_K, 2, Q36_N_EMBD, Q36_N_VOCAB, 0);
+    /* Upstream IQ2_M uses a mixed quant recipe for the 40-layer trunk.  All
+     * of these matrix types are handled by the generic CPU/Vulkan dispatch. */
+    tensor_expect_moe_matrix(w->token_embd, mixed_moe_quants,
+                             Q36_TENSOR_Q4_K, false, Q36_N_EMBD, Q36_N_VOCAB);
     tensor_expect_layout(w->output_norm, Q36_TENSOR_F32, 1, Q36_N_EMBD, 0, 0);
-    tensor_expect_layout_or_q6_k_or_q8_0(w->output, Q36_TENSOR_Q4_K, 2, Q36_N_EMBD, Q36_N_VOCAB, 0);
+    tensor_expect_moe_matrix(w->output, mixed_moe_quants,
+                             Q36_TENSOR_Q4_K, true, Q36_N_EMBD, Q36_N_VOCAB);
     tensor_expect_optional_plain(w->output_scale, 1, 1, 0, 0);
 
     for (uint32_t il = 0; il < Q36_N_LAYER; il++) {
@@ -4298,27 +4315,45 @@ static void weights_validate_layout(const q36_weights *w) {
         tensor_expect_layout(l->post_attention_norm, Q36_TENSOR_F32, 1, Q36_N_EMBD, 0, 0);
 
         if (l->kind == Q36_LAYER_FULL_ATTN) {
-            tensor_expect_layout_or_q8_0(l->attn_q, Q36_TENSOR_Q5_K, 2, Q36_N_EMBD, Q36_N_SSM_INNER * 2u, 0);
+            tensor_expect_moe_matrix(l->attn_q, mixed_moe_quants,
+                                     Q36_TENSOR_Q5_K, false,
+                                     Q36_N_EMBD, Q36_N_SSM_INNER * 2u);
             tensor_expect_layout(l->attn_q_norm, Q36_TENSOR_F32, 1, Q36_N_HEAD_DIM, 0, 0);
-            tensor_expect_layout_or_q8_0(l->attn_k, Q36_TENSOR_Q5_K, 2, Q36_N_EMBD, (uint64_t)Q36_N_HEAD_KV * Q36_N_HEAD_DIM, 0);
+            tensor_expect_moe_matrix(l->attn_k, mixed_moe_quants,
+                                     Q36_TENSOR_Q5_K, false, Q36_N_EMBD,
+                                     (uint64_t)Q36_N_HEAD_KV * Q36_N_HEAD_DIM);
             tensor_expect_layout(l->attn_k_norm, Q36_TENSOR_F32, 1, Q36_N_HEAD_DIM, 0, 0);
-            tensor_expect_layout_or_q8_0(l->attn_v, Q36_TENSOR_Q5_K, 2, Q36_N_EMBD, (uint64_t)Q36_N_HEAD_KV * Q36_N_VALUE_DIM, 0);
-            tensor_expect_layout_or_q8_0(l->attn_output, Q36_TENSOR_Q5_K, 2, Q36_N_SSM_INNER, Q36_N_EMBD, 0);
+            tensor_expect_moe_matrix(l->attn_v, mixed_moe_quants,
+                                     Q36_TENSOR_Q5_K, false, Q36_N_EMBD,
+                                     (uint64_t)Q36_N_HEAD_KV * Q36_N_VALUE_DIM);
+            tensor_expect_moe_matrix(l->attn_output, mixed_moe_quants,
+                                     Q36_TENSOR_Q5_K, false,
+                                     Q36_N_SSM_INNER, Q36_N_EMBD);
             tensor_expect_optional_plain(l->attn_sinks, 1, Q36_N_HEAD, 0, 0);
             tensor_expect_optional_plain(l->attn_q_scale, 1, 1, 0, 0);
             tensor_expect_optional_plain(l->attn_k_scale, 1, 1, 0, 0);
             tensor_expect_optional_plain(l->attn_v_scale, 1, 1, 0, 0);
             tensor_expect_optional_plain(l->attn_output_scale, 1, 1, 0, 0);
         } else {
-            tensor_expect_layout_or_q8_0(l->attn_gate, Q36_TENSOR_Q5_K, 2, Q36_N_EMBD, Q36_N_SSM_INNER, 0);
-            tensor_expect_layout_or_q8_0(l->attn_qkv, Q36_TENSOR_Q5_K, 2, Q36_N_EMBD, Q36_N_SSM_INNER * 2u, 0);
+            tensor_expect_moe_matrix(l->attn_gate, mixed_moe_quants,
+                                     Q36_TENSOR_Q5_K, false,
+                                     Q36_N_EMBD, Q36_N_SSM_INNER);
+            tensor_expect_moe_matrix(l->attn_qkv, mixed_moe_quants,
+                                     Q36_TENSOR_Q5_K, false,
+                                     Q36_N_EMBD, Q36_N_SSM_INNER * 2u);
             tensor_expect_layout(l->ssm_a, Q36_TENSOR_F32, 1, Q36_N_SSM_DT_RANK, 0, 0);
-            tensor_expect_layout_or_q8_0(l->ssm_alpha, Q36_TENSOR_F32, 2, Q36_N_EMBD, Q36_N_SSM_DT_RANK, 0);
-            tensor_expect_layout_or_q8_0(l->ssm_beta, Q36_TENSOR_F32, 2, Q36_N_EMBD, Q36_N_SSM_DT_RANK, 0);
+            tensor_expect_moe_matrix(l->ssm_alpha, mixed_moe_quants,
+                                     Q36_TENSOR_F32, false,
+                                     Q36_N_EMBD, Q36_N_SSM_DT_RANK);
+            tensor_expect_moe_matrix(l->ssm_beta, mixed_moe_quants,
+                                     Q36_TENSOR_F32, false,
+                                     Q36_N_EMBD, Q36_N_SSM_DT_RANK);
             tensor_expect_layout(l->ssm_conv1d, Q36_TENSOR_F32, 2, Q36_N_SSM_CONV, Q36_N_SSM_INNER * 2u, 0);
             tensor_expect_layout(l->ssm_dt, Q36_TENSOR_F32, 1, Q36_N_SSM_DT_RANK, 0, 0);
             tensor_expect_layout(l->ssm_norm, Q36_TENSOR_F32, 1, Q36_N_SSM_STATE, 0, 0);
-            tensor_expect_layout_or_q8_0(l->ssm_out, Q36_TENSOR_Q6_K, 2, Q36_N_SSM_INNER, Q36_N_EMBD, 0);
+            tensor_expect_moe_matrix(l->ssm_out, mixed_moe_quants,
+                                     Q36_TENSOR_Q6_K, false,
+                                     Q36_N_SSM_INNER, Q36_N_EMBD);
             tensor_expect_optional_plain(l->attn_gate_scale, 1, 1, 0, 0);
             tensor_expect_optional_plain(l->attn_qkv_scale, 1, 1, 0, 0);
             tensor_expect_optional_plain(l->ssm_alpha_scale, 1, 1, 0, 0);
@@ -4329,11 +4364,17 @@ static void weights_validate_layout(const q36_weights *w) {
         tensor_expect_layout_or_q8_0(l->ffn_gate_inp, Q36_TENSOR_F32, 2, Q36_N_EMBD, Q36_N_EXPERT, 0);
         tensor_expect_layout(l->ffn_gate_inp_shexp, Q36_TENSOR_F32, 1, Q36_N_EMBD, 0, 0);
         tensor_expect_routed_gate_up(l->ffn_gate_exps, 3, Q36_N_EMBD, Q36_N_FF_EXP, Q36_N_EXPERT);
-        tensor_expect_layout_or_q8_0(l->ffn_gate_shexp, Q36_TENSOR_Q5_K, 2, Q36_N_EMBD, Q36_N_FF_SHARED, 0);
+        tensor_expect_moe_matrix(l->ffn_gate_shexp, mixed_moe_quants,
+                                 Q36_TENSOR_Q5_K, false,
+                                 Q36_N_EMBD, Q36_N_FF_SHARED);
         tensor_expect_routed_gate_up(l->ffn_up_exps, 3, Q36_N_EMBD, Q36_N_FF_EXP, Q36_N_EXPERT);
-        tensor_expect_layout_or_q8_0(l->ffn_up_shexp, Q36_TENSOR_Q5_K, 2, Q36_N_EMBD, Q36_N_FF_SHARED, 0);
+        tensor_expect_moe_matrix(l->ffn_up_shexp, mixed_moe_quants,
+                                 Q36_TENSOR_Q5_K, false,
+                                 Q36_N_EMBD, Q36_N_FF_SHARED);
         tensor_expect_routed_down(l->ffn_down_exps, 3, Q36_N_FF_EXP, Q36_N_EMBD, Q36_N_EXPERT);
-        tensor_expect_layout_or_q8_0(l->ffn_down_shexp, Q36_TENSOR_Q6_K, 2, Q36_N_FF_SHARED, Q36_N_EMBD, 0);
+        tensor_expect_moe_matrix(l->ffn_down_shexp, mixed_moe_quants,
+                                 Q36_TENSOR_Q6_K, false,
+                                 Q36_N_FF_SHARED, Q36_N_EMBD);
         tensor_expect_optional_plain(l->ffn_gate_exps_scale, 1, Q36_N_EXPERT, 0, 0);
         tensor_expect_optional_plain(l->ffn_gate_shexp_scale, 1, 1, 0, 0);
         tensor_expect_optional_plain(l->ffn_up_exps_scale, 1, Q36_N_EXPERT, 0, 0);
@@ -4404,7 +4445,8 @@ static void weights_bind(q36_weights *w, const q36_model *m) {
             l->ffn_down_shexp_scale = tensor_by_namef(m, "blk.%u.ffn_down_shexp.scale", il);
         }
     }
-    weights_validate_layout(w);
+    weights_validate_layout(w, !Q36_MODEL_DENSE &&
+                            m->n_tensors == Q36_TENSOR_COUNT + 20u);
 }
 
 #ifndef Q36_NO_GPU
@@ -5174,7 +5216,7 @@ static bool q36_tensor_is_disabled_embedded_mtp(const q36_engine *e,
                                                 const q36_tensor *t) {
     char prefix[32];
     int len;
-    if (!e || !Q36_MODEL_DENSE || e->mtp_ready || !t) return false;
+    if (!e || e->mtp_ready || !t) return false;
     len = snprintf(prefix, sizeof(prefix), "blk.%u.", Q36_N_LAYER);
     return len > 0 && (uint64_t)len <= t->name.len &&
            memcmp(t->name.ptr, prefix, (size_t)len) == 0;
@@ -5193,8 +5235,8 @@ static bool q36_metal_q5_output_cache_candidate(const q36_engine *e,
 #endif
 
 static bool q36_vulkan_prewarm_skip_tensor(const q36_engine *e, const q36_tensor *t) {
-    /* The dense runtime executes only the trunk; its appended MTP block must
-     * not consume the resident model arena. */
+    /* The main graph executes only the trunk; an unbound appended NextN block
+     * must not consume the resident model arena. */
     if (t == e->weights.token_embd || t->bytes == 0 ||
         q36_tensor_is_disabled_embedded_mtp(e, t)) return true;
 #ifdef Q36_METAL
@@ -5345,6 +5387,7 @@ static void config_validate_model(const q36_model *m) {
     uint64_t ctx_train = 0;
     uint32_t block_count;
     uint32_t nextn_layers = 0;
+    bool embedded_nextn_block;
     q36_str arch = required_string(m, "general.architecture");
     q36_str tok_model = required_string(m, "tokenizer.ggml.model");
     q36_str tok_pre = required_string(m, "tokenizer.ggml.pre");
@@ -5374,8 +5417,8 @@ static void config_validate_model(const q36_model *m) {
     block_count = required_u32(m, key);
     Q36_META_KEY("nextn_predict_layers");
     model_get_u32(m, key, &nextn_layers);
-    if (block_count != Q36_N_LAYER &&
-        !(Q36_MODEL_DENSE && nextn_layers == 1 && block_count == Q36_N_LAYER + 1)) {
+    embedded_nextn_block = nextn_layers == 1 && block_count == Q36_N_LAYER + 1;
+    if (block_count != Q36_N_LAYER && !embedded_nextn_block) {
         Q36_META_KEY("block_count");
         config_expect_u32(key, block_count, Q36_N_LAYER);
     }
@@ -5417,7 +5460,8 @@ static void config_validate_model(const q36_model *m) {
 #undef Q36_EXPECT_U32
 #undef Q36_META_KEY
     if (m->n_tensors != Q36_TENSOR_COUNT &&
-        !(Q36_MODEL_DENSE && nextn_layers == 1 && m->n_tensors == Q36_TENSOR_COUNT + 15)) {
+        !(embedded_nextn_block &&
+          m->n_tensors == Q36_TENSOR_COUNT + (Q36_MODEL_DENSE ? 15u : 20u))) {
         fprintf(stderr, "q36: expected %u tensors, got %" PRIu64 "\n", Q36_TENSOR_COUNT, m->n_tensors);
         exit(1);
     }
