@@ -63,3 +63,6 @@
 - Added process-group cleanup for Ctrl-C in the shared Karpathy orchestrator and
   target gate, terminating active model/agent children together instead of
   leaving an orphaned `q36_test` behind.
+- Reduced the shared meta-agent provider watchdog to 180 seconds per tier,
+  added fallback-stage output, and exposed `KARPATHY_META_TIMEOUT` for faster
+  failure when the provider is unavailable.

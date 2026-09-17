@@ -31,3 +31,5 @@ short enough for this 16 GB UMA machine. Override target/model paths with
 `KARPATHY_TARGET_DIR`, `KARPATHY_SWIFT_MODEL`, and `KARPATHY_QWEN35_MODEL`.
 Ctrl-C is handled by the shared orchestrator, which terminates the active gate,
 agent, and child process group before returning.
+The meta-agent provider watchdog defaults to 180 seconds per provider and can
+be shortened with `KARPATHY_META_TIMEOUT=120`.

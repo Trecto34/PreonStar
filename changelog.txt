@@ -37,3 +37,7 @@ QuarkStar Swift Qwen3.8-27B change log
 - Fixed Ctrl-C cleanup in the shared Karpathy orchestrator and target gate:
   active commands now run in dedicated process groups and are terminated
   together, preventing an orphaned `q36_test` from blocking the next pass.
+- Reduced the shared meta-agent provider watchdog from 900 seconds to 180
+  seconds per tier, with explicit fallback-stage output and a
+  `KARPATHY_META_TIMEOUT` override, so cadence audits cannot appear hung for
+  fifteen minutes before falling back.
