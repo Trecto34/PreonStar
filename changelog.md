@@ -81,3 +81,6 @@
 - Fixed the outer Python entrypoint to propagate preflight and loop failure
   statuses, and aligned the shared fallback regression fixture with the
   mandatory target compatibility-gate contract.
+- The DeepSeek launcher now automatically loads the owner-only key file at
+  `${HOME}/.config/deepseek/api-key`, so normal runs require no per-session
+  export; explicit environment variables still override it.

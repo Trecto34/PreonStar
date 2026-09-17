@@ -55,3 +55,5 @@ QuarkStar Swift Qwen3.8-27B change log
   before any compatibility or GPU process is launched.
 - Fixed propagation of outer-loop preflight/failure exit statuses and updated
   the fallback regression fixture for the mandatory target compatibility gate.
+- DeepSeek now loads `${HOME}/.config/deepseek/api-key` automatically with no
+  per-session export required; explicit environment variables still override it.

@@ -44,6 +44,10 @@ provider label in the config identifies it as V4.1 Flash. The key is never
 stored in this repository. The outer loop validates the key before launching
 the compatibility gate, so a missing credential cannot start GPU work.
 
+The launchers automatically read `${HOME}/.config/deepseek/api-key` when it is
+present. `DEEPSEEK_API_KEY_FILE` can override that location, and an already
+exported `DEEPSEEK_API_KEY` takes precedence.
+
 For a shell session:
 
 ```sh
@@ -52,8 +56,8 @@ export DEEPSEEK_API_KEY KARPATHY_PROVIDER=deepseek
 ./karpathy/run_outer.sh
 ```
 
-For a protected key file, set `DEEPSEEK_API_KEY_FILE` instead of exporting the
-key directly. Keep that file owner-readable only (`chmod 600`):
+For a different protected key file, set `DEEPSEEK_API_KEY_FILE` instead of
+using the default location. Keep that file owner-readable only (`chmod 600`):
 
 ```sh
 export DEEPSEEK_API_KEY_FILE="$HOME/.config/deepseek/api-key"
