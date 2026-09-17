@@ -114,10 +114,26 @@ The NULLS do, and those are what this section exists for.
   kernels off the critical path. A per-kernel source widening of the
   one-cross-lane-op decode kernels is still possible but the measured ceiling is
   now ~0, so it is no longer ranked. Evidence: `evidence/raw/ab-cswave32.csv`.
-- **f16-grid LDS staging (their iq3_s GEMV port, +14.0% on-shape)** — the one
-  peer kernel technique plausibly applicable here, same family as their
-  IQ3_XXS dequant VGPR fix. Candidate for the dense_iq3_xxs_decode 269 GB/s
-  vs sibling iq4_xs 333 GB/s gap. Not yet tried.
+- **f16-grid LDS staging (their iq3_s GEMV port, +14.0% on-shape) — TRIED,
+  MEASURED NEUTRAL, rejected (2026-09-17).** Ported to
+  `vulkan/dense_iq3_xxs_decode.comp` (+21/-22): `grid_lut` staged as `f16vec4`
+  in LDS (1 KiB -> 2 KiB), all 256 entries converted once per workgroup instead
+  of per-lane per row, signs applied packed in half, promoted back to float at
+  the *unchanged* FMA boundary (nesting and order untouched, so it should be
+  exact: grid components are integers <= 62, representable in binary16, x +-1 is
+  exact in half, promotion is exact). Built clean and **both**
+  `dense_iq3_xxs_decode.spv` and `dense_iq3_xxs_decode_r4.spv` rebuilt, so the
+  edit did reach the variant the profile names. Measured, 7 interleaved reps:
+  prefill **170.67 -> 170.65 = -0.01%**, decode **18.48 -> 18.55 = +0.38%**
+  (MAD 0.100 / 0.020), steady-state decode 18.48 vs 18.48 = **0.00%**. Both
+  inside the noise floor => **no gain**. The 269 vs 333 GB/s gap is therefore
+  NOT grid-LUT conversion cost; at this occupancy the kernel is already at its
+  practical limit. Do not re-port this technique to this kernel.
+  Evidence: `evidence/raw/ab-w9-decode.csv` + `ab-w9-decode-summary.txt`.
+- **Thermal margin is now a measured hazard to a single rep,** not a theory: in
+  the w9 A/B, rep A,5 hit 69 C and collapsed to 147.52 prefill / 9.89 decode
+  (-13% / -46%) while every other rep held 169.6-172.2. Only the median is a
+  valid number on this box; a single-rep decode comparison is meaningless.
 
 ### llama.cpp head-to-head + the integer-dot dead end (2026-09-17)
 

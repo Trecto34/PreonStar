@@ -1,0 +1,8 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    7     170.67         0.460     18.48          0.100     ./q36-bench
+B    7     170.65         0.330     18.55          0.020     /home/server/q36-wt/w9-iq3dec/q36-bench
+
+B vs A prefill: -0.01%   decode: +0.38%   (gate: +1.50%)
+verdict: FAIL (prefill)
+EXIT=0
