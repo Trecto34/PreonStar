@@ -1565,14 +1565,30 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
      * wave.  Each entry was checked for zero cross-lane builtin uses in its
      * .comp source; do not add a shader here without that check, because
      * for a shader that does reduce across lanes the two widths are not
-     * interchangeable. */
+     * interchangeable.
+     *
+     * Two traps found by audit (karpathy/evidence/wave32-eligibility.md):
+     * (1) a `gl_Subgroup*` READ is not a builtin *call*, but
+     * `gl_SubgroupID`/`gl_SubgroupInvocationID` are just as lane-count
+     * dependent -- a shader deriving an index from them is disqualified too;
+     * (2) when a tile is partitioned by gl_SubgroupID with a 32-wide stride,
+     * wave32 is a *correctness requirement*, not a tuning choice: at wave64
+     * only 2 subgroups exist and the tail of every tile is written by
+     * nobody.  That is why the whole dense `_mmq` family is forced here. */
     static const char *const q36_vk_force_wave32[] = {
         "delta_net_cols.spv",
         "rope_qwen.spv",
         "rope_qwen_mrope.spv",
         "quantize_q8_0.spv",
     };
-    bool force_wave32 = strstr(k->path, "dense_") && strstr(k->path, "_mmq.spv");
+    /* The old suffix test was "_mmq.spv", which misses the _r4 / _bm64
+     * variants because those end in "_mmq_r4.spv".  Specifically
+     * dense_iq3_s_mmq_r4 -- same source, same gl_SubgroupID token formula,
+     * selected at runtime for IQ3_S with out_dim == 48 && n_tok <= 128 --
+     * therefore ran at wave64, where only 2 subgroups exist and tokens
+     * 80..127 of every 128-token tile are written by nobody.  Match the
+     * whole dense _mmq family, suffix variants included. */
+    bool force_wave32 = strstr(k->path, "dense_") && strstr(k->path, "_mmq");
     for (size_t i = 0; !force_wave32 && i < sizeof(q36_vk_force_wave32) / sizeof(*q36_vk_force_wave32); i++) {
         force_wave32 = strstr(k->path, q36_vk_force_wave32[i]) != NULL;
     }
