@@ -220,6 +220,29 @@ from `https://huggingface.co/unsloth/Qwen3.8-27B-GGUF`. It stores files under
 `./gguf/`, resumes partial downloads with `curl -C -`, and updates
 `./q36moe.gguf` to point at the selected model for older scripts.
 
+For the reasoning-efficient Swift derivative, use the highest-quality tier that
+fits this 16 GB machine with the bounded-memory profile, IQ4_XS, from
+`ukisai/Swift-Qwen3.8-27B-GGUF`:
+
+```sh
+./download_model.sh swift
+./run_swift_iq4_xs.sh -p "Explain why the sky is blue in two sentences." --nothink
+```
+
+`run_swift.sh` uses a 4096-token default context and enables the embedded MTP
+draft head with three draft positions for smaller Swift quants. IQ4_XS has a
+dedicated bounded-memory profile for the BC-250:
+
+```sh
+./run_swift_iq4_xs.sh -p "Give me one concise sentence about Vulkan." --nothink
+```
+
+That profile disables full weight prewarming, uses a 1024-token default
+context, and recycles a 2 GiB dense-weight working set so the 14.6 GiB IQ4_XS
+file does not trigger the host OOM killer. It is necessarily slower than
+IQ3_XXS because weights are reloaded between cache windows. Override the
+working-set size with `Q36_VK_DENSE_WEIGHT_CACHE_GIB` on a larger GPU.
+
 Then build for the target platform:
 
 ```sh

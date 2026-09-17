@@ -2150,6 +2150,36 @@ static void q36_vk_weight_cache_free_unlocked(void) {
     q36_vk.arena_plan_next = 0;
 }
 
+/* Dense Qwen3.8-27B IQ4_XS is larger than the BC-250's practical resident
+ * budget. Keep the normal cache for smaller models, but allow the launcher
+ * to bound it for oversized dense models. Eviction happens only after a
+ * full queue drain, because cached weights may still be referenced by the
+ * command buffer even when the host has finished recording the operation. */
+static uint64_t q36_vk_dense_weight_cache_limit_unlocked(void) {
+    if (!q36_gpu_dense_model) return 0;
+    const char *env = getenv("Q36_VK_DENSE_WEIGHT_CACHE_GIB");
+    if (!env || !env[0]) return 0;
+    char *end = NULL;
+    unsigned long long gib = strtoull(env, &end, 10);
+    if (end == env || *end != '\0' || gib == 0 ||
+        gib > (unsigned long long)(UINT64_MAX >> 30)) return 0;
+    return (uint64_t)gib << 30;
+}
+
+static uint64_t q36_vk_weight_cache_bytes_unlocked(void) {
+    uint64_t total = 0;
+    for (q36_vk_weight *w = q36_vk.weights; w; w = w->next) {
+        if (UINT64_MAX - total < w->bytes) return UINT64_MAX;
+        total += w->bytes;
+    }
+    for (q36_vk_packed_weight *w = q36_vk.packed_weights; w; w = w->next) {
+        uint64_t bytes = w->tensor ? w->tensor->bytes : 0;
+        if (UINT64_MAX - total < bytes) return UINT64_MAX;
+        total += bytes;
+    }
+    return total;
+}
+
 /* Suballocate weight bytes from the arena; new blocks prefer the
  * device-local heap and fall back to host-cached memory when it is full,
  * like the old per-weight allocations did.  256-byte alignment satisfies
@@ -2270,6 +2300,15 @@ static q36_gpu_tensor *q36_vk_weight_get_unlocked(const void *source, uint64_t b
                 q36_vk.weights = w;
             }
             return w->tensor;
+        }
+    }
+
+    {
+        const uint64_t limit = q36_vk_dense_weight_cache_limit_unlocked();
+        const uint64_t cached = q36_vk_weight_cache_bytes_unlocked();
+        if (limit && (bytes > limit || cached > limit - bytes)) {
+            if (!q36_vk_flush_reason_unlocked("dense_weight_cache_evict")) return NULL;
+            q36_vk_weight_cache_free_unlocked();
         }
     }
 

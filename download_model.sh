@@ -4,12 +4,14 @@ set -e
 REPO="Ninnix96/Qwen3.6-35B-A3B-gguf"
 KAT_REPO="Ninnix96/KAT-Coder-V2.5-Dev-gguf"
 DENSE_REPO="unsloth/Qwen3.8-27B-GGUF"
+SWIFT_REPO="ukisai/Swift-Qwen3.8-27B-GGUF"
 VISION_REPO="unsloth/Qwen3.6-35B-A3B-GGUF"
 Q2_FILE="Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf"
 Q2_Q4_FILE="Qwen3.6-35B-A3B-Layers34-39Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-Q8Rest-imatrix.gguf"
 MTP_FILE="Qwen3.6-35B-A3B-MTP-Q4K-Q8_0-F32.gguf"
 KAT_FILE="KAT-Coder-V2.5-Dev-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-imatrix.gguf"
 DENSE_FILE="Qwen3.8-27B-UD-IQ3_S.gguf"
+SWIFT_FILE="Swift-Qwen3.8-27B-IQ4_XS.gguf"
 VISION_REMOTE="mmproj-F16.gguf"
 VISION_FILE="Qwen3.6-35B-A3B-mmproj-F16.gguf"
 DENSE_VISION_FILE="Qwen3.8-27B-mmproj-F16.gguf"
@@ -31,6 +33,7 @@ Usage:
   ./download_model.sh q2-q4-imatrix [--token TOKEN]
   ./download_model.sh kat-coder [--token TOKEN]
   ./download_model.sh 27b [--token TOKEN]
+  ./download_model.sh swift [--token TOKEN]
   ./download_model.sh qwen36-vision [--token TOKEN]
   ./download_model.sh qwen38-vision [--token TOKEN]
   ./download_model.sh mtp [--token TOKEN]
@@ -53,6 +56,11 @@ Targets:
 
   27b
        Dense Qwen3.8 27B Dynamic 3.0 IQ3_S quant from $DENSE_REPO.
+
+  swift
+       Swift-Qwen3.8-27B IQ4_XS quant from $SWIFT_REPO. This is the
+       highest-quality Swift tier supported by the bounded-memory BC-250
+       profile; use ./run_swift_iq4_xs.sh.
 
   qwen36-vision
        Qwen3.6 35B A3B F16 vision projector from $VISION_REPO.
@@ -106,6 +114,7 @@ case "$MODEL" in
     q2-q4-imatrix) MODEL_FILE=$Q2_Q4_FILE ;;
     kat-coder) MODEL_REPO=$KAT_REPO; MODEL_FILE=$KAT_FILE ;;
     27b) MODEL_REPO=$DENSE_REPO; MODEL_FILE=$DENSE_FILE ;;
+    swift) MODEL_REPO=$SWIFT_REPO; MODEL_FILE=$SWIFT_FILE ;;
     qwen36-vision)
         MODEL_REPO=$VISION_REPO
         MODEL_REMOTE=$VISION_REMOTE
