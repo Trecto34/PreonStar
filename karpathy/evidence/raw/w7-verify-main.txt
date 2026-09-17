@@ -1,0 +1,16 @@
+### IQ2_M on rebuilt main 19:25:35
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-bench: context buffers 129.05 MiB (scratch=55.96 MiB, raw=10.28 MiB, compressed=62.81 MiB, ctx=1296, backend=vulkan, prefill_chunk=256, raw_kv_rows=1296, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+1024,1024,117.98,16,32.36,4108
+IQ2M_EXIT=0
+### guard on rebuilt main 19:26:09
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-bench: context buffers 129.05 MiB (scratch=55.96 MiB, raw=10.28 MiB, compressed=62.81 MiB, ctx=1296, backend=vulkan, prefill_chunk=256, raw_kv_rows=1296, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+1024,1024,715.16,16,88.63,4108
+GUARD_EXIT=0

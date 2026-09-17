@@ -289,8 +289,13 @@ Measured:
   semantics, not a regression; read the medians, not the label. A's own rep spread
   (704.62 → 737.83) also reclassifies the earlier single-run reading of `686.84`
   as cold-run noise, not a signal.
+- **Merged tree re-verified after the merge + rebuild of the main checkout**
+  (main `q36-bench`, 19:25): IQ2_M `117.98 / 32.36` exit 0, guard `715.16 / 88.63`
+  exit 0 — the committed source is what produced the accepted numbers, not just
+  the worktree build.
 - Raw: `evidence/raw/ab-w7-guard.csv`, `w7-parity.txt`, `w7-iq2m-prof.txt`,
-  `w7-guard-patched-prof.txt`. Binary sha256: A `ffd2d262…8883`, B `3264f5dc…afbb`.
+  `w7-guard-patched-prof.txt`, `w7-verify-main.txt`. Binary sha256:
+  A `ffd2d262…8883`, B `3264f5dc…afbb`.
 - **Accepted because** it makes a file the engine could not open load *and* decode
   with verified parity, at zero measured cost to the guard. **Reconsider_if:** a
   future MoE GGUF of the same 753-tensor shape ships non-trunk types the generic

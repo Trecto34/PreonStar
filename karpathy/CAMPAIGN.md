@@ -5,8 +5,8 @@
 straight to `## Open items, ranked`.
 
 Last updated: 2026-09-17 (late session) · repo `/home/server/q36-opt-27b` ·
-branch `experiment/radiance-transfer-bc250` · HEAD `f9d537d` (w7 loader fix
-merged; this docs commit follows it).
+branch `experiment/radiance-transfer-bc250` · HEAD `e0b7eb4` (w7 loader fix +
+its verdict docs; a docs-only verification commit follows it).
 
 ---
 
