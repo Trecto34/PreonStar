@@ -12,3 +12,14 @@ This ledger starts from the completed Swift bring-up in `changelog.txt`.
 Do not repeat these hypotheses without a new hardware or runtime reason.
 Preserve MoE routing parity for the Qwen3.5/Qwen3.6 reference on every
 accepted change, even when the primary target is dense Swift Qwen3.8.
+
+## Interrupted experiment: 2026-09-17 12:00 (DeepSeek worker)
+
+- **IQ3_XXS dense MMQ lane split — REJECTED/INTERRUPTED:** split the
+  `dense_iq3_xxs_mmq` dequant staging across all 128 lanes. The first build
+  failed because `half` is a GLSL reserved word; after renaming it, the
+  candidate was bit-exact but regressed the down-projection microbenchmark by
+  about 2.7% and did not establish an end-to-end win. The compatibility gate
+  passed, but the worker was terminated before its required final report.
+  Do not retry this lane-split mechanism without a measured explanation for
+  the down-projection regression.

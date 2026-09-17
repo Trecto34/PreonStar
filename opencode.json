@@ -10,7 +10,11 @@
       },
       "models": {
         "deepseek-flash": {
-          "name": "DeepSeek V4.1 Flash"
+          "name": "DeepSeek V4.1 Flash",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
         }
       }
     }

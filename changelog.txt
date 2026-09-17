@@ -60,3 +60,15 @@ QuarkStar Swift Qwen3.8-27B change log
 - Target wrappers now select DeepSeek by default, so the persisted-key setup
   runs directly with `./karpathy/run_outer.sh`; `KARPATHY_PROVIDER=union`
   remains an explicit legacy override.
+- Tightened the inner DeepSeek worker: the harness injects target/shared
+  previous-attempt snapshots and requires a `LEDGER_CHECK` before source work.
+  The direct model is capped at 32K context and 4096 output tokens, with a
+  600-second default watchdog against open-ended exploratory passes.
+- Failed or incomplete worker turns now skip the expensive compatibility gate;
+  only a successful ledger-checked turn can consume GPU time on validation.
+- Added Linux parent-death signals to the orchestrator and experiment worker so
+  abrupt supervisor termination cannot leave an orphaned DeepSeek agent running.
+- Closed and recorded interrupted experiment `20260917T120056-9e9fa702`: its
+  lane-split `dense_iq3_xxs_mmq` candidate was bit-exact but regressed down
+  projection by about 2.7%, and was terminated before its final report. The
+  rejected mechanism is now recorded in the target AlreadyTried ledger.

@@ -33,6 +33,9 @@ Ctrl-C is handled by the shared orchestrator, which terminates the active gate,
 agent, and child process group before returning.
 The meta-agent provider watchdog defaults to 180 seconds per provider and can
 be shortened with `KARPATHY_META_TIMEOUT=120`.
+The inner DeepSeek worker has a 600-second hard watchdog and a 32K context /
+4096-output model limit; tune the watchdog with `KARPATHY_INNER_TIMEOUT` only
+when a deliberately longer experiment justifies the extra spend.
 If a persisted cadence lands on meta before you want it, use
 `KARPATHY_SKIP_META=1 ./karpathy/run_outer.sh` for that invocation.
 

@@ -87,3 +87,18 @@
 - The target wrappers now select DeepSeek by default, so the persisted-key
   setup runs with `./karpathy/run_outer.sh` directly; `KARPATHY_PROVIDER=union`
   remains an explicit legacy override.
+- Tightened the inner DeepSeek worker: the harness injects target/shared
+  previous-attempt snapshots and requires a `LEDGER_CHECK` before source work;
+  the direct model is capped at 32K context and 4096 output tokens, with a
+  600-second default watchdog to stop open-ended exploratory passes.
+- Failed or incomplete worker turns now skip the expensive compatibility gate;
+  only a successful turn with a `LEDGER_CHECK` marker can consume GPU time on
+  validation.
+- Added Linux parent-death signals to the orchestrator and experiment worker;
+  abrupt supervisor termination can no longer leave an orphaned DeepSeek agent
+  running and consuming tokens.
+- Closed and recorded the interrupted DeepSeek experiment
+  `20260917T120056-9e9fa702`: its lane-split `dense_iq3_xxs_mmq` candidate was
+  bit-exact but regressed down projection by about 2.7%, and the incomplete
+  worker was terminated before its report. The rejected mechanism is now in
+  the target `karpathy/AlreadyTried.md` ledger.
