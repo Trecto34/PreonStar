@@ -6,8 +6,8 @@ KARPATHY_CORE="${KARPATHY_CORE_DIR:-/home/server/Karpathy}"
 STORE_DIR="${KARPATHY_STORE_DIR:-${ROOT_DIR}/.karpathy/experiments}"
 
 if [[ "${1:-}" != "--worker" ]]; then
-    exec python3 "$KARPATHY_CORE/experiments.py" run \
-        --store "$STORE_DIR" --target "$ROOT_DIR" -- \
+    exec python3 "$KARPATHY_CORE/experiments.py" --store "$STORE_DIR" run \
+        --target "$ROOT_DIR" -- \
         bash "$ROOT_DIR/karpathy/run_inner.sh" --worker
 fi
 
