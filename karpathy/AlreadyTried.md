@@ -38,3 +38,12 @@ accepted change, even when the primary target is dense Swift Qwen3.8.
 - **Smaller prefill chunks — REJECTED:** on 1024-token prompts, the existing
   watchdog-safe caps (Swift 256, Qwen3.6 1024) were fastest among tested
   chunk sizes. Do not raise Swift above 256 without a watchdog-safety proof.
+- **IQ3_XXS MMQ token tiles 64 or 256 — REJECTED:** with matching dispatch
+  divisors, they produced 161.07 and 166.87 prefill tok/s respectively at
+  context 1024, versus 172.41 tok/s for the existing 128-token tile.
+- **IQ3_XXS MMQ dynamic k loop — REJECTED:** removing `[[unroll]]` raised
+  128-token MMQ GPU time from about 940 to 960 ms.
+- **IQ3_XXS decode rows 8 — REJECTED:** 128-token generation throughput
+  matched the existing four-row shader at 24.14 tok/s; no speedup.
+- **Swift MTP draft depth 2 — REJECTED:** 23.28 tok/s over 128 generated
+  tokens against 24.14 tok/s for plain depth-1 decode.

@@ -132,3 +132,19 @@
   measurements, not a claimed vLLM-MXFP4 port: neither model uses MXFP4 and
   the candidate kernel transfers failed the BC-250 speed gate. The existing
   Qwen3.6 CPU/Vulkan parity and Swift Vulkan smoke compatibility gate passed.
+
+### Follow-up after throughput feedback
+
+- Tried wider and narrower IQ3_XXS prefill tiles with matching Vulkan
+  dispatch changes. At context 1024, the 256-token tile yielded 166.87
+  prefill tok/s and the 64-token tile 161.07 tok/s, both below the 172.41
+  tok/s three-run baseline for the 128-token tile. Both were reverted.
+- Tested Swift's in-file MTP draft depth 2 over 128 generated tokens: 23.28
+  tok/s versus 24.14 tok/s with the existing depth 1. No default change.
+- Removing forced unrolling in the IQ3_XXS MMQ shader increased 128-token
+  kernel time from roughly 940 to 960 ms; reverted. An eight-row IQ3_XXS
+  decode variant matched the existing 24.14 tok/s generation rate over 128
+  tokens, so it was also reverted. Restored the original shaders and build.
+- No runtime speedup was accepted. The next meaningful step would require a
+  larger change to the dominant IQ3_XXS prefill or Qwen3.6 MoE data path,
+  with correctness and thermal-controlled end-to-end validation.

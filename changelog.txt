@@ -89,3 +89,12 @@ QuarkStar Swift Qwen3.8-27B change log
 - Final unchanged-kernel three-run averages: Swift 172.41 prefill, 22.53
   decode tok/s; Qwen3.6 923.48 prefill, 88.01 decode tok/s. Accepted
   model-speed gain: 0% for both. Qwen CPU/Vulkan parity and Swift smoke passed.
+
+2026-09-17 follow-up after throughput feedback:
+- IQ3_XXS MMQ 256-token tile: 166.87 prefill tok/s; 64-token tile: 161.07,
+  versus 172.41 baseline at context 1024. Both reverted.
+- MTP draft depth 2: 23.28 generation tok/s versus 24.14 with depth 1 over
+  128 tokens. No default change.
+- Removing MMQ forced unrolling worsened 128-token kernel time about 940 to
+  960 ms. Eight-row IQ3 decode matched baseline 24.14 tok/s, no gain.
+  Both shader changes reverted; original build restored.
