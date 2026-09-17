@@ -68,3 +68,16 @@
   failure when the provider is unavailable.
 - Added `KARPATHY_SKIP_META=1` to bypass one scheduled meta audit and start the
   inner pass immediately when persistent cadence state lands on that audit.
+- Added a project-local direct DeepSeek provider in `opencode.json`, using the
+  current `deepseek-flash` API model (DeepSeek V4.1 Flash) at DeepSeek's
+  official OpenAI-compatible base URL, and
+  `DEEPSEEK_API_KEY`/`DEEPSEEK_API_KEY_FILE` without storing credentials.
+- Added `KARPATHY_PROVIDER=deepseek` support to both shared Karpathy loops.
+  Inner and outer runs use `deepseek-direct/deepseek-flash`, target the local
+  OpenCode config explicitly, and stop on provider failure unless fallback is
+  deliberately enabled outside this default mode.
+- Added an outer-loop credential preflight so a missing DeepSeek key exits
+  before any compatibility/GPU process is launched.
+- Fixed the outer Python entrypoint to propagate preflight and loop failure
+  statuses, and aligned the shared fallback regression fixture with the
+  mandatory target compatibility-gate contract.

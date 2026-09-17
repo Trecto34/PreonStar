@@ -35,3 +35,36 @@ The meta-agent provider watchdog defaults to 180 seconds per provider and can
 be shortened with `KARPATHY_META_TIMEOUT=120`.
 If a persisted cadence lands on meta before you want it, use
 `KARPATHY_SKIP_META=1 ./karpathy/run_outer.sh` for that invocation.
+
+## DeepSeek V4.1 Flash for both loops
+
+The repository contains a project-local OpenCode provider named
+`deepseek-direct`. DeepSeek's current API model name is `deepseek-flash`; the
+provider label in the config identifies it as V4.1 Flash. The key is never
+stored in this repository. The outer loop validates the key before launching
+the compatibility gate, so a missing credential cannot start GPU work.
+
+For a shell session:
+
+```sh
+read -rsp 'DeepSeek API key: ' DEEPSEEK_API_KEY; echo
+export DEEPSEEK_API_KEY KARPATHY_PROVIDER=deepseek
+./karpathy/run_outer.sh
+```
+
+For a protected key file, set `DEEPSEEK_API_KEY_FILE` instead of exporting the
+key directly. Keep that file owner-readable only (`chmod 600`):
+
+```sh
+export DEEPSEEK_API_KEY_FILE="$HOME/.config/deepseek/api-key"
+export KARPATHY_PROVIDER=deepseek
+./karpathy/run_outer.sh
+```
+
+Both the inner worker and outer meta audit then use
+`deepseek-direct/deepseek-flash`. DeepSeek mode is provider-exclusive by
+default, so an API failure stops the pass rather than silently spending quota
+with another provider. If needed, explicitly opt into the old fallback ladder
+with `KARPATHY_DEEPSEEK_FALLBACK=1` and `INNER_ALLOW_FALLBACK=1`. Use
+`KARPATHY_DEEPSEEK_MODEL` to override the model route, or
+`KARPATHY_USE_DEEPSEEK=1` as an equivalent switch.

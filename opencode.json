@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "deepseek-direct": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "DeepSeek V4.1 Flash (direct API)",
+      "options": {
+        "baseURL": "https://api.deepseek.com",
+        "apiKey": "{env:DEEPSEEK_API_KEY}"
+      },
+      "models": {
+        "deepseek-flash": {
+          "name": "DeepSeek V4.1 Flash"
+        }
+      }
+    }
+  }
+}

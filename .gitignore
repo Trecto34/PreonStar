@@ -23,6 +23,7 @@ tests/__pycache__/
 *.spv
 *.json
 *.json
+!/opencode.json
 !/tests/test-vectors/*/llamacpp/*.llamacpp.json
 !/tests/test-vectors/*/manifest.json
 *.dSYM/

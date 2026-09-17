@@ -43,3 +43,15 @@ QuarkStar Swift Qwen3.8-27B change log
   fifteen minutes before falling back.
 - Added `KARPATHY_SKIP_META=1` to the shared orchestrator for an immediate inner
   pass when persistent cadence state would otherwise start the slower meta audit.
+- Added a project-local direct DeepSeek provider in `opencode.json`, using the
+  current `deepseek-flash` API model (DeepSeek V4.1 Flash) at the official
+  OpenAI-compatible base URL. Credentials remain outside the repository through
+  `DEEPSEEK_API_KEY` or `DEEPSEEK_API_KEY_FILE`.
+- Added `KARPATHY_PROVIDER=deepseek` support to both Karpathy loops. Inner and
+  outer runs use `deepseek-direct/deepseek-flash`, load the target OpenCode
+  config explicitly, and stop on DeepSeek failure instead of silently changing
+  providers.
+- Added an outer-loop credential preflight; a missing DeepSeek key now exits
+  before any compatibility or GPU process is launched.
+- Fixed propagation of outer-loop preflight/failure exit statuses and updated
+  the fallback regression fixture for the mandatory target compatibility gate.
