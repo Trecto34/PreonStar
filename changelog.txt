@@ -68,6 +68,8 @@ QuarkStar Swift Qwen3.8-27B change log
   only a successful ledger-checked turn can consume GPU time on validation.
 - Added Linux parent-death signals to the orchestrator and experiment worker so
   abrupt supervisor termination cannot leave an orphaned DeepSeek agent running.
+- Added `--verbose`/`KARPATHY_VERBOSE=1` to both target loops, streaming the
+  inner worker live while preserving its worker log.
 - Closed and recorded interrupted experiment `20260917T120056-9e9fa702`: its
   lane-split `dense_iq3_xxs_mmq` candidate was bit-exact but regressed down
   projection by about 2.7%, and was terminated before its final report. The

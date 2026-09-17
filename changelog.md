@@ -97,6 +97,9 @@
 - Added Linux parent-death signals to the orchestrator and experiment worker;
   abrupt supervisor termination can no longer leave an orphaned DeepSeek agent
   running and consuming tokens.
+- Added `--verbose`/`KARPATHY_VERBOSE=1` to both target loops; inner worker
+  output now streams live to the terminal while remaining saved to its worker
+  log.
 - Closed and recorded the interrupted DeepSeek experiment
   `20260917T120056-9e9fa702`: its lane-split `dense_iq3_xxs_mmq` candidate was
   bit-exact but regressed down projection by about 2.7%, and the incomplete

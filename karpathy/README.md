@@ -25,6 +25,16 @@ Swift/Qwen compatibility gate and target guidance.
 ./karpathy/compat_gate.sh
 ```
 
+Add `--verbose` to either loop to stream the live inner-worker transcript while
+also saving it under the experiment store:
+
+```sh
+./karpathy/run_inner.sh --verbose
+./karpathy/run_outer.sh --verbose
+```
+
+Automation can use the equivalent `KARPATHY_VERBOSE=1` environment variable.
+
 The shared orchestrator never starts concurrent `q36`, `q36-bench`, or
 `q36_test` jobs. The default context and generation lengths are deliberately
 short enough for this 16 GB UMA machine. Override target/model paths with
