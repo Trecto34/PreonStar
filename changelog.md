@@ -29,7 +29,8 @@
   an unreliable default optimization.
 - Verified `make vulkan-generic -j2`, shell syntax, IQ4_XS Vulkan inspection, and
   a bounded single-token generation smoke test returning `READY` without a
-  SIGKILL. The IQ4_XS file is present at `gguf/Swift-Qwen3.8-27B-IQ4_XS.gguf`.
+  SIGKILL. The IQ4_XS file was subsequently permanently deleted after the
+  faster IQ3_XXS replacement was validated.
 - Tested a resident IQ4_XS split-heap experiment, but rejected it: the kernel
   reported 14.6 GiB of active GPU memory and the host OOM killer terminated the
   Codex process. The launcher therefore remains on the tested bounded-cache
@@ -44,3 +45,13 @@
   35B-A3B IQ2XXS reached 53.39 tok/s, Qwen3.8-27B IQ3_S reached 18.93 tok/s,
   and bounded IQ4_XS reached 0.11 tok/s. The first two are the practical fast
   options on this machine; IQ4_XS is capacity/I/O limited by its 14.6 GiB size.
+
+## Karpathy bilevel setup
+
+- Added versioned repo-local inner and outer loop configuration under
+  `karpathy/`, targeting Swift IQ3_XXS in isolated experiment worktrees.
+- Added `karpathy/compat_gate.sh`, which serially runs Swift IQ3_XXS smoke and
+  Qwen3.5/Qwen3.6 qwen35moe CPU/Vulkan parity with per-process timeouts.
+- The inner report finalizer records the gate as evidence and prevents a failed
+  compatibility run from being accepted. The outer loop performs preflight and
+  postflight gates and defaults to one pass to avoid unattended crash loops.

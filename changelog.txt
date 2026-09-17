@@ -26,3 +26,9 @@ QuarkStar Swift Qwen3.8-27B change log
   from the default launcher and the safe bounded profile was restored.
 - Current commits include 936c9f1 (usable IQ3_XXS profile) and the follow-up
   performance work in the working branch.
+- Added a repo-local Karpathy bilevel setup under `karpathy/`: isolated inner
+  experiments, a finite serialized outer loop, local task/ledger guidance, and
+  an independent compatibility gate. Both loops test Swift IQ3_XXS and the
+  Qwen3.5/Qwen3.6 `qwen35moe` reference sequentially before a candidate can be
+  accepted; the gate uses separate executable checks and hard timeouts to avoid
+  the old overlapping-GPU/SIGKILL failure mode.

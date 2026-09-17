@@ -47,6 +47,8 @@ TODO.md
 /tests/test_moe_gate_up
 /tests/test_moe_down
 /Karpathy
+/karpathy/__pycache__/
+/.karpathy/
 
 # Working notes for the optimization effort: session logs, handoffs, raw
 # benchmark captures and the original roadmap.  These are a lab notebook for
