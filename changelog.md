@@ -60,3 +60,6 @@
   `qwen35moe` short CPU/Vulkan parity was `OK`, followed by Swift IQ3_XXS at
   177.84 prefill tok/s and 21.19 generation tok/s, with no lingering GPU
   process.
+- Added process-group cleanup for Ctrl-C in the shared Karpathy orchestrator and
+  target gate, terminating active model/agent children together instead of
+  leaving an orphaned `q36_test` behind.

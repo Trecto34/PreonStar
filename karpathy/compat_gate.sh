@@ -9,6 +9,19 @@ LOG_FILE="${KARPATHY_COMPAT_LOG:-${EVIDENCE_DIR}/compatibility-gate.log}"
 TIMEOUT_SECONDS="${KARPATHY_GATE_TIMEOUT:-180}"
 CTX="${KARPATHY_GATE_CTX:-1024}"
 GEN_TOKENS="${KARPATHY_GATE_GEN_TOKENS:-4}"
+ACTIVE_PID=0
+
+cleanup() {
+    local status=$?
+    trap - INT TERM EXIT
+    if [[ "$ACTIVE_PID" -gt 0 ]] && kill -0 "$ACTIVE_PID" 2>/dev/null; then
+        kill -TERM -- "-$ACTIVE_PID" 2>/dev/null || kill -TERM "$ACTIVE_PID" 2>/dev/null || true
+        wait "$ACTIVE_PID" 2>/dev/null || true
+    fi
+    exit "$status"
+}
+trap 'exit 130' INT
+trap 'cleanup' TERM EXIT
 
 mkdir -p -- "$(dirname -- "$LOG_FILE")"
 : > "$LOG_FILE"
@@ -36,11 +49,14 @@ echo "context=$CTX generation=$GEN_TOKENS timeout=${TIMEOUT_SECONDS}s"
 
 echo "[1/2] Qwen3.5/Qwen3.6 MoE CPU/Vulkan parity"
 set +e
-Q36_TEST_THREADS="${Q36_TEST_THREADS:-4}" \
+setsid env Q36_TEST_THREADS="${Q36_TEST_THREADS:-4}" \
     timeout --kill-after=5s "${TIMEOUT_SECONDS}s" \
     "$ROOT_DIR/q36_test" --gpu-cpu-parity --model "$QWEN35_MODEL" \
-    --case short_reasoning_plain
+    --case short_reasoning_plain &
+ACTIVE_PID=$!
+wait "$ACTIVE_PID"
 qwen_status=$?
+ACTIVE_PID=0
 set -e
 [[ "$qwen_status" -eq 0 ]] || fail "Qwen3.5/Qwen3.6 parity exited with $qwen_status"
 
@@ -52,7 +68,7 @@ done
 
 echo "[2/2] Swift IQ3_XXS Vulkan smoke benchmark"
 set +e
-env \
+setsid env \
     Q36_SWIFT_MODEL="$SWIFT_MODEL" \
     Q36_SWIFT_CTX="$CTX" \
     Q36_SWIFT_MTP_DRAFT=1 \
@@ -62,7 +78,10 @@ env \
     --prefill-chunk 512 --ctx-start "$CTX" --ctx-max "$CTX" \
     --ctx-alloc "$((CTX + GEN_TOKENS + 1))" --gen-tokens "$GEN_TOKENS" \
     -ctk q8_0 -ctv q4_0 --mtp-draft 1
+ACTIVE_PID=$!
+wait "$ACTIVE_PID"
 swift_status=$?
+ACTIVE_PID=0
 set -e
 [[ "$swift_status" -eq 0 ]] || fail "Swift smoke exited with $swift_status"
 

@@ -34,3 +34,6 @@ QuarkStar Swift Qwen3.8-27B change log
 - Compatibility gate validation passed on the BC-250: Qwen3.5/Qwen3.6
   `qwen35moe` short CPU/Vulkan parity was `OK`, followed by Swift IQ3_XXS at
   177.84 prefill tok/s and 21.19 generation tok/s; no GPU process remained.
+- Fixed Ctrl-C cleanup in the shared Karpathy orchestrator and target gate:
+  active commands now run in dedicated process groups and are terminated
+  together, preventing an orphaned `q36_test` from blocking the next pass.

@@ -18,7 +18,7 @@ Swift/Qwen compatibility gate and target guidance.
 # One isolated inner experiment (shared Karpathy logic)
 ./karpathy/run_inner.sh
 
-# Infinite outer campaign, owned by ~/Karpathy (Ctrl-C to stop)
+# Infinite outer campaign, owned by ~/Karpathy (Ctrl-C stops its process group)
 ./karpathy/run_outer.sh
 
 # Compatibility-only check
@@ -29,3 +29,5 @@ The shared orchestrator never starts concurrent `q36`, `q36-bench`, or
 `q36_test` jobs. The default context and generation lengths are deliberately
 short enough for this 16 GB UMA machine. Override target/model paths with
 `KARPATHY_TARGET_DIR`, `KARPATHY_SWIFT_MODEL`, and `KARPATHY_QWEN35_MODEL`.
+Ctrl-C is handled by the shared orchestrator, which terminates the active gate,
+agent, and child process group before returning.

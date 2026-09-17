@@ -30,4 +30,6 @@ All model invocations are bounded by `timeout --kill-after`. GPU jobs are
 serialized by both the experiment lock and the compatibility gate's executable
 checks. A failed or timed-out gate never promotes a candidate. This prevents
 the recurring SIGKILL cascade seen with oversized contexts and overlapping
-Vulkan processes.
+Vulkan processes. The shared orchestrator starts each command in its own
+process group and terminates that group on Ctrl-C; the target gate does the same
+for each model subprocess.
