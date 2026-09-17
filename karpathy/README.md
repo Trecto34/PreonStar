@@ -52,7 +52,7 @@ For a shell session:
 
 ```sh
 read -rsp 'DeepSeek API key: ' DEEPSEEK_API_KEY; echo
-export DEEPSEEK_API_KEY KARPATHY_PROVIDER=deepseek
+export DEEPSEEK_API_KEY
 ./karpathy/run_outer.sh
 ```
 
@@ -72,3 +72,7 @@ with another provider. If needed, explicitly opt into the old fallback ladder
 with `KARPATHY_DEEPSEEK_FALLBACK=1` and `INNER_ALLOW_FALLBACK=1`. Use
 `KARPATHY_DEEPSEEK_MODEL` to override the model route, or
 `KARPATHY_USE_DEEPSEEK=1` as an equivalent switch.
+
+For this target, `./karpathy/run_outer.sh` and `./karpathy/run_inner.sh`
+default to DeepSeek automatically. Set `KARPATHY_PROVIDER=union` only when
+you intentionally want the previous provider path.

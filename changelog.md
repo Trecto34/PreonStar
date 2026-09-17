@@ -84,3 +84,6 @@
 - The DeepSeek launcher now automatically loads the owner-only key file at
   `${HOME}/.config/deepseek/api-key`, so normal runs require no per-session
   export; explicit environment variables still override it.
+- The target wrappers now select DeepSeek by default, so the persisted-key
+  setup runs with `./karpathy/run_outer.sh` directly; `KARPATHY_PROVIDER=union`
+  remains an explicit legacy override.

@@ -57,3 +57,6 @@ QuarkStar Swift Qwen3.8-27B change log
   the fallback regression fixture for the mandatory target compatibility gate.
 - DeepSeek now loads `${HOME}/.config/deepseek/api-key` automatically with no
   per-session export required; explicit environment variables still override it.
+- Target wrappers now select DeepSeek by default, so the persisted-key setup
+  runs directly with `./karpathy/run_outer.sh`; `KARPATHY_PROVIDER=union`
+  remains an explicit legacy override.
