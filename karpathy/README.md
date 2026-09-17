@@ -10,6 +10,14 @@ Qwen3.6 model metadata, target ledger, and independent CPU/Vulkan parity gate.
 ./karpathy/compat_gate.sh
 ```
 
+Use `--verbose` on either entrypoint to stream the inner-worker transcript live
+while preserving the worker log, or set `KARPATHY_VERBOSE=1` in automation:
+
+```sh
+./karpathy/run_inner.sh --verbose
+./karpathy/run_outer.sh --verbose
+```
+
 DeepSeek V4.1 Flash is the default agent provider and uses the protected key
 file at `${HOME}/.config/deepseek/api-key`. The worker has a 600-second default
 watchdog, a 32K context/4096-output model limit, and must emit `LEDGER_CHECK:`

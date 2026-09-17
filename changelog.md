@@ -13,3 +13,5 @@
   consume the Swift target's meta cadence.
 - Validated the new Qwen3.6 gate on the BC-250: CPU/Vulkan
   `short_reasoning_plain` parity passed with matching top-1/top-k results.
+- Added `--verbose`/`KARPATHY_VERBOSE=1` to both loop entrypoints, streaming the
+  inner worker live while preserving its worker log.

@@ -9,4 +9,8 @@ export KARPATHY_PROVIDER="${KARPATHY_PROVIDER:-deepseek}"
 export KARPATHY_TARGET_NAME="${KARPATHY_TARGET_NAME:-Qwen3.6-35B-A3B MoE}"
 export KARPATHY_PRIMARY_MODEL="${KARPATHY_PRIMARY_MODEL:-/home/server/q36/gguf/Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf}"
 export KARPATHY_COMPAT_MODEL="${KARPATHY_COMPAT_MODEL:-$KARPATHY_PRIMARY_MODEL}"
+if [[ "${1:-}" == "--verbose" ]]; then
+    export KARPATHY_VERBOSE=1
+    shift
+fi
 exec python3 "$HOME/Karpathy/orchestrator.py" "$@"

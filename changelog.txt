@@ -11,3 +11,5 @@ Qwen3.6 Karpathy change log
 - Isolated Qwen3.6 cadence state in state-q36-opt.json from the Swift campaign.
 - Validated the Qwen3.6 CPU/Vulkan short_reasoning_plain parity gate on the
   BC-250; top-1/top-k results matched.
+- Added `--verbose`/`KARPATHY_VERBOSE=1` to both loop entrypoints, streaming the
+  inner worker live while preserving its worker log.
