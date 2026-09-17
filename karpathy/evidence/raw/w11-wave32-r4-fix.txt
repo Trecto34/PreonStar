@@ -1,0 +1,95 @@
+# w11: dense_iq3_s_mmq_r4 escaped the wave32 force list (correctness fix)
+
+Branch `experiment/w11-wave32r4` off `330f7eb`. Found by the wave32-eligibility
+audit (`karpathy/evidence/wave32-eligibility.md` §6.3) and re-verified here from
+source before any edit.
+
+## The defect
+
+`q36_vulkan.c` decided whether to force `requiredSubgroupSize = 32` with a
+**suffix** test:
+
+    bool force_wave32 = strstr(k->path, "dense_") && strstr(k->path, "_mmq.spv");
+
+`dense_iq3_s_mmq_r4.spv` ends in `_mmq_r4.spv`, so it never matched, while the
+Makefile builds it from the *same* source (`Makefile:198`,
+`-DQ36_BM=4 -DQ36_BK=64`) and the runtime selects it for IQ3_S weights with
+`out_dim == 48 && n_tok <= 128`.
+
+That source partitions a 128-token tile by subgroup id:
+
+    uint wave = gl_SubgroupID;                    // dense_iq3_s_mmq.comp:79-83
+    uint thread_tok = lane >> 2u;
+    bv[...] = buf_b[(warp_tok*32u + st*16u + thread_tok*2u + t)*STRIDE + k];   // :172-176
+    uint tok = tok0 + warp_tok*32u + (tt>>1u)*16u + thread_tok*2u + (tt&1u);   // :189-190
+
+The token formula sits **outside** any `#if Q36_BM` gate, so `-DQ36_BM=4` does
+not change it. Maximum token offset reachable in a tile:
+
+    wave32  4 subgroups (warp_tok<=3), thread_tok<=7   -> 3*32+16+7*2+1 = 127  OK
+    wave64  2 subgroups (warp_tok<=1), thread_tok<=15  -> 1*32+16+15*2+1 = 79  BROKEN
+
+At wave64 the tail of every 128-token tile — tokens 80..127 — is written by
+nobody. So wave32 on this family is not a tuning choice; it is what makes the
+tile complete. The hole was in the *name test*, not in the reasoning.
+
+## The fix (two edits, one behaviour change)
+
+1. `q36_vulkan.c:1591` — `"_mmq.spv"` -> `"_mmq"`, covering `_r4`, `_bm64` and
+   any future suffix variant of the family.
+2. The comment above the list said "zero cross-lane builtin uses" — a
+   `gl_SubgroupID` **read** is not a builtin *call*, so it passed that check. The
+   comment now names both traps (subgroup reads are lane-count dependent; a
+   subgroup-partitioned tile makes wave32 a correctness requirement).
+
+## Behavioural delta is exactly one pipeline (measured)
+
+Old vs new predicate evaluated over every dense mmq shader the Makefile builds:
+
+    dense_extra_mmq.spv        old=1 new=1
+    dense_iq3_s_bm64_mmq.spv   old=1 new=1
+    dense_iq3_s_mmq.spv        old=1 new=1
+    dense_iq3_s_mmq_r4.spv     old=0 new=1   <<< CHANGED
+    dense_iq3_xxs_mmq.spv      old=1 new=1
+    dense_iq4_xs_mmq.spv       old=1 new=1
+    dense_kquant_mmq.spv       old=1 new=1
+
+No previously-forced pipeline changes, and nothing that was unforced becomes
+forced except the broken one.
+
+## Build and binary verification
+
+- `make -j8` exit 0; binaries written 20:21.
+- `q36_vulkan.o` (20:21:16) newer than `q36_vulkan.c` (20:20:13) — it recompiled.
+- md5 baseline `6c2813089b0697e11fdaec8730b99f53` vs w11
+  `6204d5b10d682ba48326c07b07fa3937` — the binaries differ.
+- Source check: worktree line 1591 is the widened predicate; **main is untouched**
+  (`q36_vulkan.c:1575` still `_mmq.spv`).
+- Note on grepping the binaries: `strings | grep -c _mmq.spv` returns 8 in *both*,
+  because rodata carries a shader-name table full of `_mmq.spv` entries and GCC
+  tail-merges the new literal into it. The string count therefore proves nothing;
+  the `.o`/`.c` timestamps and md5 do.
+
+## Caveat: the dynamic proof is by construction, not by a live run
+
+No local model selects this variant — it needs IQ3_S with `out_dim == 48`.
+Qwen3.8-27B-UD-IQ3_S uses the IQ3_S family but not that projection size, so the
+bug is **latent** on this box: real, reachable in principle, not currently
+corrupting any of the three benchmark models. The fix closes a landmine rather
+than moving a benchmark number; do not read it as a speed win.
+
+## Also owed: §6.2 (cswave32) is only PARTIALLY closed
+
+The `RADV_PERFTEST=cswave32` A/B (`ef6472e`, prefill -0.74%) flipped the arena
+default width for **every** non-forced pipeline, including the 30 CROSS-LANE-HEAVY
+shaders the audit says are not numerically interchangeable between widths. No
+parity gate was applied on that run. So:
+
+- measured and valid: the env-level lever loses (-0.74%).
+- **not** measured: widening only the audit's 57 SAFE-WAVE32 shaders, which is a
+  source-level force-list change and is expected to be numerically safe.
+
+That remains the one clean test left on the width axis, and it is the same test
+that would settle the audit's §3b list — nine clean-scan shaders blocked only by
+the comment's letter (`local_size_x != 32`), among them `moe_matvec`, the kernel
+carrying ~67% of IQ2_M's GPU time.

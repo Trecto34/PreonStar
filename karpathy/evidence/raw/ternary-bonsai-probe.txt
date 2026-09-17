@@ -1,0 +1,81 @@
+# Ternary-Bonsai-2-27B (prism-ml): can q36 run it?  — NO
+
+Probe date: 2026-09-17. Engine: /home/server/q36-opt-27b (baseline build).
+No model weights were downloaded: the verdict comes from the GGUF header,
+read with a 32 MB HTTP range request against
+`prism-ml/Ternary-Bonsai-2-27B-gguf` (sha `6ed5e12bf84b`).
+Raw header dump: /tmp/hf-bonsai.json + output of /tmp/gguf-probe.py.
+
+## What the header says (measured)
+
+    repo          prism-ml/Ternary-Bonsai-2-27B-gguf   (HTTP 200, public)
+    file probed   Ternary-Bonsai-2-27B-PQ2_0.gguf
+    gguf version  3
+    tensors       851
+    kv pairs      49
+
+    general.architecture              qwen35
+    qwen35.block_count                64
+    qwen35.embedding_length           5120
+    qwen35.attention.head_count       24 / head_count_kv 4
+    qwen35.attention.key_length       256
+    qwen35.full_attention_interval    4          <- hybrid: 1 full attn layer per 4
+    qwen35.ssm.conv_kernel            4
+    qwen35.ssm.state_size             128
+    qwen35.ssm.group_count            16
+    qwen35.ssm.inner_size             6144
+    qwen35.ssm.time_step_rank         48
+    general.file_type                 141
+    prism.hadamard.weight_names       ['output.weight', 'blk.0.attn_qkv.weight', ...]
+    prism.hadamard.inverse_weight_names  ['token_embd.weight']
+
+    tensor types:  353 x F32,  96 x BF16,  402 x id 142 (NOT a stock GGML type)
+
+## Blocker 1 — quant type id 142 is outside the engine's type table
+
+q36's tensor-type enum (`q36.c:276-295`) is GGML-numeric and stops at 29:
+
+    Q36_TENSOR_F32=0 F16=1 Q8_0=8 Q2_K=10 Q3_K=11 Q4_K=12 Q5_K=13 Q6_K=14
+    IQ2_XXS=16 IQ2_XS=17 IQ3_XXS=18 IQ1_S=19 IQ4_NL=20 IQ3_S=21 IQ2_S=22
+    IQ4_XS=23 I32=26 IQ1_M=29
+
+The type-info table is indexed the same way, last entry `[29] = {"iq1_m", 256, 56}`.
+The loader reads the per-tensor type and asks `tensor_nbytes(type, elements, &bytes)`;
+on failure it prints and exits (`q36.c:3556-3559`):
+
+    fprintf(stderr, "q36: unsupported tensor type %u for %.*s\n", ...);
+    exit(1);
+
+402 of 851 tensors are id 142, so the load dies at the tensor-info parse — i.e.
+before a single weight is read. This is not the documented TQ1_0/TQ2_0 ternary
+(stock ids 34/35, also absent from the enum); "Q2_0_g128" ships here as a
+private id. Supporting it means a new dequant/GEMM kernel plus a table entry —
+new engine work, not a load flag.
+
+## Blocker 2 — weights are in a Hadamard-rotated basis
+
+The file declares `prism.hadamard.weight_names` / `inverse_weight_names`.
+`grep -ri hadamard --include=*.c --include=*.h --include=*.comp` over the repo
+returns **nothing** — q36 has no inverse-Hadamard step at load. Even with the
+type implemented, token embeddings and the listed projection weights would be
+consumed in the wrong basis. (This is why the card points users at the PrismML
+llama.cpp fork.)
+
+## Not a blocker — architecture and size
+
+`qwen35` **is** a known arch to q36 (`q36.c:136`, non-MoE, with an SSM profile),
+and the profile's SSM fields (`.n_ssm_conv=4, .n_ssm_state=128, .n_ssm_group=16,
+.n_ssm_dt_rank=48`, `q36.c:151-154`) match this file's declared `ssm.*` values —
+so the hybrid state-space path exists in-tree. Size is fine too: ~7.2 GB against
+15.35 GiB usable UMA and 54 GB free disk.
+
+So the two hard blockers are quant type and weight basis; neither is reachable
+by configuration.
+
+## If this is ever wanted
+
+Order of work, cheapest first: (1) table entry + dequant for id 142, (2) the
+inverse-Hadamard load step, (3) GEMM kernel for the 2-bit g128 layout, (4) parity
+test on the F16 sibling (`Ternary-Bonsai-2-27B-F16.gguf`, 53.8 GB — larger than
+UMA, not runnable locally either, so reference-parity would have to come from a
+smaller Bonsai pack or from logits supplied by the publisher).

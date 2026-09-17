@@ -258,21 +258,21 @@ by `-D` flags, so sibling variants of the same source can end up on opposite sid
 | `.comp` | `.spv` variants built from it | `-D` flags (from the recipe) | forced? |
 |---|---|---|---|
 | `dense_iq3_xxs_decode.comp` | `dense_iq3_xxs_decode.spv` | *(none)* | no |
-| ↳ `dense_iq3_xxs_decode.comp` | `dense_iq3_xxs_decode_r4.spv` | `-DQ36_BOUNDS=0 -DQ36_ROWS=4` | no |
+| ↳ `dense_iq3_xxs_decode.comp` | `dense_iq3_xxs_decode_r4.spv` | `-DQ36_ROWS=4 -DQ36_BOUNDS=0` | no |
 | `dense_iq3_s_decode.comp` | `dense_iq3_s_decode.spv` | *(none)* | no |
 | ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_full.spv` | `-DQ36_BOUNDS=0` | no |
-| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_r4.spv` | `-DQ36_BOUNDS=0 -DQ36_ROWS=4` | no |
-| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_r1.spv` | `-DQ36_BOUNDS=0 -DQ36_ROWS=1` | no |
+| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_r4.spv` | `-DQ36_ROWS=4 -DQ36_BOUNDS=0` | no |
+| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_r1.spv` | `-DQ36_ROWS=1 -DQ36_BOUNDS=0` | no |
 | `dense_iq3_s_mmq.comp` | `dense_iq3_s_mmq.spv` | *(none)* | **yes** |
 | ↳ `dense_iq3_s_mmq.comp` | `dense_iq3_s_bm64_mmq.spv` | `-DQ36_BM=64` | **yes** |
-| ↳ `dense_iq3_s_mmq.comp` | `dense_iq3_s_mmq_r4.spv` | `-DQ36_BK=64 -DQ36_BM=4` | no |
+| ↳ `dense_iq3_s_mmq.comp` | `dense_iq3_s_mmq_r4.spv` | `-DQ36_BM=4 -DQ36_BK=64` | no |
 | `dense_kquant_decode.comp` | `dense_kquant_decode.spv` | *(none)* | no |
-| ↳ `dense_kquant_decode.comp` | `dense_q4k_decode.spv` | `-DQ36_BOUNDS=0 -DQ36_Q4K_ONLY=1` | no |
-| ↳ `dense_kquant_decode.comp` | `dense_q5k_decode.spv` | `-DQ36_BOUNDS=0 -DQ36_Q5K_ONLY=1` | no |
+| ↳ `dense_kquant_decode.comp` | `dense_q4k_decode.spv` | `-DQ36_Q4K_ONLY=1 -DQ36_BOUNDS=0` | no |
+| ↳ `dense_kquant_decode.comp` | `dense_q5k_decode.spv` | `-DQ36_Q5K_ONLY=1 -DQ36_BOUNDS=0` | no |
 | `delta_net_cols.comp` | `delta_net_cols.spv` | *(none)* | **yes** |
 | ↳ `delta_net_cols.comp` | `delta_net_cols_f16.spv` | `-DQ36_STATE_F16=1` | no |
 | `delta_net_decode_reg.comp` | `delta_net_decode_reg.spv` | `-DQ36_COLS=32` | no |
-| ↳ `delta_net_decode_reg.comp` | `delta_net_decode_reg_f16.spv` | `-DQ36_COLS=32 -DQ36_STATE_F16=1` | no |
+| ↳ `delta_net_decode_reg.comp` | `delta_net_decode_reg_f16.spv` | `-DQ36_STATE_F16=1 -DQ36_COLS=32` | no |
 | `matmul_f32_fast.comp` | `matmul_f32_fast.spv` | *(none)* | no |
 | ↳ `matmul_f32_fast.comp` | `matmul_f32_fast_w256.spv` | `-DQ36_MFF_LOCAL=256` | no |
 
@@ -495,7 +495,7 @@ swiglu_q8_k.comp                         local_size_x=64
 top2.comp                                local_size_x=256      
 topk8.comp                               local_size_x=256      
 vision_attention.comp                    local_size_x=128      
-vision_matmul_f16.comp                   local_size_x=(16, 16, 1, 3) 
+vision_matmul_f16.comp                   local_size_x=16x16x1 
 ```
 
 Generated 2026-09-17 by read-only scan of `/home/server/q36-opt-27b/vulkan` and `/home/server/q36-opt-27b/Makefile`.

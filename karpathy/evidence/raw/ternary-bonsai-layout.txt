@@ -1,0 +1,53 @@
+# Ternary-Bonsai-2-27B (PQ2_0) — quant layout, derived from the header
+# 2026-09-17. No weights downloaded: 32 MiB range fetch of the GGUF header
+# only (/tmp/gguf-layout.py, raw buffer /tmp/bonsai-head.bin).
+
+file:  Ternary-Bonsai-2-27B-PQ2_0.gguf   (HF size 7,206,168,928 bytes = 6.71 GiB)
+gguf: v3, 851 tensors, 49 KV pairs, alignment 32
+metadata+infos end at 11,120,982 -> tensor data starts 11,120,992
+  (the KV table alone is > 4 MiB: prism.hadamard.* name lists make it large;
+   a 4 MiB range fetch FAILS, 32 MiB parses cleanly)
+
+## The type-142 block is now known, not inferred
+851 tensors, 850 with a derivable size (last is bounded by EOF):
+  402 tensors of type 142, 26,869,760,000 elements, 7,137,280,000 bytes
+  => 2.1250 bits/weight, and 34.0000 bytes per 128 weights.
+
+That ratio is IDENTICAL for all 402 tensors (min = max = 34.0000), i.e. one
+fixed block for every tensor in the file:
+
+    128 weights -> 34 bytes  =  32 bytes of 2-bit codes (128 * 2 bits)
+                              +  2 bytes (f16 group scale)
+
+Same shape as a stock q-block, e.g.  struct { ggml_half d; uint8_t qs[32]; }
+with group size 128. Two bits per weight over a 4-entry table. There are NO
+super-blocks, NO grid LUT (contrast IQ2_S/iq2 grid, 256-entry), NO extra
+scales inside the group.
+
+    per-tensor detail (representative)
+    output.weight        dims=(5120, 248320)  el=1271398400  bytes=337715200
+    token_embd.weight    dims=(5120, 248320)  el=1271398400  bytes=337715200
+    blk.0.attn_qkv.weight dims=(5120,10240)   el=52428800    bytes=13926400
+    blk.0.ffn_gate.weight dims=(5120,17408)   el=89128960    bytes=23674880
+    blk.0.ssm_out.weight  dims=(6144,5120)    el=31457280    bytes=8355840
+
+  Every one: 2.1250 bpw / 34.0000 bytes per 128.
+
+## Consequences
+- The only unknown left in the format is the 4-entry codebook (which 2-bit
+  code means -1, 0, +1, and what the 4th is). Everything else — block size,
+  group size, scale dtype/position, count, element layout — is measured.
+- Implementable in q36 as: one gguf_types entry (block_elems 128, block_bytes
+  34), one row-dequant, one GEMV kernel. No LUT/grid machinery, unlike the
+  i-quants q36 already carries.
+- Off-spec type id 142 and the load-time inverse-Hadamard remain the two
+  loader-side blockers; the arch (qwen35 hybrid SSM) matches a profile q36
+  already declares (q36.c:136/151-154: dt_rank 48, inner 6144, conv 4,
+  state 128). See ternary-bonsai-probe.txt.
+
+## Publisher runtime check
+- github.com/PrismML-Eng  -- the real org ("prismml" has zero public repos);
+  docs link github.com/PrismML-Eng/Bonsai-demo.
+- docs.prismml.com/models/bonsai-2-27b -> 404. The pack the user pointed at is
+  NOT in the published docs (the docs cover prism-ml/Ternary-Bonsai-27B-gguf,
+  6.66 GiB). Sizes differ: 7.21 GB vs 6.66 GiB.
