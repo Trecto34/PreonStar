@@ -1,0 +1,13 @@
+Qwen3.6 Karpathy change log
+===========================
+
+2026-09-17
+
+- Added a Qwen3.6-specific Karpathy target profile backed by the authoritative
+  logic in /home/server/Karpathy.
+- Added a serial Qwen3.6 CPU/Vulkan parity gate with hard timeouts and cleanup.
+- Added direct DeepSeek V4.1 Flash, protected-key loading, finite worker budget,
+  mandatory previous-attempt checks, and GPU-gate skipping after agent failure.
+- Isolated Qwen3.6 cadence state in state-q36-opt.json from the Swift campaign.
+- Validated the Qwen3.6 CPU/Vulkan short_reasoning_plain parity gate on the
+  BC-250; top-1/top-k results matched.

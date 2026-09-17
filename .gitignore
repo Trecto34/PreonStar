@@ -23,6 +23,7 @@ tests/__pycache__/
 *.spv
 *.json
 *.json
+!/opencode.json
 !/tests/test-vectors/*/llamacpp/*.llamacpp.json
 !/tests/test-vectors/*/manifest.json
 *.dSYM/
@@ -47,6 +48,7 @@ TODO.md
 /tests/test_moe_gate_up
 /tests/test_moe_down
 /Karpathy
+/karpathy/evidence/
 
 # Working notes for the optimization effort: session logs, handoffs, raw
 # benchmark captures and the original roadmap.  These are a lab notebook for
