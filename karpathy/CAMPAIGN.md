@@ -179,9 +179,18 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    barrier dropped) gave prefill 170.93 (MAD 0.080) -> 170.75 (MAD 0.660) =
    **-0.11%**, decode +0.05% -> FAIL, rejected. Staging/barrier/LDS is CLOSED
    for this kernel. Evidence: `evidence/raw/ab-w8-mmq.csv`.
-4. **FA LDS staging** (`FA_SHMEM_STAGING=1` in the friend's doc) — reported
-   PP +5.4% / TG +12.4%, and it is the largest *unread* gap in that document.
-   Not yet verified locally.
+4. **FA LDS staging — TRIED, NEUTRAL, rejected (2026-09-17).** The peer's row
+   claims PP +5.4% / TG +12.4% and was the largest *unread* gap in that doc. It
+   has now been read and implemented rather than assumed: codex +20/-5 to
+   `vulkan/attn_prefill_qtile2.comp`, built clean, A/B 7 interleaved reps ->
+   prefill **171.47 (MAD 0.660) -> 170.75 (MAD 0.480) = -0.42%**, decode
+   **18.58 -> 18.58 = +0.00%**, gate +1.50% -> **FAIL**. The 0.42% is inside the
+   0.7% dense floor and in the *favourable* direction, so it is drift, not a win.
+   Rejected, not merged. Caveat that bounds this negative: attention is not in the
+   top-3 of this model's prefill profile, so an e2e A/B is a blunt instrument for
+   this kernel — a real kernel-level gain could hide under the floor here. Treat
+   the peer's FA number as still unconfirmed on this tree rather than disproven.
+   Evidence: `evidence/raw/ab-w10-fa.csv`, patch `evidence/raw/w10-fa.diff`.
 5. **Where the time actually goes** (Swift IQ3_XXS profile): prefill
    `dense_iq3_xxs_mmq` = **68.1%** of prefill GPU and is *instruction/latency*
    bound (~39% of packed-f16 peak); decode `dense_iq3_xxs_decode_r4` = 57.8% and
@@ -287,6 +296,10 @@ Authoritative detail and per-item "reconsider_if" live in
   too low, so builtins such as `subgroupAdd` fail and a worker may conclude its
   own (fine) file is broken. Tell workers the exact permitted command:
   `glslc --target-env=vulkan1.1 -fshader-stage=comp <file>.comp -o /tmp/x.spv`.
+  - **A subagent that returns a summary but no file leaves no artifact.** Name an
+  explicit output path when delegating and verify the file exists before planning
+  around it: one audit subagent here returned 4,820 chars of summary and never
+  wrote `evidence/wave32-eligibility.md`, so the table was lost.
 - **A decode-only patch cannot be judged on the prefill gate.**
   `bench_ab.sh` declares `FAIL (prefill)` by construction when only a decode
   kernel changed. Judge those on the decode median **with its spread** — the

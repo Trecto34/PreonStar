@@ -1,0 +1,57 @@
+diff --git a/vulkan/attn_prefill_qtile2.comp b/vulkan/attn_prefill_qtile2.comp
+index 6ef1a81..3c2a464 100644
+--- a/vulkan/attn_prefill_qtile2.comp
++++ b/vulkan/attn_prefill_qtile2.comp
+@@ -1,6 +1,7 @@
+ #version 460
+ 
+ #extension GL_KHR_shader_subgroup_basic : require
++#extension GL_KHR_shader_subgroup_arithmetic : require
+ #extension GL_KHR_shader_subgroup_clustered : require
+ #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+ #extension GL_EXT_control_flow_attributes : enable
+@@ -68,6 +69,10 @@ layout(push_constant) uniform Push {
+ #define Q36_QCHUNK 68u                       /* 64 floats + 4 pad */
+ #define Q36_QSTRIDE (4u * Q36_QCHUNK)        /* one q row */
+ #define Q36_QIDX(r, d) ((r) * Q36_QSTRIDE + ((d) >> 6u) * Q36_QCHUNK + ((d) & 63u))
++/* The first two Q rows contain 32 padding floats, enough for one maximum per
++ * possible 32-lane subgroup and query row without increasing LDS allocation. */
++#define Q36_QPADIDX(i) (((i) >> 4u) * Q36_QSTRIDE + (((i) >> 2u) & 3u) * Q36_QCHUNK + 64u + ((i) & 3u))
++#define Q36_QMAXIDX(sg, rr) Q36_QPADIDX((sg) * ROWS + (rr))
+ shared float sh_q[QT * HQ * Q36_QSTRIDE];
+ shared float sh_w[QT * HQ * TILE];
+ 
+@@ -209,18 +214,28 @@ void main(void) {
+ 
+             uint row_tile_n = (rg < tn && base < n_kv_rg) ? min(TILE, n_kv_rg - base) : 0u;
+             for (uint rr = 0u; rr < ROWS; rr++) {
+-                uint r = r0 + rr;
+                 if (row_tile_n == 0u) continue;
+-                float tmax = -3.402823466e38;
+-                for (uint t = 0u; t < row_tile_n; t++)
+-                    tmax = max(tmax, sh_w[r * TILE + t]);
++                float tmax = lane < row_tile_n ?
++                    sh_w[(r0 + rr) * TILE + lane] : -3.402823466e38;
++                tmax = subgroupMax(tmax);
++                if (subgroupElect())
++                    sh_q[Q36_QMAXIDX(gl_SubgroupID, rr)] = tmax;
++            }
++            barrier();
++
++            uint subgroups_per_rg = 64u / gl_SubgroupSize;
++            uint subgroup0 = rg * subgroups_per_rg;
++            for (uint rr = 0u; rr < ROWS; rr++) {
++                if (row_tile_n == 0u) continue;
++                float tmax = sh_q[Q36_QMAXIDX(subgroup0, rr)];
++                if (subgroups_per_rg == 2u)
++                    tmax = max(tmax, sh_q[Q36_QMAXIDX(subgroup0 + 1u, rr)]);
+                 float n = max(m[rr], tmax);
+                 float rs = exp(m[rr] - n);
+                 l[rr] *= rs;
+                 for (uint v = 0u; v < VD; v++) acc[rr][v] *= rs;
+                 m[rr] = n;
+             }
+-            barrier();
+ 
+             for (uint rr = 0u; rr < ROWS; rr++) {
+                 uint r = r0 + rr;
