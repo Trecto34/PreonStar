@@ -96,14 +96,24 @@ The NULLS do, and those are what this section exists for.
 - **shader_core_count 24->40 split-K lever — NOT APPLICABLE.** This engine has
   no shader-core-count query at all, so there is no scheduling input to
   correct. Their effect was correcting a driver-reported split-K sizing input.
-- **Wave32 — DEPRIORITIZED (evidence added 2026-09-17).** See
-  `q36_vulkan.c:1569`; the source-level force covers prefill MMQ only. But
-  llama.cpp's Vulkan backend on this same device reports `warp size: 32` out of
-  the box, i.e. the driver's default compute subgroup is already 32-wide, so
-  the peer's `RADV_PERFTEST=cswave32` +1.3% has no premise in a backend that
-  already runs 32. Re-verify whether q36's decode really dispatches at 64
-  before spending a build on it; `tests/bench_cswave32.sh` stays as the
-  harness if it does.
+- **Wave32 for the non-mmq paths — RUN, MEASURED NEGATIVE (2026-09-17).** The
+  earlier note in this entry was wrong on one point and it cost a re-check: it
+  reasoned from *llama.cpp's* `warp size: 32` that the driver default is already
+  32-wide, so the peer's `RADV_PERFTEST=cswave32` had "no premise". That is
+  llama.cpp's backend, not this engine — q36 prints `subgroup 64` on the same
+  device (`q36_vulkan.c:1569` forces only `delta_net_cols`, `rope_qwen`,
+  `rope_qwen_mrope`, `quantize_q8_0` and the `dense_*_mmq` family). So the
+  premise WAS live here and the lever earned one run. It got it: Swift 27B,
+  7 interleaved reps, ctx 1024, `tests/bench_cswave32.sh` — prefill **171.14 ->
+  169.88 = -0.74%** (MAD 0.600 / 1.540). Decode 19.69 -> 18.67 raw looks like
+  -5%, but that is an artifact of A's own cold start (A reps 1-2 ran 23.66/21.79
+  before the die settled at 66-68 C; steady-state A3-A7 median 18.58 vs B 18.67
+  is a **tie**). Verdict: **no gain**, prefill negative in all seven pairs.
+  Structural reason, from the shader census: the hot kernels are *already*
+  wave32-forced (`dense_*_mmq`, `q36_vulkan.c:1575`), so the flag only moved
+  kernels off the critical path. A per-kernel source widening of the
+  one-cross-lane-op decode kernels is still possible but the measured ceiling is
+  now ~0, so it is no longer ranked. Evidence: `evidence/raw/ab-cswave32.csv`.
 - **f16-grid LDS staging (their iq3_s GEMV port, +14.0% on-shape)** — the one
   peer kernel technique plausibly applicable here, same family as their
   IQ3_XXS dequant VGPR fix. Candidate for the dense_iq3_xxs_decode 269 GB/s

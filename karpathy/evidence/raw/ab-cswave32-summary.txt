@@ -1,0 +1,8 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    7     171.14         0.600     19.69          1.120     ./q36-bench
+B    7     169.88         1.540     18.67          0.140     tests/bench_cswave32.sh
+
+B vs A prefill: -0.74%   decode: -5.18%   (gate: +1.50%)
+verdict: FAIL (prefill)
+EXIT=0

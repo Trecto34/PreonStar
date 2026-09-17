@@ -154,12 +154,18 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    the work is routing these shapes into the per-quant prefill GEMM family:
    **in-tree prior art, not new shader work.** Evidence:
    `evidence/raw/w7-iq2m-prof.txt`, ledger §"kernel SELECTION".
-2. **Wave32 for the non-mmq paths.** `q36_vulkan.c:1569-1575` force-waves only
-   `delta_net_cols`, `rope_qwen`, `rope_qwen_mrope`, `quantize_q8_0` and the
-   `dense_*_mmq` family. Every decode kernel, every MoE kernel and all attn
-   prefill still run at **subgroup 64**. One-line list edit; the friend's
-   `RADV_PERFTEST=cswave32` (+1.3% PP) and FA-subgroup-32 numbers (pp16384
-   +7.4%) are the prior art. `tests/bench_cswave32.sh` is the harness.
+2. **Wave32 for the non-mmq paths — MEASURED NEGATIVE, closed (2026-09-17).**
+   The cheap bound was run first, before any build: `RADV_PERFTEST=cswave32` vs
+   stock on Swift 27B, 7 interleaved reps, ctx 1024 -> prefill **171.14 ->
+   169.88 = -0.74%** (MAD 0.600/1.540), negative in all seven pairs; decode a
+   tie in steady state (the raw -5.18% is A's cold-start tail). n=7 per side.
+   The reason is structural, not mysterious: the hot kernels are *already*
+   wave32-forced (`dense_*_mmq` at `q36_vulkan.c:1575`), so the flag only moved
+   off-critical-path kernels. **Do not re-run the env lever.** A per-kernel
+   source widening of the decode kernels (each has exactly one cross-lane op)
+   is still *possible*, but the measured ceiling is ~0, so it is demoted out of
+   the ranked list. Evidence: `evidence/raw/ab-cswave32.csv`; runner pitfall in
+   §9.
 3. **Packed-native shader restructuring.** The only surviving general lever
    class: this driver exposes **no** usable dot-product intrinsics
    (`int dot: 0`, all accelerated variants false) and no bf16, so the wins have
@@ -254,6 +260,31 @@ Authoritative detail and per-item "reconsider_if" live in
    an empty transcript — treat empty output as failure, not success.
 7. **`~/Karpathy` is a separate checkout and stays untouched** unless the user
    says otherwise.
+
+- **A wrapper B that is not executable kills an A/B before a model loads.** If
+  `bench_ab.sh` returns exit **2** almost instantly with "B binary not
+  executable", the run produced no numbers at all — do not read it as a failed
+  experiment. `tests/bench_cswave32.sh` was committed without its exec bit and
+  cost two launches on 2026-09-17. Fix: `chmod +x`, and commit the bit.
+- **Worker availability is not stable — check before assigning the critical
+  item (2026-09-17).** `claude --dangerously-skip-permissions -p` failed
+  instantly with `You've hit your weekly limit · resets Sep 19, 1pm
+  (America/Sao_Paulo)`; `opencode run --model union-alpha` returned
+  `UnknownError / Unexpected server error. ref: err_...` on both attempts
+  (exit 1, no patch written); `agy` is unusable (`print timeout after 5m0s`).
+  **codex is the only CLI worker that has delivered a patch on this box** — give
+  it the highest-value file first, then fall back. Always give a worker the
+  fallback order explicitly so a dead agent is not the end of the item.
+- **Syntax-checking a shader with bare `glslc` gives a false negative.** The
+  Makefile compiles with `--target-env=vulkan1.1`; the default target env is
+  too low, so builtins such as `subgroupAdd` fail and a worker may conclude its
+  own (fine) file is broken. Tell workers the exact permitted command:
+  `glslc --target-env=vulkan1.1 -fshader-stage=comp <file>.comp -o /tmp/x.spv`.
+- **A decode-only patch cannot be judged on the prefill gate.**
+  `bench_ab.sh` declares `FAIL (prefill)` by construction when only a decode
+  kernel changed. Judge those on the decode median **with its spread** — the
+  decode spread on Swift 27B is up to 9.4% and a cold first rep can move the
+  whole median.
 
 ## 10. Handoff checklist for the next agent
 
