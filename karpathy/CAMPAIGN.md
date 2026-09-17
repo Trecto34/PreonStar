@@ -166,6 +166,19 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    is still *possible*, but the measured ceiling is ~0, so it is demoted out of
    the ranked list. Evidence: `evidence/raw/ab-cswave32.csv`; runner pitfall in
    §9.
+   **2b. The same audit found a real BUG, not a lever — FIXED (2026-09-17).**
+   `dense_iq3_s_mmq_r4.spv` escapes the force predicate (suffix test
+   `"_mmq.spv"` against a name ending `_mmq_r4.spv`), so it ran at wave64 while
+   its `gl_SubgroupID`-partitioned token tile *requires* wave32: the formula
+   peaks at **79** with 2 subgroups, so tokens 80-127 of every 128-token tile
+   were written by nobody. Reachable via `small_rows` (IQ3_S, `out_dim == 48 &&
+   n_tok <= 128`), latent for all three local models. Fix + A/B (no change:
+   -0.03% / -0.05%, gate PASS) merged as `6e999eb`; row in `AlreadyTried.md`.
+   The audit's §3b list — nine clean-scan shaders blocked only by the comment's
+   *letter*, including `moe_matvec`, which holds 67% of IQ2_M's GPU time — is
+   still **one unrun test**, and it is the same test that would settle item 1's
+   dispatch question from the other side. Evidence:
+   `evidence/wave32-eligibility.md`, `evidence/raw/w11-wave32-r4-fix.txt`.
 3. **Packed-native shader restructuring.** The only surviving general lever
    class: this driver exposes **no** usable dot-product intrinsics
    (`int dot: 0`, all accelerated variants false) and no bf16, so the wins have
@@ -196,6 +209,33 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    bound (~39% of packed-f16 peak); decode `dense_iq3_xxs_decode_r4` = 57.8% and
    is *DRAM-bound at 80% of roofline*. **Prefill is the lever; decode has
    almost no headroom.**
+
+6. **Ternary-Bonsai-2-27B (`prism-ml/Ternary-Bonsai-2-27B-gguf`) — cannot run
+   as-is, but the work is now bounded and the layout is measured (2026-09-17).**
+   Header probe only (32 MiB range fetch, no weights downloaded): GGUF v3, 851
+   tensors, arch `qwen35` hybrid SSM, **402 tensors of off-spec type id 142**
+   (`general.file_type = 141`), `prism.hadamard.*` weight-name lists, and a
+   derived layout of **34.0000 bytes per 128 weights** — identical min to max
+   across all 402 tensors, i.e. 32 B of 2-bit codes + a 2 B f16 group scale =
+   **2.125 bpw**, with **no grid LUT** (nothing like this engine's IQ2_S/IQ3_S
+   machinery). Blockers in cost order: **(a)** type-142 table entry + dequant +
+   GEMV — small; the only unknown is the 4-entry codebook; **(b)**
+   inverse-Hadamard at load — `grep -ri hadamard` returns nothing, so it is not
+   implemented; **(c)** the `qwen35` hybrid graph — the SSM profile already
+   exists (`q36.c:136,151-154`: `n_ssm_conv 4 / n_ssm_state 128 / n_ssm_group
+   16 / n_ssm_dt_rank 48`, matching the file's `ssm.*` exactly), so the open
+   risk is whether that profile is *exercised* by a model we have run. The
+   loader rejects the file cleanly: `tensor_type()` and `tensor_nbytes()` both
+   bounds-check, so id 142 produces a **named unsupported-type error, no OOB**.
+   The publisher's fork **is public** — org **`PrismML-Eng`** (NOT `prismml`,
+   which has zero public repos), repo `llama.cpp` — so the codebook can be
+   *read* rather than guessed. Speed case if it loads: 7.206 GB read per token
+   against the measured **454.4 GB/s** DRAM = **63.1 tok/s** decode roofline,
+   versus the 27B's 23.19 at 63.8% of its own roofline -> **~40 tok/s (+73%)**
+   at equal efficiency; and ternary weights need **no multiplies**
+   (mask-and-add), which is exactly the axis where IQ3_XXS's decode sits at an
+   instruction-bound 59%. Evidence: `evidence/raw/ternary-bonsai-probe.txt`,
+   `evidence/raw/ternary-bonsai-layout.txt`.
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 

@@ -116,6 +116,31 @@ The NULLS do, and those are what this section exists for.
   kernels off the critical path. A per-kernel source widening of the
   one-cross-lane-op decode kernels is still possible but the measured ceiling is
   now ~0, so it is no longer ranked. Evidence: `evidence/raw/ab-cswave32.csv`.
+- **`dense_iq3_s_mmq_r4` escaped the wave32 force predicate — CORRECTNESS BUG,
+  found by the wave32 eligibility audit, FIXED (2026-09-17).** The force
+  predicate is a *suffix* test:
+  `strstr(k->path,"dense_") && strstr(k->path,"_mmq.spv")`.
+  `dense_iq3_s_mmq_r4.spv` (built at `Makefile:198-202` with
+  `-DQ36_BM=4 -DQ36_BK=64`) ends `_mmq_r4.spv`, so it never matched and the
+  shader ran at wave64. That shader partitions its token tile by
+  `gl_SubgroupID`: `tok = tok0 + warp_tok*32 + (tt>>1)*16 + thread_tok*2 +
+  (tt&1)`, `thread_tok = lane>>2`, and the store covers a 128-token tile. At
+  wave32 (4 subgroups) the formula reaches **127**; at wave64 (2 subgroups) it
+  peaks at **79**, so **tokens 80-127 of every tile were written by nobody**.
+  Reachable from the `small_rows` selection site (`q36_vulkan.c:8160-8170`:
+  IQ3_S weights, `out_dim == 48 && n_tok <= 128`). Fix: predicate widened to
+  `_mmq` and the eligibility comment now names both traps (`gl_Subgroup*` reads
+  count as cross-lane use; a `gl_SubgroupID`-partitioned tile makes wave32 a
+  *correctness* requirement, not a preference). Predicate delta is exactly one
+  pipeline — `dense_iq3_s_mmq_r4.spv` 0 -> 1, the other six `dense_*mmq*.spv`
+  unchanged. A/B, 7 interleaved reps, Swift IQ3_XXS ctx 1024: prefill **170.92
+  (MAD 0.290) -> 170.87 (MAD 0.320) = -0.03%**, decode **18.59 -> 18.58** =
+  -0.05% = **no change, as expected**: none of the three local models selects
+  the touched pipeline (they are IQ3_XXS / IQ2_XXS / IQ2_M), so the bug is
+  **latent** and this is a landmine closed, not a speed win. Compatibility gate
+  PASS on the patched binaries. Merged as `6e999eb`. Evidence:
+  `evidence/raw/w11-wave32-r4-fix.txt`, `evidence/raw/w11-wave32-r4-ab.csv`,
+  `evidence/raw/w11-wave32-r4-ab-summary.txt`.
 - **f16-grid LDS staging (their iq3_s GEMV port, +14.0% on-shape) — TRIED,
   MEASURED NEUTRAL, rejected (2026-09-17).** Ported to
   `vulkan/dense_iq3_xxs_decode.comp` (+21/-22): `grid_lut` staged as `f16vec4`
