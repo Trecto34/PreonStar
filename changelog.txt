@@ -74,3 +74,18 @@ QuarkStar Swift Qwen3.8-27B change log
   lane-split `dense_iq3_xxs_mmq` candidate was bit-exact but regressed down
   projection by about 2.7%, and was terminated before its final report. The
   rejected mechanism is now recorded in the target AlreadyTried ledger.
+
+2026-09-17: BC-250 vllm-mxfp4 transfer audit
+- New branch experiment/radiance-transfer-bc250; separate dirty q36-opt checkout
+  preserved. Added tests/benchmark_transfer.sh for serial, interrupt-safe,
+  three-repetition Swift IQ3_XXS and Qwen3.6 IQ2_XXS benchmarking.
+- Reverted all tested shader candidates: 512-thread add/RMS regressed Swift
+  kernel 23.64 to 30.13 ms; packed sign handling regressed IQ3 decode 373.83
+  to 407.97 ms; XOR-swizzled IQ3 MMQ regressed 940.28 to 1309.31 ms; direct
+  MoE table reads gave no reproducible full-context Qwen3.6 gain.
+- At context 1024 / generation 16, safe chunk sweep: Swift 64/128/256 =
+  96.37/164.73/171.91 prefill tok/s; Qwen3.6 256/512/1024 =
+  720.58/858.86/951.38. Existing safe defaults were best.
+- Final unchanged-kernel three-run averages: Swift 172.41 prefill, 22.53
+  decode tok/s; Qwen3.6 923.48 prefill, 88.01 decode tok/s. Accepted
+  model-speed gain: 0% for both. Qwen CPU/Vulkan parity and Swift smoke passed.

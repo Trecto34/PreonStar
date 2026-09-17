@@ -23,3 +23,18 @@ accepted change, even when the primary target is dense Swift Qwen3.8.
   passed, but the worker was terminated before its required final report.
   Do not retry this lane-split mechanism without a measured explanation for
   the down-projection regression.
+
+## BC-250 transfer audit: 2026-09-17
+
+- **512-thread add/RMS — REJECTED:** Swift kernel 23.64 -> 30.13 ms.
+- **Integer sign-mask IQ3_XXS decode — REJECTED:** Swift decode kernel
+  373.83 -> 407.97 ms over 16 generation tokens.
+- **XOR-swizzled IQ3_XXS MMQ staging — REJECTED:** Swift prefill MMQ kernel
+  940.28 -> 1309.31 ms at 128-token context. The existing 17-element padded
+  stride is faster than the attempted 16-element XOR layout on BC-250.
+- **Global IQ2 grid lookup in MoE gate/up GEMM — REJECTED:** 128-token kernel
+  time improved slightly (197.71 -> 194.26 ms), but 1024-token whole-model
+  prefill was not reliably faster. Shared staging remains the default.
+- **Smaller prefill chunks — REJECTED:** on 1024-token prompts, the existing
+  watchdog-safe caps (Swift 256, Qwen3.6 1024) were fastest among tested
+  chunk sizes. Do not raise Swift above 256 without a watchdog-safety proof.

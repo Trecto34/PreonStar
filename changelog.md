@@ -105,3 +105,30 @@
   bit-exact but regressed down projection by about 2.7%, and the incomplete
   worker was terminated before its report. The rejected mechanism is now in
   the target `karpathy/AlreadyTried.md` ledger.
+
+## 2026-09-17 — vllm-mxfp4 transfer audit on BC-250
+
+- Created branch `experiment/radiance-transfer-bc250` in the clean Swift target;
+  left the separate, dirty `/home/server/q36-opt` checkout untouched. Added
+  `tests/benchmark_transfer.sh` to benchmark Swift IQ3_XXS and Qwen3.6 IQ2_XXS
+  serially at context 1024, 16 generated tokens, safe per-model prefill chunks,
+  and three repetitions by default. It kills an active benchmark on interrupt.
+- Profiled both models and tested four shader ideas, reverting all source
+  candidates that did not improve end-to-end throughput: 512-thread fused
+  add/RMS (Swift kernel 23.64 -> 30.13 ms); integer sign-mask IQ3_XXS decode
+  (Swift decode kernel 373.83 -> 407.97 ms); XOR-swizzled IQ3_XXS MMQ staging
+  (Swift MMQ kernel 940.28 -> 1309.31 ms). Direct global-table reads in the
+  Qwen3.6 MoE gate/up GEMM changed its 128-token kernel time 197.71 -> 194.26
+  ms, but three full-context candidate runs were 932.91/913.41/953.56 prefill
+  tok/s, not a reliable gain over the 951.38 tok/s single baseline point; it
+  too was reverted. The model kernels remain unchanged.
+- Safe prefill-chunk sweep at context 1024: Swift 64/128/256 yielded
+  96.37/164.73/171.91 tok/s; Qwen3.6 256/512/1024 yielded
+  720.58/858.86/951.38 tok/s. Existing defaults (256 and 1024) were best
+  among tested safe options.
+- Final unchanged-kernel three-run means from the new script: Swift 172.41
+  prefill and 22.53 decode tok/s; Qwen3.6 923.48 prefill and 88.01 decode
+  tok/s. **Accepted model-speed gain: 0% on both.** These are honest baseline
+  measurements, not a claimed vLLM-MXFP4 port: neither model uses MXFP4 and
+  the candidate kernel transfers failed the BC-250 speed gate. The existing
+  Qwen3.6 CPU/Vulkan parity and Swift Vulkan smoke compatibility gate passed.
