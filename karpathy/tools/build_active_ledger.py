@@ -150,6 +150,9 @@ def build_active_ledger(source_path: Path, output_path: Path, priority: int = 8,
         if e["priority"] == priority and (not target_filter or target_filter in e["target"])
     ]
 
+    source_text = source_bytes.decode("utf-8", errors="replace").strip()
+    source_first_line = source_text.splitlines()[0] if source_text else ""
+
     lines = [
         "LEDGER_CHECK:",
         f"source={source_path.name}",
@@ -160,7 +163,7 @@ def build_active_ledger(source_path: Path, output_path: Path, priority: int = 8,
         "",
         f"# Active Optimization Ledger (Priority {priority})",
         "",
-        f"> **Auditable source:** `{source_path.name}` (SHA-256: `{source_sha256[:16]}...`)  ",
+        f"> **Auditable source:** `{source_path.name}` ({source_first_line}) (SHA-256: `{source_sha256[:16]}...`)  ",
         f"> **Filter:** Priority {priority}" + (f", Target contains '{target_filter}'" if target_filter else "") + "  ",
         "> **Mandatory Policy:** Do not repeat rejected approaches without a stated new hardware/runtime reason. Preserve MoE routing parity for Qwen3.6 reference.",
         "",
