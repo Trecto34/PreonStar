@@ -1,0 +1,8 @@
+=== 4x8 packed signed accelerated property ===
+666:	integerDotProduct4x8BitPackedSignedAccelerated                                = false
+=== vs the ACCELERATED-any variants nearby ===
+662:	integerDotProduct8BitUnsignedAccelerated                                      = false
+663:	integerDotProduct8BitSignedAccelerated                                        = false
+665:	integerDotProduct4x8BitPackedUnsignedAccelerated                              = false
+666:	integerDotProduct4x8BitPackedSignedAccelerated                                = false
+670:	integerDotProduct16BitMixedSignednessAccelerated                              = false

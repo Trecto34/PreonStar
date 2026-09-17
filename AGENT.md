@@ -1,5 +1,11 @@
 # Agent Notes
 
+**Working on performance?** Read `karpathy/CAMPAIGN.md` first — it is the map
+for the optimization campaign: current state, the files that track it, the rules
+that decide a verdict, the open items ranked, the exact commands, and the closed
+dead ends (do not re-litigate those). `karpathy/AlreadyTried.md` is the
+authoritative rejection ledger and must be read before proposing a change.
+
 `q36.c` is a Qwen3.6-35B-A3B specific inference engine. It is not a generic
 GGUF runner. The goal is a small, readable, high-performance C codebase.
 

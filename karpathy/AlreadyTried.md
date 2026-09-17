@@ -168,3 +168,84 @@ upstream? Measured it. Same box, same GGUF
   `getenv` inventory is 23 `GGML_VK_*` variables and it is not among them. That
   is a stable-diffusion.cpp variable, consistent with the peer's own finding
   that its CU lever is a no-op for diffusion and LLM-decode-specific.
+
+## Cross-engine MoE matrix + the IQ2_M loader wall (2026-09-17)
+
+Full table, asymmetries and raw CSVs: `evidence/cross-engine-matrix.md`.
+Same box, same GGUFs, ctx 1024, `-ngl 99`, `llama-bench -p 1024 -n 16 -r 3`.
+
+| model | q36 prefill / decode | llama.cpp `972d231` | delta |
+|---|---|---|---|
+| Qwen3.6-35B-A3B IQ2XXS (MoE guard) | 909.49 / 87.37 | 615.08 / 78.72 | **+47.9% / +11.0%** |
+| RavenX-35B-Q36-IQ2XXS | 717.36 / 89.47 | 545.46 / 77.96 | **+31.5% / +14.8%** |
+| Qwen3.8-35B-A3B-IQ2_M | refuses to load | 529.90 / **91.53** | n/a |
+
+- **`Qwen3.8-35B-A3B-IQ2_M` is a q36 loader limitation, not a bad file.** Upstream
+  loads it (35.5B params, 2.7 bpw, 99/99 layers on GPU) and posts the fastest MoE
+  decode measured on this box — 91.53 +/- 2.11, above q36's best (RavenX 89.47).
+  q36 stops it at `q36: expected qwen35moe.block_count=40, got 41` (3/3 reps,
+  exit 1). This is the highest-value open item in the repo and it is a loader
+  condition, not a kernel.
+
+  **Root cause located (2026-09-17, do not re-derive):** the guard is
+  `q36.c:5377-5381` in `config_validate_model`, and it *already contains the
+  escape hatch this file needs* — but it is gated on `Q36_MODEL_DENSE`:
+
+  ```c
+  if (block_count != Q36_N_LAYER &&
+      !(Q36_MODEL_DENSE && nextn_layers == 1 && block_count == Q36_N_LAYER + 1)) {
+  ```
+
+  Read from the GGUF itself (`gguf-py`): IQ2_M is `block_count=41`,
+  `nextn_predict_layers=1`, blk 0..40, 753 tensors, and **`blk.40.*` is a
+  complete MoE block** (attn_q/k/v/output + norms, ffn_gate/up/down_exps,
+  ffn_gate_inp, shared-expert tensors). The guard has 40 blocks / 733 tensors and
+  no `nextn` key; RavenX likewise. So IQ2_M is a 40-block model **plus one
+  NextN/MTP block** — structurally the shape the *dense* path already accepts.
+  A second dense-gated check at `q36.c:5419-5420` allows
+  `Q36_TENSOR_COUNT + 15` (dense NextN = +15 tensors; MoE NextN = +20 by
+  arithmetic on 753 vs 733). The engine has a non-dense MTP binder
+  (`mtp_weights_bind`, `q36.c:4454`) but the embedded-MTP *skip* is dense-only:
+  `q36_tensor_is_disabled_embedded_mtp` returns false when `!Q36_MODEL_DENSE`
+  (`q36.c:5177`).
+
+  ⇒ **Reconsider_if:** extend both gates to the MoE shape *and* route block 40
+  through the embedded-MTP skip. Relaxing the check alone is NOT the fix: the
+  extra block's weights (~800 MB on a 15.35 GiB unified pool) would load into a
+  40-block graph. Verify by loading IQ2_M, then A/B against the guard for
+  no-regression.
+- **MoE prefill spread is 3.4%, not the 27B's 0.7%.** Identical code produced
+  713.98 -> 738.81 t/s on RavenX. Do not report a MoE prefill delta under ~3%;
+  the MoE guard's acceptance band is 3.4%, not 1.5%.
+- **RavenX out-decodes the guard (89.47 vs 87.37) while its prefill is 21%
+  lower**, despite the two files differing by 128 bytes in length. That is quant
+  mix, not layout — no single "MoE ≈ 900 t/s prefill" figure covers both files.
+
+## Host query-pool drain removal — REJECTED as a speed lever (2026-09-17)
+
+- **Removing the mid-dispatch query-pool drain at `q36_vulkan.c:2981-2983`** —
+  the thing that produced the "94 us/dispatch" `dense_q4k_decode` anomaly — is
+  **INERT in production**. The block was gated on `q36_vk.prof_kernel`, and that
+  flag is only set when `Q36_VK_PROF_KERNEL` is present in the environment
+  (`q36_vulkan.c:3465-3474`). Interleaved 7-rep A/B on Swift at ctx 1024:
+  A 170.91 (MAD 0.650) vs B 171.68 (MAD 0.550) → **+0.45% prefill, +0.43%
+  decode, FAIL** against the +1.5% gate. The MoE guard run agrees: **712.75
+  (MAD 6.660) vs 711.95 (MAD 9.330) → −0.11% prefill, −0.25% decode, FAIL**,
+  both arms inside the MoE noise band. That is one MAD of noise on each model,
+  measured on two binaries that *cannot* differ in the configuration
+  bench_ab.sh runs. Do not re-open the 94 us/dispatch anomaly as a speed lever —
+  it is profiler overhead, not a stall. Breakdown and both raw CSVs:
+  `evidence/ab-hostdrain.md`, `evidence/raw/ab-drain-verdicts.txt`.
+- **Rule learned: a change gated on a runtime flag must be A/B'd with that flag
+  set, or not A/B'd for speed at all.** Check the gate before designing the
+  experiment; otherwise the null result is guaranteed and reads like a finding.
+- **`tests/bench_ab.sh`'s verdict `awk` was broken and is now fixed.** It passed
+  the SUBSEP-joined multipart arrays (`p[lab,k]`, `d[lab,k]`) straight into
+  `med()`, which indexes its argument with plain integers — so every read hit an
+  uninitialized element and `med()` returned 0. Every run therefore printed
+  `prefill_med 0.00` / `decode_med 0.00` and a fake `+0.00%`, i.e.
+  `verdict: FAIL (prefill)` regardless of the data. Fixed by flattening into the
+  copy arrays first, and verified by re-running the patched block over the same
+  raw CSV (170.91 / 171.68 / +0.45%, identical to an independent Python median).
+  **Any A/B verdict this script produced before this fix is unusable — recompute
+  it from the CSV.**

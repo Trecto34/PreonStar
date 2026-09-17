@@ -1,0 +1,14 @@
+engine,model,rep,prefill_tps,decode_tps
+q36,qwen3.8-35B-A3B-IQ2_M,1,err1,err1
+q36,qwen3.8-35B-A3B-IQ2_M,2,err1,err1
+q36,qwen3.8-35B-A3B-IQ2_M,3,err1,err1
+q36,ravenx-35B-Q36-IQ2XXS,1,713.98,88.74
+q36,ravenx-35B-Q36-IQ2XXS,2,717.36,89.49
+q36,ravenx-35B-Q36-IQ2XXS,3,738.81,89.47
+q36,qwen3.8-27B-UD-IQ3_S,1,170.77,22.02
+q36,qwen3.8-27B-UD-IQ3_S,2,166.36,21.44
+q36,qwen3.8-27B-UD-IQ3_S,3,166.39,20.43
+llamacpp,qwen3.8-35B-A3B-IQ2_M,pp,0.00,
+llamacpp,qwen3.8-35B-A3B-IQ2_M,pp,0.00,
+llamacpp,ravenx-35B-Q36-IQ2XXS,pp,0.00,
+llamacpp,ravenx-35B-Q36-IQ2XXS,pp,0.00,

@@ -1,0 +1,48 @@
+# Drain-fix A/B verdicts — recomputed with the fixed awk block
+
+Both summaries below were produced by running the **patched** `awk` block
+(extracted from `tests/bench_ab.sh` after the `med()` fix, 2026-09-17 18:17:33)
+over the raw CSV of each run. They are reproduced byte-for-byte by an
+independent Python `statistics` computation, so both routes agree.
+
+## Swift-Qwen3.8-27B-IQ3_XXS (ctx 1024, 7 interleaved reps) — raw: ab-drain-swift.csv
+
+```
+bin  n     prefill_med    mad       decode_med     mad       source
+A    7     170.91         0.650     18.60          0.100     A-baseline (11bb345)
+B    7     171.68         0.550     18.68          0.110     B-drain (w6-hostdrain)
+
+B vs A prefill: +0.45%   decode: +0.43%   (gate: +1.50%)
+verdict: FAIL (prefill)
+```
+
+## Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS (MoE guard, ctx 1024, 7 reps) — raw: ab-drain-moe.csv
+
+```
+bin  n     prefill_med    mad       decode_med     mad       source
+A    7     712.75         6.660     88.13          0.290     A-baseline (11bb345)
+B    7     711.95         9.330     87.91          0.180     B-drain (w6-hostdrain)
+
+B vs A prefill: -0.11%   decode: -0.25%   (gate: +1.50%)
+verdict: FAIL (prefill)
+```
+
+## Two traps this run set off — both worth knowing before the next A/B
+
+1. **The MoE run's own `/tmp/ab-drain-moe.summary` is untrustworthy and was
+   discarded.** It printed `prefill_med 0.00` for both arms with the *MAD*
+   column carrying the true median (712.750 / 88.130) — the exact signature of
+   the old `med()`. Cause: the `med()` fix was written to `tests/bench_ab.sh` at
+   **18:17:33, while that A/B was still running**, and a `bash` process keeps
+   reading the script it launched. So the fix did not apply to that run's
+   summary. Always check the script's mtime against the run's start before
+   trusting a summary file.
+2. **`med() = 0` is recognisable without any other tooling:** if `prefill_med`
+   is `0.00` while its MAD column holds a plausible throughput number, you are
+   looking at the broken code, because `mad_of(arr, n, 0)` degenerates into the
+   median of the raw values. A real MAD is always small (0.1–10 t/s here).
+
+Both arms are indistinguishable, which is the only possible outcome: the removed
+block was gated on `q36_vk.prof_kernel`, so with no profiler env set the two
+binaries cannot differ. The drain change is inert in production; it is profiling
+hygiene at best, not a speed lever. See `../ab-hostdrain.md`.

@@ -111,11 +111,15 @@ END {
         "bin", "n", "prefill_med", "mad", "decode_med", "mad", "source" > "/dev/stderr"
     for (i = 1; i <= 2; i++) {
         lab = (i == 1 ? "A" : "B")
-        pa = med(p, np[lab])
-        # med() sorts in place, so copy before computing MAD.
+        # p[]/d[] are SUBSEP-joined multipart arrays (p[lab,k]); med() indexes its
+        # argument with plain integers, so handing them over directly reads only
+        # uninitialized elements and returns 0 -- which prints a fake "median 0.00"
+        # and a fake 0.00% gain. Flatten into the copy arrays first, then med() the
+        # flat copy (med() sorts in place, which does not affect the MAD).
         for (k = 1; k <= np[lab]; k++) pcopy[k] = p[lab, k]
-        pb = med(d, nd[lab])
+        pa = (np[lab] > 0 ? med(pcopy, np[lab]) : -1)
         for (k = 1; k <= nd[lab]; k++) dcopy[k] = d[lab, k]
+        pb = (nd[lab] > 0 ? med(dcopy, nd[lab]) : -1)
         printf "%-4s %-5d %-14.2f %-9.3f %-14.2f %-9.3f %s\n", \
             lab, np[lab], pa, mad_of(pcopy, np[lab], pa), pb, mad_of(dcopy, nd[lab], pb), \
             (lab == "A" ? a_name : b_name) > "/dev/stderr"
