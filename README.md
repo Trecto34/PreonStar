@@ -220,30 +220,23 @@ from `https://huggingface.co/unsloth/Qwen3.8-27B-GGUF`. It stores files under
 `./gguf/`, resumes partial downloads with `curl -C -`, and updates
 `./q36moe.gguf` to point at the selected model for older scripts.
 
-For the reasoning-efficient Swift derivative, use the highest-quality tier that
-fits this 16 GB machine with the bounded-memory profile, IQ4_XS, from
+For the reasoning-efficient Swift derivative, the practical tier for this
+16 GB BC-250 is IQ3_XXS, from
 `ukisai/Swift-Qwen3.8-27B-GGUF`:
 
 ```sh
-./download_model.sh swift
-./run_swift_iq4_xs.sh -p "Explain why the sky is blue in two sentences." --nothink
+./download_model.sh swift-iq3
+./run_swift_iq3_xxs.sh -p "Explain why the sky is blue in two sentences." --nothink
 ```
 
 `run_swift.sh` uses a 4096-token default context and enables the embedded MTP
-draft head with three draft positions for smaller Swift quants. IQ4_XS has a
-dedicated bounded-memory profile for the BC-250:
+draft head with three draft positions. IQ4_XS had a dedicated bounded-memory
+profile, but its 14.6 GiB file was removed because it was unusably slow on this
+hardware and full residency triggered the host OOM killer.
 
 ```sh
-./run_swift_iq4_xs.sh -p "Give me one concise sentence about Vulkan." --nothink
+./run_swift_iq3_xxs.sh -p "Explain why the sky is blue." --nothink
 ```
-
-That profile disables full weight prewarming, uses a 1024-token default
-context, retains a 7 GiB dense-weight prefix, and recycles a separate 2 GiB
-streaming window. This avoids reloading the entire 14.6 GiB IQ4_XS file on
-every token without triggering the host OOM killer. It is still slower than
-IQ3_XXS because the remaining weights are streamed. Override the cache and
-retained-prefix sizes with `Q36_VK_DENSE_WEIGHT_CACHE_GIB` and
-`Q36_VK_DENSE_WEIGHT_PIN_GIB` on a larger GPU.
 
 Then build for the target platform:
 

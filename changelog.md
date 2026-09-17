@@ -15,6 +15,12 @@
   recycled instead of repeatedly allocated and freed,
   1024-token context, and the same optimized Vulkan kernels as the Swift launcher.
 - Updated the README with Swift download and launch instructions.
+- Added the `swift-iq3` downloader target and `run_swift_iq3_xxs.sh` launcher
+  for the faster IQ3_XXS Swift tier.
+- Resumed and completed `Swift-Qwen3.8-27B-IQ3_XXS.gguf` at 11.67 GiB, then
+  permanently deleted the unused 14.6 GiB IQ4_XS file to reclaim disk space.
+- Verified the IQ3_XXS launcher with Vulkan inspection and a protected text
+  generation test: `READY`, 39.92 tok/s prefill, and 21.90 tok/s generation.
 - Verified `make vulkan-generic -j2`, shell syntax, IQ4_XS Vulkan inspection, and
   a bounded single-token generation smoke test returning `READY` without a
   SIGKILL. The IQ4_XS file is present at `gguf/Swift-Qwen3.8-27B-IQ4_XS.gguf`.

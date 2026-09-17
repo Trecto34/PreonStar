@@ -12,6 +12,7 @@ MTP_FILE="Qwen3.6-35B-A3B-MTP-Q4K-Q8_0-F32.gguf"
 KAT_FILE="KAT-Coder-V2.5-Dev-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-imatrix.gguf"
 DENSE_FILE="Qwen3.8-27B-UD-IQ3_S.gguf"
 SWIFT_FILE="Swift-Qwen3.8-27B-IQ4_XS.gguf"
+SWIFT_FAST_FILE="Swift-Qwen3.8-27B-IQ3_XXS.gguf"
 VISION_REMOTE="mmproj-F16.gguf"
 VISION_FILE="Qwen3.6-35B-A3B-mmproj-F16.gguf"
 DENSE_VISION_FILE="Qwen3.8-27B-mmproj-F16.gguf"
@@ -34,6 +35,7 @@ Usage:
   ./download_model.sh kat-coder [--token TOKEN]
   ./download_model.sh 27b [--token TOKEN]
   ./download_model.sh swift [--token TOKEN]
+  ./download_model.sh swift-iq3 [--token TOKEN]
   ./download_model.sh qwen36-vision [--token TOKEN]
   ./download_model.sh qwen38-vision [--token TOKEN]
   ./download_model.sh mtp [--token TOKEN]
@@ -61,6 +63,10 @@ Targets:
        Swift-Qwen3.8-27B IQ4_XS quant from $SWIFT_REPO. This is the
        highest-quality Swift tier supported by the bounded-memory BC-250
        profile; use ./run_swift_iq4_xs.sh.
+
+  swift-iq3
+       Swift-Qwen3.8-27B IQ3_XXS quant from $SWIFT_REPO. This is the
+       recommended faster Swift tier for the BC-250; use ./run_swift_iq3_xxs.sh.
 
   qwen36-vision
        Qwen3.6 35B A3B F16 vision projector from $VISION_REPO.
@@ -115,6 +121,7 @@ case "$MODEL" in
     kat-coder) MODEL_REPO=$KAT_REPO; MODEL_FILE=$KAT_FILE ;;
     27b) MODEL_REPO=$DENSE_REPO; MODEL_FILE=$DENSE_FILE ;;
     swift) MODEL_REPO=$SWIFT_REPO; MODEL_FILE=$SWIFT_FILE ;;
+    swift-iq3) MODEL_REPO=$SWIFT_REPO; MODEL_FILE=$SWIFT_FAST_FILE ;;
     qwen36-vision)
         MODEL_REPO=$VISION_REPO
         MODEL_REMOTE=$VISION_REMOTE

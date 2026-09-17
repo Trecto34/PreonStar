@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-MODEL=${Q36_SWIFT_MODEL:-"$ROOT/gguf/Swift-Qwen3.8-27B-IQ4_XS.gguf"}
+MODEL=${Q36_SWIFT_MODEL:-"$ROOT/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf"}
 if [ -n "${Q36_SWIFT_CTX:-}" ]; then
     CTX=$Q36_SWIFT_CTX
 else
