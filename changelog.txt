@@ -1,0 +1,28 @@
+QuarkStar Swift Qwen3.8-27B change log
+======================================
+
+2026-09-17
+
+- Added Swift IQ4_XS and IQ3_XXS download targets and launchers for
+  ukisai/Swift-Qwen3.8-27B-GGUF.
+- Added bounded dense-weight caching, retained-prefix reuse, and recyclable
+  stream buffers so IQ4_XS can run without the recurring OOM/SIGKILL path.
+- Permanently deleted the unusably slow 14.6 GiB IQ4_XS file after validating
+  that the smaller Swift IQ3_XXS tier was the practical choice on this BC-250.
+- Resumed and completed Swift-Qwen3.8-27B-IQ3_XXS.gguf; final size 11.67 GiB.
+- IQ3_XXS Vulkan inspection passed. Protected launcher smoke test returned
+  READY at 39.92 tok/s prefill and 21.90 tok/s generation.
+- q36-bench IQ3_XXS baseline at 1024 context: 180.27 tok/s prefill and
+  23.01 tok/s generation with 8 greedy output tokens.
+- q36-bench with three-position MTP: 175.21 tok/s prefill and 21.73 tok/s
+  generation. MTP draft=1 is therefore the new Swift launcher default; draft=3
+  remains available through Q36_SWIFT_MTP_DRAFT=3.
+- Attention span 128 measured 23.80 tok/s at 1024 context but regressed to
+  19.10 tok/s at 2048 versus 22.02 tok/s with span 512. It was not enabled.
+- Local reference measurements: Qwen3.6 35B-A3B IQ2XXS reached 53.39 tok/s;
+  Qwen3.8-27B IQ3_S reached 18.93 tok/s; bounded IQ4_XS reached 0.11 tok/s.
+- A full resident IQ4_XS experiment allocated 14.6 GiB active GPU memory and
+  triggered the global OOM killer, terminating Codex. That path was removed
+  from the default launcher and the safe bounded profile was restored.
+- Current commits include 936c9f1 (usable IQ3_XXS profile) and the follow-up
+  performance work in the working branch.

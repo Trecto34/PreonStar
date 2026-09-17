@@ -21,6 +21,12 @@
   permanently deleted the unused 14.6 GiB IQ4_XS file to reclaim disk space.
 - Verified the IQ3_XXS launcher with Vulkan inspection and a protected text
   generation test: `READY`, 39.92 tok/s prefill, and 21.90 tok/s generation.
+- Benchmarked IQ3_XXS with `q36-bench` at 1024 context: 180.27 tok/s prefill
+  and 23.01 tok/s generation without MTP; three-position MTP measured 175.21
+  and 21.73 tok/s, so the launcher now defaults to one draft position.
+- Tested attention span 128 at 1024 and 2048 context; it measured 23.80 and
+  19.10 tok/s versus 23.01 and 22.02 tok/s at span 512, so it was rejected as
+  an unreliable default optimization.
 - Verified `make vulkan-generic -j2`, shell syntax, IQ4_XS Vulkan inspection, and
   a bounded single-token generation smoke test returning `READY` without a
   SIGKILL. The IQ4_XS file is present at `gguf/Swift-Qwen3.8-27B-IQ4_XS.gguf`.

@@ -11,7 +11,7 @@ else
         *) CTX=4096 ;;
     esac
 fi
-DRAFT=${Q36_SWIFT_MTP_DRAFT:-3}
+DRAFT=${Q36_SWIFT_MTP_DRAFT:-1}
 MARGIN=${Q36_SWIFT_MTP_MARGIN:-3}
 
 if [ ! -s "$MODEL" ]; then

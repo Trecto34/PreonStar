@@ -229,8 +229,10 @@ For the reasoning-efficient Swift derivative, the practical tier for this
 ./run_swift_iq3_xxs.sh -p "Explain why the sky is blue in two sentences." --nothink
 ```
 
-`run_swift.sh` uses a 4096-token default context and enables the embedded MTP
-draft head with three draft positions. IQ4_XS had a dedicated bounded-memory
+`run_swift.sh` uses a 4096-token default context and binds the embedded MTP
+draft head, but defaults to one draft position because the BC-250 benchmark
+was faster without speculative verification. Set `Q36_SWIFT_MTP_DRAFT=3` to
+opt into three-position MTP. IQ4_XS had a dedicated bounded-memory
 profile, but its 14.6 GiB file was removed because it was unusably slow on this
 hardware and full residency triggered the host OOM killer.
 
