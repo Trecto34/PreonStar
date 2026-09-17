@@ -8,24 +8,24 @@ This is the repo-local bilevel autoresearch setup for the BC-250 checkout.
 - **Compatibility gate:** every candidate checks Swift IQ3_XXS and the local
   Qwen3.5/Qwen3.6 MoE reference (`qwen35moe`) in separate GPU processes.
 
-The experiment branch manager is shared with the existing Karpathy install at
-`/home/server/Karpathy/experiments.py`, but the target, task files, evidence,
-and experiment store are local to this checkout.
+The authoritative loop logic, persistent state machine, and experiment branch
+manager remain in `~/Karpathy`. The scripts here are target wrappers plus the
+Swift/Qwen compatibility gate and target guidance.
 
 ## Commands
 
 ```sh
-# One isolated inner experiment (safe default)
+# One isolated inner experiment (shared Karpathy logic)
 ./karpathy/run_inner.sh
 
-# One complete outer pass; increase explicitly for a campaign
-KARPATHY_MAX_ITERATIONS=1 ./karpathy/run_outer.sh
+# Infinite outer campaign, owned by ~/Karpathy (Ctrl-C to stop)
+./karpathy/run_outer.sh
 
 # Compatibility-only check
 ./karpathy/compat_gate.sh
 ```
 
-The loops never start concurrent `q36`, `q36-bench`, or `q36_test` jobs. The
-default context and generation lengths are deliberately short enough for this
-16 GB UMA machine. Override model paths with `KARPATHY_SWIFT_MODEL` and
-`KARPATHY_QWEN35_MODEL` when testing another local quant.
+The shared orchestrator never starts concurrent `q36`, `q36-bench`, or
+`q36_test` jobs. The default context and generation lengths are deliberately
+short enough for this 16 GB UMA machine. Override target/model paths with
+`KARPATHY_TARGET_DIR`, `KARPATHY_SWIFT_MODEL`, and `KARPATHY_QWEN35_MODEL`.

@@ -48,8 +48,9 @@
 
 ## Karpathy bilevel setup
 
-- Added versioned repo-local inner and outer loop configuration under
-  `karpathy/`, targeting Swift IQ3_XXS in isolated experiment worktrees.
+- Added a versioned Swift target profile under `karpathy/`; its entrypoints now
+  delegate inner/outer control, persistent state, and experiment branching to
+  the authoritative `~/Karpathy` implementation.
 - Added `karpathy/compat_gate.sh`, which serially runs Swift IQ3_XXS smoke and
   Qwen3.5/Qwen3.6 qwen35moe CPU/Vulkan parity with per-process timeouts.
 - The inner report finalizer records the gate as evidence and prevents a failed

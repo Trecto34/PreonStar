@@ -21,8 +21,8 @@ a compatibility preflight, starts exactly one inner experiment through the
 serialized experiment store, runs a compatibility postflight, and periodically
 asks the outer agent to update local task guidance.
 
-The outer loop stops on a failed preflight/postflight and uses a finite one-pass
-default. Long campaigns require an explicit `KARPATHY_MAX_ITERATIONS` value.
+The outer loop stops on a failed preflight/postflight and otherwise remains
+continuous, as controlled by the authoritative orchestrator in `~/Karpathy`.
 
 ## Safety model
 
