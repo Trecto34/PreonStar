@@ -21,6 +21,17 @@ layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
 layout(set = 0, binding = 3) readonly buffer Tables { uint tables[]; };
 
+#ifdef Q36_Q2_0_ONLY
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint blocks;
+    uint row_bytes;
+    uint type;
+    float scale;
+    uint num_groups;
+    uint swizzle_stride;
+} pc;
+#else
 layout(push_constant) uniform Push {
     uint out_dim;
     uint blocks;
@@ -28,6 +39,7 @@ layout(push_constant) uniform Push {
     uint type;
     float scale;
 } pc;
+#endif
 
 const uint IQ2_XXS = 16u;
 const uint IQ2_XS = 17u;
@@ -74,7 +86,12 @@ int q2_dot4(uint codes, uint qword) {
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
     uint lane8 = lid & 7u;
-    uint first_row = gl_WorkGroupID.x * ROWS;
+    uint g = gl_WorkGroupID.x;
+    uint grid_dim = (pc.num_groups + pc.swizzle_stride - 1u) / pc.swizzle_stride;
+    uint block = g / pc.swizzle_stride, off = g % pc.swizzle_stride;
+    uint s = off * grid_dim + block;
+    if (s >= pc.num_groups) s = g;
+    uint first_row = s * ROWS;
     float acc[ROWS];
     [[unroll]] for (uint r = 0u; r < ROWS; r++) acc[r] = 0.0;
 

@@ -1112,6 +1112,13 @@ static bool q36_vk_env_default_on(const char *name) {
     return !env || !env[0] || env[0] != '0';
 }
 
+static uint32_t q36_vk_q2_0_swizzle_stride(void) {
+    const char *env = getenv("Q36_Q2_0_SWIZZLE");
+    if (!env || !env[0]) return 1u;
+    int s = atoi(env);
+    return s > 0 ? (uint32_t)s : 1u;
+}
+
 static bool q36_vk_have_subgroups(bool clustered) {
     return q36_vk.subgroup_size >= 32u && q36_vk.subgroup_arithmetic &&
            (!clustered || q36_vk.subgroup_clustered);
@@ -3220,7 +3227,7 @@ int q36_gpu_init(void) {
     q36_vk.dense_iq4_xs_mmq = Q36_VK_KERNEL("vulkan/dense_iq4_xs_mmq.spv", 3, 20, 1u << 2);
     q36_vk.dense_iq1_m = Q36_VK_KERNEL("vulkan/dense_iq1_m.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode = Q36_VK_KERNEL("vulkan/dense_extra_decode.spv", 4, 20, 1u << 2);
-    q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
+    q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 28, 1u << 2);
     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
     q36_vk.dense_kquant_mmq = Q36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
     q36_vk.predequant_b16 = Q36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
@@ -8177,15 +8184,19 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                 (uint32_t)out_dim, n_tok == 1u ?
                     "dense_extra_decode" : "dense_extra_mmq");
             if (n_tok == 1u) {
+                uint32_t groups = ((uint32_t)out_dim + 3u) / 4u;
                 struct {
                     uint32_t out_dim;
                     uint32_t blocks;
                     uint32_t row_bytes;
                     uint32_t type;
                     float scale;
+                    uint32_t num_groups;
+                    uint32_t swizzle_stride;
                 } push = {
                     (uint32_t)out_dim, (uint32_t)blocks,
                     (uint32_t)row_bytes, weight_type, scale,
+                    groups, 1u,
                 };
                 q36_vk_kernel *decode_kernel =
                     weight_type == Q36_VK_TENSOR_Q2_0 &&
@@ -8193,10 +8204,15 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                     q36_vk.subgroup_arithmetic ?
                         &q36_vk.dense_extra_decode_q2_0 :
                         &q36_vk.dense_extra_decode;
+                uint32_t push_bytes = 20u;
+                if (decode_kernel == &q36_vk.dense_extra_decode_q2_0) {
+                    push.swizzle_stride = q36_vk_q2_0_swizzle_stride();
+                    push_bytes = (uint32_t)sizeof(push);
+                }
                 ok = q36_vk_run_unlocked(
                     op, decode_kernel,
-                    bindings, &push, sizeof(push),
-                    ((uint32_t)out_dim + 3u) / 4u, 1, 1);
+                    bindings, &push, push_bytes,
+                    groups, 1, 1);
             } else {
                 struct {
                     uint32_t out_dim;
