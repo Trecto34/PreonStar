@@ -58,3 +58,9 @@ file list).  Artifact list in `MANIFEST.artifacts`:
 - Profiling overhead: `runs/prof-overhead.csv`.
 - Secondary benchmarks: `runs/secondary.csv`, `runs/memgrowth-frontiers.csv`.
 - Resource stats: `runs/mmq-resource-stats.txt` from `mmq_info.c`.
+- Attention parity / D2 regression: `attn_parity.c` + `attn_parity_cmp.py`
+  + `attn_parity_test.sh`; raw span dumps `runs/attn-512.bin`,
+  `runs/attn-256.bin`, reference lines `runs/attn-parity-ref.txt`, cross-span
+  comparison `runs/attn-pair-512-256.txt`.  Build/run:
+  `logs/bc250-sustained-20260918/attn_parity_test.sh` (needs `.o` files from
+  `make`).
