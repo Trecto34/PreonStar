@@ -42,9 +42,11 @@ The two phases answer the earlier open question: *aggregate GPU time does not
 prove serialization*, but the timestamps do — neither phase overlaps work.  The
 only recoverable decode time not in a kernel is the launch/sync idle above;
 shrinking it means fewer dispatches or a device-side sampling path that avoids
-the per-token host round-trip, both structural.  The dense decode kernel itself
-is already within ~4 % of its no-ALU load floor (r5 ablation: mode 4 3048 ms vs
-mode 1 2937 ms per 128 tokens), so a further kernel-local win is not indicated.
+the per-token host round-trip, both structural.  The dense decode kernel runs
+at high occupancy (28 VGPRs, 1 KiB LDS, 36 subgroups/SIMD from
+`runs/mmq-resource-stats.txt`) at ~322 GB/s of logical weight bytes, so it is
+memory-system bound; the r5 output-invalid no-ALU ablation is not used as a
+floor.
 
 ## Instrumentation caveat (important)
 
