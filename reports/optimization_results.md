@@ -12,16 +12,22 @@ Campaign branch: `experiment/radiance-transfer-bc250`.
 - **Correctness:** the Hadamard-rotated 27B runs fully resident on BC-250 and
   produces coherent text (sheep = 9, Canberra). Quality bar met at `e50a3e1`,
   still met at the final HEAD.
-- **Decode:** 5.6 t/s at first load → **24.8 t/s soak-gated median** (~245 GB/s
-  effective), **1.36× prism/llama.cpp on the identical file** (measured 18.22
-  t/s). Cold-start runs reach 27.5–28.5 t/s.
+- **Decode:** 5.6 t/s at first load → **33.3 t/s soak-gated median** (ctx 512 /
+  gen 128), **1.8× prism/llama.cpp on the identical file** (measured 18.22 t/s).
+  Short-context runs reach 35.6 t/s. The R5 change (`c910941`) replaced the
+  10-op SWAR `q2_i8x4` expansion with a 256-dword shared LUT: **25.28 → 33.30
+  t/s (+31.7 %, 3 interleaved soak-gated pairs)**.
 - **Prefill:** 181.53 → **200.03 t/s** soak-gated interleaved median (**+10.2 %**)
   from a Q2_0-specialized `dense_extra_mmq` (BM=64/BN=128/BK=32, f16 shared tiles).
-- **Decode is closed:** seven kernel variants, an LDS aligned-load staging test
-  (+18 % slower) and a 6-way channel-swizzle sweep all failed to beat linear.
-  Two unrelated kernels (this and `dense_iq3_xxs`) cap at ~230–250 GB/s (~52–55 %
-  of spec) on this board. The dispatch path is *not* the limiter: a
-  `Q36_VK_PROF_OP=1` trace shows ~93 % GPU busy during decode.
+- **Decode closure was wrong, and R5 found why.** The earlier "closed" verdict
+  (7 shader variants, LDS staging +18 %, swizzle sweep) was measured against the
+  SWAR kernel. A `Q36_Q2_0_ABLATE` decomposition showed the decode kernel time is
+  almost exactly additive: 589 ms non-weight floor + 2348 ms weight streaming +
+  166 ms `dotPacked4x8` + **1181 ms SWAR expansion** = 4284 ms. The expansion was
+  the tax, not DRAM, layout, or dispatch (the `Q36_VK_PROF_OP=1` trace still shows
+  ~93 % GPU busy). Replacing it with a shared LUT recovers it. The SB288 offline
+  reblock remains closed; the raw stream already runs at ~385 GB/s effective once
+  the ALU is out of the way.
 - **Platform:** fan PWM is inert (nct6686 channels do not drive the APU cooler)
   and the driver rejects both `manual` and `high` DPM levels (`EINVAL`), so no
   clock/fan lock is available. All comparisons therefore use a ≤55 °C soak gate.
@@ -326,11 +332,47 @@ Commits: `b434f30` (harness/evidence), `5be1a22` (mmq), `6964c87` (merge),
 
 1. Keep `5be1a22` (+10.2 % prefill, decode unchanged) and the fused
    `hadamard_prepare` (`6e65e89`).
-2. Decode stays at ~24.8 t/s soak-gated (~28 cold). Do not re-run the closed
-   variants; they are documented in §6/§7.
-3. If the 40 t/s decode target is still wanted, the levers are engine/layout
-   level only: an offline weight re-block (decoupled scales / superblocks) is the
-   only untested structural change, and it requires a conversion tool plus new
-   kernels — not a shader tweak.
+2. Decode is at **~33.3 t/s soak-gated** after the R5 LUT (`c910941`), up from
+   24.8. The earlier "closed" variants (§6/§7) were measured against the SWAR
+   kernel and are superseded by §13.
+3. The SB288 offline re-block is **closed**; the raw stream hits ~385 GB/s
+   effective once the expansion ALU is removed. Remaining decode headroom is the
+   589 ms floor plus the ~4 % gap to the no-ALU memory floor; the software-pipeline
+   attempt regressed 5.2 % on occupancy and is not landed.
 4. Prefill has the remaining headroom: ~200 t/s measured vs the 250 t/s spec
    target, and prefill is genuinely compute-bound.
+
+---
+
+## 13. R5 addendum — Q2_0 decode LUT (`c910941`)
+
+The ablation instrument was a temporary `Q36_Q2_0_ABLATE` mode in
+`dense_extra_decode.comp` (removed after measurement). `Q36_VK_PROF_KERNEL=1`,
+ctx 512 / gen 128, `gpu_ms` of `op dense_extra_decode` (128 decode tokens, soak
+gate ≤55 °C):
+
+| mode | change | gpu_ms (hot, median) | vs full |
+|---|---|---|---|
+| 0 | production SWAR `q2_i8x4` + `dotPacked4x8` | 4284 | — |
+| 1 | weight loads kept, expansion + dot removed | 2937 | −31.4 % |
+| 2 | weight loads removed | 589 | −86.3 % |
+| 3 | `dotPacked4x8` on raw code bytes (wrong math) | 3103 | −27.6 % |
+| 4 | shared-LUT expansion (correct) | 3150 | −26.5 % |
+
+Cooler interleaved confirm, 3 reps: mode 0 3756/3775/4237 (median 3775), mode 4
+3038/3048/3111 (median 3048, **−19.2 %**).
+
+Landed A/B vs committed `6964c87`, 3 interleaved soak-gated pairs:
+
+| pair | base tg128 | LUT tg128 | base pp512 | LUT pp512 |
+|---|---|---|---|---|
+| 1 | 28.38 | 33.32 | 197.81 | 200.80 |
+| 2 | 25.28 | 33.30 | 193.61 | 200.71 |
+| 3 | 24.93 | 32.82 | 198.42 | 201.35 |
+| **median** | **25.28** | **33.30 (+31.7 %)** | ~197 | ~201 |
+
+Coherence (9 sheep, Canberra) passes. The Phase 2 software pipeline hoisting the
+four rows' loads ahead of the LUT/dot was correct but regressed to 31.03 t/s
+(lut 32.74 in the same session, −5.2 %) on register pressure/occupancy, and was
+reverted. Full evidence: `karpathy/evidence/raw/r5-q2_0-lut.md`,
+`logs/thermal_run_log.csv` (`lutab-*`, `pipeab-*`), `logs/profiles/`.

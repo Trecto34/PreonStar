@@ -65,9 +65,31 @@ Coherence gate (sheep/Canberra) passes on the LUT kernel. Raw rows:
 `logs/thermal_run_log.csv` (`lutab-*`); profiler dumps:
 `logs/profiles/ablate-*.txt`, `logs/profiles/lutab-*.txt`.
 
+## Phase 2: software-pipeline attempt (negative)
+
+The spec asked for a cross-block ping-pong double buffer. Each lane's block
+loop is only ~3 iterations (`blocks=20`, stride 8), so cross-block prefetch has
+little to hide; the exposed serialization is inside the 4-row group. The
+attempt therefore hoisted the four rows' `codes0/codes1/scale` loads ahead of
+the LUT/dot (3×4 extra live registers), keeping correctness (sheep/Canberra
+pass). Soak-gated interleaved A/B, 3 pairs:
+
+| rep | lut tg128 | pipelined tg128 |
+|---|---|---|
+| 1 | 33.32 | 31.39 |
+| 2 | 32.74 | 31.03 |
+| 3 | 32.54 | 30.93 |
+| median | **32.74** | **31.03 (−5.2 %)** |
+
+The extra live registers cost more occupancy than the load hoisting recovered.
+**Rejected**; the tree stays on the LUT kernel. Raw rows `pipeab-*` in
+`logs/thermal_run_log.csv`, dumps in `logs/profiles/pipeab-*.txt`.
+
 ## Verdict
 
 - Phase 1 gate (≥18 % kernel-time reduction, target ~28–29 t/s): **pass**, at
   33.3 t/s.
+- Phase 2 gate (≥31 t/s): met by Phase 1; the explicit pipeline costs 5.2 % and
+  is not landed. The LUT kernel is already within ~4 % of the no-ALU memory
+  floor (mode 4 3048 ms vs mode 1 2937 ms), so there is little left to hide.
 - SB288 reblock stays closed; the memory path is not the limiter for this win.
-- Remaining target is the 589 + 2348 ms serial floor (Phase 2 pipeline).
