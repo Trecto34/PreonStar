@@ -7722,41 +7722,37 @@ static int q36_hadamard_sign_offset(uint32_t width, uint32_t *offset) {
     return 0;
 }
 
-/* Forward activation transform for a rotated weight: x' = H (s . x), left in
- * rt->had and quantized to rt->had_q8 for the q8_K matmul path.  rt->inp_q8
- * keeps the plain activation for the unrotated weights that share it. */
+/* Forward activation transform for a rotated weight: x' = H (s . x), quantized
+ * directly to rt->had_q8 for the q8_K matmul path in a single fused dispatch.
+ * rt->inp_q8 keeps the plain activation for the unrotated weights that share it. */
 static bool q36_hadamard_prepare(q36_vulkan_runtime *rt,
                                  const q36_gpu_tensor *src,
                                  uint32_t width, uint32_t n_rows) {
     uint32_t offset = 0;
-    if (!rt || !rt->had || !rt->had_q8 || !rt->had_signs) return false;
+    if (!rt || !rt->had_q8 || !rt->had_signs) return false;
     if (!q36_hadamard_sign_offset(width, &offset)) return false;
-    return q36_gpu_signs_mul_tensor(rt->had, src, rt->had_signs, width, n_rows,
-                                    offset, q36_hadamard_total_signs()) &&
-           q36_gpu_fwht_tensor(rt->had, rt->had, width, n_rows,
-                               g_q36_hadamard.inv_sqrt_block) &&
-           q36_gpu_quantize_q8_k_tensor(rt->had_q8, rt->had, width, n_rows);
+    return q36_gpu_hadamard_prepare_tensor(rt->had_q8, src, rt->had_signs,
+                                           width, n_rows, offset,
+                                           q36_hadamard_total_signs(),
+                                           g_q36_hadamard.inv_sqrt_block, 0);
 }
 
 /* Same, for a folded weight whose rotation axis kept the training V order
  * (prism.hadamard.gdn_v_grouped): the runtime activation is tiled, so permute
- * tiled -> grouped before the signs and the transform. */
+ * tiled -> grouped inside the fused kernel before the signs and the transform. */
 static bool q36_hadamard_prepare_grouped(q36_vulkan_runtime *rt,
                                          const q36_gpu_tensor *src,
                                          uint32_t width, uint32_t n_rows) {
     uint32_t offset = 0;
     uint32_t n_v = Q36_N_SSM_DT_RANK;
     uint32_t n_k = Q36_N_SSM_GROUP;
-    if (!rt || !rt->had || !rt->had_q8 || !rt->had_signs) return false;
+    if (!rt || !rt->had_q8 || !rt->had_signs) return false;
     if (!n_k || !n_v || (n_v % n_k) != 0 || (width % n_v) != 0) return false;
     if (!q36_hadamard_sign_offset(width, &offset)) return false;
-    return q36_gpu_v_grouped_permute_tensor(rt->had, src, width, width / n_v,
-                                            n_k, n_v / n_k, n_rows) &&
-           q36_gpu_signs_mul_tensor(rt->had, rt->had, rt->had_signs, width, n_rows,
-                                    offset, q36_hadamard_total_signs()) &&
-           q36_gpu_fwht_tensor(rt->had, rt->had, width, n_rows,
-                               g_q36_hadamard.inv_sqrt_block) &&
-           q36_gpu_quantize_q8_k_tensor(rt->had_q8, rt->had, width, n_rows);
+    return q36_gpu_hadamard_prepare_tensor(rt->had_q8, src, rt->had_signs,
+                                           width, n_rows, offset,
+                                           q36_hadamard_total_signs(),
+                                           g_q36_hadamard.inv_sqrt_block, 1);
 }
 
 static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
