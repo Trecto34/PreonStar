@@ -1,0 +1,182 @@
+#version 460
+
+/* Fused Hadamard activation preparation:
+ *   1. Optional tiled -> grouped V permute (for GDN ssm_out, width 6144)
+ *   2. Signs multiplication by per-width +/-1 sign vector
+ *   3. Normalized Sylvester Walsh-Hadamard transform over 1024-element blocks:
+ *        out = H x / sqrt(1024)
+ *   4. Fast GPU Q8_K quantization writing 256-element blocks into the exact
+ *      layout matching q36_vk_block_q8_K / dense_extra_decode.comp (74 uints per block).
+ *
+ * One workgroup per (1024-block, row): 256 threads.
+ * Each 1024-block produces exactly 4 Q8_K sub-blocks of 256 elements each.
+ */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Src {
+    float src[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Signs {
+    float signs[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Output {
+    uint q8[];
+};
+
+layout(push_constant) uniform Push {
+    uint  width;        /* elements per row */
+    uint  sign_offset;  /* element offset in signs tensor */
+    float scale;        /* 1 / sqrt(1024) */
+    uint  n_rows;       /* number of token rows */
+    uint  blocks;       /* total 256-element blocks per row (width / 256) */
+    uint  is_grouped;   /* 1 if tiled->grouped permute is needed, 0 otherwise */
+} pc;
+
+const uint BLOCK = 1024u;
+const uint QK_K = 256u;
+const uint Q8K_WORDS = 74u;
+
+shared float sh[BLOCK];
+shared float sh_abs[256];
+shared float sh_val[256];
+shared uint  sh_idx[256];
+shared int   sh_sum4[256];
+shared int   sh_bsum[64];
+
+int nearest_int(float fval) {
+    /* precise: keep the mul that produces fval from contracting into an fma
+     * with this magic-number add, or bytes drift from the CPU quantizer. */
+    precise float val = fval + 12582912.0f;
+    uint bits = floatBitsToUint(val);
+    return int(bits & 0x007fffffu) - 0x00400000;
+}
+
+uint pack_i8x4(int a0, int a1, int a2, int a3) {
+    return (uint(a0) & 255u)
+         | ((uint(a1) & 255u) << 8u)
+         | ((uint(a2) & 255u) << 16u)
+         | ((uint(a3) & 255u) << 24u);
+}
+
+void main(void) {
+    const uint block_1024 = gl_WorkGroupID.x;
+    const uint row        = gl_WorkGroupID.y;
+    const uint tid        = gl_LocalInvocationID.x;
+
+    if (row >= pc.n_rows) return;
+
+    /* 1. Load 4 floats/thread with optional permute, multiply signs & scale into LDS */
+    for (uint k = 0u; k < 4u; ++k) {
+        const uint i = tid * 4u + k;
+        const uint col = block_1024 * BLOCK + i;
+        uint src_col = col;
+        if (pc.is_grouped != 0u) {
+            /* Grouped permute geometry: width=6144, hd=128, nk=16, rep=3 */
+            const uint hd_idx  = col % 128u;
+            const uint rep_idx = (col / 128u) % 3u;
+            const uint nk_idx  = col / 384u;
+            src_col = hd_idx + 128u * (nk_idx + 16u * rep_idx);
+        }
+        const float val = src[row * pc.width + src_col];
+        const float s   = signs[pc.sign_offset + col];
+        sh[i] = val * s * pc.scale;
+    }
+    barrier();
+
+    /* 2. In-LDS Fast Walsh-Hadamard Transform butterfly (1024 elements) */
+    for (uint h = 1u; h < BLOCK; h <<= 1) {
+        for (uint k = 0u; k < 4u; ++k) {
+            const uint i = tid * 4u + k;
+            if ((i & h) == 0u) {
+                const float a = sh[i];
+                const float b = sh[i + h];
+                sh[i]     = a + b;
+                sh[i + h] = a - b;
+            }
+        }
+        barrier();
+    }
+
+    /* 3. Q8_K Quantization: 4 sub-blocks of 256 elements handled concurrently
+     *    by 4 groups of 64 threads. */
+    const uint sub = tid >> 6u;       /* sub-block index 0..3 */
+    const uint lid = tid & 63u;       /* thread index 0..63 within sub-block */
+    const uint sub_offset = sub * QK_K;
+
+    float best_abs = 0.0f;
+    float best_val = 0.0f;
+    uint best_idx = lid * 4u;
+
+    for (uint j = 0u; j < 4u; ++j) {
+        const uint idx = lid * 4u + j;
+        const float xv = sh[sub_offset + idx];
+        const float ax = abs(xv);
+        if (ax > best_abs) {
+            best_abs = ax;
+            best_val = xv;
+            best_idx = idx;
+        }
+    }
+
+    sh_abs[tid] = best_abs;
+    sh_val[tid] = best_val;
+    sh_idx[tid] = best_idx;
+    barrier();
+
+    /* Reduction across 64 threads in this sub-block */
+    for (uint s = 32u; s > 0u; s >>= 1u) {
+        if (lid < s) {
+            const float other_abs = sh_abs[tid + s];
+            const uint other_idx = sh_idx[tid + s];
+            if (other_abs > sh_abs[tid] || (other_abs == sh_abs[tid] && other_idx < sh_idx[tid])) {
+                sh_abs[tid] = other_abs;
+                sh_val[tid] = sh_val[tid + s];
+                sh_idx[tid] = other_idx;
+            }
+        }
+        barrier();
+    }
+
+    /* fp64 division for exact d computation matching CPU and quantize_q8_k.comp */
+    const float maxv = sh_val[sub * 64u];
+    const float iscale = maxv != 0.0f ? float(-127.0 / double(maxv)) : 0.0f;
+    const float d = iscale != 0.0f ? float(1.0 / double(iscale)) : 0.0f;
+
+    int qv[4];
+    int sum4 = 0;
+
+    for (uint j = 0u; j < 4u; ++j) {
+        const float xv = sh[sub_offset + lid * 4u + j];
+        int q = iscale != 0.0f ? nearest_int(iscale * xv) : 0;
+        if (q > 127) q = 127;
+        qv[j] = q;
+        sum4 += q;
+    }
+
+    const uint block_256 = block_1024 * 4u + sub;
+    const uint out_base = (row * pc.blocks + block_256) * Q8K_WORDS;
+
+    if (lid == 0u) {
+        q8[out_base + 0u] = floatBitsToUint(d);
+        q8[out_base + 1u] = 0u;
+    }
+    q8[out_base + 2u + lid] = pack_i8x4(qv[0], qv[1], qv[2], qv[3]);
+
+    sh_sum4[tid] = sum4;
+    barrier();
+
+    if ((lid & 3u) == 0u) {
+        sh_bsum[sub * 16u + (lid >> 2u)] = sh_sum4[tid] + sh_sum4[tid + 1u] +
+                                          sh_sum4[tid + 2u] + sh_sum4[tid + 3u];
+    }
+    barrier();
+
+    if (lid < 8u) {
+        const int s0 = sh_bsum[sub * 16u + 2u * lid + 0u];
+        const int s1 = sh_bsum[sub * 16u + 2u * lid + 1u];
+        q8[out_base + 66u + lid] = (uint(s0) & 0xffffu) | ((uint(s1) & 0xffffu) << 16u);
+    }
+}

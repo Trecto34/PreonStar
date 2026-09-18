@@ -411,6 +411,19 @@ int q36_gpu_v_grouped_permute_tensor(
         uint32_t                rep,
         uint32_t                n_rows);
 
+/* Fused activation prep: (optional grouped permute) -> signs multiply ->
+ * normalized 1024-block FWHT -> Q8_K quantize into q8_dst. */
+int q36_gpu_hadamard_prepare_tensor(
+        q36_gpu_tensor       *q8_dst,
+        const q36_gpu_tensor *src,
+        const q36_gpu_tensor *signs,
+        uint32_t              width,
+        uint32_t              n_rows,
+        uint32_t              sign_offset,
+        uint32_t              total_signs,
+        float                 scale,
+        uint32_t              is_grouped);
+
 /* out_sum = a + b, out_norm = rmsnorm(out_sum) * weight, fused per row.
  * out_sum may alias a or b. */
 int q36_gpu_add_rms_norm_tensor(
