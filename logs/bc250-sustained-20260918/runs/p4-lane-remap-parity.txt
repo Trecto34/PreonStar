@@ -1,0 +1,28 @@
+P4 dense_extra_mmq_q2_0 lane remap -- correctness record
+========================================================
+Change: Q36_Q2_0_ONLY path, A-operand LDS read and output row use
+row = r*4 + lane_row instead of lane_row*16 + r.
+Reason: lane_row*16*STRIDE gives lane-row bases 0,272,544,816 -> banks
+0,16,0,16 -> a 2-way LDS bank conflict on every A-column read.  The
+round-robin row map gives bases 0,17,34,51 -> four distinct banks.
+Pure relabeling: per-output reduction order (qb, slice, k) unchanged.
+
+Full frontier-512 logits (ctx 512, chunk 256, 512 real tokens):
+  baseline  logs/bc250-sustained-20260918/runs/p3-logits-base/frontier_000512.logits.json
+  P4        (regenerated; compare the `logits` array, not the file hash --
+            the file also records the model path string)
+  n=248320  max_abs_diff=0  mean_abs_diff=0  first_diff=none   -> BIT EXACT
+  (whole-file sha256 differs only because one run passed an absolute model
+   path and the other a relative path)
+
+End-to-end interleaved A/B (same host binary, only the .spv swapped),
+10 soak-gated pairs, entry edge <=55 C, primary command:
+  pp512  A median 196.41 (MAD 2.37)  B median 203.08  -> median paired +3.58%
+         9/10 pairs positive; paired mean +3.40%; baseline relMAD 1.21%
+  decode A median 32.76  B median 32.73  -> -0.09% (kernel not touched)
+
+Coherence gate (greedy, temp 0): answers 9 sheep and Canberra.  Pass.
+Raw CSV: ab-p4-lane-remap.csv
+Candidate .spv sha256: 1f4b5c63ee2a5ff5624ff96e25267772c2b99dc43ed59301abe828aea151f76a
+Baseline  .spv sha256: a3bd761d6f831976e28a9a73b966a7aff2a6ea3b7baf5da688bbf6e28e07759c
+Shaders are untracked; `make` regenerates from vulkan/dense_extra_mmq.comp.
