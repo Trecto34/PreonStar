@@ -53,6 +53,7 @@ VULKAN_SHADERS := \
 	vulkan/matmul_f32_fast.spv \
 	vulkan/matmul_f32_fast_w256.spv \
 	vulkan/add.spv \
+	vulkan/fwht.spv \
 	vulkan/directional_steering.spv \
 	vulkan/add_rms_norm.spv \
 	vulkan/rms_norm.spv \

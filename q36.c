@@ -48,6 +48,8 @@
 #define Q36_Q8_0_BYTES 34u
 #define Q36_QK4_0 32u
 #define Q36_Q4_0_BYTES 18u
+#define Q36_QK2_0 64u
+#define Q36_Q2_0_BYTES 18u
 #define Q36_QK_K 256u
 #define Q36_K_SCALE_SIZE 12u
 #define Q36_Q8_K_BYTES 292u
@@ -271,6 +273,8 @@ static const gguf_type_info gguf_types[] = {
     [23] = {"iq4_xs", 256, 136},
     [26] = {"i32", 1, 4},
     [29] = {"iq1_m", 256, 56},
+    [30] = {"bf16", 1, 2},
+    [42] = {"q2_0", 64, 18},
 };
 
 enum {
@@ -292,6 +296,8 @@ enum {
     Q36_TENSOR_IQ4_XS = 23,
     Q36_TENSOR_I32 = 26,
     Q36_TENSOR_IQ1_M = 29,
+    Q36_TENSOR_BF16 = 30,
+    Q36_TENSOR_Q2_0 = 42,
 };
 
 typedef struct {
@@ -309,6 +315,8 @@ typedef struct {
     uint64_t abs_offset;
     uint64_t elements;
     uint64_t bytes;
+    bool hadamard_rotate;
+    bool hadamard_inverse;
 } q36_tensor;
 
 typedef struct {
@@ -341,6 +349,11 @@ typedef struct {
     uint16_t d;
     uint8_t qs[Q36_QK4_0 / 2u];
 } q36_block_q4_0;
+
+typedef struct {
+    uint16_t d;
+    uint8_t qs[Q36_QK2_0 / 4u];
+} q36_block_q2_0;
 
 typedef struct {
     float d;
@@ -751,6 +764,8 @@ typedef struct {
     q36_gpu_tensor *norm;
     q36_gpu_tensor *last_h;
     q36_gpu_tensor *inp_q8;
+    q36_gpu_tensor *had;        /* f32 scratch for the Walsh-Hadamard transform */
+    q36_gpu_tensor *had_signs;  /* concatenated per-width sign vectors */
     q36_gpu_tensor *attn_qg;
     q36_gpu_tensor *attn_q;
     q36_gpu_tensor *attn_k;
@@ -1885,6 +1900,8 @@ static void q36_get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m
 
 static bool tensor_nbytes(uint32_t type, uint64_t elements, uint64_t *bytes);
 static void q36_dequantize_row_q8_0(const q36_block_q8_0 *x, float *y, uint64_t k);
+static void q36_dequantize_row_bf16(const uint16_t *x, float *y, uint64_t k);
+static void q36_dequantize_row_q2_0(const q36_block_q2_0 *x, float *y, uint64_t k);
 static void q36_dequantize_row_q2_k(const q36_block_q2_k *x, float *y, uint64_t k);
 static void q36_dequantize_row_q3_k(const q36_block_q3_k *x, float *y, uint64_t k);
 static void q36_dequantize_row_q4_k(const q36_block_q4_k *x, float *y, uint64_t k);
@@ -1930,8 +1947,14 @@ static bool q36_dequantize_row_from_ptr(uint32_t type, const uint8_t *src, float
         for (uint32_t i = 0; i < n; i++) dst[i] = q36_f16_to_f32(h[i]);
         return true;
     }
+    case Q36_TENSOR_BF16:
+        q36_dequantize_row_bf16((const uint16_t *)src, dst, n);
+        return true;
     case Q36_TENSOR_Q8_0:
         q36_dequantize_row_q8_0((const q36_block_q8_0 *)src, dst, n);
+        return true;
+    case Q36_TENSOR_Q2_0:
+        q36_dequantize_row_q2_0((const q36_block_q2_0 *)src, dst, n);
         return true;
     case Q36_TENSOR_Q2_K:
         q36_dequantize_row_q2_k((const q36_block_q2_k *)src, dst, n);
@@ -1995,6 +2018,28 @@ static void q36_dequantize_row_q8_0(const q36_block_q8_0 *x, float *y, uint64_t 
     for (uint64_t i = 0; i < nb; i++) {
         float d = q36_f16_to_f32(x[i].d);
         for (uint32_t j = 0; j < Q36_QK8_0; j++) *y++ = d * (float)x[i].qs[j];
+    }
+}
+
+static void q36_dequantize_row_bf16(const uint16_t *x, float *y, uint64_t k) {
+    for (uint64_t i = 0; i < k; i++) {
+        uint32_t bits = (uint32_t)x[i] << 16;
+        float f;
+        memcpy(&f, &bits, sizeof(f));
+        y[i] = f;
+    }
+}
+
+static void q36_dequantize_row_q2_0(const q36_block_q2_0 *x, float *y, uint64_t k) {
+    uint64_t nb;
+    if ((k % Q36_QK2_0) != 0) q36_die("q2_0 row size mismatch");
+    nb = k / Q36_QK2_0;
+    for (uint64_t i = 0; i < nb; i++) {
+        float d = q36_f16_to_f32(x[i].d);
+        for (uint32_t j = 0; j < Q36_QK2_0; j++) {
+            uint8_t q = (uint8_t)((x[i].qs[j / 4u] >> ((j % 4u) * 2u)) & 0x03u);
+            *y++ = (float)((int)q - 1) * d;
+        }
     }
 }
 
@@ -2461,6 +2506,8 @@ static void q36_scale_inplace(float *x, uint32_t n, float scale) {
 
 static bool q36_tensor_type_supports_q8k_dot(uint32_t type) {
     switch (type) {
+    case Q36_TENSOR_BF16:
+    case Q36_TENSOR_Q2_0:
     case Q36_TENSOR_Q2_K:
     case Q36_TENSOR_Q3_K:
     case Q36_TENSOR_Q4_K:
@@ -4135,7 +4182,9 @@ static bool tensor_type_is_cpu_matrix(uint32_t type) {
     switch (type) {
     case Q36_TENSOR_F32:
     case Q36_TENSOR_F16:
+    case Q36_TENSOR_BF16:
     case Q36_TENSOR_Q8_0:
+    case Q36_TENSOR_Q2_0:
     case Q36_TENSOR_Q2_K:
     case Q36_TENSOR_Q3_K:
     case Q36_TENSOR_Q4_K:
@@ -4235,6 +4284,7 @@ static int q36_quant_bits_from_type(uint32_t type) {
     case Q36_TENSOR_IQ2_XXS:
     case Q36_TENSOR_IQ2_XS:
     case Q36_TENSOR_IQ2_S:
+    case Q36_TENSOR_Q2_0:
     case Q36_TENSOR_Q2_K:
         return 2;
     case Q36_TENSOR_IQ3_XXS:
@@ -4255,6 +4305,8 @@ static int q36_quant_bits_from_type(uint32_t type) {
         return 6;
     case Q36_TENSOR_Q8_0:
         return 8;
+    case Q36_TENSOR_BF16:
+        return 16;
     default:
         return 0;
     }
@@ -5381,6 +5433,155 @@ static void q36_vulkan_prewarm_weights(const q36_engine *e) {
 }
 #endif
 
+#define Q36_HADAMARD_MAX_WIDTHS 16
+
+typedef struct {
+    bool enabled;
+    uint32_t block_size;
+    float inv_sqrt_block;
+    uint32_t n_widths;
+    uint32_t widths[Q36_HADAMARD_MAX_WIDTHS];
+    float *signs[Q36_HADAMARD_MAX_WIDTHS];
+} q36_hadamard;
+
+static q36_hadamard g_q36_hadamard;
+
+static int q36_hadamard_width_index(uint32_t width) {
+    for (uint32_t i = 0; i < g_q36_hadamard.n_widths; i++) {
+        if (g_q36_hadamard.widths[i] == width) return (int)i;
+    }
+    return -1;
+}
+
+static const float *q36_hadamard_signs(uint32_t width) {
+    int i = q36_hadamard_width_index(width);
+    return i < 0 ? NULL : g_q36_hadamard.signs[i];
+}
+
+static bool q36_hadamard_rotate_enabled(const q36_tensor *t) {
+    return g_q36_hadamard.enabled && t && t->hadamard_rotate;
+}
+
+static const char *q36_hadamard_str(const q36_str s, char *tmp, size_t tmp_size) {
+    if (s.len + 1 > tmp_size) q36_die("prism.hadamard metadata name is too long");
+    memcpy(tmp, s.ptr, s.len);
+    tmp[s.len] = '\0';
+    return tmp;
+}
+
+/* Parse the prism.hadamard.* GGUF block that marks weights stored in a
+ * rotated (normalized Walsh-Hadamard + explicit sign) basis. The transform is
+ * applied to the activation before the matmul, so the flag rides on the tensor
+ * and the sign vectors are looked up by activation width. */
+static void hadamard_parse(q36_model *m) {
+    q36_str transform, axis, sign_mode;
+    q36_array_ref widths_arr, values_arr, names_arr;
+    q36_cursor c;
+    uint32_t block_size = 0;
+    uint64_t total = 0;
+    char tmp[256];
+
+    if (!model_find_kv(m, "prism.hadamard.weight_names")) return;
+
+    if (!model_get_u32(m, "prism.hadamard.block_size", &block_size) || block_size == 0 ||
+        (block_size & (block_size - 1u)) != 0) {
+        q36_die("prism.hadamard.block_size is missing or not a power of two");
+    }
+    transform = required_string(m, "prism.hadamard.transform");
+    if (!q36_streq(transform, "normalized-sylvester-walsh-hadamard")) {
+        q36_die("unsupported prism.hadamard.transform");
+    }
+    axis = required_string(m, "prism.hadamard.axis");
+    if (!q36_streq(axis, "input-last-dimension")) {
+        q36_die("unsupported prism.hadamard.axis");
+    }
+    sign_mode = required_string(m, "prism.hadamard.sign_mode");
+    if (!q36_streq(sign_mode, "explicit")) {
+        q36_die("unsupported prism.hadamard.sign_mode");
+    }
+
+    g_q36_hadamard.enabled = true;
+    g_q36_hadamard.block_size = block_size;
+    g_q36_hadamard.inv_sqrt_block = 1.0f / sqrtf((float)block_size);
+
+    if (!model_get_array(m, "prism.hadamard.sign_widths", &widths_arr) ||
+        widths_arr.type != GGUF_VALUE_INT32 ||
+        !model_get_array(m, "prism.hadamard.sign_values", &values_arr) ||
+        values_arr.type != GGUF_VALUE_INT32) {
+        q36_die("prism.hadamard explicit signs are missing");
+    }
+    if (widths_arr.len == 0 || widths_arr.len > Q36_HADAMARD_MAX_WIDTHS) {
+        q36_die("prism.hadamard.sign_widths has an unsupported length");
+    }
+    g_q36_hadamard.n_widths = (uint32_t)widths_arr.len;
+    c = cursor_at(m, widths_arr.data_pos);
+    for (uint64_t i = 0; i < widths_arr.len; i++) {
+        int32_t w = 0;
+        if (!cursor_read(&c, &w, sizeof(w))) q36_die(c.error);
+        if (w <= 0 || (uint32_t)w % block_size != 0) q36_die("prism.hadamard sign width is invalid");
+        g_q36_hadamard.widths[i] = (uint32_t)w;
+        total += (uint64_t)w;
+    }
+    if (total != values_arr.len) q36_die("prism.hadamard sign_values length mismatch");
+    c = cursor_at(m, values_arr.data_pos);
+    for (uint32_t i = 0; i < g_q36_hadamard.n_widths; i++) {
+        uint32_t w = g_q36_hadamard.widths[i];
+        float *buf = (float *)xmalloc((size_t)w * sizeof(float));
+        for (uint32_t j = 0; j < w; j++) {
+            int32_t v = 0;
+            if (!cursor_read(&c, &v, sizeof(v))) q36_die(c.error);
+            if (v != 1 && v != -1) q36_die("prism.hadamard sign value must be +/-1");
+            buf[j] = (float)v;
+        }
+        g_q36_hadamard.signs[i] = buf;
+    }
+
+    if (!model_get_array(m, "prism.hadamard.weight_names", &names_arr) ||
+        names_arr.type != GGUF_VALUE_STRING) {
+        q36_die("prism.hadamard.weight_names is missing");
+    }
+    c = cursor_at(m, names_arr.data_pos);
+    for (uint64_t i = 0; i < names_arr.len; i++) {
+        q36_str name;
+        q36_tensor *t;
+        if (!cursor_string(&c, &name)) q36_die(c.error);
+        t = model_find_tensor(m, q36_hadamard_str(name, tmp, sizeof(tmp)));
+        if (!t) {
+            fprintf(stderr, "q36: prism.hadamard weight not found: %s\n", tmp);
+            exit(1);
+        }
+        if ((t->dim[0] % block_size) != 0) {
+            fprintf(stderr, "q36: prism.hadamard block size does not divide input dim of %s\n", tmp);
+            exit(1);
+        }
+        t->hadamard_rotate = true;
+    }
+
+    if (model_get_array(m, "prism.hadamard.inverse_weight_names", &names_arr) &&
+        names_arr.type == GGUF_VALUE_STRING) {
+        c = cursor_at(m, names_arr.data_pos);
+        for (uint64_t i = 0; i < names_arr.len; i++) {
+            q36_str name;
+            q36_tensor *t;
+            if (!cursor_string(&c, &name)) q36_die(c.error);
+            q36_hadamard_str(name, tmp, sizeof(tmp));
+            if (strcmp(tmp, "token_embd.weight") != 0) {
+                fprintf(stderr, "q36: unsupported prism.hadamard inverse weight: %s\n", tmp);
+                exit(1);
+            }
+            t = model_find_tensor(m, tmp);
+            if (!t) {
+                fprintf(stderr, "q36: prism.hadamard inverse weight not found: %s\n", tmp);
+                exit(1);
+            }
+            t->hadamard_inverse = true;
+        }
+    }
+
+    fprintf(stderr, "q36: prism.hadamard: block=%u widths=%u values=%" PRIu64 "\n",
+            block_size, g_q36_hadamard.n_widths, total);
+}
+
 static void config_validate_model(const q36_model *m) {
     char key[128];
     const char *prefix;
@@ -5841,6 +6042,7 @@ static bool q36_gpu_tensor_matmul_q8_scaled(const q36_model *m,
     case Q36_TENSOR_Q6_K:
         return q36_gpu_matmul_k_quant_q8_scaled_tensor(out, m->map, m->size, t->abs_offset,
                                                         t->type, in_dim, out_dim, xq, n_tok, scale) != 0;
+    case Q36_TENSOR_Q2_0:
     case Q36_TENSOR_IQ3_XXS:
     case Q36_TENSOR_IQ3_S:
     case Q36_TENSOR_IQ2_XXS:
@@ -5931,6 +6133,8 @@ static void q36_vulkan_runtime_free(q36_vulkan_runtime *rt) {
     q36_gpu_tensor_free(rt->norm);
     q36_gpu_tensor_free(rt->last_h);
     q36_gpu_tensor_free(rt->inp_q8);
+    q36_gpu_tensor_free(rt->had);
+    q36_gpu_tensor_free(rt->had_signs);
     q36_gpu_tensor_free(rt->attn_qg);
     q36_gpu_tensor_free(rt->attn_q);
     q36_gpu_tensor_free(rt->attn_k);
@@ -6081,6 +6285,29 @@ static q36_vulkan_runtime *q36_vulkan_runtime_create(int ctx_size,
     Q36_GPU_ALLOC_SCRATCH_F32(attn_v, Q36_N_HEAD_KV * Q36_N_VALUE_DIM);
     Q36_GPU_ALLOC_SCRATCH_F32(attn_out, Q36_N_SSM_INNER);
 #endif
+    if (g_q36_hadamard.enabled) {
+        uint32_t had_width = Q36_N_EMBD;
+        uint64_t signs_total = 0;
+        if (Q36_N_FF_SHARED > had_width) had_width = Q36_N_FF_SHARED;
+        if (Q36_N_SSM_INNER > had_width) had_width = Q36_N_SSM_INNER;
+        if (Q36_N_SSM_CONV_DIM > had_width) had_width = Q36_N_SSM_CONV_DIM;
+        Q36_GPU_ALLOC_SCRATCH_F32(had, had_width);
+        for (uint32_t i = 0; i < g_q36_hadamard.n_widths; i++) {
+            signs_total += g_q36_hadamard.widths[i];
+        }
+        rt->had_signs = q36_gpu_tensor_alloc(signs_total * sizeof(float));
+        if (!rt->had_signs) goto fail;
+        {
+            float *sp = (float *)q36_gpu_tensor_contents(rt->had_signs);
+            uint64_t off = 0;
+            if (!sp) goto fail;
+            for (uint32_t i = 0; i < g_q36_hadamard.n_widths; i++) {
+                memcpy(sp + off, g_q36_hadamard.signs[i],
+                       (size_t)g_q36_hadamard.widths[i] * sizeof(float));
+                off += g_q36_hadamard.widths[i];
+            }
+        }
+    }
     /* A layer is attention or recurrent, never both. These equal-sized
      * views remove 64 MiB of mutually exclusive 1024-row scratch. */
     rt->recur_qkv = q36_gpu_tensor_view(rt->attn_qg, 0,
@@ -10010,6 +10237,7 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
         }
     }
     config_validate_model(&e->model);
+    hadamard_parse(&e->model);
     e->variant = g_q36_shape.variant;
     if (opt->vision_path && opt->vision_path[0]) {
         model_open(&e->vision_model, opt->vision_path, false);

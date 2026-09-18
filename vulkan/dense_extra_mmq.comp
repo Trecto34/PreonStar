@@ -25,6 +25,7 @@ const uint IQ2_XS = 17u;
 const uint IQ1_S = 19u;
 const uint IQ4_NL = 20u;
 const uint IQ2_S = 22u;
+const uint Q2_0 = 42u;
 const uint BM = 32u;
 const uint BN = 128u;
 const uint BK = 32u;
@@ -163,7 +164,8 @@ void main(void) {
             uint block_bytes = pc.type == IQ2_XXS ? 66u :
                                pc.type == IQ2_XS ? 74u :
                                pc.type == IQ2_S ? 82u : 50u;
-            weight_scale[lid] = row < pc.out_dim && pc.type != IQ4_NL ?
+            weight_scale[lid] = row < pc.out_dim &&
+                pc.type != IQ4_NL && pc.type != Q2_0 ?
                 unpackHalf2x16(load_u16(row * pc.row_bytes + qb * block_bytes)).x *
                     pc.scale : 0.0;
         }
@@ -232,6 +234,18 @@ void main(void) {
                                 (((qh >> (3u * p)) & 7u) << 8u);
                             v[p] = d * (unpack_i8(
                                 tables[TAB_IQ1S + entry * 2u + kw]) + delta);
+                        }
+                    } else if (pc.type == Q2_0) {
+                        /* 64-element blocks: one f16 scale per block, 2-bit codes. */
+                        base += (qb * 4u + (slice >> 1u)) * 18u;
+                        float d = unpackHalf2x16(load_u16(base)).x * pc.scale;
+                        [[unroll]] for (uint p = 0u; p < 4u; p++) {
+                            uint bits = load_u8(base + 2u + (slice & 1u) * 8u +
+                                                (kw + 2u * p));
+                            v[p] = d * vec4(float(bits & 3u) - 1.0,
+                                            float((bits >> 2u) & 3u) - 1.0,
+                                            float((bits >> 4u) & 3u) - 1.0,
+                                            float((bits >> 6u) & 3u) - 1.0);
                         }
                     } else {
                         base += (qb * 8u + slice) * 18u;

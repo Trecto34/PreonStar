@@ -369,6 +369,20 @@ int q36_gpu_directional_steering_project_tensor(
         uint32_t                rows,
         float                   scale);
 
+/* Normalized Walsh-Hadamard transform with explicit +/-1 signs over each
+ * contiguous 1024-element block of every f32 row. signs_after = 0 applies the
+ * signs before the butterfly (forward), != 0 applies them after (inverse). */
+int q36_gpu_fwht_tensor(
+        q36_gpu_tensor       *dst,
+        const q36_gpu_tensor *src,
+        const q36_gpu_tensor *signs,
+        uint32_t                width,
+        uint32_t                n_rows,
+        uint32_t                sign_offset,
+        uint32_t                total_signs,
+        float                   scale,
+        int                     signs_after);
+
 /* out_sum = a + b, out_norm = rmsnorm(out_sum) * weight, fused per row.
  * out_sum may alias a or b. */
 int q36_gpu_add_rms_norm_tensor(

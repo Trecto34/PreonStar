@@ -26,6 +26,7 @@ const uint IQ2_XS = 17u;
 const uint IQ1_S = 19u;
 const uint IQ4_NL = 20u;
 const uint IQ2_S = 22u;
+const uint Q2_0 = 42u;
 const uint ROWS = 4u;
 const uint Q8K_WORDS = 74u;
 const uint TAB_IQ2XXS = 0u;
@@ -199,6 +200,23 @@ float block_dot(uint row, uint qb, uint group, vec4 qv[8]) {
                          (((qh >> (3u * l)) & 7u) << 8u);
             sum += dot(unpack_i8(tables[TAB_IQ1S + entry * 2u]) + delta, qv[2u * l]);
             sum += dot(unpack_i8(tables[TAB_IQ1S + entry * 2u + 1u]) + delta, qv[2u * l + 1u]);
+        }
+        return d * sum;
+    }
+
+    if (pc.type == Q2_0) {
+        /* Q2_0: 64-element blocks, f16 scale + 16 bytes of 2-bit codes.
+         * group covers 32 elements = half of one 64-block; qv[i] holds the
+         * four elements at offset 4*i inside that half. */
+        base += (qb * 4u + (group >> 1u)) * 18u;
+        d = unpackHalf2x16(load_u16(base)).x;
+        for (uint i = 0u; i < 8u; i++) {
+            uint bits = load_u8(base + 2u + (group & 1u) * 8u + i);
+            vec4 w = vec4(float(bits & 3u) - 1.0,
+                          float((bits >> 2u) & 3u) - 1.0,
+                          float((bits >> 4u) & 3u) - 1.0,
+                          float((bits >> 6u) & 3u) - 1.0);
+            sum += dot(w, qv[i]);
         }
         return d * sum;
     }

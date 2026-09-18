@@ -37,6 +37,7 @@ enum {
     Q36_VK_TENSOR_IQ2_S   = 22,
     Q36_VK_TENSOR_IQ4_XS  = 23,
     Q36_VK_TENSOR_IQ1_M   = 29,
+    Q36_VK_TENSOR_Q2_0    = 42,
 };
 
 typedef struct q36_gpu_tensor {
@@ -246,6 +247,7 @@ typedef struct {
     q36_vk_kernel dense_q5k_decode;
     q36_vk_kernel moe_reduce;
     q36_vk_kernel ffn_tail;
+    q36_vk_kernel fwht;
     q36_vk_weight *weights;
     q36_vk_packed_weight *packed_weights;
     q36_vk_arena_block *arena;
@@ -3115,6 +3117,7 @@ int q36_gpu_init(void) {
     q36_vk.matmul_f32_fast = Q36_VK_KERNEL("vulkan/matmul_f32_fast.spv", 3, 16, 1u << 2);
     q36_vk.matmul_f32_fast_w256 = Q36_VK_KERNEL("vulkan/matmul_f32_fast_w256.spv", 3, 16, 1u << 2);
     q36_vk.add = Q36_VK_KERNEL("vulkan/add.spv", 3, 4, 1u << 2);
+    q36_vk.fwht = Q36_VK_KERNEL("vulkan/fwht.spv", 3, 16, 1u << 2);
     q36_vk.directional_steering = Q36_VK_KERNEL("vulkan/directional_steering.spv", 2, 16, 1u << 0);
     q36_vk.rms_norm = Q36_VK_KERNEL("vulkan/rms_norm.spv", 3, 12, 1u << 2);
     q36_vk.add_rms_norm = Q36_VK_KERNEL("vulkan/add_rms_norm.spv", 5, 8, (1u << 3) | (1u << 4));
@@ -3683,6 +3686,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.quantize_q8_k);
     q36_vk_kernel_destroy(&q36_vk.directional_steering);
     q36_vk_kernel_destroy(&q36_vk.add);
+    q36_vk_kernel_destroy(&q36_vk.fwht);
     q36_vk_kernel_destroy(&q36_vk.matmul_f32);
     q36_vk_kernel_destroy(&q36_vk.matmul_f32_fast);
     q36_vk_kernel_destroy(&q36_vk.matmul_f32_fast_w256);
@@ -5752,6 +5756,44 @@ int q36_gpu_ffn_tail_tensor(q36_gpu_tensor *out,
     return ok;
 }
 
+int q36_gpu_fwht_tensor(q36_gpu_tensor *dst,
+                        const q36_gpu_tensor *src,
+                        const q36_gpu_tensor *signs,
+                        uint32_t width,
+                        uint32_t n_rows,
+                        uint32_t sign_offset,
+                        uint32_t total_signs,
+                        float scale,
+                        int signs_after) {
+    uint64_t elems = 0;
+    uint64_t act_bytes = 0;
+    uint64_t sign_bytes = 0;
+    if (!dst || !src || !signs || width == 0 || n_rows == 0) return 0;
+    if ((width % 1024u) != 0 || width > UINT32_MAX) return 0;
+    if (!q36_u64_mul_ok(width, n_rows, &elems) ||
+        !q36_u64_mul_ok(elems, sizeof(float), &act_bytes) ||
+        !q36_u64_mul_ok(total_signs, sizeof(float), &sign_bytes)) {
+        return 0;
+    }
+    if (!q36_gpu_tensor_range_ok(src, 0, act_bytes) ||
+        !q36_gpu_tensor_range_ok(dst, 0, act_bytes) ||
+        !q36_gpu_tensor_range_ok(signs, 0, sign_bytes)) {
+        return 0;
+    }
+    struct {
+        uint32_t width;
+        uint32_t sign_offset;
+        float    scale;
+        uint32_t signs_after;
+    } push = { width, sign_offset, scale, signs_after ? 1u : 0u };
+    const q36_gpu_tensor *bindings[3] = { src, signs, dst };
+    pthread_mutex_lock(&q36_vk_mu);
+    int ok = q36_vk_run_unlocked("fwht", &q36_vk.fwht, bindings, &push, sizeof(push),
+                                 width / 1024u, n_rows, 1);
+    pthread_mutex_unlock(&q36_vk_mu);
+    return ok;
+}
+
 int q36_gpu_add_tensor(q36_gpu_tensor *out,
                        const q36_gpu_tensor *a,
                        const q36_gpu_tensor *b,
@@ -7547,6 +7589,7 @@ static uint64_t q36_vk_iq_block_bytes(uint32_t type) {
     case Q36_VK_TENSOR_IQ2_S: return 82;
     case Q36_VK_TENSOR_IQ4_XS: return 136;
     case Q36_VK_TENSOR_IQ1_M: return 56;
+    case Q36_VK_TENSOR_Q2_0: return 72;
     default: return 0;
     }
 }
@@ -7961,7 +8004,8 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                       weight_type == Q36_VK_TENSOR_IQ2_XS ||
                       weight_type == Q36_VK_TENSOR_IQ2_S ||
                       weight_type == Q36_VK_TENSOR_IQ1_S ||
-                      weight_type == Q36_VK_TENSOR_IQ4_NL;
+                      weight_type == Q36_VK_TENSOR_IQ4_NL ||
+                      weight_type == Q36_VK_TENSOR_Q2_0;
     if ((weight_type != Q36_VK_TENSOR_IQ3_XXS &&
          weight_type != Q36_VK_TENSOR_IQ3_S &&
          weight_type != Q36_VK_TENSOR_IQ4_XS &&
