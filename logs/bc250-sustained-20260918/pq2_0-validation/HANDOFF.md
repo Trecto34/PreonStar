@@ -2,11 +2,13 @@
 
 Written at the point work was stopped. Base commit `c0e7c1a`, branch
 `experiment/bc250-sustained-20260918`. Committed history: `598eb58` (PQ2_0
-sources + validation), `60b67b2` (handoff provenance). **Everything after that
-is uncommitted** — see "Tree state (uncommitted session)" below. The top
-sections were rewritten at the 2026-09-18 evening stop; the historical
-"Directive items" table and "What is established" retain older wording where it
-is still true but read the CORRECTION first.
+sources + validation), `60b67b2` (handoff provenance), `0b3fb5b` (the
+2026-09-18 evening session — Hadamard reference fix, shared f16-MMQ contract,
+native-128 policy). The tree is clean at `0b3fb5b`; prebuilt tool binaries and
+`runs/` stay untracked by design. The top sections were rewritten at the
+2026-09-18 evening stop; the historical "Directive items" table and "What is
+established" retain older wording where it is still true but read the CORRECTION
+first.
 
 ## Status at a glance
 
@@ -17,9 +19,10 @@ is still true but read the CORRECTION first.
   source); no packer was needed. The old "repack" claim is retracted.
 * **Whole-model CPU↔GPU parity: closed as low priority.** GPU-first policy;
   do not resume it.
-* **Only open item: tier-3 quality** (`hard-smoke`, 3 pass / 4 incomplete so
-  far, stopped mid-run). Resume command below.
-* All 2026-09-18 evening changes are **uncommitted**.
+* **Only open item: tier-3 quality** (`hard-smoke`, 3 pass / 4 incomplete on the
+  first attempt, stopped mid-case 8). A second attempt is running at `0b3fb5b`
+  — see "Resume here" for the log/trace paths.
+* All 2026-09-18 evening changes are **committed at `0b3fb5b`**.
 
 ## Resume here (updated: build + run done)
 
@@ -134,9 +137,17 @@ An F16 baseline cannot be run on BC-250 (54 GB > 15 GB UMA).
 
 The eval process was killed cleanly (`pkill -x q36-eval`); no GPU lock holder.
 
-## Uncommitted session changes (2026-09-18 evening)
+Second attempt, started 2026-09-18 ~21:17Z at `0b3fb5b` (`q36-eval` pid 159342,
+binary newer than all sources, `make -q q36_test q36-eval` clean), same command
+with fresh output paths so the first attempt's evidence survives:
 
-Modified, not committed:
+    /tmp/opencode/eval_hardsmoke.resume.log     stdout
+    /tmp/opencode/eval_hardsmoke.resume.trace   regradeable trace
+    (first attempt: eval_hardsmoke.log / eval_hardsmoke.trace)
+
+## Session changes (2026-09-18 evening), committed at `0b3fb5b`
+
+In that commit:
 
     q36.c        + q36_hadamard_forward_host / _grouped_host / _rows; per-tensor
                  hadamard_grouped; rotation wired into every CPU matmul site;
@@ -150,17 +161,18 @@ Modified, not committed:
     logs/.../REPORT.md, HANDOFF.md  policy change + native-128 correction
     logs/.../verify_native_128.py   NEW: reproducible native-128 proof
 
-Not committed. `make q36_test` and `make q36-eval` are clean. Suggested commit
-message: `gpu: native-128 PQ2_0 validation; fix CPU Hadamard reference;
-GPU-first policy`.
+Committed at `0b3fb5b`. `make q36_test` and `make q36-eval` are clean (verified
+`make -q` at that commit).
 
 ## What to do next
 
 Per the GPU-first policy (REPORT "Policy change"):
 
 1. Finish tier-3 (`hard-smoke`) on the native PQ2_0 model, record the score.
-2. Re-run the data-independent GPU gates on the current tree from a committed
-   point: execution trace (`Q36_VK_SHADER_TRACE`, `Q36_VK_PROF_KERNEL`),
+   **Running** at `0b3fb5b` (pid 159342, ~hours); do not start a second GPU job
+   until it exits — the flock is contended, not shared.
+2. Re-run the data-independent GPU gates on the current tree **once (1) frees
+   the GPU**: execution trace (`Q36_VK_SHADER_TRACE`, `Q36_VK_PROF_KERNEL`),
    sustained decode/context-growth, and the controlled paired benchmark vs g64.
    The pre-existing numbers (REPORT sections 1-5) already passed and the weights
    are unchanged, so this is a re-confirmation, not new work.
@@ -240,7 +252,7 @@ Artifacts in this directory; `REPORT.md` has the full write-up.
 | 5 | Decode error reporting | **DONE** — worst token/row/value/abs/ulp printed, running |
 | 6 | Do not overinterpret cross-format MMQ | **DONE** — stale "slightly lower" claim removed; both are bit-exact |
 | 7 | Full `q36_test` suite | **PARTIAL** — non-parity tests pass individually; `--all` blocks on a pre-existing `--server` hang (see Traps) |
-| 8 | Freeze provenance / commits | **DONE** for the first batch (`598eb58`); the 2026-09-18 evening session is **uncommitted** |
+| 8 | Freeze provenance / commits | **DONE** — `598eb58` then `0b3fb5b`; tree clean |
 | 9 | Resume Track A gates | **done for the kernel layer** — native-128 is proven and no packer is needed; only tier-3 quality remains (see Resume here) |
 
 ## Traps worth carrying forward
