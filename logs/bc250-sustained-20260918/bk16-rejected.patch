@@ -1,0 +1,72 @@
+diff --git a/vulkan/dense_extra_mmq.comp b/vulkan/dense_extra_mmq.comp
+index 24dc5b1..4137c29 100644
+--- a/vulkan/dense_extra_mmq.comp
++++ b/vulkan/dense_extra_mmq.comp
+@@ -24,7 +24,11 @@ layout(push_constant) uniform Push {
+ 
+ const uint BM = 64u;
+ const uint BN = 128u;
+-const uint BK = 32u;
++/* LDS-residency experiment: BK 32 -> 16.  buf_a+buf_b shrink from 13056 to
++ * 6912 B/workgroup, which should roughly double resident workgroups, but the
++ * slice count and therefore the barrier count per 256-element block double.
++ * Win => residency matters; loss => barrier/issue bound. */
++const uint BK = 16u;
+ const uint STRIDE = BK / 2u + 1u;
+ const uint Q8K_WORDS = 74u;
+ 
+@@ -56,20 +60,19 @@ void main(void) {
+     [[unroll]] for (uint i = 0u; i < 32u; i++) sum[i] = f16vec2(0.0);
+ 
+     for (uint qb = 0u; qb < pc.blocks; qb++) {
+-        for (uint slice = 0u; slice < 8u; slice++) {
+-            // Load weights: BM=64 rows, 16 half-pairs per row.
+-            // lid < 128: lr = lid >> 1 (0..63), kw = lid & 1 (0..1: first 16 or second 16 weights)
+-            {
+-                uint lr = lid >> 1u;
+-                uint kw = lid & 1u;
++        for (uint slice = 0u; slice < 16u; slice++) {
++            // Load weights: BK=16 -> 16 elements = 4 code bytes = one u32 per row.
++            // 64 rows (lid<64), stored as 8 f16vec2 at offsets 0..7 (STRIDE=9).
++            if (lid < BM) {
++                uint lr = lid;
+                 uint row = row0 + lr;
+-                uint base_dst = lr * STRIDE + kw * 8u;
++                uint base_dst = lr * STRIDE;
+                 if (row < pc.out_dim) {
+-                    uint base = row * pc.row_bytes + (qb * 4u + (slice >> 1u)) * 18u;
++                    uint base = row * pc.row_bytes + (qb * 4u + (slice >> 2u)) * 18u;
+                     float16_t d = float16_t(unpackHalf2x16(load_u16(base)).x * pc.scale);
+-                    uint code_word = load_u32(base + 2u + (slice & 1u) * 8u + kw * 4u);
++                    uint codes = load_u32(base + 2u + (slice & 3u) * 4u);
+                     [[unroll]] for (uint p = 0u; p < 4u; p++) {
+-                        uint bits = (code_word >> (p * 8u)) & 0xffu;
++                        uint bits = (codes >> (p * 8u)) & 0xffu;
+                         buf_a[base_dst + 2u * p] = f16vec2(
+                             float16_t(float(bits & 3u) - 1.0) * d,
+                             float16_t(float((bits >> 2u) & 3u) - 1.0) * d);
+@@ -84,18 +87,17 @@ void main(void) {
+                 }
+             }
+ 
+-            // Load activations: BN=128 tokens, 16 half-pairs per token.
+-            // 256 items: 2 per thread.
+-            for (uint i = lid; i < BN * 2u; i += 128u) {
+-                uint lt = i >> 1u;
+-                uint kw = i & 1u;
++            // Load activations: BK=16 -> 16 bytes = 4 dwords per token.
++            // 128 tokens, one per thread; 8 f16vec2 at offsets 0..7.
++            {
++                uint lt = lid;
+                 uint tok = tok0 + lt;
+-                uint base_dst = lt * STRIDE + kw * 8u;
++                uint base_dst = lt * STRIDE;
+                 if (tok < pc.n_tok) {
+                     uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
+                     float16_t scale_in = float16_t(uintBitsToFloat(q8[qbase]));
+                     [[unroll]] for (uint p = 0u; p < 4u; p++) {
+-                        uint qword = q8[qbase + 2u + slice * 8u + kw * 4u + p];
++                        uint qword = q8[qbase + 2u + slice * 4u + p];
+                         buf_b[base_dst + 2u * p] = f16vec2(
+                             float16_t(float(bitfieldExtract(int(qword), 0, 8))) * scale_in,
+                             float16_t(float(bitfieldExtract(int(qword), 8, 8))) * scale_in);
