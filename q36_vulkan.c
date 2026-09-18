@@ -4353,9 +4353,9 @@ static int q36_vk_matmul_dense(q36_vk_kernel *kernel,
         float scale;
     } push = { (uint32_t)in_dim, (uint32_t)out_dim, (uint32_t)n_tok, scale };
     const q36_gpu_tensor *bindings[3] = { weights, x, out };
-    /* out_dim workgroups; the f16/f32 shaders index rows by global id, so
-     * trailing groups simply exit.  These dense paths see little runtime
-     * use: f32 matvecs run on the host and this model has no f16 matvec. */
+    /* The bf16 shader assigns one cooperative workgroup to each row.  The
+     * legacy f16/f32 shaders index rows by global id, so their trailing
+     * groups simply exit. */
     const char *op = "dense_f16";
     if (kernel != &q36_vk.matmul_f16 && kernel != &q36_vk.matmul_bf16) {
         op = q36_vk.prof_ops

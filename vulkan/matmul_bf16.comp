@@ -1,9 +1,9 @@
 #version 460
 
-/* Dense bf16 matvec.  bf16 is the top 16 bits of an f32, so upconversion is a
- * shift.  Accumulates in fp64 like matmul_f16.comp. */
+/* Dense bf16 matvec.  One workgroup cooperatively reduces each output row.
+ * Loading packed bf16 pairs avoids fetching every weight word twice. */
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Weights {
     uint w[];
@@ -24,19 +24,33 @@ layout(push_constant) uniform Push {
     float scale;
 } pc;
 
-float bf16_at(uint idx) {
-    uint word = w[idx >> 1];
-    uint hbits = ((idx & 1u) == 0u) ? (word & 0xffffu) : (word >> 16);
-    return uintBitsToFloat(hbits << 16u);
-}
+shared float partial[256];
 
 void main(void) {
-    uint out_row = gl_GlobalInvocationID.x;
-    uint tok = gl_GlobalInvocationID.y;
+    uint out_row = gl_WorkGroupID.x;
+    uint tok = gl_WorkGroupID.y;
     if (out_row >= pc.out_dim || tok >= pc.n_tok) return;
-    double acc = 0.0;
+    uint lane = gl_LocalInvocationID.x;
     uint wbase = out_row * pc.in_dim;
     uint xbase = tok * pc.in_dim;
-    for (uint i = 0; i < pc.in_dim; i++) acc += double(bf16_at(wbase + i)) * double(x[xbase + i]);
-    y[tok * pc.out_dim + out_row] = float(acc) * pc.scale;
+    uint pair_count = (pc.in_dim + 1u) >> 1u;
+    float acc = 0.0;
+    for (uint pair = lane; pair < pair_count; pair += 256u) {
+        uint i = pair << 1u;
+        uint packed = w[(wbase + i) >> 1u];
+        float w0 = uintBitsToFloat((packed & 0xffffu) << 16u);
+        float w1 = uintBitsToFloat(packed & 0xffff0000u);
+        acc = fma(w0, x[xbase + i], acc);
+        if (i + 1u < pc.in_dim)
+            acc = fma(w1, x[xbase + i + 1u], acc);
+    }
+
+    partial[lane] = acc;
+    barrier();
+    for (uint stride = 128u; stride != 0u; stride >>= 1u) {
+        if (lane < stride) partial[lane] += partial[lane + stride];
+        barrier();
+    }
+    if (lane == 0u)
+        y[tok * pc.out_dim + out_row] = partial[0] * pc.scale;
 }
