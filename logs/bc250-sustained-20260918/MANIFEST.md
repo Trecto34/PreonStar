@@ -58,6 +58,10 @@ file list).  Artifact list in `MANIFEST.artifacts`:
 - Profiling overhead: `runs/prof-overhead.csv`.
 - Secondary benchmarks: `runs/secondary.csv`, `runs/memgrowth-frontiers.csv`.
 - Resource stats: `runs/mmq-resource-stats.txt` from `mmq_info.c`.
+- Preparation audit + trim: `runs/audit-profile-512-128.txt` (baseline
+  dispatch/time table), `prep-trim-rejected.patch` (the default-off
+  `Q36_VK_PREP_TRIM` path, source reverted), `runs/ab-prep-trim.csv`,
+  `runs/prep-trim-profile-decode.txt`, `runs/prep-trim-gen-{base,candidate}.txt`.
 - Attention parity / D2 regression: `attn_parity.c` + `attn_parity_cmp.py`
   + `attn_parity_test.sh`; raw span dumps `runs/attn-512.bin`,
   `runs/attn-256.bin`, reference lines `runs/attn-parity-ref.txt`, cross-span

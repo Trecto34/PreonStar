@@ -1,0 +1,23 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36: clamping prefill chunk 1024 -> 256 on GFX1013 (GQA 6); a larger chunk can exceed the 10 s amdgpu watchdog and destroy the GPU context. Set Q36_VK_PREFILL_CHUNK_UNSAFE=1 to override.
+q36: memory: KV 0.96 GiB (raw 0.81 + compressed 0.15) + buffers 0.11 GiB = 1.07 GiB context
+q36: memory detail: ctx=32768 prefill_cap=256 raw_kv_rows=32768 compressed_kv_rows=0 backend=vulkan
+processing 47 input tokens: 47/47 (100.0%)
+The user is asking two questions:
+
+1. A farmer has 17 sheep. All but 9 run away. How many are left?
+This is a classic trick question. "All but 9 run away" means that 9 sheep did NOT run away. So 9 sheep are left.
+
+2. What is the capital of Australia?
+The capital of Australia is Canberra. (Many people mistakenly think it's Sydney or Melbourne.)
+
+Let me answer both clearly.
+
+
+**Sheep:** 9 are left. "All but 9 run away" means 9 sheep stayed.
+
+**Capital of Australia:** Canberra. (Not Sydney or Melbourne — a common mix-up!)
+q36: prefill: 78.14 t/s, generation: 35.63 t/s

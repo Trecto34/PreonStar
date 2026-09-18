@@ -1,0 +1,124 @@
+diff --git a/q36.c b/q36.c
+index 92f09c6..3135403 100644
+--- a/q36.c
++++ b/q36.c
+@@ -6137,6 +6137,26 @@ static bool q36_gpu_tensor_matmul_dense_q8_scaled(const q36_model *m,
+                                                      in_dim, out_dim, n_tok, scale);
+ }
+ 
++/* True when a dense matmul of this weight type consumes the q8_K activation
++ * (the xq argument) instead of the f32 activation.  Mirrors the branch in
++ * q36_gpu_tensor_matmul_q8_or_float_scaled. */
++static bool q36_tensor_consumes_q8_activation(uint32_t type) {
++    return type != Q36_TENSOR_F32 && type != Q36_TENSOR_F16 &&
++           type != Q36_TENSOR_BF16 && type != Q36_TENSOR_Q8_0;
++}
++
++/* Activation-preparation trim: skip q8_K preparation whose only consumer is a
++ * rotated (folded) weight that takes the had_q8 path instead.  Selectable so
++ * the untrimmed graph stays available for A/B; default off. */
++static bool q36_vk_prep_trim(void) {
++    static int cached = -1;
++    if (cached < 0) {
++        const char *env = getenv("Q36_VK_PREP_TRIM");
++        cached = env && env[0] && env[0] != '0';
++    }
++    return cached != 0;
++}
++
+ static bool q36_vulkan_runtime_reset(q36_vulkan_runtime *rt) {
+     uint64_t state_dim = (uint64_t)Q36_N_SSM_STATE * Q36_N_SSM_STATE * Q36_N_SSM_DT_RANK;
+     uint64_t state_bytes;
+@@ -7817,11 +7837,18 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
+                  n_tok, 1.0f))) {
+             return false;
+         }
++        bool down_rot = q36_hadamard_rotate_enabled(l->ffn_down_shexp);
++        /* The mid Q8_K is consumed only by an unrotated down weight (a rotated
++         * one reads had_q8), so skip producing it otherwise. */
++        bool mid_q8_needed = !down_rot &&
++            q36_tensor_consumes_q8_activation(l->ffn_down_shexp->type);
+         bool fused_swiglu_q8 = false;
+ #ifndef Q36_METAL
+-        fused_swiglu_q8 = q36_gpu_swiglu_q8_k_tensor(
+-            rt->ffn_shared_mid, rt->inp_q8, rt->ffn_shared_gate,
+-            rt->ffn_shared_up, Q36_N_FF_SHARED, n_tok, 0.0f, 1.0f);
++        if (mid_q8_needed || !q36_vk_prep_trim()) {
++            fused_swiglu_q8 = q36_gpu_swiglu_q8_k_tensor(
++                rt->ffn_shared_mid, rt->inp_q8, rt->ffn_shared_gate,
++                rt->ffn_shared_up, Q36_N_FF_SHARED, n_tok, 0.0f, 1.0f);
++        }
+ #endif
+         if (!fused_swiglu_q8 &&
+             !q36_gpu_swiglu_tensor(
+@@ -7831,12 +7858,12 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
+         }
+         const q36_gpu_tensor *down_in = rt->ffn_shared_mid;
+         const q36_gpu_tensor *down_q8 = rt->inp_q8;
+-        if (q36_hadamard_rotate_enabled(l->ffn_down_shexp)) {
++        if (down_rot) {
+             if (!q36_hadamard_prepare(rt, rt->ffn_shared_mid, Q36_N_FF_SHARED, n_tok)) {
+                 return false;
+             }
+             down_q8 = rt->had_q8;
+-        } else if (!fused_swiglu_q8 &&
++        } else if (mid_q8_needed && !fused_swiglu_q8 &&
+                    !q36_gpu_quantize_q8_k_tensor(rt->inp_q8, rt->ffn_shared_mid,
+                                                  Q36_N_FF_SHARED, n_tok)) {
+             return false;
+@@ -8228,14 +8255,28 @@ static bool q36_forward_recurrent_vulkan(q36_session *s,
+     e = s->engine;
+     rt = (q36_vulkan_runtime *)s->runtime;
+     cache = &rt->recurrent[il];
+-    if ((l->attn_qkv->type != Q36_TENSOR_Q8_0 || l->attn_gate->type != Q36_TENSOR_Q8_0) &&
++    bool attn_rot_recur = q36_hadamard_rotate_enabled(l->attn_qkv) ||
++                          q36_hadamard_rotate_enabled(l->attn_gate);
++    bool inp_q8_needed;
++    if (!q36_vk_prep_trim()) {
++        inp_q8_needed = l->attn_qkv->type != Q36_TENSOR_Q8_0 ||
++                        l->attn_gate->type != Q36_TENSOR_Q8_0;
++    } else {
++        /* Rotated qkv/gate consume had_q8; only an unrotated q8 weight (or a
++         * q8 ssm projection) still needs the plain q8_K activation. */
++        inp_q8_needed = (!attn_rot_recur &&
++                         (q36_tensor_consumes_q8_activation(l->attn_qkv->type) ||
++                          q36_tensor_consumes_q8_activation(l->attn_gate->type))) ||
++                        q36_tensor_consumes_q8_activation(l->ssm_beta->type) ||
++                        q36_tensor_consumes_q8_activation(l->ssm_alpha->type);
++    }
++    if (inp_q8_needed &&
+         !q36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, Q36_N_EMBD, n_tok)) {
+         return false;
+     }
+     const q36_gpu_tensor *qkv_in = inp;
+     const q36_gpu_tensor *qkv_q8 = rt->inp_q8;
+-    if (q36_hadamard_rotate_enabled(l->attn_qkv) ||
+-        q36_hadamard_rotate_enabled(l->attn_gate)) {
++    if (attn_rot_recur) {
+         if (!q36_hadamard_prepare(rt, inp, Q36_N_EMBD, n_tok)) return false;
+         qkv_q8 = rt->had_q8;
+     }
+@@ -8363,13 +8404,18 @@ static bool q36_forward_recurrent_vulkan(q36_session *s,
+         fprintf(stderr, "q36: recurrent delta decode non-finite at layer=%u\n", il);
+         return false;
+     }
++    bool ssm_out_rot = q36_hadamard_rotate_enabled(l->ssm_out);
++    bool norm_q8_needed = ssm_out_rot ? false :
++        q36_tensor_consumes_q8_activation(l->ssm_out->type);
+     bool norm_gate_q8 = false;
+ #ifndef Q36_METAL
+-    norm_gate_q8 = !e->quality &&
+-        q36_gpu_recurrent_norm_gate_q8_k_tensor(
+-            rt->recur_proj, rt->inp_q8, rt->recur_z,
+-            e->model.map, e->model.size, l->ssm_norm->abs_offset,
+-            n_tok * Q36_N_SSM_DT_RANK, Q36_RMS_EPS);
++    if (norm_q8_needed || !q36_vk_prep_trim()) {
++        norm_gate_q8 = !e->quality &&
++            q36_gpu_recurrent_norm_gate_q8_k_tensor(
++                rt->recur_proj, rt->inp_q8, rt->recur_z,
++                e->model.map, e->model.size, l->ssm_norm->abs_offset,
++                n_tok * Q36_N_SSM_DT_RANK, Q36_RMS_EPS);
++    }
+ #endif
+     bool norm_gate_fused = norm_gate_q8 || (!e->quality &&
+         q36_gpu_recurrent_norm_gate_tensor(
