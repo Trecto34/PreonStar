@@ -1,0 +1,9 @@
+n_kv=512   max|A-B|=5.722e-06 ndiff=5610/6144 first_idx=2733 head=10 dim=173
+n_kv=513   max|A-B|=1.335e-05 ndiff=5609/6144 first_idx=414 head=1 dim=158
+n_kv=768   max|A-B|=5.722e-06 ndiff=5227/6144 first_idx=817 head=3 dim=49
+n_kv=769   max|A-B|=5.722e-06 ndiff=5265/6144 first_idx=1801 head=7 dim=9
+n_kv=1024  max|A-B|=3.099e-06 ndiff=5640/6144 first_idx=2577 head=10 dim=17
+n_kv=1025  max|A-B|=4.292e-06 ndiff=5519/6144 first_idx=1924 head=7 dim=132
+n_kv=1280  max|A-B|=2.861e-06 ndiff=5259/6144 first_idx=3884 head=15 dim=44
+n_kv=1281  max|A-B|=2.623e-06 ndiff=5357/6144 first_idx=545 head=2 dim=33
+worst=1.335e-05 bound=1.0e-04 reassociation (ok)
