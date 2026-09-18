@@ -764,7 +764,6 @@ typedef struct {
     q36_gpu_tensor *norm;
     q36_gpu_tensor *last_h;
     q36_gpu_tensor *inp_q8;
-    q36_gpu_tensor *had;        /* f32 scratch for the Walsh-Hadamard transform */
     q36_gpu_tensor *had_q8;     /* q8_K of the transformed activation */
     q36_gpu_tensor *had_signs;  /* concatenated per-width sign vectors */
     q36_gpu_tensor *attn_qg;
@@ -6170,7 +6169,6 @@ static void q36_vulkan_runtime_free(q36_vulkan_runtime *rt) {
     q36_gpu_tensor_free(rt->norm);
     q36_gpu_tensor_free(rt->last_h);
     q36_gpu_tensor_free(rt->inp_q8);
-    q36_gpu_tensor_free(rt->had);
     q36_gpu_tensor_free(rt->had_q8);
     q36_gpu_tensor_free(rt->had_signs);
     q36_gpu_tensor_free(rt->attn_qg);
@@ -6329,7 +6327,6 @@ static q36_vulkan_runtime *q36_vulkan_runtime_create(int ctx_size,
         if (Q36_N_FF_SHARED > had_width) had_width = Q36_N_FF_SHARED;
         if (Q36_N_SSM_INNER > had_width) had_width = Q36_N_SSM_INNER;
         if (Q36_N_SSM_CONV_DIM > had_width) had_width = Q36_N_SSM_CONV_DIM;
-        Q36_GPU_ALLOC_SCRATCH_F32(had, had_width);
         {
             uint64_t q8_bytes = (uint64_t)((had_width + Q36_QK_K - 1u) / Q36_QK_K) *
                                 Q36_VK_Q8_K_BYTES * prefill_cap;
@@ -7778,7 +7775,10 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
                         q36_hadamard_rotate_enabled(l->ffn_up_shexp);
         if (gate_rot) {
             if (!q36_hadamard_prepare(rt, inp, Q36_N_EMBD, n_tok)) return false;
-            ffn_in = rt->had;
+            /* The fused prepare writes only had_q8; folded weights always take
+             * the q8_K path, so ffn_in stays the f32 source and is unused.
+             * ponytail: a folded f32/f16/q8_0 weight would need the prepare
+             * kernel to also emit the f32 activation. */
             ffn_q8 = rt->had_q8;
         } else if (!q36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, Q36_N_EMBD, n_tok)) {
             return false;
@@ -7835,7 +7835,6 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
             if (!q36_hadamard_prepare(rt, rt->ffn_shared_mid, Q36_N_FF_SHARED, n_tok)) {
                 return false;
             }
-            down_in = rt->had;
             down_q8 = rt->had_q8;
         } else if (!fused_swiglu_q8 &&
                    !q36_gpu_quantize_q8_k_tensor(rt->inp_q8, rt->ffn_shared_mid,
@@ -8080,7 +8079,6 @@ static bool q36_forward_full_attn_vulkan_model(q36_vulkan_runtime *rt,
         q36_hadamard_rotate_enabled(l->attn_k) ||
         q36_hadamard_rotate_enabled(l->attn_v)) {
         if (!q36_hadamard_prepare(rt, inp, Q36_N_EMBD, n_tok)) return false;
-        qkv_in = rt->had;
         qkv_q8 = rt->had_q8;
     } else if ((l->attn_q->type != Q36_TENSOR_Q8_0 || l->attn_k->type != Q36_TENSOR_Q8_0 ||
                 l->attn_v->type != Q36_TENSOR_Q8_0) &&
@@ -8175,7 +8173,7 @@ static bool q36_forward_full_attn_vulkan_model(q36_vulkan_runtime *rt,
     }
     if (q36_hadamard_rotate_enabled(l->attn_output)) {
         if (!q36_hadamard_prepare(rt, rt->attn_out, Q36_N_SSM_INNER, n_tok) ||
-            !q36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_output, rt->had, rt->had_q8, out,
+            !q36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_output, rt->attn_out, rt->had_q8, out,
                                                       Q36_N_SSM_INNER, Q36_N_EMBD, n_tok,
                                                       q36_tensor_scalar_or(m, l->attn_output_scale, 1.0f))) {
             fprintf(stderr, "q36: full_attn attn_output failed at layer=%u pos=%u\n", il, pos0);
@@ -8239,7 +8237,6 @@ static bool q36_forward_recurrent_vulkan(q36_session *s,
     if (q36_hadamard_rotate_enabled(l->attn_qkv) ||
         q36_hadamard_rotate_enabled(l->attn_gate)) {
         if (!q36_hadamard_prepare(rt, inp, Q36_N_EMBD, n_tok)) return false;
-        qkv_in = rt->had;
         qkv_q8 = rt->had_q8;
     }
     bool pair_projected = n_tok == 1u &&
@@ -8400,7 +8397,7 @@ static bool q36_forward_recurrent_vulkan(q36_session *s,
     }
     bool out_ok = q36_hadamard_rotate_enabled(l->ssm_out) ?
         q36_gpu_tensor_matmul_q8_or_float_scaled(
-            &e->model, l->ssm_out, rt->had, rt->had_q8, out,
+            &e->model, l->ssm_out, rt->recur_proj, rt->had_q8, out,
             Q36_N_SSM_INNER, Q36_N_EMBD, n_tok, out_scale) :
         norm_gate_q8 ?
         q36_gpu_tensor_matmul_q8_or_float_scaled(
@@ -8547,7 +8544,7 @@ static bool q36_forward_tokens_vulkan_into(q36_session *s,
         if (rot) {
             ok = out_in && q36_hadamard_prepare(rt, out_in, Q36_N_EMBD, rows) &&
                  q36_gpu_tensor_matmul_q8_or_float_scaled(&e->model, e->weights.output,
-                                                          rt->had, rt->had_q8, logits_out,
+                                                          out_in, rt->had_q8, logits_out,
                                                           Q36_N_EMBD, Q36_N_VOCAB, rows, out_scale);
         } else {
             ok = out_in && q36_gpu_tensor_matmul_scaled(&e->model, e->weights.output,
