@@ -1,0 +1,2 @@
+timestamp,label,start_temp_c,end_temp_c,wall_s,result
+2026-09-18T08:44:25-03:00,cont-base-r1,47,66,13,"512;512;198.74;128;34.35;2060"

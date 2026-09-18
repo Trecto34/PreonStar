@@ -519,7 +519,14 @@ typedef struct {
 static const char *q36_vk_prof_query_path[Q36_VK_PROF_QUERY_CAP / 2];
 static const char *q36_vk_prof_query_op[Q36_VK_PROF_QUERY_CAP / 2];
 static uint64_t q36_vk_prof_query_groups[Q36_VK_PROF_QUERY_CAP / 2];
+static uint64_t q36_vk_prof_query_host_ns[Q36_VK_PROF_QUERY_CAP / 2];
 static uint32_t q36_vk_prof_query_count;
+/* Optional per-dispatch GPU timeline (Q36_VK_PROF_TIMELINE=<path>).  Bounded
+ * diagnostic for separating host record cadence, GPU work and dependency
+ * gaps; the aggregate profile cannot show overlap or idle time. */
+static FILE *q36_vk_prof_timeline_fp;
+static uint64_t q36_vk_prof_timeline_seq;
+static bool q36_vk_prof_timeline_tried;
 static q36_vk_prof_kernel_row q36_vk_prof_kernel_rows[Q36_VK_PROF_KERNEL_CAP];
 static uint32_t q36_vk_prof_kernel_n;
 static q36_vk_prof_op_row q36_vk_prof_op_rows[Q36_VK_PROF_OP_CAP];
@@ -784,6 +791,21 @@ static void q36_vk_prof_kernel_collect_unlocked(void) {
     if (q36_vk.timestamp_valid_bits > 0 && q36_vk.timestamp_valid_bits < 64) {
         mask = (1ull << q36_vk.timestamp_valid_bits) - 1ull;
     }
+    if (!q36_vk_prof_timeline_tried) {
+        q36_vk_prof_timeline_tried = true;
+        const char *tp = getenv("Q36_VK_PROF_TIMELINE");
+        if (tp && tp[0]) {
+            q36_vk_prof_timeline_fp = fopen(tp, "wb");
+            if (q36_vk_prof_timeline_fp) {
+                fprintf(q36_vk_prof_timeline_fp,
+                        "# q36 vulkan dispatch timeline v1\n"
+                        "# tick_period_ns=%.6f valid_bits=%u\n"
+                        "# columns: seq flush path groups start_tick end_tick dur_ns host_ns\n",
+                        (double)q36_vk.props.limits.timestampPeriod,
+                        q36_vk.timestamp_valid_bits);
+            }
+        }
+    }
     for (uint32_t q = 0; q + 1 < q36_vk_prof_query_count; q += 2) {
         uint64_t a = ticks[q] & mask;
         uint64_t b = ticks[q + 1u] & mask;
@@ -791,7 +813,20 @@ static void q36_vk_prof_kernel_collect_unlocked(void) {
         uint64_t ns = (uint64_t)((double)dt * (double)q36_vk.props.limits.timestampPeriod);
         q36_vk_prof_kernel_add(q36_vk_prof_query_path[q / 2u], q36_vk_prof_query_groups[q / 2u], ns);
         q36_vk_prof_op_add(q36_vk_prof_query_op[q / 2u], 0, 0, 0, 0, 0, ns, 0);
+        if (q36_vk_prof_timeline_fp) {
+            fprintf(q36_vk_prof_timeline_fp,
+                    "%" PRIu64 " %" PRIu64 " %s %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+                    q36_vk_prof_timeline_seq++,
+                    q36_vk_prof_flushes,
+                    q36_vk_prof_query_path[q / 2u],
+                    q36_vk_prof_query_groups[q / 2u],
+                    a,
+                    b,
+                    ns,
+                    q36_vk_prof_query_host_ns[q / 2u]);
+        }
     }
+    if (q36_vk_prof_timeline_fp) fflush(q36_vk_prof_timeline_fp);
     q36_vk_prof_query_count = 0;
 }
 
@@ -3069,6 +3104,7 @@ static int q36_vk_run_unlocked(
         q36_vk_prof_query_path[query0 / 2u] = kernel->path;
         q36_vk_prof_query_op[query0 / 2u] = prof_op;
         q36_vk_prof_query_groups[query0 / 2u] = groups_total;
+        q36_vk_prof_query_host_ns[query0 / 2u] = q36_vk_now_ns();
         vkCmdResetQueryPool(cmd, q36_vk.query_pool, query0, 2);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, q36_vk.query_pool, query0);
     }
@@ -3566,6 +3602,10 @@ static void q36_vk_prof_report(void) {
                     (double)r->gpu_ns / 1e6,
                     pct);
         }
+    }
+    if (q36_vk_prof_timeline_fp) {
+        fclose(q36_vk_prof_timeline_fp);
+        q36_vk_prof_timeline_fp = NULL;
     }
 }
 

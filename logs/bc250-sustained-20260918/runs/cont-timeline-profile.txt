@@ -1,0 +1,2 @@
+q36:   vulkan/dense_extra_mmq_q2_0.spv  dispatches=800 groups=243712 gpu_ms=2283.715 pct=37.2
+q36:   vulkan/attn_prefill_qtile2_gqa6.spv dispatches=32 groups=16384 gpu_ms=44.515 pct=0.7
