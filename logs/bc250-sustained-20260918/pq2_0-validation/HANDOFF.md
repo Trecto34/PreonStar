@@ -1,7 +1,9 @@
 # Handoff — PQ2_0 (type 142) validation, BC-250
 
 Written at the point work was stopped. Base commit `c0e7c1a`, branch
-`experiment/bc250-sustained-20260918`. **Nothing below is committed.**
+`experiment/bc250-sustained-20260918`. The Track A tree and this validation
+directory are now committed as `598eb58`; that is the frozen provenance for
+the results below. Anything still marked open was not part of that commit.
 
 ## Resume here (updated: build + run done)
 
@@ -29,7 +31,7 @@ somewhere durable if it is still needed).
 
 ## Tree state
 
-Modified, uncommitted:
+Committed at `598eb58` (directive item 8):
 
     Makefile                        PQ2_0 shader build targets
     q36.c                           PQ2_0 plumbing; + q36_engine_debug_count_tensors_of_type
@@ -37,14 +39,16 @@ Modified, uncommitted:
     q36_vulkan.c                    type-142 kernel selection, host guard
     vulkan/dense_extra_decode.comp  Q2_BLK_* geometry defines
     vulkan/dense_extra_mmq.comp     same
-    tests/q36_test.c                two new oracles + UNBUILT dense-quant rewrite
+    tests/q36_test.c                two new oracles + rewritten dense-quant test
+    logs/.../{ab_model.sh, logit_divergence.py, pq2_0-validation/}
 
-Untracked: `logs/bc250-sustained-20260918/{ab_model.sh,logit_divergence.py,
-pq2_0-validation/}` and several prebuilt tool binaries.
+Prebuilt tool binaries (`attn_parity`, `hadamard_parity`, `mmq_info`,
+`read_copy_bw`, `swiglu_hadamard_parity`, `baseline/q36-bench`) and the raw
+`runs/` traces are untracked by design.
 
-Provenance was **not** frozen (directive item 8). No commits were made, so every
-result below was produced on a dirty, unnamed tree. That is the single biggest
-gap: re-run the critical gates from a committed tree before quoting them.
+The original performance/soak numbers were produced on the pre-commit dirty
+tree; only the dense-quant results were re-run after the freeze and are
+unchanged. Re-run the critical gates from `598eb58` before quoting the report.
 
 ## What is established
 
@@ -99,7 +103,7 @@ Artifacts in this directory; `REPORT.md` has the full write-up.
 | 5 | Decode error reporting | **DONE** — worst token/row/value/abs/ulp printed, running |
 | 6 | Do not overinterpret cross-format MMQ | **DONE** — stale "slightly lower" claim removed; both are bit-exact |
 | 7 | Full `q36_test` suite | **PARTIAL** — non-parity tests pass individually; `--all` blocks on a pre-existing `--server` hang (see Traps) |
-| 8 | Freeze provenance / commits | **NOT DONE** — needs explicit go-ahead; no commit made |
+| 8 | Freeze provenance / commits | **DONE** — sources + validation docs committed at `598eb58` |
 | 9 | Resume Track A gates | not started, correctly blocked |
 
 ## Traps worth carrying forward
