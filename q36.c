@@ -35,6 +35,7 @@
 #include "q36_image.h"
 #include "q36_gpu.h"
 #include "q36_iq_tables.h"
+#include "q36_mmq_contract.h"
 #include "q36_quant.h"
 #include "q36_ssd.h"
 
@@ -325,6 +326,7 @@ typedef struct {
     uint64_t bytes;
     bool hadamard_rotate;
     bool hadamard_inverse;
+    bool hadamard_grouped;   /* GDN ssm_out: activation needs a tiled->grouped permute */
 } q36_tensor;
 
 typedef struct {
@@ -619,6 +621,7 @@ struct q36_engine {
     bool mtp_ready;
     bool vision_ready;
     bool kat_coder;
+    bool cpu_mmq_contract;   /* CPU reference emulates the f16 dense MMQ contract */
     q36_variant variant;
 };
 
@@ -707,6 +710,7 @@ typedef struct {
     float *batch_ffn_shared_out;
     float *batch_ffn_scalar;
     uint8_t *batch_xq;
+    float *batch_had;        /* forward-Hadamard activation scratch, widest projection */
 } q36_cpu_runtime;
 
 typedef void (*q36_parallel_fn)(void *ctx, uint64_t row0, uint64_t row1);
@@ -3013,6 +3017,98 @@ static void q36_swiglu_rows_worker(void *opaque, uint64_t row0, uint64_t row1) {
     }
 }
 
+/* Contract-aware whole-model matmul: emulates the dense MMQ kernel's f16
+ * staging/accumulation (see q36_mmq_contract.h). Used only when
+ * e->cpu_mmq_contract is set, i.e. the parity reference. The activation f16
+ * values are precomputed once per token and the weight decode is shared across
+ * tokens, which is what makes the scalar emulation affordable. */
+typedef struct {
+    const q36_engine *e;
+    const q36_tensor *t0;
+    const q36_tensor *t1;      /* NULL for a single projection */
+    const float *act;
+    float *out0;
+    float *out1;
+    uint32_t n_tok, in_dim, out_dim, q8k_blocks;
+    uint32_t blk_bytes0, blk_per_q8k0, lane_shift0, lane_mask0;
+    uint32_t blk_bytes1, blk_per_q8k1, lane_shift1, lane_mask1;
+    float scale0, scale1;
+} q36_contract_matmul_ctx;
+
+static void q36_contract_matmul_worker(void *opaque, uint64_t row0, uint64_t row1) {
+    q36_contract_matmul_ctx *ctx = (q36_contract_matmul_ctx *)opaque;
+    const q36_model *m = &ctx->e->model;
+    float *sums = malloc((size_t)ctx->n_tok * sizeof(float));
+    if (!sums) return;
+    for (uint64_t row = row0; row < row1; row++) {
+        const uint8_t *src0 = NULL;
+        const uint8_t *src1 = NULL;
+        if (!q36_tensor_row_ptr(m, ctx->t0, row, &src0, NULL)) continue;
+        if (ctx->t1 && !q36_tensor_row_ptr(m, ctx->t1, row, &src1, NULL)) continue;
+        q36_contract_mmq_q2_dot_multi(
+            src0, ctx->act, sums, ctx->n_tok, ctx->in_dim, ctx->q8k_blocks,
+            ctx->blk_bytes0, ctx->blk_per_q8k0, ctx->lane_shift0,
+            ctx->lane_mask0, ctx->scale0, ctx->out0 + row, ctx->out_dim);
+        if (ctx->t1) {
+            q36_contract_mmq_q2_dot_multi(
+                src1, ctx->act, sums, ctx->n_tok, ctx->in_dim, ctx->q8k_blocks,
+                ctx->blk_bytes1, ctx->blk_per_q8k1, ctx->lane_shift1,
+                ctx->lane_mask1, ctx->scale1, ctx->out1 + row, ctx->out_dim);
+        }
+    }
+    free(sums);
+}
+
+static bool q36_contract_matmul_batch(const q36_engine *e,
+                                      const q36_tensor *t0,
+                                      const q36_tensor *t1,
+                                      const uint8_t *xq,
+                                      float *out0,
+                                      float *out1,
+                                      uint32_t n_tok,
+                                      uint32_t in_dim,
+                                      uint32_t out_dim,
+                                      float scale0,
+                                      float scale1) {
+    q36_contract_matmul_ctx ctx;
+    uint32_t bb0, bq0, ls0, lm0, bb1 = 0, bq1 = 0, ls1 = 0, lm1 = 0;
+    uint32_t q8k_blocks, row_bytes;
+    float *act;
+    if (!e || !t0 || !xq || n_tok == 0 || in_dim == 0 || out_dim == 0 ||
+        in_dim % Q36_QK_K != 0) return false;
+    if (!q36_contract_q2_geometry(t0->type, &bb0, &bq0, &ls0, &lm0)) return false;
+    if (t1 && !q36_contract_q2_geometry(t1->type, &bb1, &bq1, &ls1, &lm1)) return false;
+    q8k_blocks = in_dim / Q36_QK_K;
+    row_bytes = q8k_blocks * Q36_Q8_K_BYTES;
+    act = malloc((size_t)n_tok * in_dim * sizeof(float));
+    if (!act) return false;
+    for (uint32_t tok = 0; tok < n_tok; tok++) {
+        q36_contract_mmq_q2_act(xq + (uint64_t)tok * row_bytes,
+                                Q36_Q8_K_BYTES, 4u, q8k_blocks,
+                                act + (uint64_t)tok * in_dim);
+    }
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.e = e;
+    ctx.t0 = t0;
+    ctx.t1 = t1;
+    ctx.act = act;
+    ctx.out0 = out0;
+    ctx.out1 = out1;
+    ctx.n_tok = n_tok;
+    ctx.in_dim = in_dim;
+    ctx.out_dim = out_dim;
+    ctx.q8k_blocks = q8k_blocks;
+    ctx.blk_bytes0 = bb0; ctx.blk_per_q8k0 = bq0;
+    ctx.lane_shift0 = ls0; ctx.lane_mask0 = lm0;
+    ctx.blk_bytes1 = bb1; ctx.blk_per_q8k1 = bq1;
+    ctx.lane_shift1 = ls1; ctx.lane_mask1 = lm1;
+    ctx.scale0 = scale0;
+    ctx.scale1 = scale1;
+    q36_parallel_for_rows(out_dim, 1, e->n_threads, q36_contract_matmul_worker, &ctx);
+    free(act);
+    return true;
+}
+
 static bool q36_tensor_matmul_batch_prequant(const q36_engine *e,
                                              const q36_tensor *t,
                                              const float *x,
@@ -3027,6 +3123,12 @@ static bool q36_tensor_matmul_batch_prequant(const q36_engine *e,
     uint64_t ops;
     uint64_t min_rows;
     if (!e || !t || !x || !out || t->ndim != 2 || t->dim[0] != in_dim || t->dim[1] != out_dim) return false;
+    if (e->cpu_mmq_contract && n_tok > 1u && xq) {
+        uint32_t bb, bq, ls, lm;
+        if (q36_contract_q2_geometry(t->type, &bb, &bq, &ls, &lm))
+            return q36_contract_matmul_batch(e, t, NULL, xq, out, NULL,
+                                             n_tok, in_dim, out_dim, scale, 0.0f);
+    }
     kind = q36_activation_quant_kind_for_type(t->type);
     if (kind != Q36_ACTIVATION_QUANT_NONE && (!xq || !q36_activation_quant_valid_dim(kind, in_dim))) return false;
     ctx.out = out;
@@ -3063,6 +3165,13 @@ static bool q36_tensor_matmul_pair_batch_prequant(const q36_engine *e,
     uint64_t min_rows;
     if (!e || !t0 || !t1 || !x || !out0 || !out1) return false;
     if (!q36_tensor_pair_can_fuse(t0, t1, 2, in_dim, out_dim)) return false;
+    if (e->cpu_mmq_contract && n_tok > 1u && xq) {
+        uint32_t bb, bq, ls, lm;
+        if (q36_contract_q2_geometry(t0->type, &bb, &bq, &ls, &lm) &&
+            q36_contract_q2_geometry(t1->type, &bb, &bq, &ls, &lm))
+            return q36_contract_matmul_batch(e, t0, t1, xq, out0, out1,
+                                             n_tok, in_dim, out_dim, scale0, scale1);
+    }
     kind = q36_activation_quant_kind_for_type(t0->type);
     if (kind != Q36_ACTIVATION_QUANT_NONE && (!xq || !q36_activation_quant_valid_dim(kind, in_dim))) return false;
     ctx.out0 = out0;
@@ -5526,6 +5635,64 @@ static void q36_hadamard_inverse_host(float *x, uint32_t width) {
     }
 }
 
+/* Forward activation transform for a folded weight: x' = H (s . x) / sqrt(block).
+ * Order matters -- signs and scale are applied before the butterfly, matching
+ * vulkan/hadamard_prepare.comp. The inverse embedding above applies them after;
+ * the two are not interchangeable. */
+static void q36_hadamard_forward_host(float *x, uint32_t width) {
+    const float *signs;
+    uint32_t block;
+    if (!g_q36_hadamard.enabled || width % g_q36_hadamard.block_size != 0) return;
+    signs = q36_hadamard_signs(width);
+    if (!signs) return;
+    block = g_q36_hadamard.block_size;
+    for (uint32_t b = 0; b < width; b += block) {
+        float *blk = x + b;
+        for (uint32_t i = 0; i < block; i++)
+            blk[i] *= g_q36_hadamard.inv_sqrt_block * signs[b + i];
+        q36_hadamard_fwht_host(blk, block);
+    }
+}
+
+/* Forward transform for the folded GDN ssm_out weight: permute tiled -> grouped
+ * first, then the signs+FWHT. Mirrors the is_grouped path of the Vulkan kernel
+ * (width = n_ssm_inner, hd = n_ssm_state, nk = n_ssm_group, rep = dt_rank/group). */
+static bool q36_hadamard_forward_grouped_host(float *x, uint32_t width) {
+    uint32_t hd = Q36_N_SSM_STATE, nk = Q36_N_SSM_GROUP, rep;
+    float *tmp;
+    if (!g_q36_hadamard.enabled || hd == 0 || nk == 0 ||
+        width % hd != 0 || (width / hd) % nk != 0) return false;
+    rep = width / hd / nk;
+    tmp = xmalloc((size_t)width * sizeof(float));
+    for (uint32_t col = 0; col < width; col++) {
+        uint32_t hd_idx = col % hd;
+        uint32_t rep_idx = (col / hd) % rep;
+        uint32_t nk_idx = col / (hd * rep);
+        tmp[col] = x[hd_idx + hd * (nk_idx + nk * rep_idx)];
+    }
+    memcpy(x, tmp, (size_t)width * sizeof(float));
+    free(tmp);
+    q36_hadamard_forward_host(x, width);
+    return true;
+}
+
+/* Copy n_rows activations of `in_dim` into `dst` applying the forward transform
+ * required by `t`. Returns dst (or x when no transform applies). */
+static const float *q36_hadamard_forward_rows(const q36_tensor *t, const float *x,
+                                              float *dst, uint32_t in_dim, uint32_t n_rows) {
+    if (!q36_hadamard_rotate_enabled(t)) return x;
+    for (uint32_t r = 0; r < n_rows; r++) {
+        float *d = dst + (uint64_t)r * in_dim;
+        memcpy(d, x + (uint64_t)r * in_dim, (size_t)in_dim * sizeof(float));
+        if (t->hadamard_grouped) {
+            if (!q36_hadamard_forward_grouped_host(d, in_dim)) return x;
+        } else {
+            q36_hadamard_forward_host(d, in_dim);
+        }
+    }
+    return dst;
+}
+
 static const char *q36_hadamard_str(const q36_str s, char *tmp, size_t tmp_size) {
     if (s.len + 1 > tmp_size) q36_die("prism.hadamard metadata name is too long");
     memcpy(tmp, s.ptr, s.len);
@@ -5619,6 +5786,11 @@ static void hadamard_parse(q36_model *m) {
             exit(1);
         }
         t->hadamard_rotate = true;
+        /* The GDN ssm_out projection kept the training V order
+         * (prism.hadamard.gdn_v_grouped); its activation is permuted
+         * tiled -> grouped before the transform, exactly as the Vulkan
+         * hadamard_prepare is_grouped path does. */
+        if (strstr(tmp, "ssm_out") != NULL) t->hadamard_grouped = true;
     }
 
     if (model_get_array(m, "prism.hadamard.inverse_weight_names", &names_arr) &&
@@ -5799,7 +5971,11 @@ static q36_cpu_runtime *q36_cpu_runtime_create(int ctx_size,
     if (prefill_cap < 1) prefill_cap = 1;
     uint32_t k_row_bytes = q36_kv_cache_row_bytes(cache_type_k, Q36_N_HEAD_KV * Q36_N_HEAD_DIM);
     uint32_t v_row_bytes = q36_kv_cache_row_bytes(cache_type_v, Q36_N_HEAD_KV * Q36_N_VALUE_DIM);
+    uint32_t had_width;
     if (!k_row_bytes || !v_row_bytes) return NULL;
+    had_width = Q36_N_EMBD;
+    if (Q36_N_FF_SHARED > had_width) had_width = Q36_N_FF_SHARED;
+    if (Q36_N_SSM_INNER > had_width) had_width = Q36_N_SSM_INNER;
     rt = xcalloc(1, sizeof(*rt));
     full_cap = q36_kv_initial_cap(ctx_size);
     state_dim = (uint64_t)Q36_N_SSM_STATE * Q36_N_SSM_STATE * Q36_N_SSM_DT_RANK;
@@ -5834,6 +6010,7 @@ static q36_cpu_runtime *q36_cpu_runtime_create(int ctx_size,
     rt->batch_ffn_shared_out = xmalloc((size_t)prefill_cap * Q36_N_EMBD * sizeof(float));
     rt->batch_ffn_scalar = xmalloc((size_t)prefill_cap * sizeof(float));
     rt->batch_xq = xmalloc((size_t)prefill_cap * Q36_MAX_Q8_K_BYTES);
+    rt->batch_had = xmalloc((size_t)prefill_cap * had_width * sizeof(float));
     for (uint32_t il = 0; il < Q36_N_LAYER; il++) {
         if (q36_layer_is_full_attention(il)) {
             rt->full[il].cap = full_cap;
@@ -5929,6 +6106,7 @@ static void q36_cpu_runtime_free(q36_cpu_runtime *rt) {
     free(rt->batch_ffn_shared_out);
     free(rt->batch_ffn_scalar);
     free(rt->batch_xq);
+    free(rt->batch_had);
     free(rt);
 }
 
@@ -6790,27 +6968,32 @@ static bool q36_forward_ffn(const q36_engine *e, const q36_layer_weights *l, con
     float *rowbuf = rt->work5;
     float shared_gate;
     if (Q36_MODEL_DENSE) {
+        const q36_tensor *rot_gate = q36_hadamard_rotate_enabled(l->ffn_gate_shexp) ? l->ffn_gate_shexp :
+                                     (q36_hadamard_rotate_enabled(l->ffn_up_shexp) ? l->ffn_up_shexp : NULL);
+        const float *ffn_in = rot_gate ? q36_hadamard_forward_rows(rot_gate, inp, rt->batch_had, Q36_N_EMBD, 1u) : inp;
+        const float *down_in;
         inpq_kind = q36_activation_quant_kind_for_type(l->ffn_gate_shexp->type);
-        if (!q36_quantize_activation_row(inpq_kind, inp, inpq, Q36_N_EMBD)) return false;
+        if (!q36_quantize_activation_row(inpq_kind, ffn_in, inpq, Q36_N_EMBD)) return false;
         xq = inpq_kind == Q36_ACTIVATION_QUANT_NONE ? NULL : inpq;
         if (!q36_tensor_matvec_pair_prequant(e,
                                              l->ffn_gate_shexp,
                                              l->ffn_up_shexp,
-                                             inp, xq, gate, up, rowbuf,
+                                             ffn_in, xq, gate, up, rowbuf,
                                              Q36_N_EMBD, Q36_N_FF_SHARED,
                                              1.0f, 1.0f)) {
             if (!q36_tensor_matvec_prequant(
-                    e, l->ffn_gate_shexp, inp, xq, gate, rowbuf,
+                    e, l->ffn_gate_shexp, ffn_in, xq, gate, rowbuf,
                     Q36_N_EMBD, Q36_N_FF_SHARED) ||
                 !q36_tensor_matvec_prequant(
-                    e, l->ffn_up_shexp, inp, xq, up, rowbuf,
+                    e, l->ffn_up_shexp, ffn_in, xq, up, rowbuf,
                     Q36_N_EMBD, Q36_N_FF_SHARED)) {
                 return false;
             }
         }
         for (uint32_t j = 0; j < Q36_N_FF_SHARED; j++)
             mid[j] = q36_siluf(gate[j]) * up[j];
-        return q36_tensor_matvec(e, l->ffn_down_shexp, mid, out, rowbuf,
+        down_in = q36_hadamard_forward_rows(l->ffn_down_shexp, mid, rt->batch_had, Q36_N_FF_SHARED, 1u);
+        return q36_tensor_matvec(e, l->ffn_down_shexp, down_in, out, rowbuf,
                                  Q36_N_FF_SHARED, Q36_N_EMBD);
     }
     if (!q36_tensor_matvec(e, l->ffn_gate_inp, inp, gate_logits, rowbuf, Q36_N_EMBD, Q36_N_EXPERT)) return false;
@@ -6918,19 +7101,23 @@ static bool q36_forward_full_attn(const q36_engine *e, const q36_layer_weights *
     float sinks[Q36_N_HEAD];
     q36_full_attn_cache *cache = &rt->full[il];
     bool have_sinks = false;
-    if (!q36_tensor_matvec(e, l->attn_q, inp, qg, rt->work4, Q36_N_EMBD, Q36_N_HEAD * Q36_N_HEAD_DIM * 2u)) {
+    const q36_tensor *rot_qkv = q36_hadamard_rotate_enabled(l->attn_q) ? l->attn_q :
+                                (q36_hadamard_rotate_enabled(l->attn_k) ? l->attn_k :
+                                (q36_hadamard_rotate_enabled(l->attn_v) ? l->attn_v : NULL));
+    const float *qkv_in = rot_qkv ? q36_hadamard_forward_rows(rot_qkv, inp, rt->batch_had, Q36_N_EMBD, 1u) : inp;
+    if (!q36_tensor_matvec(e, l->attn_q, qkv_in, qg, rt->work4, Q36_N_EMBD, Q36_N_HEAD * Q36_N_HEAD_DIM * 2u)) {
         fprintf(stderr, "q36: full_attn attn_q failed at layer=%u pos=%u\n", il, pos);
         return false;
     }
     q36_scale_inplace(qg, Q36_N_HEAD * Q36_N_HEAD_DIM * 2u,
                       q36_tensor_scalar_or(&e->model, l->attn_q_scale, 1.0f));
-    if (!q36_tensor_matvec(e, l->attn_k, inp, k, rt->work4, Q36_N_EMBD, Q36_N_HEAD_KV * Q36_N_HEAD_DIM)) {
+    if (!q36_tensor_matvec(e, l->attn_k, qkv_in, k, rt->work4, Q36_N_EMBD, Q36_N_HEAD_KV * Q36_N_HEAD_DIM)) {
         fprintf(stderr, "q36: full_attn attn_k failed at layer=%u pos=%u\n", il, pos);
         return false;
     }
     q36_scale_inplace(k, Q36_N_HEAD_KV * Q36_N_HEAD_DIM,
                       q36_tensor_scalar_or(&e->model, l->attn_k_scale, 1.0f));
-    if (!q36_tensor_matvec(e, l->attn_v, inp, v, rt->work4, Q36_N_EMBD, Q36_N_HEAD_KV * Q36_N_VALUE_DIM)) {
+    if (!q36_tensor_matvec(e, l->attn_v, qkv_in, v, rt->work4, Q36_N_EMBD, Q36_N_HEAD_KV * Q36_N_VALUE_DIM)) {
         fprintf(stderr, "q36: full_attn attn_v failed at layer=%u pos=%u\n", il, pos);
         return false;
     }
@@ -6983,9 +7170,12 @@ static bool q36_forward_full_attn(const q36_engine *e, const q36_layer_weights *
             head_out[i] *= q36_sigmoidf(qg[gate_off]);
         }
     }
-    if (!q36_tensor_matvec(e, l->attn_output, acc, out, rt->work4, Q36_N_SSM_INNER, Q36_N_EMBD)) {
-        fprintf(stderr, "q36: full_attn attn_output failed at layer=%u pos=%u\n", il, pos);
-        return false;
+    {
+        const float *ao_in = q36_hadamard_forward_rows(l->attn_output, acc, rt->batch_had, Q36_N_SSM_INNER, 1u);
+        if (!q36_tensor_matvec(e, l->attn_output, ao_in, out, rt->work4, Q36_N_SSM_INNER, Q36_N_EMBD)) {
+            fprintf(stderr, "q36: full_attn attn_output failed at layer=%u pos=%u\n", il, pos);
+            return false;
+        }
     }
     q36_scale_inplace(out, Q36_N_EMBD,
                       q36_tensor_scalar_or(&e->model, l->attn_output_scale, 1.0f));
@@ -7006,7 +7196,10 @@ static bool q36_forward_recurrent(const q36_engine *e, const q36_layer_weights *
     float *proj = rt->work3;
     float *gate = rt->work1 + Q36_N_SSM_DT_RANK;
     const float *kernel = (const float *)(e->model.map + l->ssm_conv1d->abs_offset);
-    if (!q36_tensor_matvec(e, l->attn_qkv, inp, qkv, z, Q36_N_EMBD, Q36_N_SSM_CONV_DIM)) {
+    const q36_tensor *rot_qkv = q36_hadamard_rotate_enabled(l->attn_qkv) ? l->attn_qkv :
+                                (q36_hadamard_rotate_enabled(l->attn_gate) ? l->attn_gate : NULL);
+    const float *qkv_in = rot_qkv ? q36_hadamard_forward_rows(rot_qkv, inp, rt->batch_had, Q36_N_EMBD, 1u) : inp;
+    if (!q36_tensor_matvec(e, l->attn_qkv, qkv_in, qkv, z, Q36_N_EMBD, Q36_N_SSM_CONV_DIM)) {
         fprintf(stderr, "q36: recurrent attn_qkv failed at layer=%u\n", il);
         return false;
     }
@@ -7031,7 +7224,7 @@ static bool q36_forward_recurrent(const q36_engine *e, const q36_layer_weights *
     }
     q36_scale_inplace(gate, Q36_N_SSM_DT_RANK,
                       q36_tensor_scalar_or(&e->model, l->ssm_alpha_scale, 1.0f));
-    if (!q36_tensor_matvec(e, l->attn_gate, inp, z, window, Q36_N_EMBD, Q36_N_SSM_INNER)) {
+    if (!q36_tensor_matvec(e, l->attn_gate, qkv_in, z, window, Q36_N_EMBD, Q36_N_SSM_INNER)) {
         fprintf(stderr, "q36: recurrent attn_gate failed at layer=%u\n", il);
         return false;
     }
@@ -7079,9 +7272,12 @@ static bool q36_forward_recurrent(const q36_engine *e, const q36_layer_weights *
         fprintf(stderr, "q36: recurrent gated proj non-finite at layer=%u\n", il);
         return false;
     }
-    if (!q36_tensor_matvec(e, l->ssm_out, proj, out, q, Q36_N_SSM_INNER, Q36_N_EMBD)) {
-        fprintf(stderr, "q36: recurrent ssm_out failed at layer=%u\n", il);
-        return false;
+    {
+        const float *ssm_in = q36_hadamard_forward_rows(l->ssm_out, proj, rt->batch_had, Q36_N_SSM_INNER, 1u);
+        if (!q36_tensor_matvec(e, l->ssm_out, ssm_in, out, q, Q36_N_SSM_INNER, Q36_N_EMBD)) {
+            fprintf(stderr, "q36: recurrent ssm_out failed at layer=%u\n", il);
+            return false;
+        }
     }
     q36_scale_inplace(out, Q36_N_EMBD,
                       q36_tensor_scalar_or(&e->model, l->ssm_out_scale, 1.0f));
@@ -7274,21 +7470,25 @@ static bool q36_forward_ffn_batch(const q36_engine *e,
     const uint8_t *gate_inp_xq = NULL;
     q36_activation_quant_kind inpq_kind;
     if (Q36_MODEL_DENSE) {
+        const q36_tensor *rot_gate = q36_hadamard_rotate_enabled(l->ffn_gate_shexp) ? l->ffn_gate_shexp :
+                                     (q36_hadamard_rotate_enabled(l->ffn_up_shexp) ? l->ffn_up_shexp : NULL);
+        const float *ffn_in = rot_gate ? q36_hadamard_forward_rows(rot_gate, inp, rt->batch_had, Q36_N_EMBD, n_tok) : inp;
+        const float *down_in;
         inpq_kind = q36_activation_quant_kind_for_type(l->ffn_gate_shexp->type);
-        if (!q36_quantize_activation_batch(inpq_kind, inp, rt->batch_xq,
+        if (!q36_quantize_activation_batch(inpq_kind, ffn_in, rt->batch_xq,
                                            n_tok, Q36_N_EMBD, e->n_threads)) return false;
         gate_inp_xq = inpq_kind == Q36_ACTIVATION_QUANT_NONE ? NULL : rt->batch_xq;
         if (!q36_tensor_matmul_pair_batch_prequant(
                 e, l->ffn_gate_shexp, l->ffn_up_shexp,
-                inp, gate_inp_xq,
+                ffn_in, gate_inp_xq,
                 rt->batch_ffn_shared_gate, rt->batch_ffn_shared_up,
                 n_tok, Q36_N_EMBD, Q36_N_FF_SHARED, 1.0f, 1.0f)) {
             if (!q36_tensor_matmul_batch_prequant(
-                    e, l->ffn_gate_shexp, inp, gate_inp_xq,
+                    e, l->ffn_gate_shexp, ffn_in, gate_inp_xq,
                     rt->batch_ffn_shared_gate, n_tok,
                     Q36_N_EMBD, Q36_N_FF_SHARED, 1.0f) ||
                 !q36_tensor_matmul_batch_prequant(
-                    e, l->ffn_up_shexp, inp, gate_inp_xq,
+                    e, l->ffn_up_shexp, ffn_in, gate_inp_xq,
                     rt->batch_ffn_shared_up, n_tok,
                     Q36_N_EMBD, Q36_N_FF_SHARED, 1.0f)) {
                 return false;
@@ -7298,13 +7498,15 @@ static bool q36_forward_ffn_batch(const q36_engine *e,
                         rt->batch_ffn_shared_gate,
                         rt->batch_ffn_shared_up,
                         n_tok, Q36_N_FF_SHARED, e->n_threads);
+        down_in = q36_hadamard_forward_rows(l->ffn_down_shexp, rt->batch_ffn_shared_mid,
+                                            rt->batch_had, Q36_N_FF_SHARED, n_tok);
         if (!q36_quantize_activation_batch_for_type(
-                l->ffn_down_shexp->type, rt->batch_ffn_shared_mid,
+                l->ffn_down_shexp->type, down_in,
                 rt->batch_xq, n_tok, Q36_N_FF_SHARED, e->n_threads)) {
             return false;
         }
         return q36_tensor_matmul_batch_prequant(
-                e, l->ffn_down_shexp, rt->batch_ffn_shared_mid,
+                e, l->ffn_down_shexp, down_in,
                 rt->batch_xq, out, n_tok,
                 Q36_N_FF_SHARED, Q36_N_EMBD, 1.0f);
     }
@@ -7402,9 +7604,13 @@ static bool q36_forward_full_attn_batch(const q36_engine *e,
     q36_full_attn_cache *cache = &rt->full[il];
     float sinks[Q36_N_HEAD];
     bool have_sinks = false;
+    const q36_tensor *rot_qkv = q36_hadamard_rotate_enabled(l->attn_q) ? l->attn_q :
+                                (q36_hadamard_rotate_enabled(l->attn_k) ? l->attn_k :
+                                (q36_hadamard_rotate_enabled(l->attn_v) ? l->attn_v : NULL));
+    const float *qkv_in = rot_qkv ? q36_hadamard_forward_rows(rot_qkv, inp, rt->batch_had, Q36_N_EMBD, n_tok) : inp;
     q36_activation_quant_kind xq_kind = q36_activation_quant_kind_for_type(l->attn_q->type);
-    if (!q36_quantize_activation_batch(xq_kind, inp, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
-    if (!q36_tensor_matmul_batch_prequant(e, l->attn_q, inp, rt->batch_xq,
+    if (!q36_quantize_activation_batch(xq_kind, qkv_in, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
+    if (!q36_tensor_matmul_batch_prequant(e, l->attn_q, qkv_in, rt->batch_xq,
                                           rt->batch_qg,
                                           n_tok, Q36_N_EMBD, Q36_N_HEAD * Q36_N_HEAD_DIM * 2u,
                                           q36_tensor_scalar_or(&e->model, l->attn_q_scale, 1.0f))) {
@@ -7412,9 +7618,9 @@ static bool q36_forward_full_attn_batch(const q36_engine *e,
     }
     if (q36_activation_quant_kind_for_type(l->attn_k->type) != xq_kind) {
         xq_kind = q36_activation_quant_kind_for_type(l->attn_k->type);
-        if (!q36_quantize_activation_batch(xq_kind, inp, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
+        if (!q36_quantize_activation_batch(xq_kind, qkv_in, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
     }
-    if (!q36_tensor_matmul_batch_prequant(e, l->attn_k, inp, rt->batch_xq,
+    if (!q36_tensor_matmul_batch_prequant(e, l->attn_k, qkv_in, rt->batch_xq,
                                           rt->batch_k,
                                           n_tok, Q36_N_EMBD, Q36_N_HEAD_KV * Q36_N_HEAD_DIM,
                                           q36_tensor_scalar_or(&e->model, l->attn_k_scale, 1.0f))) {
@@ -7422,9 +7628,9 @@ static bool q36_forward_full_attn_batch(const q36_engine *e,
     }
     if (q36_activation_quant_kind_for_type(l->attn_v->type) != xq_kind) {
         xq_kind = q36_activation_quant_kind_for_type(l->attn_v->type);
-        if (!q36_quantize_activation_batch(xq_kind, inp, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
+        if (!q36_quantize_activation_batch(xq_kind, qkv_in, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
     }
-    if (!q36_tensor_matmul_batch_prequant(e, l->attn_v, inp, rt->batch_xq,
+    if (!q36_tensor_matmul_batch_prequant(e, l->attn_v, qkv_in, rt->batch_xq,
                                           rt->batch_v,
                                           n_tok, Q36_N_EMBD, Q36_N_HEAD_KV * Q36_N_VALUE_DIM,
                                           q36_tensor_scalar_or(&e->model, l->attn_v_scale, 1.0f))) {
@@ -7454,15 +7660,19 @@ static bool q36_forward_full_attn_batch(const q36_engine *e,
     sctx.pos0 = pos0;
     sctx.have_sinks = have_sinks;
     q36_parallel_for_rows((uint64_t)n_tok * Q36_N_HEAD, 1, e->n_threads, q36_full_attn_scores_worker, &sctx);
-    if (!q36_quantize_activation_batch_for_type(l->attn_output->type, rt->batch_attn_out,
-                                               rt->batch_xq, n_tok, Q36_N_SSM_INNER, e->n_threads)) {
-        return false;
-    }
-    if (!q36_tensor_matmul_batch_prequant(e, l->attn_output, rt->batch_attn_out, rt->batch_xq,
-                                          out,
-                                          n_tok, Q36_N_SSM_INNER, Q36_N_EMBD,
-                                          q36_tensor_scalar_or(&e->model, l->attn_output_scale, 1.0f))) {
-        return false;
+    {
+        const float *ao_in = q36_hadamard_forward_rows(l->attn_output, rt->batch_attn_out,
+                                                       rt->batch_had, Q36_N_SSM_INNER, n_tok);
+        if (!q36_quantize_activation_batch_for_type(l->attn_output->type, ao_in,
+                                                   rt->batch_xq, n_tok, Q36_N_SSM_INNER, e->n_threads)) {
+            return false;
+        }
+        if (!q36_tensor_matmul_batch_prequant(e, l->attn_output, ao_in, rt->batch_xq,
+                                              out,
+                                              n_tok, Q36_N_SSM_INNER, Q36_N_EMBD,
+                                              q36_tensor_scalar_or(&e->model, l->attn_output_scale, 1.0f))) {
+            return false;
+        }
     }
     return true;
 }
@@ -7479,9 +7689,12 @@ static bool q36_forward_recurrent_batch(const q36_engine *e,
     const float *dt_bias = (const float *)(e->model.map + l->ssm_dt->abs_offset);
     const float *a = (const float *)(e->model.map + l->ssm_a->abs_offset);
     const float *ssm_norm = (const float *)(e->model.map + l->ssm_norm->abs_offset);
+    const q36_tensor *rot_qkv = q36_hadamard_rotate_enabled(l->attn_qkv) ? l->attn_qkv :
+                                (q36_hadamard_rotate_enabled(l->attn_gate) ? l->attn_gate : NULL);
+    const float *qkv_in = rot_qkv ? q36_hadamard_forward_rows(rot_qkv, inp, rt->batch_had, Q36_N_EMBD, n_tok) : inp;
     q36_activation_quant_kind xq_kind = q36_activation_quant_kind_for_type(l->attn_qkv->type);
-    if (!q36_quantize_activation_batch(xq_kind, inp, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
-    if (!q36_tensor_matmul_batch_prequant(e, l->attn_qkv, inp, rt->batch_xq,
+    if (!q36_quantize_activation_batch(xq_kind, qkv_in, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
+    if (!q36_tensor_matmul_batch_prequant(e, l->attn_qkv, qkv_in, rt->batch_xq,
                                           rt->batch_recur_qkv,
                                           n_tok, Q36_N_EMBD, Q36_N_SSM_CONV_DIM,
                                           q36_tensor_scalar_or(&e->model, l->attn_qkv_scale, 1.0f))) {
@@ -7489,9 +7702,9 @@ static bool q36_forward_recurrent_batch(const q36_engine *e,
     }
     if (q36_activation_quant_kind_for_type(l->attn_gate->type) != xq_kind) {
         xq_kind = q36_activation_quant_kind_for_type(l->attn_gate->type);
-        if (!q36_quantize_activation_batch(xq_kind, inp, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
+        if (!q36_quantize_activation_batch(xq_kind, qkv_in, rt->batch_xq, n_tok, Q36_N_EMBD, e->n_threads)) return false;
     }
-    if (!q36_tensor_matmul_batch_prequant(e, l->attn_gate, inp, rt->batch_xq,
+    if (!q36_tensor_matmul_batch_prequant(e, l->attn_gate, qkv_in, rt->batch_xq,
                                           rt->batch_recur_z,
                                           n_tok, Q36_N_EMBD, Q36_N_SSM_INNER,
                                           q36_tensor_scalar_or(&e->model, l->attn_gate_scale, 1.0f))) {
@@ -7563,15 +7776,19 @@ static bool q36_forward_recurrent_batch(const q36_engine *e,
         for (uint32_t i = 0; i < Q36_N_SSM_INNER; i++) proj[i] *= q36_siluf(z[i]);
         if (!q36_all_finite(proj, Q36_N_SSM_INNER)) return false;
     }
-    if (!q36_quantize_activation_batch_for_type(l->ssm_out->type, rt->batch_recur_proj,
-                                               rt->batch_xq, n_tok, Q36_N_SSM_INNER, e->n_threads)) {
-        return false;
-    }
-    if (!q36_tensor_matmul_batch_prequant(e, l->ssm_out, rt->batch_recur_proj, rt->batch_xq,
-                                          out,
-                                          n_tok, Q36_N_SSM_INNER, Q36_N_EMBD,
-                                          q36_tensor_scalar_or(&e->model, l->ssm_out_scale, 1.0f))) {
-        return false;
+    {
+        const float *ssm_in = q36_hadamard_forward_rows(l->ssm_out, rt->batch_recur_proj,
+                                                        rt->batch_had, Q36_N_SSM_INNER, n_tok);
+        if (!q36_quantize_activation_batch_for_type(l->ssm_out->type, ssm_in,
+                                                   rt->batch_xq, n_tok, Q36_N_SSM_INNER, e->n_threads)) {
+            return false;
+        }
+        if (!q36_tensor_matmul_batch_prequant(e, l->ssm_out, ssm_in, rt->batch_xq,
+                                              out,
+                                              n_tok, Q36_N_SSM_INNER, Q36_N_EMBD,
+                                              q36_tensor_scalar_or(&e->model, l->ssm_out_scale, 1.0f))) {
+            return false;
+        }
     }
     return true;
 }
@@ -7673,6 +7890,7 @@ static bool q36_forward_tokens_cpu(q36_session *s,
     }
     if (compute_logits) {
         const float *last = rt->batch_norm + (uint64_t)(n_tok - 1u) * Q36_N_EMBD;
+        last = q36_hadamard_forward_rows(e->weights.output, last, rt->batch_had, Q36_N_EMBD, 1u);
         if (!q36_tensor_matvec(e, e->weights.output, last, s->logits, rt->work1, Q36_N_EMBD, Q36_N_VOCAB)) {
             fprintf(stderr, "q36: output projection failed at pos=%u\n", pos0);
             return false;
@@ -9235,7 +9453,8 @@ static bool q36_forward_token_cpu(q36_session *s, int token, uint32_t pos, bool 
         return false;
     }
     if (compute_logits) {
-        if (!q36_tensor_matvec(e, e->weights.output, rt->work0, s->logits, rt->work1, Q36_N_EMBD, Q36_N_VOCAB)) {
+        const float *out_in = q36_hadamard_forward_rows(e->weights.output, rt->work0, rt->batch_had, Q36_N_EMBD, 1u);
+        if (!q36_tensor_matvec(e, e->weights.output, out_in, s->logits, rt->work1, Q36_N_EMBD, Q36_N_VOCAB)) {
             fprintf(stderr, "q36: output projection failed for token=%d pos=%u\n", token, pos);
             return false;
         }
@@ -10393,6 +10612,10 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
     e->cache_type_v = opt->cache_type_v;
     e->power_percent = opt->power_percent > 0 ? opt->power_percent : 100;
     e->quality = opt->quality;
+    {
+        const char *mmq_contract = getenv("Q36_CPU_MMQ_CONTRACT");
+        e->cpu_mmq_contract = mmq_contract && mmq_contract[0] && mmq_contract[0] != '0';
+    }
     e->ssd_streaming = opt->ssd_streaming;
     e->ssd_streaming_cold = opt->ssd_streaming_cold;
     e->ssd_streaming_full_layers_set = opt->ssd_streaming_full_layers_set;
@@ -10941,6 +11164,25 @@ int q36_engine_debug_first_tensor_of_type(q36_engine *e, uint32_t type, char *na
         memcpy(name, t->name.ptr, t->name.len);
         name[t->name.len] = '\0';
         if (n) *n = (uint32_t)t->dim[0];
+        return 0;
+    }
+    return 1;
+}
+
+int q36_engine_debug_tensor_of_type_at(q36_engine *e, uint32_t type, uint32_t ordinal,
+                                       char *name, size_t name_cap,
+                                       uint32_t *in_dim, uint32_t *out_dim) {
+    uint32_t seen = 0;
+    if (!e || !name || name_cap == 0) return 1;
+    for (uint64_t i = 0; i < e->model.n_tensors; i++) {
+        q36_tensor *t = &e->model.tensors[i];
+        if (t->type != type || t->ndim == 0 || t->dim[0] == 0) continue;
+        if (seen++ != ordinal) continue;
+        if (t->name.len + 1 > name_cap) return 1;
+        memcpy(name, t->name.ptr, t->name.len);
+        name[t->name.len] = '\0';
+        if (in_dim) *in_dim = (uint32_t)t->dim[0];
+        if (out_dim) *out_dim = t->ndim > 1 ? (uint32_t)t->dim[1] : 1u;
         return 0;
     }
     return 1;

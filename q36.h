@@ -328,6 +328,9 @@ const q36_tokens *q36_session_tokens(q36_session *s);
 int q36_engine_debug_tensor_row(q36_engine *e, const char *tensor_name, uint64_t row, float *dst, uint32_t n);
 int q36_engine_debug_first_tensor_of_type(q36_engine *e, uint32_t type, char *name, size_t name_cap, uint32_t *n);
 uint32_t q36_engine_debug_count_tensors_of_type(q36_engine *e, uint32_t type);
+int q36_engine_debug_tensor_of_type_at(q36_engine *e, uint32_t type, uint32_t ordinal,
+                                       char *name, size_t name_cap,
+                                       uint32_t *in_dim, uint32_t *out_dim);
 int q36_engine_debug_tensor_row_packed(q36_engine *e, const char *tensor_name, uint64_t row,
                                        void *dst, uint64_t dst_cap,
                                        uint64_t *row_bytes, uint32_t *type, uint32_t *n);

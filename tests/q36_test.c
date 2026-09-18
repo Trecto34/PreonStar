@@ -1,6 +1,7 @@
 #define Q36_SERVER_TEST
 #define Q36_SERVER_TEST_NO_MAIN
 #include "../q36_server.c"
+#include "../q36_mmq_contract.h"
 #include "../q36_quant.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -2918,55 +2919,17 @@ static void test_vulkan_kquant_matvec(void) {
 
 #ifndef Q36_NO_GPU
 /* ---------------------------------------------------------------------------
- * Independent numeric helpers for the dense-quant oracles.
+ * f16 MMQ contract helpers.
  *
- * These deliberately avoid the production helpers. An oracle that shares a
- * rounding or format routine with the code under test cannot catch a bug in
- * that routine, so the parity tests below cross-check these against production
- * rather than either side being trusted on its own.
+ * The single implementation lives in ../q36_mmq_contract.h and is shared by
+ * this oracle and the CPU parity reference (Q36_CPU_MMQ_CONTRACT). Sharing is
+ * deliberate: the point is to test production against the *contract*, so the
+ * contract itself must have exactly one implementation, not two that can drift.
  * ------------------------------------------------------------------------ */
-
-/* IEEE-754 binary16 -> binary32, from the format definition. */
-static float test_ref_half_to_float(uint16_t h) {
-    const uint32_t sign = (uint32_t)(h >> 15) & 1u;
-    const uint32_t exp = (uint32_t)(h >> 10) & 0x1fu;
-    const uint32_t man = (uint32_t)h & 0x3ffu;
-    double v;
-    if (exp == 0u) v = ldexp((double)man, -24);                  /* subnormal */
-    else if (exp == 31u) v = man ? (double)NAN : (double)INFINITY;
-    else v = ldexp((double)(man | 0x400u), (int)exp - 25);
-    return (float)(sign ? -v : v);
-}
-
-/* Round to IEEE-754 binary16 (nearest, ties to even) and widen back to float.
- * Models the MMQ kernel's f16 staging. */
-static float test_ref_round_half(double v) {
-    double a, step, r;
-    int e;
-    if (isnan(v)) return (float)v;
-    a = fabs(v);
-    if (a >= 65520.0) return (float)(v < 0.0 ? -INFINITY : INFINITY);
-    if (a < 6.103515625e-05) {           /* binary16 subnormal: ulp = 2^-24 */
-        r = ldexp(nearbyint(ldexp(a, 24)), -24);
-    } else {
-        (void)frexp(a, &e);              /* a = m * 2^e, m in [0.5, 1) */
-        step = ldexp(1.0, e - 11);       /* binary16 keeps 11 significand bits */
-        r = nearbyint(a / step) * step;
-        if (r >= 65536.0) return (float)(v < 0.0 ? -INFINITY : INFINITY);
-    }
-    return (float)(v < 0.0 ? -r : r);
-}
-
-/* One f16 multiply and one f16 fused multiply-add, each with a single rounding
- * as v_mul_f16 / v_fma_f16 do. The inputs are exact binary16 values, so the
- * product and sum are exact in double and only the final rounding is inexact. */
-static float test_ref_mul_half(float a, float b) {
-    return test_ref_round_half((double)a * (double)b);
-}
-
-static float test_ref_fma_half(float a, float b, float c) {
-    return test_ref_round_half((double)a * (double)b + (double)c);
-}
+#define test_ref_half_to_float q36_contract_half_to_float
+#define test_ref_round_half    q36_contract_round_half
+#define test_ref_mul_half      q36_contract_mul_half
+#define test_ref_fma_half      q36_contract_fma_half
 
 /* ULP distance between two finite f32 values, for decode error reporting. */
 static uint32_t test_f32_ulp_diff(float a, float b) {
@@ -3488,39 +3451,12 @@ static float test_mmq_q2_family_ref(const uint8_t *row_ptr,
                                     uint32_t lane_shift,
                                     uint32_t lane_mask,
                                     float pc_scale) {
-    float sum = 0.0f;
-    uint32_t qb, slice, e, c;
-    for (qb = 0; qb < q8k_blocks; qb++) {
-        const float scale_in = test_ref_round_half((double)xq[qb].d);
-        for (slice = 0; slice < 8u; slice++) {
-            const uint32_t qblock = blk_per_q8k * qb + (slice >> lane_shift);
-            const uint8_t *blk = row_ptr + (uint64_t)qblock * blk_bytes;
-            const uint16_t dbits = (uint16_t)(blk[0] | ((uint16_t)blk[1] << 8));
-            const float d = test_ref_round_half(
-                (double)test_ref_half_to_float(dbits) * (double)pc_scale);
-            const uint8_t *codes = blk + 2 + (slice & lane_mask) * 8u;
-            for (e = 0; e < 16u; e++) {
-                const uint32_t kw = e >> 3;
-                const uint32_t p = (e & 7u) >> 1;
-                const uint32_t q = e & 1u;
-                const uint32_t bits = codes[kw * 4u + p];
-                float a[2], bv[2];
-                for (c = 0; c < 2u; c++) {
-                    const uint32_t sub = 2u * q + c;
-                    const uint32_t code = (bits >> (sub * 2u)) & 3u;
-                    const int8_t qv =
-                        xq[qb].qs[slice * 32u + kw * 16u + p * 4u + sub];
-                    a[c] = test_ref_mul_half(
-                        test_ref_round_half((double)(int)code - 1.0), d);
-                    bv[c] = test_ref_mul_half(
-                        test_ref_round_half((double)(int)qv), scale_in);
-                }
-                sum = test_ref_fma_half(a[1], bv[1], sum);
-                sum = test_ref_fma_half(a[0], bv[0], sum);
-            }
-        }
-    }
-    return sum;
+    /* test_block_q8_K puts dmin between d and qs, so the q8_K block stride is
+     * sizeof(test_block_q8_K) and qs starts at offset 8. */
+    return q36_contract_mmq_q2_dot(row_ptr, (const uint8_t *)xq,
+                                   (uint32_t)sizeof(test_block_q8_K), 8u,
+                                   q8k_blocks, blk_bytes, blk_per_q8k,
+                                   lane_shift, lane_mask, pc_scale);
 }
 
 typedef struct {
@@ -3567,6 +3503,7 @@ static void test_dense_quant_model_rows(void) {
 
     test_dense_cov cov[N_TYPE];
     uint32_t ti, uncovered = 0, unmodelled_types = 0;
+    uint32_t q2_mmq_cases = 0, f16_f32_distinct = 0;
     q36_engine *engine = NULL;
 
     if (!test_model_available(test_model_path())) {
@@ -3589,19 +3526,36 @@ static void test_dense_quant_model_rows(void) {
     for (ti = 0; ti < (uint32_t)N_TYPE; ti++) {
         const uint32_t type = types[ti];
         test_dense_cov *cv = &cov[ti];
-        char tensor_name[256];
-        uint32_t in_dim = 0, packed_type = 0, packed_n = 0;
-        uint64_t row_bytes = 0;
         const int q2_family = (type == 42u || type == 142u);
-        if (q36_engine_debug_first_tensor_of_type(
-                engine, type, tensor_name, sizeof(tensor_name), &in_dim) != 0)
-            continue;
-        TEST_ASSERT(q36_engine_debug_tensor_row_packed(
-            engine, tensor_name, 0, NULL, 0, &row_bytes, &packed_type,
-            &packed_n) == 0);
-        TEST_ASSERT(type == packed_type && in_dim == packed_n);
-        if (!row_bytes || type != packed_type || in_dim != packed_n) continue;
-        snprintf(cv->tensor, sizeof(cv->tensor), "%s", tensor_name);
+        uint32_t in_dims_seen[64];
+        uint32_t n_seen = 0;
+        uint32_t ordinal;
+        /* One tensor per distinct input width. The first tensor of a type is
+         * output.weight (in_dim 5120) and does not exercise the wide FFN
+         * (17408) or SSM (6144) MMQ shapes, where a stride/lane bug would
+         * otherwise hide behind the whole-model reference drift. */
+        for (ordinal = 0; ordinal < 4096u; ordinal++) {
+            char tensor_name[256];
+            uint32_t in_dim = 0, out_dim_t = 0, packed_type = 0, packed_n = 0;
+            uint64_t row_bytes = 0;
+            uint32_t s;
+            int dup = 0;
+            if (q36_engine_debug_tensor_of_type_at(engine, type, ordinal,
+                    tensor_name, sizeof(tensor_name), &in_dim, &out_dim_t) != 0)
+                break;
+            (void)out_dim_t;
+            for (s = 0; s < n_seen; s++) {
+                if (in_dims_seen[s] == in_dim) { dup = 1; break; }
+            }
+            if (dup) continue;
+            if (n_seen < (uint32_t)(sizeof(in_dims_seen) / sizeof(in_dims_seen[0])))
+                in_dims_seen[n_seen++] = in_dim;
+            TEST_ASSERT(q36_engine_debug_tensor_row_packed(
+                engine, tensor_name, 0, NULL, 0, &row_bytes, &packed_type,
+                &packed_n) == 0);
+            TEST_ASSERT(type == packed_type && in_dim == packed_n);
+            if (!row_bytes || type != packed_type || in_dim != packed_n) continue;
+            snprintf(cv->tensor, sizeof(cv->tensor), "%s", tensor_name);
 
         {
         const uint64_t weight_bytes = row_bytes * out_dim;
@@ -3630,8 +3584,8 @@ static void test_dense_quant_model_rows(void) {
         if (type == 18u)
             memcpy((uint8_t *)weights + weight_bytes, weights,
                    (size_t)weight_bytes);
-        cv->tensors_tested = 1u;
-        cv->rows_tested = (uint32_t)out_dim;
+        cv->tensors_tested++;
+        cv->rows_tested += (uint32_t)out_dim;
 
         for (tokens_i = 0; tokens_i < (uint32_t)N_TOKCASE; tokens_i++) {
             const uint32_t tokens = token_counts[tokens_i];
@@ -3642,6 +3596,7 @@ static void test_dense_quant_model_rows(void) {
             float *x_ref = malloc((size_t)x_count * sizeof(*x_ref));
             float *got = malloc((size_t)out_count * sizeof(*got));
             float *want = malloc((size_t)out_count * sizeof(*want));
+            float *want_f32 = malloc((size_t)out_count * sizeof(*want_f32));
             test_block_q8_K *xq =
                 malloc((size_t)tokens * q8k_blocks * sizeof(*xq));
             q36_gpu_tensor *x = q36_gpu_tensor_alloc(x_count * sizeof(float));
@@ -3651,11 +3606,11 @@ static void test_dense_quant_model_rows(void) {
             double max_abs = 0.0, sum_abs = 0.0, rms = 0.0, ref_rms = 0.0, tol;
             uint64_t worst_i = 0;
             int modelled;
-            TEST_ASSERT(x_host && x_ref && got && want && xq && x && out);
+            TEST_ASSERT(x_host && x_ref && got && want && want_f32 && xq && x && out);
             TEST_ASSERT(in_dim % TEST_QK_K == 0);
-            if (!x_host || !x_ref || !got || !want || !xq || !x || !out ||
+            if (!x_host || !x_ref || !got || !want || !want_f32 || !xq || !x || !out ||
                 in_dim % TEST_QK_K != 0) {
-                free(x_host); free(x_ref); free(got); free(want); free(xq);
+                free(x_host); free(x_ref); free(got); free(want); free(want_f32); free(xq);
                 q36_gpu_tensor_free(x); q36_gpu_tensor_free(out);
                 continue;
             }
@@ -3687,14 +3642,14 @@ static void test_dense_quant_model_rows(void) {
                     (const uint8_t *)weights + (uint64_t)row * row_bytes;
                 TEST_ASSERT(q36_quant_dequantize(type, row_ptr, dequant, in_dim));
                 for (tok = 0; tok < tokens; tok++) {
+                    double sum_f32 = 0.0;
+                    for (i = 0; i < in_dim; i++)
+                        sum_f32 += (double)dequant[i] *
+                                   x_ref[(uint64_t)tok * in_dim + i];
                     if (tokens == 1u || !q2_family) {
                         /* Decode is f32 throughout, and unmodelled MMQ kernels
                          * get the f32 dot as their (loose) reference. */
-                        double sum = 0.0;
-                        for (i = 0; i < in_dim; i++)
-                            sum += (double)dequant[i] *
-                                   x_ref[(uint64_t)tok * in_dim + i];
-                        want[(uint64_t)tok * out_dim + row] = (float)sum;
+                        want[(uint64_t)tok * out_dim + row] = (float)sum_f32;
                     } else {
                         want[(uint64_t)tok * out_dim + row] =
                             test_mmq_q2_family_ref(
@@ -3705,6 +3660,7 @@ static void test_dense_quant_model_rows(void) {
                                 type == 142u ? 3u : 1u,
                                 1.0f);
                     }
+                    want_f32[(uint64_t)tok * out_dim + row] = (float)sum_f32;
                 }
             }
 
@@ -3734,6 +3690,25 @@ static void test_dense_quant_model_rows(void) {
             rms = sqrt(rms / (double)out_count);
             ref_rms = sqrt(ref_rms / (double)out_count);
             cv->token_cases++;
+            if (q2_family && tokens > 1u) {
+                /* The production f16 contract is expected to differ from a
+                 * high-precision f32 dot. Record it so the distinction is
+                 * explicit and cannot silently become the pass/fail criterion
+                 * again. */
+                double f32_rms = 0.0, f32_max = 0.0;
+                for (i = 0; i < out_count; i++) {
+                    double df = (double)want[i] - (double)want_f32[i];
+                    if (fabs(df) > f32_max) f32_max = fabs(df);
+                    f32_rms += df * df;
+                }
+                f32_rms = sqrt(f32_rms / (double)out_count);
+                q2_mmq_cases++;
+                if (f32_rms > 0.0) f16_f32_distinct++;
+                fprintf(stderr,
+                        "q36-test:     f16-contract vs f32 reference: "
+                        "max_abs=%.7g rms=%.7g (by design; diagnostic, not a "
+                        "kernel error)\n", f32_max, f32_rms);
+            }
 
             tol = tokens == 1u ? decode_tol
                                : (q2_family ? mmq_tol_f16 : mmq_tol_unmodelled);
@@ -3762,11 +3737,12 @@ static void test_dense_quant_model_rows(void) {
             TEST_ASSERT(rms / fmax(ref_rms, 1.0e-20) < tol);
             if (tokens == 1u) TEST_ASSERT(max_abs < decode_tol);
 
-            free(x_host); free(x_ref); free(got); free(want); free(xq);
+            free(x_host); free(x_ref); free(got); free(want); free(want_f32); free(xq);
             q36_gpu_tensor_free(x); q36_gpu_tensor_free(out);
         }
         free(dequant);
         free(weights);
+        }
         }
     }
 
@@ -3780,7 +3756,7 @@ static void test_dense_quant_model_rows(void) {
         const test_dense_cov *cv = &cov[ti];
         const int bad = cv->eligible != 0u &&
             (cv->tensors_tested == 0u || cv->rows_tested == 0u ||
-             cv->token_cases != (uint32_t)N_TOKCASE);
+             cv->token_cases != cv->tensors_tested * (uint32_t)N_TOKCASE);
         if (cv->eligible == 0u && cv->tensors_tested == 0u) continue;
         uncovered += (uint32_t)(bad ? 1 : 0);
         fprintf(stderr, "q36-test:   %-8s %-9u %-8u %-6u %-6u %s%s\n",
@@ -3794,6 +3770,17 @@ static void test_dense_quant_model_rows(void) {
                 "q36-test:   NOTE %u token-cases used the UNMODELLED f32 MMQ "
                 "reference at tol=%.3g -- not release grade\n",
                 unmodelled_types, mmq_tol_unmodelled);
+    /* The three facts this oracle is meant to lock in: (1) the GPU matches the
+     * f16 contract bit-exactly, asserted per case above; (2) the f16 contract
+     * legitimately differs from a f32 reference, asserted here; (3) that
+     * expected difference must not be treated as a kernel error. */
+    if (q2_mmq_cases > 0) {
+        fprintf(stderr,
+                "q36-test:   f16 contract differs from f32 reference in %u/%u "
+                "q2 MMQ cases (expected)\n",
+                f16_f32_distinct, q2_mmq_cases);
+        TEST_ASSERT(f16_f32_distinct > 0u);
+    }
     TEST_ASSERT(uncovered == 0u);
 
     q36_gpu_set_dense_model(false);
@@ -3803,6 +3790,204 @@ static void test_dense_quant_model_rows(void) {
 #else
 static void test_dense_quant_model_rows(void) {
     test_skip("dense-quant-model-rows", "CPU-only build");
+}
+#endif
+
+#ifndef Q36_NO_GPU
+static uint16_t test_f32_to_half_bits(float v) {
+#if defined(__FLT16_MANT_DIG__)
+    _Float16 h = (_Float16)v;
+    uint16_t u = 0;
+    memcpy(&u, &h, sizeof(u));
+    return u;
+#else
+    double a = fabs((double)v);
+    uint16_t sign = v < 0.0f ? 0x8000u : 0u;
+    if (a == 0.0) return sign;
+    {
+        int e;
+        double m = frexp(a, &e);
+        uint32_t biased = (uint32_t)(e - 1 + 15);
+        uint32_t man = (uint32_t)ldexp(m, 11) & 0x3ffu;
+        if (biased >= 31u) return (uint16_t)(sign | 0x7c00u);
+        return (uint16_t)(sign | (biased << 10) | man);
+    }
+#endif
+}
+
+/* ---------------------------------------------------------------------------
+ * Native-128 PQ2_0: independent per-128 scale handling.
+ *
+ * The shipped model is a lossless repack whose adjacent 128-block scales are
+ * equal, so it cannot exercise the 128-granularity scale read. This builds
+ * synthetic rows with deliberately independent, signed scales and arbitrary
+ * codes and checks the GPU decode and MMQ against the shared f16 contract.
+ *
+ * Falsifiability: a second buffer forces all block scales equal and the test
+ * asserts the GPU output *changes*, so a kernel that read a single 64-pair
+ * scale (or ignored the 128-block index) cannot pass.
+ * ------------------------------------------------------------------------ */
+static void test_pq2_0_native_128(void) {
+    enum {
+        BLK = 128,
+        BB = 34,
+        NBLK = 4,
+        in_dim = BLK * NBLK,       /* 512, 2 q8_K blocks */
+        out_dim = 8,
+        N_TOK = 4,
+    };
+    static const uint32_t token_counts[N_TOK] = {1u, 2u, 5u, 8u};
+    /* Distinct, both signs, none a multiple of another: a paired-repack read
+     * (block 0/1 or 2/3 equal) moves the answer far more than any rounding. */
+    static const float scales[NBLK] = {0.8125f, -1.1875f, 1.5625f, 0.4375f};
+    const uint64_t row_bytes = (uint64_t)NBLK * BB;
+    const uint64_t weight_bytes = row_bytes * out_dim;
+    const uint64_t weight_alloc = test_round_up_u64(weight_bytes, (uint64_t)getpagesize());
+    const uint32_t q8k_blocks = in_dim / (uint32_t)TEST_QK_K;
+    void *weights = NULL, *weights_forced = NULL;
+    float *dequant = malloc((size_t)in_dim * sizeof(*dequant));
+    uint32_t r, b, j, ti, tok, blk_i, i;
+    uint32_t decode_checks = 0, mmq_checks = 0, forced_diff = 0;
+
+    TEST_ASSERT(q36_gpu_init() != 0);
+    q36_gpu_set_dense_model(true);
+    TEST_ASSERT(posix_memalign(&weights, (size_t)getpagesize(), (size_t)weight_alloc) == 0);
+    TEST_ASSERT(posix_memalign(&weights_forced, (size_t)getpagesize(), (size_t)weight_alloc) == 0);
+    TEST_ASSERT(dequant != NULL);
+    if (!weights || !weights_forced || !dequant) goto done;
+    memset(weights, 0, (size_t)weight_alloc);
+
+    for (r = 0; r < out_dim; r++) {
+        for (b = 0; b < NBLK; b++) {
+            uint8_t *blk = (uint8_t *)weights + (uint64_t)r * row_bytes + (uint64_t)b * BB;
+            uint16_t dbits = test_f32_to_half_bits(scales[b]);
+            blk[0] = (uint8_t)(dbits & 0xffu);
+            blk[1] = (uint8_t)(dbits >> 8);
+            for (j = 0; j < 32u; j++) {
+                uint32_t c0 = (r * 7u + b * 11u + j * 5u) & 3u;
+                uint32_t c1 = (r * 3u + b * 13u + j * 7u + 1u) & 3u;
+                uint32_t c2 = (r * 5u + b * 17u + j * 3u + 2u) & 3u;
+                uint32_t c3 = (r * 9u + b * 19u + j * 11u + 3u) & 3u;
+                blk[2 + j] = (uint8_t)(c0 | (c1 << 2) | (c2 << 4) | (c3 << 6));
+            }
+        }
+    }
+    /* Forced-equal copy: every 128-block uses scales[0]. */
+    memcpy(weights_forced, weights, (size_t)weight_alloc);
+    for (r = 0; r < out_dim; r++) {
+        for (b = 1; b < NBLK; b++) {
+            uint8_t *blk = (uint8_t *)weights_forced + (uint64_t)r * row_bytes + (uint64_t)b * BB;
+            uint16_t dbits = test_f32_to_half_bits(scales[0]);
+            blk[0] = (uint8_t)(dbits & 0xffu);
+            blk[1] = (uint8_t)(dbits >> 8);
+        }
+    }
+
+    for (ti = 0; ti < N_TOK; ti++) {
+        const uint32_t tokens = token_counts[ti];
+        const uint64_t x_count = (uint64_t)tokens * in_dim;
+        const uint64_t out_count = (uint64_t)tokens * out_dim;
+        float *x_host = malloc((size_t)x_count * sizeof(*x_host));
+        float *x_ref = malloc((size_t)x_count * sizeof(*x_ref));
+        float *got = malloc((size_t)out_count * sizeof(*got));
+        float *want = malloc((size_t)out_count * sizeof(*want));
+        test_block_q8_K *xq = malloc((size_t)tokens * q8k_blocks * sizeof(*xq));
+        q36_gpu_tensor *x = q36_gpu_tensor_alloc(x_count * sizeof(float));
+        q36_gpu_tensor *out = q36_gpu_tensor_alloc(out_count * sizeof(float));
+        double max_abs = 0.0, rms = 0.0, ref_rms = 0.0;
+        if (!x_host || !x_ref || !got || !want || !xq || !x || !out) {
+            free(x_host); free(x_ref); free(got); free(want); free(xq);
+            q36_gpu_tensor_free(x); q36_gpu_tensor_free(out);
+            continue;
+        }
+        for (i = 0; i < x_count; i++)
+            x_host[i] = sinf((float)(i * 23u + 7u) * 0.011f)
+                * (0.2f + (float)(i % 13u) * 0.02f);
+        for (tok = 0; tok < tokens; tok++) {
+            for (blk_i = 0; blk_i < q8k_blocks; blk_i++) {
+                const uint64_t off = (uint64_t)tok * in_dim + (uint64_t)blk_i * TEST_QK_K;
+                test_block_q8_K *qb = &xq[tok * q8k_blocks + blk_i];
+                test_quantize_q8_k(x_host + off, qb);
+                for (j = 0; j < (uint32_t)TEST_QK_K; j++)
+                    x_ref[off + j] = qb->d * (float)qb->qs[j];
+            }
+        }
+        for (r = 0; r < out_dim; r++) {
+            const uint8_t *row_ptr = (const uint8_t *)weights + (uint64_t)r * row_bytes;
+            TEST_ASSERT(q36_quant_dequantize(142u, row_ptr, dequant, in_dim));
+            for (tok = 0; tok < tokens; tok++) {
+                if (tokens == 1u) {
+                    double sum = 0.0;
+                    for (i = 0; i < in_dim; i++)
+                        sum += (double)dequant[i] * x_ref[(uint64_t)tok * in_dim + i];
+                    want[(uint64_t)tok * out_dim + r] = (float)sum;
+                } else {
+                    want[(uint64_t)tok * out_dim + r] =
+                        test_mmq_q2_family_ref(row_ptr, &xq[tok * q8k_blocks],
+                                               q8k_blocks, 34u, 2u, 2u, 3u, 1.0f);
+                }
+            }
+        }
+        TEST_ASSERT(q36_gpu_tensor_write(x, 0, x_host, x_count * sizeof(float)) != 0);
+        TEST_ASSERT(q36_gpu_set_model_map(weights, weight_alloc) != 0);
+        TEST_ASSERT(q36_gpu_matmul_iq_quant_scaled_tensor(
+            out, weights, weight_alloc, 0, 142u, in_dim, out_dim, x, tokens, 1.0f) != 0);
+        TEST_ASSERT(q36_gpu_tensor_read(out, 0, got, out_count * sizeof(float)) != 0);
+        for (i = 0; i < out_count; i++) {
+            double d = (double)got[i] - (double)want[i];
+            if (fabs(d) > max_abs) max_abs = fabs(d);
+            rms += d * d;
+            ref_rms += (double)want[i] * (double)want[i];
+        }
+        rms = sqrt(rms / (double)out_count);
+        ref_rms = sqrt(ref_rms / (double)out_count);
+        fprintf(stderr,
+                "q36-test: native-128 PQ2_0 tokens=%u max_abs=%.7g rel_rms=%.7g\n",
+                tokens, max_abs, rms / fmax(ref_rms, 1.0e-20));
+        if (tokens == 1u) {
+            TEST_ASSERT(max_abs < 1.0e-5);
+            decode_checks++;
+        } else {
+            TEST_ASSERT(max_abs == 0.0);
+            mmq_checks++;
+            /* Forced-equal block scales must change the MMQ result: proof the
+             * kernel really consumes an independent scale per 128-block. */
+            TEST_ASSERT(q36_gpu_set_model_map(weights_forced, weight_alloc) != 0);
+            TEST_ASSERT(q36_gpu_matmul_iq_quant_scaled_tensor(
+                out, weights_forced, weight_alloc, 0, 142u, in_dim, out_dim, x, tokens, 1.0f) != 0);
+            TEST_ASSERT(q36_gpu_tensor_read(out, 0, got, out_count * sizeof(float)) != 0);
+            {
+                double forced_max = 0.0;
+                for (i = 0; i < out_count; i++) {
+                    double d = fabs((double)got[i] - (double)want[i]);
+                    if (d > forced_max) forced_max = d;
+                }
+                fprintf(stderr,
+                        "q36-test: native-128 forced-equal-scale vs independent "
+                        "ref max_abs=%.7g (must be > 0)\n", forced_max);
+                TEST_ASSERT(forced_max > 0.05);
+                forced_diff++;
+            }
+            TEST_ASSERT(q36_gpu_set_model_map(weights, weight_alloc) != 0);
+        }
+        free(x_host); free(x_ref); free(got); free(want); free(xq);
+        q36_gpu_tensor_free(x); q36_gpu_tensor_free(out);
+    }
+
+    TEST_ASSERT(decode_checks == 1u);
+    TEST_ASSERT(mmq_checks == (uint32_t)N_TOK - 1u);
+    TEST_ASSERT(forced_diff == mmq_checks);
+
+done:
+    free(weights);
+    free(weights_forced);
+    free(dequant);
+    q36_gpu_set_dense_model(false);
+    q36_gpu_cleanup();
+}
+#else
+static void test_pq2_0_native_128(void) {
+    test_skip("pq2-0-native-128", "CPU-only build");
 }
 #endif
 
@@ -5725,6 +5910,10 @@ typedef struct {
     int top20_overlap;
     int top64_overlap;
     int nonfinite;
+    int elements;
+    int worst_index;
+    float worst_ref;
+    float worst_cand;
     float rms;
     float max_abs;
     float top15_max_abs;
@@ -5844,6 +6033,8 @@ static test_logit_comparison test_compare_logits(const float *cand, const float 
     double sumsq = 0.0;
     float max_abs = 0.0f;
     int nonfinite = 0;
+    int worst_index = -1;
+    float worst_ref = 0.0f, worst_cand = 0.0f;
     for (int i = 0; i < n_vocab; i++) {
         float d;
         if (!isfinite(ref[i]) || !isfinite(cand[i])) {
@@ -5851,7 +6042,12 @@ static test_logit_comparison test_compare_logits(const float *cand, const float 
             continue;
         }
         d = cand[i] - ref[i];
-        if (fabsf(d) > max_abs) max_abs = fabsf(d);
+        if (fabsf(d) > max_abs) {
+            max_abs = fabsf(d);
+            worst_index = i;
+            worst_ref = ref[i];
+            worst_cand = cand[i];
+        }
         sumsq += (double)d * (double)d;
     }
     {
@@ -5881,6 +6077,10 @@ static test_logit_comparison test_compare_logits(const float *cand, const float 
         result.top64_overlap = test_topk_overlap_count(ref, cand, n_vocab, 64);
         result.overlap = result.top20_overlap;
         result.nonfinite = nonfinite;
+        result.elements = n_vocab;
+        result.worst_index = worst_index;
+        result.worst_ref = worst_ref;
+        result.worst_cand = worst_cand;
         result.rms = (float)sqrt(sumsq / (double)n_vocab);
         result.max_abs = max_abs;
         result.top15_max_abs = test_topk_ref_max_abs(ref, cand, n_vocab, 15);
@@ -5905,6 +6105,13 @@ static void test_logit_comparison_print(const char *name, const char *case_id, i
             result->max_abs,
             result->top15_max_abs,
             result->top20_max_abs);
+    fprintf(stderr,
+            "q36-test: %s %s step %d elements=%d nonfinite=%d worst_index=%d "
+            "ref=%.9g cand=%.9g abs=%.9g\n",
+            name, case_id, step, result->elements, result->nonfinite,
+            result->worst_index, (double)result->worst_ref,
+            (double)result->worst_cand,
+            (double)fabsf(result->worst_cand - result->worst_ref));
 }
 
 static void test_logit_comparison_assert_strict(const char *name, const char *case_id, int step,
@@ -6985,15 +7192,33 @@ static void test_gpu_cpu_parity(void) {
     }
     const char *ref_env = getenv("Q36_TEST_PARITY_REF");
     bool ref_vulkan = ref_env && !strcmp(ref_env, "vulkan");
+    /* The CPU reference emulates the dense MMQ kernel's intentionally-f16
+     * arithmetic so the gate compares like contracts. Q36_TEST_PARITY_F32=1
+     * selects the plain f32 reference instead; that path is a high-precision
+     * drift diagnostic, not the pass/fail contract. */
+    const char *f32_env = getenv("Q36_TEST_PARITY_F32");
+    bool f32_reference = f32_env && f32_env[0] && f32_env[0] != '0';
+    if (!ref_vulkan && !f32_reference) setenv("Q36_CPU_MMQ_CONTRACT", "1", 1);
+    else unsetenv("Q36_CPU_MMQ_CONTRACT");
     test_parity_cache_env(getenv("Q36_TEST_REF_CACHE_TYPE_K"),
                           getenv("Q36_TEST_REF_CACHE_TYPE_V"));
     cpu_engine = test_open_backend_engine(test_model_path(),
                                           ref_vulkan ? Q36_BACKEND_VULKAN
                                                      : Q36_BACKEND_CPU,
                                           ref_vulkan ? 1 : test_reference_threads());
+    unsetenv("Q36_CPU_MMQ_CONTRACT");
     if (!cpu_engine) {
         test_skip("gpu-cpu-parity", "reference backend unavailable");
         return;
+    }
+    if (!ref_vulkan && !f32_reference) {
+        fprintf(stderr,
+                "q36-test: gpu-cpu-parity reference = f16 dense-MMQ contract "
+                "(compares against production arithmetic)\n");
+    } else if (!ref_vulkan) {
+        fprintf(stderr,
+                "q36-test: gpu-cpu-parity reference = f32 HIGH-PRECISION "
+                "DIAGNOSTIC (not the implementation-parity contract)\n");
     }
     if (!test_require_session_backend("gpu-cpu-parity", cpu_engine, 4096)) {
         q36_engine_close(cpu_engine);
@@ -7839,6 +8064,7 @@ static const q36_test_entry test_entries[] = {
     {"--dense-quant-model-rows", "dense-quant-model-rows", "dense model quant kernels against CPU-dequantized GGUF rows", test_dense_quant_model_rows},
     {"--q8k-activation-parity", "q8k-activation-parity", "GPU/CPU/test q8_K activation quantizers agree byte for byte", test_q8k_activation_parity},
     {"--pq2-0-layout-oracle", "pq2-0-layout-oracle", "PQ2_0 block layout against hand-built blocks", test_pq2_0_layout_oracle},
+    {"--pq2-0-native-128", "pq2-0-native-128", "independent per-128 PQ2_0 scales: GPU decode+MMQ vs f16 contract", test_pq2_0_native_128},
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
 };
 
