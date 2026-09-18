@@ -67,13 +67,16 @@ uint q2_i8x4(uint codes) {
     return ((expanded | 0x80808080u) - 0x01010101u) ^ 0x80808080u;
 }
 
-int q2_dot4(uint codes, uint qword) {
-    return dotPacked4x8EXT(int(q2_i8x4(codes)), int(qword));
-}
+/* One 256-entry dword table holds every possible 4-code expansion, so the
+ * hot loop does one LDS read instead of the 10-op SWAR spread.  Measured
+ * -19..28% on dense_extra_decode_q2_0 (reports/optimization_results.md). */
+shared uint q2tab[256];
 
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
     uint lane8 = lid & 7u;
+    for (uint i = lid; i < 256u; i += 64u) q2tab[i] = q2_i8x4(i);
+    barrier();
     uint first_row = gl_WorkGroupID.x * ROWS;
     float acc[ROWS];
     [[unroll]] for (uint r = 0u; r < ROWS; r++) acc[r] = 0.0;
@@ -94,8 +97,8 @@ void main(void) {
             uint codes1 = load_u32(code_base + 4u);
             int sum = 0;
             [[unroll]] for (uint i = 0u; i < 4u; i++) {
-                sum += q2_dot4(codes0 >> (8u * i), qv[i]);
-                sum += q2_dot4(codes1 >> (8u * i), qv[i + 4u]);
+                sum += dotPacked4x8EXT(int(q2tab[(codes0 >> (8u * i)) & 0xffu]), int(qv[i]));
+                sum += dotPacked4x8EXT(int(q2tab[(codes1 >> (8u * i)) & 0xffu]), int(qv[i + 4u]));
             }
             float wd = unpackHalf2x16(load_u16(base)).x;
             acc[r] = fma(wd * yd, float(sum), acc[r]);
