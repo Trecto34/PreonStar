@@ -146,6 +146,7 @@ VULKAN_SHADERS := \
 	vulkan/dense_iq4_xs_mmq.spv \
 	vulkan/dense_iq1_m.spv \
 	vulkan/dense_extra_decode.spv \
+	vulkan/dense_extra_decode_q2_0.spv \
 	vulkan/dense_extra_mmq.spv \
 	vulkan/dense_kquant_mmq.spv \
 	vulkan/dense_kquant_decode.spv \
@@ -216,6 +217,9 @@ vulkan/dense_iq1_m.spv: vulkan/dense_iq1_m.comp
 
 vulkan/dense_extra_decode.spv: vulkan/dense_extra_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/dense_extra_decode_q2_0.spv: vulkan/dense_extra_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -o $@ $<
 
 vulkan/dense_extra_mmq.spv: vulkan/dense_extra_mmq.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<

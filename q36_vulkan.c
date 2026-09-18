@@ -240,6 +240,7 @@ typedef struct {
     q36_vk_kernel dense_iq4_xs_mmq;
     q36_vk_kernel dense_iq1_m;
     q36_vk_kernel dense_extra_decode;
+    q36_vk_kernel dense_extra_decode_q2_0;
     q36_vk_kernel dense_extra_mmq;
     q36_vk_kernel dense_kquant_mmq;
     q36_vk_kernel predequant_b16;
@@ -3217,6 +3218,7 @@ int q36_gpu_init(void) {
     q36_vk.dense_iq4_xs_mmq = Q36_VK_KERNEL("vulkan/dense_iq4_xs_mmq.spv", 3, 20, 1u << 2);
     q36_vk.dense_iq1_m = Q36_VK_KERNEL("vulkan/dense_iq1_m.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode = Q36_VK_KERNEL("vulkan/dense_extra_decode.spv", 4, 20, 1u << 2);
+    q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
     q36_vk.dense_kquant_mmq = Q36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
     q36_vk.predequant_b16 = Q36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
@@ -3606,6 +3608,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_bm64_mmq);
     q36_vk_kernel_destroy(&q36_vk.dense_iq1_m);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq);
+    q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_mmq);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_decode);
@@ -8134,8 +8137,14 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                     (uint32_t)out_dim, (uint32_t)blocks,
                     (uint32_t)row_bytes, weight_type, scale,
                 };
+                q36_vk_kernel *decode_kernel =
+                    weight_type == Q36_VK_TENSOR_Q2_0 &&
+                    q36_vk.have_int_dot && q36_vk.subgroup_size == 64u &&
+                    q36_vk.subgroup_arithmetic ?
+                        &q36_vk.dense_extra_decode_q2_0 :
+                        &q36_vk.dense_extra_decode;
                 ok = q36_vk_run_unlocked(
-                    op, &q36_vk.dense_extra_decode,
+                    op, decode_kernel,
                     bindings, &push, sizeof(push),
                     ((uint32_t)out_dim + 3u) / 4u, 1, 1);
             } else {

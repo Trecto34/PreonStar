@@ -5,10 +5,18 @@
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#ifdef Q36_Q2_0_ONLY
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : require
+#endif
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+#ifdef Q36_Q2_0_ONLY
+layout(set = 0, binding = 0) readonly buffer Weights { uint wb[]; };
+#else
 layout(set = 0, binding = 0) readonly buffer Weights { uint8_t wb[]; };
+#endif
 layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
 layout(set = 0, binding = 3) readonly buffer Tables { uint tables[]; };
@@ -34,6 +42,74 @@ const uint TAB_KSIGNS_BYTES = 2048u;
 const uint TAB_IQ2S = 544u;
 const uint TAB_IQ1S = 3360u;
 const uint TAB_IQ2XS = 7456u;
+
+#ifdef Q36_Q2_0_ONLY
+
+uint load_u16(uint off) {
+    uint word = wb[off >> 2u];
+    return (word >> (8u * (off & 3u))) & 0xffffu;
+}
+
+uint load_u32(uint off) {
+    uint shift = 8u * (off & 3u);
+    uint i = off >> 2u;
+    uint lo = wb[i];
+    return shift == 0u ? lo : (lo >> shift) | (wb[i + 1u] << (32u - shift));
+}
+
+/* Expand four 2-bit Q2_0 codes into packed signed bytes.  Biasing each byte
+ * before the subtract prevents borrows from crossing byte boundaries. */
+uint q2_i8x4(uint codes) {
+    uint expanded = (codes & 0x03u) |
+                    ((codes & 0x0cu) << 6u) |
+                    ((codes & 0x30u) << 12u) |
+                    ((codes & 0xc0u) << 18u);
+    return ((expanded | 0x80808080u) - 0x01010101u) ^ 0x80808080u;
+}
+
+int q2_dot4(uint codes, uint qword) {
+    return dotPacked4x8EXT(int(q2_i8x4(codes)), int(qword));
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint lane8 = lid & 7u;
+    uint first_row = gl_WorkGroupID.x * ROWS;
+    float acc[ROWS];
+    [[unroll]] for (uint r = 0u; r < ROWS; r++) acc[r] = 0.0;
+
+    for (uint b = lid >> 3u; b < pc.blocks; b += 8u) {
+        uint qbase = b * Q8K_WORDS + 2u + 8u * lane8;
+        uint qv[8];
+        [[unroll]] for (uint i = 0u; i < 8u; i++) qv[i] = q8[qbase + i];
+        float yd = uintBitsToFloat(q8[b * Q8K_WORDS]);
+
+        [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+            uint row = first_row + r;
+            if (row >= pc.out_dim) continue;
+            uint qblock = 4u * b + (lane8 >> 1u);
+            uint base = row * pc.row_bytes + qblock * 18u;
+            uint code_base = base + 2u + (lane8 & 1u) * 8u;
+            uint codes0 = load_u32(code_base);
+            uint codes1 = load_u32(code_base + 4u);
+            int sum = 0;
+            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                sum += q2_dot4(codes0 >> (8u * i), qv[i]);
+                sum += q2_dot4(codes1 >> (8u * i), qv[i + 4u]);
+            }
+            float wd = unpackHalf2x16(load_u16(base)).x;
+            acc[r] = fma(wd * yd, float(sum), acc[r]);
+        }
+    }
+
+    [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+        float total = subgroupAdd(acc[r]);
+        uint row = first_row + r;
+        if (lid == 0u && row < pc.out_dim) y[row] = total * pc.scale;
+    }
+}
+
+#else
 
 uint load_u8(uint off) {
     return uint(wb[off]);
@@ -261,3 +337,5 @@ void main(void) {
         if (lid == 0u && row < pc.out_dim) y[row] = total * pc.scale;
     }
 }
+
+#endif
