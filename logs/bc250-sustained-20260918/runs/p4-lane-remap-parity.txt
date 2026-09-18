@@ -2,23 +2,41 @@ P4 dense_extra_mmq_q2_0 lane remap -- correctness record
 ========================================================
 Change: Q36_Q2_0_ONLY path, A-operand LDS read and output row use
 row = r*4 + lane_row instead of lane_row*16 + r.
-Reason: lane_row*16*STRIDE gives lane-row bases 0,272,544,816 -> banks
-0,16,0,16 -> a 2-way LDS bank conflict on every A-column read.  The
-round-robin row map gives bases 0,17,34,51 -> four distinct banks.
+
+Bank-conflict accounting (say it in the right units):
+  - LDS has 32 banks at DWORD (4-byte) granularity.
+  - A load reads one f16vec2 = one DWORD, address word index
+    addr = (row)*STRIDE + k, STRIDE = 17 DWORDs.
+  - A wave is 64 lanes; lane_row = lane & 3, so per A-load instruction the
+    four simultaneous addresses are the four lane_row bases (each requested
+    by 16 lanes, which is a broadcast, not a conflict).
+  - baseline rows lane_row*16 + r: lane_row bases are 0, 272, 544, 816 DWORDs;
+    mod 32 -> 0, 16, 0, 16.  Two of the four distinct addresses share a bank,
+    so the load serializes 2x.
+  - P4 rows r*4 + lane_row: lane_row bases differ by 17 DWORDs -> 0, 17, 34, 51;
+    mod 32 -> 0, 17, 2, 19, four distinct banks, no conflict.
+
+NOTE: earlier drafts wrote "0/17/34/51 -> four distinct banks", which mixes
+unreduced offsets with bank indices.  The bank indices are 0/17/2/19.
 Pure relabeling: per-output reduction order (qb, slice, k) unchanged.
 
-Full frontier-512 logits (ctx 512, chunk 256, 512 real tokens):
-  baseline  logs/bc250-sustained-20260918/runs/p3-logits-base/frontier_000512.logits.json
-  P4        (regenerated; compare the `logits` array, not the file hash --
-            the file also records the model path string)
-  n=248320  max_abs_diff=0  mean_abs_diff=0  first_diff=none   -> BIT EXACT
-  (whole-file sha256 differs only because one run passed an absolute model
-   path and the other a relative path)
+Parity coverage (compare the `logits` array, not the whole-file hash -- the
+file also records the model path string):
+  frontier 512, n=248320 ................ max_abs_diff=0   BIT EXACT
+  extended (n_tok=200 tail + cumulative contexts; run p4_parity-style):
+    200/400/600/800/1000, each n=248320 .. max_abs_diff=0   BIT EXACT
+  The increments are 200 tokens, so the Q2_0 MMQ runs with n_tok=200 = one
+  full 128-token tile plus a 72-token tail, exercising the row/token guards.
+  Files: runs/par-base, runs/par-p4 (untracked large logits, see manifest).
 
 End-to-end interleaved A/B (same host binary, only the .spv swapped),
 10 soak-gated pairs, entry edge <=55 C, primary command:
-  pp512  A median 196.41 (MAD 2.37)  B median 203.08  -> median paired +3.58%
-         9/10 pairs positive; paired mean +3.40%; baseline relMAD 1.21%
+  pp512  arms: baseline median 196.41 (MAD 2.37), P4 median 203.08.
+    - aggregate-of-medians difference: 203.08/196.41 - 1 = +3.40%
+    - median of per-pair percentage changes: +3.58%  (9/10 pairs positive,
+      paired mean +3.40%; baseline relative MAD 1.21%)
+    Both numbers are reported; they differ because the median arms and the
+    median paired change are different statistics.
   decode A median 32.76  B median 32.73  -> -0.09% (kernel not touched)
 
 Coherence gate (greedy, temp 0): answers 9 sheep and Canberra.  Pass.
