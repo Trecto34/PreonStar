@@ -242,6 +242,7 @@ typedef struct {
     q36_vk_kernel dense_extra_decode;
     q36_vk_kernel dense_extra_decode_q2_0;
     q36_vk_kernel dense_extra_mmq;
+    q36_vk_kernel dense_extra_mmq_q2_0;
     q36_vk_kernel dense_kquant_mmq;
     q36_vk_kernel predequant_b16;
     q36_vk_kernel dense_kquant_decode;
@@ -3222,6 +3223,7 @@ int q36_gpu_init(void) {
     q36_vk.dense_extra_decode = Q36_VK_KERNEL("vulkan/dense_extra_decode.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
+    q36_vk.dense_extra_mmq_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
     q36_vk.dense_kquant_mmq = Q36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
     q36_vk.predequant_b16 = Q36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
     q36_vk.dense_kquant_decode = Q36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
@@ -3610,6 +3612,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_bm64_mmq);
     q36_vk_kernel_destroy(&q36_vk.dense_iq1_m);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq);
+    q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_mmq);
@@ -8210,10 +8213,15 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                     (uint32_t)blocks, (uint32_t)row_bytes,
                     weight_type, scale,
                 };
+                bool is_q2_0 = weight_type == Q36_VK_TENSOR_Q2_0;
+                q36_vk_kernel *mmq_kernel = is_q2_0 ?
+                    &q36_vk.dense_extra_mmq_q2_0 :
+                    &q36_vk.dense_extra_mmq;
                 ok = q36_vk_run_unlocked(
-                    op, &q36_vk.dense_extra_mmq,
+                    op, mmq_kernel,
                     bindings, &push, sizeof(push),
-                    ((uint32_t)out_dim + 31u) / 32u,
+                    is_q2_0 ? ((uint32_t)out_dim + 63u) / 64u :
+                              ((uint32_t)out_dim + 31u) / 32u,
                     ((uint32_t)n_tok + 127u) / 128u, 1);
             }
         }
