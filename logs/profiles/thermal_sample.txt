@@ -1,0 +1,8 @@
+23:56:54 1: 65Mhz * temp=48C power=38W
+23:56:56 1: 82Mhz * temp=48C power=43W
+23:56:58 1: 51Mhz * temp=81C power=172W
+23:57:00 1: 25Mhz * temp=86C power=149W
+23:57:02 1: 34Mhz * temp=78C power=148W
+23:57:04 1: 32Mhz * temp=80C power=148W
+23:57:06 1: 8Mhz * temp=91C power=134W
+23:57:08 1: 16Mhz * temp=65C power=63W

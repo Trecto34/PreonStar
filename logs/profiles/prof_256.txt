@@ -1,0 +1,9 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36: clamping prefill chunk 1024 -> 256 on GFX1013 (GQA 6); a larger chunk can exceed the 10 s amdgpu watchdog and destroy the GPU context. Set Q36_VK_PREFILL_CHUNK_UNSAFE=1 to override.
+q36: memory: KV 0.16 GiB (raw 0.01 + compressed 0.15) + buffers 0.09 GiB = 0.25 GiB context
+q36: memory detail: ctx=512 prefill_cap=256 raw_kv_rows=512 compressed_kv_rows=0 backend=vulkan
+q36: prompt processing failed: prompt exceeds context
+q36: Vulkan prof dispatches=0 record_ms=0.0 flushes=0 submit_wait_ms=0.0

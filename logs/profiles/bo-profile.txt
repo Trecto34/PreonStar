@@ -1,0 +1,50 @@
+SHARED PROFILE DUMP — Bonsai-2-27B Q2_0/g64 decode on BC-250, q36 e50a3e1
+=========================================================================
+Command (one generate, greedy):
+  Q36_VK_PROF_KERNEL=1 Q36_VK_PROF_OP=1 ./q36 --vulkan \
+    -m /home/server/q36/gguf/Ternary-Bonsai-2-27B-Q2_0-g64.gguf \
+    -c 4096 -n 64 --temp 0 \
+    -p "A farmer has 17 sheep. All but 9 run away. How many are left? Give the
+        answer and one line of reasoning. Then name the capital of Australia."
+Result: coherent; prefill 40.29 t/s, generation 5.59 t/s
+Totals: dispatches=120201 record_ms=935.1 flushes=130 submit_wait_ms=1666.5
+GPU kernel time total = 12500.796 ms for 65 steps (~192 ms/step)
+
+KERNEL GPU PROFILE (path dispatches groups gpu_ms pct)
+  vulkan/matmul_bf16.spv            6240  552960   9528.838  76.2   <== #1 HOT
+  vulkan/dense_extra_decode.spv    25665 66425472   2074.251  16.6   Q2_0 decode
+  vulkan/dense_extra_mmq.spv         400   121856    591.369   4.7   Q2_0 prefill
+  vulkan/fwht.spv                  16705   253765     60.088   0.5
+  vulkan/add_rms_norm.spv           8320    15360     61.977   0.5
+  vulkan/quantize_q8_k.spv         19825  1130260     40.232   0.3
+  vulkan/delta_net_decode_reg_f16    3120   599040     48.534   0.4
+  vulkan/signs_mul.spv             16705  1015060     16.931   0.1
+  vulkan/v_grouped_permute.spv      3120   138240      2.781   0.0
+  (all other kernels <0.2% each)
+
+WHY matmul_bf16 IS #1:
+  ssm_alpha.weight and ssm_beta.weight (48 x 5120, ggml type bf16) are bf16 and
+  NOT Hadamard-rotated, on all 48 recurrent layers. 2 dispatches x 48 layers =
+  96 dispatches/token; 6240 total over 65 steps. 9528 ms / 6240 = 1.53 ms per
+  dispatch.
+  vulkan/matmul_bf16.comp was copied from matmul_f16.comp: ONE workgroup per
+  output row (out_dim = 48), 64 threads, each thread runs in_dim = 5120
+  iterations of fp64 FMA over bf16 loads. 48 workgroups x 64 threads = 3072
+  threads on ~24 CUs; the reduction is fully serial and fp64-bound. This is the
+  same slack the f16/f32 dense shaders have (their comment says they "see little
+  runtime use: f32 matvecs run on the host"), but for this model they are 76% of
+  all GPU time.
+
+WHAT IS *NOT* THE BOTTLENECK:
+  - Q2_0 extra_decode 16.6%, extra_mmq 4.7% (mmq is prefill-only per the profile;
+    only 400 dispatches, all in the 256-token prefill chunks)
+  - FWHT 0.5%, signs_mul 0.1%, v_grouped_permute 0.0%, q8_k_quant 0.3%.
+
+DISPATCH/CPU SIDE (matters once #1 is fixed):
+  120201 dispatches, record_ms=935, submit_wait_ms=1667 for 65 steps.
+  Per rotated matmul the activation prepare is 3 dispatches
+  (signs_mul -> fwht -> quantize_q8_k); ~128 prepares/token x 3 = ~300
+  quantize-family dispatches per token; fwht+signs are 16705 each.
+  After #1, the remaining per-step budget is ~46 ms GPU + ~40 ms record/submit.
+
+REPRO: full log at /tmp/opencode/prof_run.txt
