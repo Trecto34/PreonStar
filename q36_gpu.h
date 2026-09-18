@@ -176,6 +176,17 @@ int q36_gpu_matmul_f16_tensor(
         const q36_gpu_tensor *x,
         uint64_t                n_tok);
 
+int q36_gpu_matmul_bf16_scaled_tensor(
+        q36_gpu_tensor       *out,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                weight_offset,
+        uint64_t                in_dim,
+        uint64_t                out_dim,
+        const q36_gpu_tensor *x,
+        uint64_t                n_tok,
+        float                   scale);
+
 int q36_gpu_matmul_f32_tensor(
         q36_gpu_tensor       *out,
         const void             *model_map,
@@ -369,19 +380,36 @@ int q36_gpu_directional_steering_project_tensor(
         uint32_t                rows,
         float                   scale);
 
-/* Normalized Walsh-Hadamard transform with explicit +/-1 signs over each
- * contiguous 1024-element block of every f32 row. signs_after = 0 applies the
- * signs before the butterfly (forward), != 0 applies them after (inverse). */
+/* Normalized Walsh-Hadamard transform over each contiguous 1024-element block
+ * of every f32 row: dst = H src / sqrt(1024). */
 int q36_gpu_fwht_tensor(
+        q36_gpu_tensor       *dst,
+        const q36_gpu_tensor *src,
+        uint32_t                width,
+        uint32_t                n_rows,
+        float                   scale);
+
+/* Elementwise multiply of every f32 row by the +/-1 sign vector stored at
+ * sign_offset (broadcast across rows). dst may alias src. */
+int q36_gpu_signs_mul_tensor(
         q36_gpu_tensor       *dst,
         const q36_gpu_tensor *src,
         const q36_gpu_tensor *signs,
         uint32_t                width,
         uint32_t                n_rows,
         uint32_t                sign_offset,
-        uint32_t                total_signs,
-        float                   scale,
-        int                     signs_after);
+        uint32_t                total_signs);
+
+/* Tiled -> grouped V-head reorder within each f32 row of width hd*nk*rep:
+ * dst[hd + hd*(rep + rep*nk)] = src[hd + hd*(nk + nk*rep)]. */
+int q36_gpu_v_grouped_permute_tensor(
+        q36_gpu_tensor       *dst,
+        const q36_gpu_tensor *src,
+        uint32_t                width,
+        uint32_t                hd,
+        uint32_t                nk,
+        uint32_t                rep,
+        uint32_t                n_rows);
 
 /* out_sum = a + b, out_norm = rmsnorm(out_sum) * weight, fused per row.
  * out_sum may alias a or b. */

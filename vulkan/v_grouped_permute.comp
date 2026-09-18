@@ -1,0 +1,35 @@
+#version 460
+
+/* Tiled -> grouped V-head reorder for the folded GDN ssm_out input.
+ * Tiled order is [nk, rep, hd] (row-major), grouped order is [rep, nk, hd];
+ * both are hd-wide head vectors.  See the fork's build_lora_mm permute. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Src {
+    float s[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer Dst {
+    float d[];
+};
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint hd;
+    uint nk;
+    uint rep;
+    uint n_rows;
+} pc;
+
+void main(void) {
+    uint j = gl_GlobalInvocationID.x;
+    uint row = gl_GlobalInvocationID.y;
+    if (j >= pc.width || row >= pc.n_rows) return;
+    uint hd_idx = j % pc.hd;
+    uint t = j / pc.hd;
+    uint rep_idx = t % pc.rep;
+    uint nk_idx = t / pc.rep;
+    uint i = hd_idx + pc.hd * (nk_idx + pc.nk * rep_idx);
+    d[row * pc.width + j] = s[row * pc.width + i];
+}

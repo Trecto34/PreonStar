@@ -1,0 +1,31 @@
+#version 460
+
+/* Elementwise multiply of each f32 row by a per-width +/-1 sign vector.
+ * The sign vector is indexed by column only and broadcast across rows. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Src {
+    float src[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Signs {
+    float signs[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Dst {
+    float dst[];
+};
+
+layout(push_constant) uniform Push {
+    uint width;        /* elements per row */
+    uint sign_offset;  /* element offset of this width's sign vector */
+} pc;
+
+void main(void) {
+    const uint col = gl_GlobalInvocationID.x;
+    const uint row = gl_GlobalInvocationID.y;
+    if (col >= pc.width) return;
+    const uint i = row * pc.width + col;
+    dst[i] = src[i] * signs[pc.sign_offset + col];
+}

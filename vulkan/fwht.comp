@@ -1,10 +1,10 @@
 #version 460
 
 /* Normalized Sylvester Walsh-Hadamard transform over each contiguous 1024
- * element block of an f32 activation row, with an explicit +/-1 sign vector.
- * Forward (signs_after == 0): out = H (s * x) / sqrt(N)
- * Inverse (signs_after == 1): out = s * (H x / sqrt(N))
- * One workgroup per (row, 1024-block); 256 threads own four elements each. */
+ * element block of an f32 activation row: out = H x / sqrt(N).  The explicit
+ * sign vector is a separate elementwise multiply (signs_mul.comp), matching
+ * the reference graph.  One workgroup per (row, 1024-block); 256 threads own
+ * four elements each. */
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -12,19 +12,13 @@ layout(set = 0, binding = 0) readonly buffer Src {
     float src[];
 };
 
-layout(set = 0, binding = 1) readonly buffer Signs {
-    float signs[];
-};
-
-layout(set = 0, binding = 2) writeonly buffer Dst {
+layout(set = 0, binding = 1) writeonly buffer Dst {
     float dst[];
 };
 
 layout(push_constant) uniform Push {
-    uint  width;        /* elements per row */
-    uint  sign_offset;  /* element offset of this width's sign vector */
-    float scale;        /* 1 / sqrt(1024) */
-    uint  signs_after;  /* 0 = forward, 1 = inverse */
+    uint  width;  /* elements per row */
+    float scale;  /* 1 / sqrt(1024) */
 } pc;
 
 const uint BLOCK = 1024u;
@@ -35,16 +29,11 @@ void main(void) {
     const uint block = gl_WorkGroupID.x;
     const uint row   = gl_WorkGroupID.y;
     const uint base  = row * pc.width + block * BLOCK;
-    const uint so    = pc.sign_offset + block * BLOCK;
     const uint tid   = gl_LocalInvocationID.x;
 
     for (uint k = 0; k < 4u; ++k) {
         const uint i = tid * 4u + k;
-        float v = src[base + i];
-        if (pc.signs_after == 0u) {
-            v *= signs[so + i];
-        }
-        sh[i] = v * pc.scale;
+        sh[i] = src[base + i] * pc.scale;
     }
     barrier();
 
@@ -63,10 +52,6 @@ void main(void) {
 
     for (uint k = 0; k < 4u; ++k) {
         const uint i = tid * 4u + k;
-        float v = sh[i];
-        if (pc.signs_after != 0u) {
-            v *= signs[so + i];
-        }
-        dst[base + i] = v;
+        dst[base + i] = sh[i];
     }
 }

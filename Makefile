@@ -47,6 +47,7 @@ METAL_LDFLAGS := $(LDFLAGS) $(DARWIN_MIN_FLAG)
 METAL_SRCS := $(wildcard metal/*.metal)
 VULKAN_SHADERS := \
 	vulkan/matmul_f16.spv \
+	vulkan/matmul_bf16.spv \
 	vulkan/vision_matmul_f16.spv \
 	vulkan/vision_attention.spv \
 	vulkan/matmul_f32.spv \
@@ -54,6 +55,8 @@ VULKAN_SHADERS := \
 	vulkan/matmul_f32_fast_w256.spv \
 	vulkan/add.spv \
 	vulkan/fwht.spv \
+	vulkan/signs_mul.spv \
+	vulkan/v_grouped_permute.spv \
 	vulkan/directional_steering.spv \
 	vulkan/add_rms_norm.spv \
 	vulkan/rms_norm.spv \
