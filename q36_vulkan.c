@@ -251,6 +251,7 @@ typedef struct {
     q36_vk_kernel fwht;
     q36_vk_kernel signs_mul;
     q36_vk_kernel v_grouped_permute;
+    q36_vk_kernel hadamard_prepare;
     q36_vk_weight *weights;
     q36_vk_packed_weight *packed_weights;
     q36_vk_arena_block *arena;
@@ -3124,6 +3125,7 @@ int q36_gpu_init(void) {
     q36_vk.fwht = Q36_VK_KERNEL("vulkan/fwht.spv", 2, 8, 1u << 1);
     q36_vk.signs_mul = Q36_VK_KERNEL("vulkan/signs_mul.spv", 3, 8, 1u << 2);
     q36_vk.v_grouped_permute = Q36_VK_KERNEL("vulkan/v_grouped_permute.spv", 2, 20, 1u << 1);
+    q36_vk.hadamard_prepare = Q36_VK_KERNEL("vulkan/hadamard_prepare.spv", 3, 24, 1u << 2);
     q36_vk.directional_steering = Q36_VK_KERNEL("vulkan/directional_steering.spv", 2, 16, 1u << 0);
     q36_vk.rms_norm = Q36_VK_KERNEL("vulkan/rms_norm.spv", 3, 12, 1u << 2);
     q36_vk.add_rms_norm = Q36_VK_KERNEL("vulkan/add_rms_norm.spv", 5, 8, (1u << 3) | (1u << 4));
@@ -3695,6 +3697,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.fwht);
     q36_vk_kernel_destroy(&q36_vk.signs_mul);
     q36_vk_kernel_destroy(&q36_vk.v_grouped_permute);
+    q36_vk_kernel_destroy(&q36_vk.hadamard_prepare);
     q36_vk_kernel_destroy(&q36_vk.matmul_f32);
     q36_vk_kernel_destroy(&q36_vk.matmul_f32_fast);
     q36_vk_kernel_destroy(&q36_vk.matmul_f32_fast_w256);
@@ -5874,6 +5877,53 @@ int q36_gpu_v_grouped_permute_tensor(q36_gpu_tensor *dst,
     pthread_mutex_lock(&q36_vk_mu);
     int ok = q36_vk_run_unlocked("v_grouped_permute", &q36_vk.v_grouped_permute, bindings,
                                  &push, sizeof(push), (width + 255u) / 256u, n_rows, 1);
+    pthread_mutex_unlock(&q36_vk_mu);
+    return ok;
+}
+
+int q36_gpu_hadamard_prepare_tensor(q36_gpu_tensor *q8_dst,
+                                    const q36_gpu_tensor *src,
+                                    const q36_gpu_tensor *signs,
+                                    uint32_t width,
+                                    uint32_t n_rows,
+                                    uint32_t sign_offset,
+                                    uint32_t total_signs,
+                                    float scale,
+                                    uint32_t is_grouped) {
+    uint64_t elems = 0;
+    uint64_t act_bytes = 0;
+    uint64_t sign_bytes = 0;
+    uint64_t q8_bytes = 0;
+    if (!q8_dst || !src || !signs || width == 0 || n_rows == 0) return 0;
+    if ((width % 1024u) != 0 || width > UINT32_MAX || n_rows > UINT32_MAX) return 0;
+    if (!q36_u64_mul_ok(width, n_rows, &elems) ||
+        !q36_u64_mul_ok(elems, sizeof(float), &act_bytes) ||
+        !q36_u64_mul_ok(total_signs, sizeof(float), &sign_bytes)) {
+        return 0;
+    }
+    if (sign_offset > total_signs || (uint64_t)sign_offset + width > total_signs) return 0;
+    const uint64_t blocks = width / Q36_VK_QK_K;
+    if (!q36_u64_mul_ok(n_rows, blocks, &q8_bytes) ||
+        !q36_u64_mul_ok(q8_bytes, sizeof(q36_vk_block_q8_K), &q8_bytes)) {
+        return 0;
+    }
+    if (!q36_gpu_tensor_range_ok(src, 0, act_bytes) ||
+        !q36_gpu_tensor_range_ok(signs, 0, sign_bytes) ||
+        !q36_gpu_tensor_range_ok(q8_dst, 0, q8_bytes)) {
+        return 0;
+    }
+    struct {
+        uint32_t width;
+        uint32_t sign_offset;
+        float    scale;
+        uint32_t n_rows;
+        uint32_t blocks;
+        uint32_t is_grouped;
+    } push = { width, sign_offset, scale, n_rows, (uint32_t)blocks, is_grouped };
+    const q36_gpu_tensor *bindings[3] = { src, signs, q8_dst };
+    pthread_mutex_lock(&q36_vk_mu);
+    int ok = q36_vk_run_unlocked("hadamard_prepare", &q36_vk.hadamard_prepare, bindings,
+                                 &push, sizeof(push), width / 1024u, n_rows, 1);
     pthread_mutex_unlock(&q36_vk_mu);
     return ok;
 }
