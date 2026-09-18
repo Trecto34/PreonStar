@@ -1,0 +1,22 @@
+diff --git a/vulkan/dense_extra_decode.comp b/vulkan/dense_extra_decode.comp
+index d5fd80a..a1916d7 100644
+--- a/vulkan/dense_extra_decode.comp
++++ b/vulkan/dense_extra_decode.comp
+@@ -88,8 +88,15 @@ void main(void) {
+         float yd = uintBitsToFloat(q8[b * Q8K_WORDS]);
+ 
+         [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+-            uint row = first_row + r;
+-            if (row >= pc.out_dim) continue;
++            /* Clamp rather than branch.  The guard is wave-uniform, so ACO
++             * turns it into a scalar branch and each row lands in its own
++             * basic block: the four rows' weight loads can no longer be
++             * batched (each buffer_load_dwordx3 is waited on five
++             * instructions later) and the weight descriptor is re-loaded per
++             * row.  A clamped row reads live memory and its accumulator is
++             * never stored -- the store below still guards on out_dim -- so
++             * the arithmetic of every real row is bit-identical. */
++            uint row = min(first_row + r, pc.out_dim - 1u);
+             uint qblock = 4u * b + (lane8 >> 1u);
+             uint base = row * pc.row_bytes + qblock * 18u;
+             uint code_base = base + 2u + (lane8 & 1u) * 8u;

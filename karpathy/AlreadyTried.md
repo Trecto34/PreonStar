@@ -13,6 +13,69 @@ Do not repeat these hypotheses without a new hardware or runtime reason.
 Preserve MoE routing parity for the Qwen3.5/Qwen3.6 reference on every
 accepted change, even when the primary target is dense Swift Qwen3.8.
 
+## Q2_0 decode inner-loop coalescing + latency audit — REJECTED, FREEZE (2026-09-18)
+
+Branch `experiment/bc250-sustained-20260918`, HEAD `c133a09`, model
+`Ternary-Bonsai-2-27B-Q2_0-g64.gguf`. Full write-up:
+`reports/decode_coalescing_audit.md`.
+
+- **The "ACO IR query crashes this RADV build" blocker is FALSE — deleted.**
+  `reports/compiler_and_occupancy_audit.md` and the main report both record that
+  disassembly is unobtainable here. It is obtainable: build the pipeline with
+  `VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR` and run the
+  three-pass `vkGetPipelineExecutableInternalRepresentationsKHR` query
+  (count -> sizes -> data). RADV returns NIR + ACO IR + **Assembly**,
+  unprivileged, no `RADV_DEBUG`, no wedge. Tool:
+  `logs/bc250-sustained-20260918/shader_isa.c`; output archived under
+  `logs/bc250-sustained-20260918/isa/`. **Future kernel work should read the
+  assembly instead of inferring from timings.**
+- **Loads are already optimal width — not a lever.** ACO merges the two
+  unaligned `load_u32()` calls into one `buffer_load_dwordx3` plus two
+  `v_alignbit_b32`. Three dwords is the minimum covering 8 B at an arbitrary
+  byte offset; `uvec2`/`uvec4` are impossible because the 18-byte Q2_0 block
+  stride makes the data 2-byte aligned by construction.
+- **Transactions are already coalesced — not a lever.** One load instruction
+  from a wave64 spans a contiguous `[row_base, row_base+580)` region. No
+  striding, no split transactions. (L0 over-request is 1.78x from overlapping
+  12-byte windows, but those hit the same cache lines, so DRAM traffic is 1.0x.)
+- **Clamp-instead-of-branch (the one real gap) — REJECTED.** The per-row
+  `if (row >= pc.out_dim) continue;` is wave-uniform and dead at runtime (every
+  Q2_0 `out_dim` is a multiple of 64, `ROWS=4`), yet it splits the four rows
+  into separate basic blocks: the weight descriptor is reloaded 4x per iteration
+  and each `buffer_load_dwordx3` is waited on 5 instructions after issue.
+  Replacing it with `min(first_row + r, pc.out_dim - 1u)` merged the blocks
+  (21 -> 13), cut descriptor reloads (9 -> 4) and cost registers
+  (28 -> 36 VGPRs, 36 -> 28 subgroups/SIMD). Bit exact: frontier-512 logits
+  `max_abs_diff = 0` over 248,320 entries, greedy generation byte-identical
+  (5,901 B). 10 soak-gated interleaved pairs: decode **median paired +0.34 %**
+  (6/10 positive, A 32.66 MAD 0.16 -> B 32.70 MAD 0.07), aggregate-of-medians
+  +0.15 %, pp512 -0.90 %. Gate >= +1.5 % -> **FAIL**. Patch
+  `logs/bc250-sustained-20260918/decode-clamp-rejected.patch`, raw
+  `runs/ab-decode-clamp.csv`.
+- **Two premises fall out of that number.** (a) The 28-VGPR ceiling is not a
+  cliff: occupancy fell 36 -> 28 subgroups/SIMD with *no* decode regression, so
+  "dropping occupancy degrades throughput" is not supported on this kernel.
+  (b) The kernel is **not latency-bound** — removing the stall, the branches and
+  five descriptor reloads bought +0.34 %, inside the run's own spread.
+- **Verdict: the inner loop is memory-bound and near-optimal. Freeze it.**
+  Do not re-litigate load vectorization, transaction coalescing, software
+  prefetch/double-buffering, or the row guard on this kernel.
+  `reconsider_if`: a hardware DRAM byte counter becomes available and shows the
+  kernel well under bus saturation, or the weight *format* changes (below).
+- **Where the headroom actually is — PTQ1_0 (not tried, ranked next).** ggml type
+  id **143**: `QK=128`, block = 24 B base-3 trits (5 trits/byte) + 2 B qh + 2 B
+  f16 scale = 28 B per 128 weights = **1.75 bpw**, against the current
+  Q2_0-g64's 18 B/64 = **2.25 bpw**. That is **~22 % less weight traffic per
+  token** on a kernel this audit just proved is limited by that traffic.
+  `prism-ml/Ternary-Bonsai-2-27B-gguf` publishes
+  `Ternary-Bonsai-2-27B-PTQ1_0.gguf` (5.95 GB vs the local 7.63 GB, matching the
+  bpw ratio), and `prism-llama.cpp` already has Vulkan shaders
+  (`ptq1_0.glsl`, `dequant_ptq1_0.comp`) to port. Blockers: q36 has no type-143
+  loader entry and no trit unpack — the current 256-entry `q2tab` LUT does not
+  carry over, because one byte holds 5 trits, not 4 codes. Note this changes the
+  quantization, so it is a new baseline needing a quality eval, **not** a
+  bit-exact parity check.
+
 ## Interrupted experiment: 2026-09-17 12:00 (DeepSeek worker)
 
 - **IQ3_XXS dense MMQ lane split — REJECTED/INTERRUPTED:** split the

@@ -62,6 +62,17 @@ file list).  Artifact list in `MANIFEST.artifacts`:
   dispatch/time table), `prep-trim-rejected.patch` (the default-off
   `Q36_VK_PREP_TRIM` path, source reverted), `runs/ab-prep-trim.csv`,
   `runs/prep-trim-profile-decode.txt`, `runs/prep-trim-gen-{base,candidate}.txt`.
+- Decode coalescing/latency audit (2026-09-18): `shader_isa.c` (ACO ISA dump via
+  `VK_KHR_pipeline_executable_properties`; build `cc -O2 -o shader_isa
+  shader_isa.c -lvulkan`, run `./shader_isa <shader.spv> <push_bytes>`),
+  disassembly `isa/dense_extra_decode_q2_0.{baseline,clamp}.asm` and
+  `isa/dense_extra_decode_q2_0.baseline.aco-ir.txt`, rejected candidate
+  `decode-clamp-rejected.patch`, A/B raw `runs/ab-decode-clamp.csv`
+  (10 soak-gated interleaved pairs, decode median paired +0.34 % -> FAIL).
+  Parity for that candidate: frontier-512 logits `max_abs_diff = 0`
+  (n=248,320) and greedy generation byte-identical, sha256
+  `7f316c5cd7b7d5d560c49fe39129254dfbd78f83cdc822a1baa28ff33f7710dc`.
+  Analysis: `reports/decode_coalescing_audit.md`.
 - Attention parity / D2 regression: `attn_parity.c` + `attn_parity_cmp.py`
   + `attn_parity_test.sh`; raw span dumps `runs/attn-512.bin`,
   `runs/attn-256.bin`, reference lines `runs/attn-parity-ref.txt`, cross-span

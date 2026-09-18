@@ -1,8 +1,15 @@
 # Compiler / Occupancy Audit (Phase 1) — BC-250 gfx1013
 
-Status: **not obtainable on this stack.** This document records exactly what was
-tried and why no VGPR/SGPR/occupancy table is produced, rather than inventing
-numbers. The occupancy question was answered experimentally instead.
+Status: **SUPERSEDED (2026-09-18) — the data IS obtainable.** Register/LDS stats
+arrived via `VK_KHR_pipeline_executable_properties` (see the main report), and
+full ACO **Assembly** via the same extension's internal-representation query:
+build the pipeline with `VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR`
+and run the three-pass query (count -> sizes -> data). Tool
+`logs/bc250-sustained-20260918/shader_isa.c`, output
+`logs/bc250-sustained-20260918/isa/`, analysis
+`reports/decode_coalescing_audit.md`. The table below is retained as a record of
+what does *not* work (`RADV_DEBUG`, `ACO_DEBUG`, `umr`), not as a statement that
+disassembly is unavailable.
 
 ## Requested data
 1. VGPR & SGPR per wave for `dense_extra_decode` / `matmul_bf16`.
@@ -23,8 +30,9 @@ numbers. The occupancy question was answered experimentally instead.
 
 ## What can be said from measurement
 
-- `dense_extra_decode_q2_0`: LDS usage is 0 B by construction (no `shared`
-  declarations, no barriers). The `bo-lds` experiment (§7.2 of the main report)
+- `dense_extra_decode_q2_0`: LDS was 0 B when this was written; since `c910941`
+  the shared 256-entry dequant LUT makes it **1024 B/workgroup** (measured).
+  The historical note below refers to the pre-LUT kernel. The `bo-lds` experiment (§7.2 of the main report)
   introduced LDS + a barrier and lost 18.3 % (1964.7 → 2324.1 ms/64), so the
   streaming decode is better with zero LDS and no barriers.
 - The 2× block unroll (V6) and ROWS=8 (V5) variants regressed or were neutral,

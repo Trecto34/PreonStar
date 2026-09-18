@@ -66,3 +66,6 @@ TODO.md
 /start-server-bg.sh
 /stop-server.sh
 .infino/
+
+# mem0-local MCP server for this repo (see .local/share/mem0-local/README.md)
+!.mcp.json
