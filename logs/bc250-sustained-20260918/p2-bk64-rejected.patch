@@ -1,0 +1,165 @@
+diff --git a/Makefile b/Makefile
+index 8a923a5..659e8ff 100644
+--- a/Makefile
++++ b/Makefile
+@@ -147,6 +147,7 @@ VULKAN_SHADERS := \
+ 	vulkan/dense_extra_decode_q2_0.spv \
+ 	vulkan/dense_extra_mmq.spv \
+ 	vulkan/dense_extra_mmq_q2_0.spv \
++	vulkan/dense_extra_mmq_q2_0_bk64.spv \
+ 	vulkan/dense_kquant_mmq.spv \
+ 	vulkan/dense_kquant_decode.spv \
+ 	vulkan/dense_q4k_decode.spv \
+@@ -226,6 +227,9 @@ vulkan/dense_extra_mmq.spv: vulkan/dense_extra_mmq.comp
+ vulkan/dense_extra_mmq_q2_0.spv: vulkan/dense_extra_mmq.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -o $@ $<
+ 
++vulkan/dense_extra_mmq_q2_0_bk64.spv: vulkan/dense_extra_mmq.comp
++	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -DQ36_Q2_0_BK=64 -o $@ $<
++
+ vulkan/predequant_b16.spv: vulkan/predequant_b16.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+ 
+diff --git a/q36_vulkan.c b/q36_vulkan.c
+index 4b89592..d0b1efb 100644
+--- a/q36_vulkan.c
++++ b/q36_vulkan.c
+@@ -243,6 +243,7 @@ typedef struct {
+     q36_vk_kernel dense_extra_decode_q2_0;
+     q36_vk_kernel dense_extra_mmq;
+     q36_vk_kernel dense_extra_mmq_q2_0;
++    q36_vk_kernel dense_extra_mmq_q2_0_bk64;
+     q36_vk_kernel dense_kquant_mmq;
+     q36_vk_kernel predequant_b16;
+     q36_vk_kernel dense_kquant_decode;
+@@ -3224,6 +3225,7 @@ int q36_gpu_init(void) {
+     q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
+     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
+     q36_vk.dense_extra_mmq_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
++    q36_vk.dense_extra_mmq_q2_0_bk64 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0_bk64.spv", 4, 24, 1u << 2);
+     q36_vk.dense_kquant_mmq = Q36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
+     q36_vk.predequant_b16 = Q36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
+     q36_vk.dense_kquant_decode = Q36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
+@@ -3613,6 +3615,7 @@ void q36_gpu_cleanup(void) {
+     q36_vk_kernel_destroy(&q36_vk.dense_iq1_m);
+     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq);
+     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0);
++    q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0_bk64);
+     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0);
+     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode);
+     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_mmq);
+@@ -8214,7 +8217,10 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
+                     weight_type, scale,
+                 };
+                 bool is_q2_0 = weight_type == Q36_VK_TENSOR_Q2_0;
+-                q36_vk_kernel *mmq_kernel = is_q2_0 ?
++                bool bk64 = is_q2_0 && n_tok >= 64u &&
++                            getenv("Q36_VK_Q2_MMQ_BK64") != NULL;
++                q36_vk_kernel *mmq_kernel = bk64 ?
++                    &q36_vk.dense_extra_mmq_q2_0_bk64 : is_q2_0 ?
+                     &q36_vk.dense_extra_mmq_q2_0 :
+                     &q36_vk.dense_extra_mmq;
+                 ok = q36_vk_run_unlocked(
+diff --git a/vulkan/dense_extra_mmq.comp b/vulkan/dense_extra_mmq.comp
+index 28fd24c..119571d 100644
+--- a/vulkan/dense_extra_mmq.comp
++++ b/vulkan/dense_extra_mmq.comp
+@@ -1,6 +1,9 @@
+ #version 460
+ 
+ #ifdef Q36_Q2_0_ONLY
++#ifndef Q36_Q2_0_BK
++#define Q36_Q2_0_BK 32
++#endif
+ #extension GL_EXT_control_flow_attributes : enable
+ #extension GL_EXT_shader_16bit_storage : require
+ #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+@@ -24,7 +27,7 @@ layout(push_constant) uniform Push {
+ 
+ const uint BM = 64u;
+ const uint BN = 128u;
+-const uint BK = 32u;
++const uint BK = Q36_Q2_0_BK;
+ const uint STRIDE = BK / 2u + 1u;
+ const uint Q8K_WORDS = 74u;
+ 
+@@ -56,46 +59,51 @@ void main(void) {
+     [[unroll]] for (uint i = 0u; i < 32u; i++) sum[i] = f16vec2(0.0);
+ 
+     for (uint qb = 0u; qb < pc.blocks; qb++) {
+-        for (uint slice = 0u; slice < 8u; slice++) {
+-            // Load weights: BM=64 rows, 16 half-pairs per row.
+-            // lid < 128: lr = lid >> 1 (0..63), kw = lid & 1 (0..1: first 16 or second 16 weights)
++        for (uint slice = 0u; slice < 256u / BK; slice++) {
++            // Each lane owns half a BK-wide weight slice for one output row.
+             {
+                 uint lr = lid >> 1u;
+                 uint kw = lid & 1u;
+                 uint row = row0 + lr;
+-                uint base_dst = lr * STRIDE + kw * 8u;
++                uint base_dst = lr * STRIDE + kw * (BK / 4u);
+                 if (row < pc.out_dim) {
+-                    uint base = row * pc.row_bytes + (qb * 4u + (slice >> 1u)) * 18u;
++                    uint base = row * pc.row_bytes +
++                                (qb * 4u + slice / (64u / BK)) * 18u;
+                     float16_t d = float16_t(unpackHalf2x16(load_u16(base)).x * pc.scale);
+-                    uint code_word = load_u32(base + 2u + (slice & 1u) * 8u + kw * 4u);
+-                    [[unroll]] for (uint p = 0u; p < 4u; p++) {
+-                        uint bits = (code_word >> (p * 8u)) & 0xffu;
+-                        buf_a[base_dst + 2u * p] = f16vec2(
+-                            float16_t(float(bits & 3u) - 1.0) * d,
+-                            float16_t(float((bits >> 2u) & 3u) - 1.0) * d);
+-                        buf_a[base_dst + 2u * p + 1u] = f16vec2(
+-                            float16_t(float((bits >> 4u) & 3u) - 1.0) * d,
+-                            float16_t(float((bits >> 6u) & 3u) - 1.0) * d);
++                    [[unroll]] for (uint cw = 0u; cw < BK / 32u; cw++) {
++                        uint code_word = load_u32(base + 2u +
++                            (slice % (64u / BK)) * (BK / 4u) +
++                            kw * (BK / 8u) + cw * 4u);
++                        [[unroll]] for (uint p = 0u; p < 4u; p++) {
++                            uint bits = (code_word >> (p * 8u)) & 0xffu;
++                            buf_a[base_dst + cw * 8u + 2u * p] = f16vec2(
++                                float16_t(float(bits & 3u) - 1.0) * d,
++                                float16_t(float((bits >> 2u) & 3u) - 1.0) * d);
++                            buf_a[base_dst + cw * 8u + 2u * p + 1u] = f16vec2(
++                                float16_t(float((bits >> 4u) & 3u) - 1.0) * d,
++                                float16_t(float((bits >> 6u) & 3u) - 1.0) * d);
++                        }
+                     }
+                 } else {
+-                    [[unroll]] for (uint p = 0u; p < 8u; p++) {
++                    [[unroll]] for (uint p = 0u; p < BK / 4u; p++) {
+                         buf_a[base_dst + p] = f16vec2(0.0);
+                     }
+                 }
+             }
+ 
+-            // Load activations: BN=128 tokens, 16 half-pairs per token.
++            // Load activations: BN=128 tokens and BK half-width pairs per token.
+             // 256 items: 2 per thread.
+             for (uint i = lid; i < BN * 2u; i += 128u) {
+                 uint lt = i >> 1u;
+                 uint kw = i & 1u;
+                 uint tok = tok0 + lt;
+-                uint base_dst = lt * STRIDE + kw * 8u;
++                uint base_dst = lt * STRIDE + kw * (BK / 4u);
+                 if (tok < pc.n_tok) {
+                     uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
+                     float16_t scale_in = float16_t(uintBitsToFloat(q8[qbase]));
+-                    [[unroll]] for (uint p = 0u; p < 4u; p++) {
+-                        uint qword = q8[qbase + 2u + slice * 8u + kw * 4u + p];
++                    [[unroll]] for (uint p = 0u; p < BK / 8u; p++) {
++                        uint qword = q8[qbase + 2u + slice * (BK / 4u) +
++                                        kw * (BK / 8u) + p];
+                         buf_b[base_dst + 2u * p] = f16vec2(
+                             float16_t(float(bitfieldExtract(int(qword), 0, 8))) * scale_in,
+                             float16_t(float(bitfieldExtract(int(qword), 8, 8))) * scale_in);
+@@ -104,7 +112,7 @@ void main(void) {
+                             float16_t(float(bitfieldExtract(int(qword), 24, 8))) * scale_in);
+                     }
+                 } else {
+-                    [[unroll]] for (uint p = 0u; p < 8u; p++) {
++                    [[unroll]] for (uint p = 0u; p < BK / 4u; p++) {
+                         buf_b[base_dst + p] = f16vec2(0.0);
+                     }
+                 }

@@ -1,0 +1,31 @@
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(set=0, binding=0) readonly buffer Source { uint src[]; };
+layout(set=0, binding=1) writeonly buffer Destination { uint dst[]; };
+layout(set=0, binding=2) writeonly buffer Checksums { uint checksums[]; };
+layout(push_constant) uniform Params { uint words_per_thread; uint mode; } pc;
+shared uint wave_sums[8];
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint group = gl_WorkGroupID.x;
+    uint acc = 0u;
+    for (uint k = 0u; k < pc.words_per_thread; k++) {
+        uint logical = group * (pc.words_per_thread * 256u) + k * 256u + lid;
+        /* mode 2 models 72 useful bytes in each 80-byte row; its reported
+         * throughput uses useful reads, not an invented DRAM byte count. */
+        uint idx = pc.mode == 2u ? (logical / 18u) * 20u + logical % 18u : logical;
+        uint value = src[idx];
+        acc += value;
+        if (pc.mode == 1u) dst[idx] = value;
+    }
+    uint wave_sum = subgroupAdd(acc);
+    if (gl_SubgroupInvocationID == 0u) wave_sums[gl_SubgroupID] = wave_sum;
+    barrier();
+    if (lid == 0u) {
+        uint total = 0u;
+        for (uint i = 0u; i < gl_NumSubgroups; i++) total += wave_sums[i];
+        checksums[group] = total;
+    }
+}

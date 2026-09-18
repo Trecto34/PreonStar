@@ -1,0 +1,30 @@
+version=3 tensors=851 metadata=49 data_start=11120992 file_bytes=7626008928
+type_bytes [(0, 10582016), (30, 47185920), (42, 7557120000)]
+q2_count 402 q2_bytes 7557120000
+q2_payload_code_bytes 6717440000
+q2_scale_bytes 839680000
+q2_except_embedding 7199539200
+top_categories
+blk.*.ffn_down.weight,1604321280
+blk.*.ffn_gate.weight,1604321280
+blk.*.ffn_up.weight,1604321280
+blk.*.attn_qkv.weight,707788800
+blk.*.attn_gate.weight,424673280
+blk.*.ssm_out.weight,424673280
+output.weight,357580800
+token_embd.weight,357580800
+blk.*.attn_q.weight,283115520
+blk.*.attn_output.weight,141557760
+blk.*.ssm_alpha.weight,23592960
+blk.*.ssm_beta.weight,23592960
+blk.*.attn_k.weight,23592960
+blk.*.attn_v.weight,23592960
+blk.*.ssm_conv1d.weight,7864320
+blk.*.attn_norm.weight,1310720
+blk.*.post_attention_norm.weight,1310720
+blk.*.ssm_norm.weight,24576
+output_norm.weight,20480
+blk.*.attn_k_norm.weight,16384
+blk.*.attn_q_norm.weight,16384
+blk.*.ssm_a,9216
+blk.*.ssm_dt.bias,9216

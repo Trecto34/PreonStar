@@ -1,0 +1,27 @@
+diff --git a/q36_bench.c b/q36_bench.c
+index f087371..7f6e861 100644
+--- a/q36_bench.c
++++ b/q36_bench.c
+@@ -654,6 +654,9 @@ int main(int argc, char **argv) {
+                 rc = 1;
+                 break;
+             }
++            if (getenv("Q36_BENCH_DUMP_TOKENS"))
++                fprintf(stderr, "q36-bench: generated-token frontier=%d step=%d id=%d\n",
++                        frontier, i, token);
+             if (spec) {
+                 /* Only the frontier token skips EOS; accepted draft tokens may
+                  * include it, but decode always runs to exactly gen-tokens. */
+@@ -693,6 +696,12 @@ int main(int argc, char **argv) {
+             for (int n = 1; n <= 17; n++) fprintf(stderr, "%s%d:%u", n == 1 ? "" : ",", n, spec_hist[n]);
+             fputc('\n', stderr);
+         }
++        if (cfg.gen_tokens > 0 && getenv("Q36_BENCH_DUMP_FINAL_LOGITS") &&
++            write_frontier_logits_json(&cfg, engine, session,
++                                       frontier + cfg.gen_tokens, frontier)) {
++            rc = 1;
++            break;
++        }
+ #ifndef Q36_NO_GPU
+         if (prof_decode) q36_gpu_prof_report("decode");
+ #endif

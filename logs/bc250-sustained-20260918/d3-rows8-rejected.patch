@@ -1,0 +1,93 @@
+diff --git a/Makefile b/Makefile
+index 8a923a5..99f8448 100644
+--- a/Makefile
++++ b/Makefile
+@@ -145,6 +145,7 @@ VULKAN_SHADERS := \
+ 	vulkan/dense_iq1_m.spv \
+ 	vulkan/dense_extra_decode.spv \
+ 	vulkan/dense_extra_decode_q2_0.spv \
++	vulkan/dense_extra_decode_q2_0_rows8.spv \
+ 	vulkan/dense_extra_mmq.spv \
+ 	vulkan/dense_extra_mmq_q2_0.spv \
+ 	vulkan/dense_kquant_mmq.spv \
+@@ -220,6 +221,9 @@ vulkan/dense_extra_decode.spv: vulkan/dense_extra_decode.comp
+ vulkan/dense_extra_decode_q2_0.spv: vulkan/dense_extra_decode.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -o $@ $<
+ 
++vulkan/dense_extra_decode_q2_0_rows8.spv: vulkan/dense_extra_decode.comp
++	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -DQ36_Q2_ROWS8=1 -o $@ $<
++
+ vulkan/dense_extra_mmq.spv: vulkan/dense_extra_mmq.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+ 
+diff --git a/q36_vulkan.c b/q36_vulkan.c
+index 4b89592..b3e2bb6 100644
+--- a/q36_vulkan.c
++++ b/q36_vulkan.c
+@@ -241,6 +241,7 @@ typedef struct {
+     q36_vk_kernel dense_iq1_m;
+     q36_vk_kernel dense_extra_decode;
+     q36_vk_kernel dense_extra_decode_q2_0;
++    q36_vk_kernel dense_extra_decode_q2_0_rows8;
+     q36_vk_kernel dense_extra_mmq;
+     q36_vk_kernel dense_extra_mmq_q2_0;
+     q36_vk_kernel dense_kquant_mmq;
+@@ -3222,6 +3223,7 @@ int q36_gpu_init(void) {
+     q36_vk.dense_iq1_m = Q36_VK_KERNEL("vulkan/dense_iq1_m.spv", 4, 20, 1u << 2);
+     q36_vk.dense_extra_decode = Q36_VK_KERNEL("vulkan/dense_extra_decode.spv", 4, 20, 1u << 2);
+     q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
++    q36_vk.dense_extra_decode_q2_0_rows8 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0_rows8.spv", 4, 20, 1u << 2);
+     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
+     q36_vk.dense_extra_mmq_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
+     q36_vk.dense_kquant_mmq = Q36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
+@@ -3614,6 +3616,7 @@ void q36_gpu_cleanup(void) {
+     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq);
+     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0);
+     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0);
++    q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0_rows8);
+     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode);
+     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_mmq);
+     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_decode);
+@@ -8190,16 +8193,20 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
+                     (uint32_t)out_dim, (uint32_t)blocks,
+                     (uint32_t)row_bytes, weight_type, scale,
+                 };
+-                q36_vk_kernel *decode_kernel =
+-                    weight_type == Q36_VK_TENSOR_Q2_0 &&
++                bool use_q2 = weight_type == Q36_VK_TENSOR_Q2_0 &&
+                     q36_vk.have_int_dot && q36_vk.subgroup_size == 64u &&
+-                    q36_vk.subgroup_arithmetic ?
+-                        &q36_vk.dense_extra_decode_q2_0 :
+-                        &q36_vk.dense_extra_decode;
++                    q36_vk.subgroup_arithmetic;
++                bool rows8 = use_q2 && getenv("Q36_VK_Q2_DECODE_ROWS8") &&
++                    strcmp(getenv("Q36_VK_Q2_DECODE_ROWS8"), "1") == 0;
++                q36_vk_kernel *decode_kernel = !use_q2 ?
++                    &q36_vk.dense_extra_decode : rows8 ?
++                    &q36_vk.dense_extra_decode_q2_0_rows8 :
++                    &q36_vk.dense_extra_decode_q2_0;
+                 ok = q36_vk_run_unlocked(
+                     op, decode_kernel,
+                     bindings, &push, sizeof(push),
+-                    ((uint32_t)out_dim + 3u) / 4u, 1, 1);
++                    ((uint32_t)out_dim + (rows8 ? 7u : 3u)) /
++                        (rows8 ? 8u : 4u), 1, 1);
+             } else {
+                 struct {
+                     uint32_t out_dim;
+diff --git a/vulkan/dense_extra_decode.comp b/vulkan/dense_extra_decode.comp
+index d5fd80a..f392998 100644
+--- a/vulkan/dense_extra_decode.comp
++++ b/vulkan/dense_extra_decode.comp
+@@ -35,7 +35,11 @@ const uint IQ1_S = 19u;
+ const uint IQ4_NL = 20u;
+ const uint IQ2_S = 22u;
+ const uint Q2_0 = 42u;
++#ifdef Q36_Q2_ROWS8
++const uint ROWS = 8u;
++#else
+ const uint ROWS = 4u;
++#endif
+ const uint Q8K_WORDS = 74u;
+ const uint TAB_IQ2XXS = 0u;
+ const uint TAB_KSIGNS_BYTES = 2048u;

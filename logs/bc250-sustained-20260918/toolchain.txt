@@ -1,0 +1,16 @@
+7.2.6-1-cachyos
+Glslang Version: 11:16.4.0
+ESSL Version: OpenGL ES GLSL 3.20 glslang Khronos. 16.4.0
+GLSL Version: 4.60 glslang Khronos. 16.4.0
+SPIR-V Version 0x00010600, Revision 1
+GLSL.std.450 Version 100, Revision 1
+Khronos Tool ID 8
+SPIR-V Generator Version 11
+GL_KHR_vulkan_glsl version 100
+ARB_GL_gl_spirv version 100
+/usr/bin/glslc
+1.4.357
+0: 450Mhz *
+0: 1000Mhz 
+1: 13Mhz *
+2: 2000Mhz 

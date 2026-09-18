@@ -1,0 +1,42 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: Vulkan prof dispatches=64 record_ms=0.4 flushes=32 submit_wait_ms=2.7
+q36: Vulkan op profile
+q36:   op hadamard_prepare             dispatches=64 flushes=0 groups=928 record_ms=0.442 submit_wait_ms=0.000 gpu_ms=1.546 wall_ms=0.000
+q36:   op submit_wait_tensor_read      dispatches=0 flushes=32 groups=0 record_ms=0.000 submit_wait_ms=2.655 gpu_ms=0.000 wall_ms=0.000
+q36: Vulkan kernel GPU time total_ms=1.546
+q36:   vulkan/hadamard_prepare.spv      dispatches=32 groups=464 gpu_ms=0.812 pct=52.5
+q36:   vulkan/hadamard_prepare_subgroup.spv dispatches=32 groups=464 gpu_ms=0.735 pct=47.5
+width=1024 rows=1 grouped=0 fixture=0 bytes=1184 exact
+width=1024 rows=3 grouped=0 fixture=0 bytes=3552 exact
+width=1024 rows=1 grouped=0 fixture=1 bytes=1184 exact
+width=1024 rows=3 grouped=0 fixture=1 bytes=3552 exact
+width=1024 rows=1 grouped=0 fixture=2 bytes=1184 exact
+width=1024 rows=3 grouped=0 fixture=2 bytes=3552 exact
+width=1024 rows=1 grouped=0 fixture=3 bytes=1184 exact
+width=1024 rows=3 grouped=0 fixture=3 bytes=3552 exact
+width=5120 rows=1 grouped=0 fixture=0 bytes=5920 exact
+width=5120 rows=3 grouped=0 fixture=0 bytes=17760 exact
+width=5120 rows=1 grouped=0 fixture=1 bytes=5920 exact
+width=5120 rows=3 grouped=0 fixture=1 bytes=17760 exact
+width=5120 rows=1 grouped=0 fixture=2 bytes=5920 exact
+width=5120 rows=3 grouped=0 fixture=2 bytes=17760 exact
+width=5120 rows=1 grouped=0 fixture=3 bytes=5920 exact
+width=5120 rows=3 grouped=0 fixture=3 bytes=17760 exact
+width=6144 rows=1 grouped=1 fixture=0 bytes=7104 exact
+width=6144 rows=3 grouped=1 fixture=0 bytes=21312 exact
+width=6144 rows=1 grouped=1 fixture=1 bytes=7104 exact
+width=6144 rows=3 grouped=1 fixture=1 bytes=21312 exact
+width=6144 rows=1 grouped=1 fixture=2 bytes=7104 exact
+width=6144 rows=3 grouped=1 fixture=2 bytes=21312 exact
+width=6144 rows=1 grouped=1 fixture=3 bytes=7104 exact
+width=6144 rows=3 grouped=1 fixture=3 bytes=21312 exact
+width=17408 rows=1 grouped=0 fixture=0 bytes=20128 exact
+width=17408 rows=3 grouped=0 fixture=0 bytes=60384 exact
+width=17408 rows=1 grouped=0 fixture=1 bytes=20128 exact
+width=17408 rows=3 grouped=0 fixture=1 bytes=60384 exact
+width=17408 rows=1 grouped=0 fixture=2 bytes=20128 exact
+width=17408 rows=3 grouped=0 fixture=2 bytes=60384 exact
+width=17408 rows=1 grouped=0 fixture=3 bytes=20128 exact
+width=17408 rows=3 grouped=0 fixture=3 bytes=60384 exact

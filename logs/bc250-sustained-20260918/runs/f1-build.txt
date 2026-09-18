@@ -1,0 +1,6 @@
+cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only -c -o q36_bench.o q36_bench.c
+cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only -c -o q36_gpu_core.o q36.c
+./glslc -O -o vulkan/swiglu_hadamard_prepare.spv vulkan/swiglu_hadamard_prepare.comp
+vulkan/swiglu_hadamard_prepare.comp
+cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only  -c -o q36_vulkan.o q36_vulkan.c
+cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only -o q36-bench q36_bench.o q36_ssd.o q36_prompt_prefix.o q36_gpu_core.o q36_vulkan.o q36_image.o -lm -pthread -ldl -lvulkan

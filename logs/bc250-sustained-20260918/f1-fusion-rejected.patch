@@ -1,0 +1,364 @@
+diff --git a/Makefile b/Makefile
+index 8a923a5..5a2d248 100644
+--- a/Makefile
++++ b/Makefile
+@@ -55,6 +55,7 @@ VULKAN_SHADERS := \
+ 	vulkan/matmul_f32_fast_w256.spv \
+ 	vulkan/add.spv \
+ 	vulkan/hadamard_prepare.spv \
++	vulkan/swiglu_hadamard_prepare.spv \
+ 	vulkan/directional_steering.spv \
+ 	vulkan/add_rms_norm.spv \
+ 	vulkan/rms_norm.spv \
+@@ -226,6 +227,9 @@ vulkan/dense_extra_mmq.spv: vulkan/dense_extra_mmq.comp
+ vulkan/dense_extra_mmq_q2_0.spv: vulkan/dense_extra_mmq.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -o $@ $<
+ 
++vulkan/swiglu_hadamard_prepare.spv: vulkan/swiglu_hadamard_prepare.comp
++	$(GLSLC) -O -o $@ $<
++
+ vulkan/predequant_b16.spv: vulkan/predequant_b16.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+ 
+diff --git a/q36.c b/q36.c
+index 92f09c6..cd15e95 100644
+--- a/q36.c
++++ b/q36.c
+@@ -7734,6 +7734,18 @@ static bool q36_hadamard_prepare(q36_vulkan_runtime *rt,
+                                            g_q36_hadamard.inv_sqrt_block, 0);
+ }
+ 
++static bool q36_swiglu_hadamard_prepare(q36_vulkan_runtime *rt,
++                                        const q36_gpu_tensor *gate,
++                                        const q36_gpu_tensor *up,
++                                        uint32_t width, uint32_t n_rows) {
++    uint32_t offset = 0;
++    if (!rt || !rt->had_q8 || !rt->had_signs ||
++        !q36_hadamard_sign_offset(width, &offset)) return false;
++    return q36_gpu_swiglu_hadamard_prepare_tensor(
++        rt->had_q8, gate, up, rt->had_signs, width, n_rows, offset,
++        q36_hadamard_total_signs(), g_q36_hadamard.inv_sqrt_block) != 0;
++}
++
+ /* Same, for a folded weight whose rotation axis kept the training V order
+  * (prism.hadamard.gdn_v_grouped): the runtime activation is tiled, so permute
+  * tiled -> grouped inside the fused kernel before the signs and the transform. */
+@@ -7817,13 +7829,21 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
+                  n_tok, 1.0f))) {
+             return false;
+         }
++        bool down_rot = q36_hadamard_rotate_enabled(l->ffn_down_shexp);
++        bool fused_swiglu_had = down_rot &&
++            l->ffn_down_shexp->type == Q36_TENSOR_Q2_0 &&
++            getenv("Q36_VK_FUSE_SWIGLU_HAD") != NULL;
+         bool fused_swiglu_q8 = false;
++        if (fused_swiglu_had &&
++            !q36_swiglu_hadamard_prepare(rt, rt->ffn_shared_gate,
++                                         rt->ffn_shared_up, Q36_N_FF_SHARED,
++                                         n_tok)) return false;
+ #ifndef Q36_METAL
+-        fused_swiglu_q8 = q36_gpu_swiglu_q8_k_tensor(
++        if (!fused_swiglu_had) fused_swiglu_q8 = q36_gpu_swiglu_q8_k_tensor(
+             rt->ffn_shared_mid, rt->inp_q8, rt->ffn_shared_gate,
+             rt->ffn_shared_up, Q36_N_FF_SHARED, n_tok, 0.0f, 1.0f);
+ #endif
+-        if (!fused_swiglu_q8 &&
++        if (!fused_swiglu_had && !fused_swiglu_q8 &&
+             !q36_gpu_swiglu_tensor(
+                  rt->ffn_shared_mid, rt->ffn_shared_gate,
+                  rt->ffn_shared_up, n_tok * Q36_N_FF_SHARED, 0.0f, 1.0f)) {
+@@ -7831,8 +7851,9 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
+         }
+         const q36_gpu_tensor *down_in = rt->ffn_shared_mid;
+         const q36_gpu_tensor *down_q8 = rt->inp_q8;
+-        if (q36_hadamard_rotate_enabled(l->ffn_down_shexp)) {
+-            if (!q36_hadamard_prepare(rt, rt->ffn_shared_mid, Q36_N_FF_SHARED, n_tok)) {
++        if (down_rot) {
++            if (!fused_swiglu_had &&
++                !q36_hadamard_prepare(rt, rt->ffn_shared_mid, Q36_N_FF_SHARED, n_tok)) {
+                 return false;
+             }
+             down_q8 = rt->had_q8;
+diff --git a/q36_gpu.h b/q36_gpu.h
+index 7fdc029..efd1fcd 100644
+--- a/q36_gpu.h
++++ b/q36_gpu.h
+@@ -424,6 +424,19 @@ int q36_gpu_hadamard_prepare_tensor(
+         float                 scale,
+         uint32_t              is_grouped);
+ 
++/* Dense rotated FFN down path: produce Q8_K directly from gate/up SwiGLU.
++ * The caller must have no consumer of the unrotated f32 or Q8_K mid. */
++int q36_gpu_swiglu_hadamard_prepare_tensor(
++        q36_gpu_tensor       *q8_dst,
++        const q36_gpu_tensor *gate,
++        const q36_gpu_tensor *up,
++        const q36_gpu_tensor *signs,
++        uint32_t              width,
++        uint32_t              n_rows,
++        uint32_t              sign_offset,
++        uint32_t              total_signs,
++        float                 scale);
++
+ /* out_sum = a + b, out_norm = rmsnorm(out_sum) * weight, fused per row.
+  * out_sum may alias a or b. */
+ int q36_gpu_add_rms_norm_tensor(
+diff --git a/q36_vulkan.c b/q36_vulkan.c
+index 4b89592..6c819f1 100644
+--- a/q36_vulkan.c
++++ b/q36_vulkan.c
+@@ -254,6 +254,7 @@ typedef struct {
+     q36_vk_kernel signs_mul;
+     q36_vk_kernel v_grouped_permute;
+     q36_vk_kernel hadamard_prepare;
++    q36_vk_kernel swiglu_hadamard_prepare;
+     q36_vk_weight *weights;
+     q36_vk_packed_weight *packed_weights;
+     q36_vk_arena_block *arena;
+@@ -3128,6 +3129,7 @@ int q36_gpu_init(void) {
+     q36_vk.signs_mul = Q36_VK_KERNEL("vulkan/signs_mul.spv", 3, 8, 1u << 2);
+     q36_vk.v_grouped_permute = Q36_VK_KERNEL("vulkan/v_grouped_permute.spv", 2, 20, 1u << 1);
+     q36_vk.hadamard_prepare = Q36_VK_KERNEL("vulkan/hadamard_prepare.spv", 3, 24, 1u << 2);
++    q36_vk.swiglu_hadamard_prepare = Q36_VK_KERNEL("vulkan/swiglu_hadamard_prepare.spv", 4, 24, 1u << 3);
+     q36_vk.directional_steering = Q36_VK_KERNEL("vulkan/directional_steering.spv", 2, 16, 1u << 0);
+     q36_vk.rms_norm = Q36_VK_KERNEL("vulkan/rms_norm.spv", 3, 12, 1u << 2);
+     q36_vk.add_rms_norm = Q36_VK_KERNEL("vulkan/add_rms_norm.spv", 5, 8, (1u << 3) | (1u << 4));
+@@ -3704,6 +3706,7 @@ void q36_gpu_cleanup(void) {
+     q36_vk_kernel_destroy(&q36_vk.signs_mul);
+     q36_vk_kernel_destroy(&q36_vk.v_grouped_permute);
+     q36_vk_kernel_destroy(&q36_vk.hadamard_prepare);
++    q36_vk_kernel_destroy(&q36_vk.swiglu_hadamard_prepare);
+     q36_vk_kernel_destroy(&q36_vk.matmul_f32);
+     q36_vk_kernel_destroy(&q36_vk.matmul_f32_fast);
+     q36_vk_kernel_destroy(&q36_vk.matmul_f32_fast_w256);
+@@ -5934,6 +5937,43 @@ int q36_gpu_hadamard_prepare_tensor(q36_gpu_tensor *q8_dst,
+     return ok;
+ }
+ 
++int q36_gpu_swiglu_hadamard_prepare_tensor(q36_gpu_tensor *q8_dst,
++                                           const q36_gpu_tensor *gate,
++                                           const q36_gpu_tensor *up,
++                                           const q36_gpu_tensor *signs,
++                                           uint32_t width,
++                                           uint32_t n_rows,
++                                           uint32_t sign_offset,
++                                           uint32_t total_signs,
++                                           float scale) {
++    uint64_t elems, act_bytes, sign_bytes, q8_bytes;
++    if (!q8_dst || !gate || !up || !signs || !width || !n_rows ||
++        (width % 1024u) != 0 ||
++        !q36_u64_mul_ok(width, n_rows, &elems) ||
++        !q36_u64_mul_ok(elems, sizeof(float), &act_bytes) ||
++        !q36_u64_mul_ok(total_signs, sizeof(float), &sign_bytes) ||
++        sign_offset > total_signs ||
++        (uint64_t)sign_offset + width > total_signs ||
++        !q36_u64_mul_ok(n_rows, width / Q36_VK_QK_K, &q8_bytes) ||
++        !q36_u64_mul_ok(q8_bytes, sizeof(q36_vk_block_q8_K), &q8_bytes) ||
++        !q36_gpu_tensor_range_ok(gate, 0, act_bytes) ||
++        !q36_gpu_tensor_range_ok(up, 0, act_bytes) ||
++        !q36_gpu_tensor_range_ok(signs, 0, sign_bytes) ||
++        !q36_gpu_tensor_range_ok(q8_dst, 0, q8_bytes)) return 0;
++    struct {
++        uint32_t width, sign_offset;
++        float scale;
++        uint32_t n_rows, blocks, is_grouped;
++    } push = { width, sign_offset, scale, n_rows, width / Q36_VK_QK_K, 0 };
++    const q36_gpu_tensor *bindings[4] = { gate, up, signs, q8_dst };
++    pthread_mutex_lock(&q36_vk_mu);
++    int ok = q36_vk_run_unlocked("swiglu_hadamard_prepare",
++                                  &q36_vk.swiglu_hadamard_prepare, bindings,
++                                  &push, sizeof(push), width / 1024u, n_rows, 1);
++    pthread_mutex_unlock(&q36_vk_mu);
++    return ok;
++}
++
+ int q36_gpu_add_tensor(q36_gpu_tensor *out,
+                        const q36_gpu_tensor *a,
+                        const q36_gpu_tensor *b,
+diff --git a/vulkan/swiglu_hadamard_prepare.comp b/vulkan/swiglu_hadamard_prepare.comp
+new file mode 100644
+index 0000000..f168bde
+--- /dev/null
++++ b/vulkan/swiglu_hadamard_prepare.comp
+@@ -0,0 +1,181 @@
++#version 460
++
++/* Dense FFN SwiGLU producer fused with rotated down activation preparation:
++ *   1. SwiGLU from gate/up projections; the unrotated Q8 and f32 mid are unused
++ *   2. Signs multiplication by per-width +/-1 sign vector
++ *   3. Normalized Sylvester Walsh-Hadamard transform over 1024-element blocks:
++ *        out = H x / sqrt(1024)
++ *   4. Fast GPU Q8_K quantization writing 256-element blocks into the exact
++ *      layout matching q36_vk_block_q8_K / dense_extra_decode.comp (74 uints per block).
++ *
++ * One workgroup per (1024-block, row): 256 threads.
++ * Each 1024-block produces exactly 4 Q8_K sub-blocks of 256 elements each.
++ */
++
++layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
++
++layout(set = 0, binding = 0) readonly buffer Gate {
++    float gatev[];
++};
++
++layout(set = 0, binding = 1) readonly buffer Up {
++    float upv[];
++};
++
++layout(set = 0, binding = 2) readonly buffer Signs {
++    float signs[];
++};
++
++layout(set = 0, binding = 3) writeonly buffer Output {
++    uint q8[];
++};
++
++layout(push_constant) uniform Push {
++    uint  width;        /* elements per row */
++    uint  sign_offset;  /* element offset in signs tensor */
++    float scale;        /* 1 / sqrt(1024) */
++    uint  n_rows;       /* number of token rows */
++    uint  blocks;       /* total 256-element blocks per row (width / 256) */
++    uint  is_grouped;   /* must be zero for this FFN-only variant */
++} pc;
++
++const uint BLOCK = 1024u;
++const uint QK_K = 256u;
++const uint Q8K_WORDS = 74u;
++
++shared float sh[BLOCK];
++shared float sh_abs[256];
++shared float sh_val[256];
++shared uint  sh_idx[256];
++shared int   sh_sum4[256];
++shared int   sh_bsum[64];
++
++int nearest_int(float fval) {
++    /* precise: keep the mul that produces fval from contracting into an fma
++     * with this magic-number add, or bytes drift from the CPU quantizer. */
++    precise float val = fval + 12582912.0f;
++    uint bits = floatBitsToUint(val);
++    return int(bits & 0x007fffffu) - 0x00400000;
++}
++
++uint pack_i8x4(int a0, int a1, int a2, int a3) {
++    return (uint(a0) & 255u)
++         | ((uint(a1) & 255u) << 8u)
++         | ((uint(a2) & 255u) << 16u)
++         | ((uint(a3) & 255u) << 24u);
++}
++
++void main(void) {
++    const uint block_1024 = gl_WorkGroupID.x;
++    const uint row        = gl_WorkGroupID.y;
++    const uint tid        = gl_LocalInvocationID.x;
++
++    if (row >= pc.n_rows) return;
++
++    /* 1. Produce SwiGLU values directly in the transform workgroup. */
++    for (uint k = 0u; k < 4u; ++k) {
++        const uint i = tid * 4u + k;
++        const uint col = block_1024 * BLOCK + i;
++        const uint off = row * pc.width + col;
++        const float g = gatev[off];
++        const float u = upv[off];
++        const float val = (g / (1.0 + exp(-g))) * u;
++        const float s   = signs[pc.sign_offset + col];
++        sh[i] = val * s * pc.scale;
++    }
++    barrier();
++
++    /* 2. In-LDS Fast Walsh-Hadamard Transform butterfly (1024 elements) */
++    for (uint h = 1u; h < BLOCK; h <<= 1) {
++        for (uint k = 0u; k < 4u; ++k) {
++            const uint i = tid * 4u + k;
++            if ((i & h) == 0u) {
++                const float a = sh[i];
++                const float b = sh[i + h];
++                sh[i]     = a + b;
++                sh[i + h] = a - b;
++            }
++        }
++        barrier();
++    }
++
++    /* 3. Q8_K Quantization: 4 sub-blocks of 256 elements handled concurrently
++     *    by 4 groups of 64 threads. */
++    const uint sub = tid >> 6u;       /* sub-block index 0..3 */
++    const uint lid = tid & 63u;       /* thread index 0..63 within sub-block */
++    const uint sub_offset = sub * QK_K;
++
++    float best_abs = 0.0f;
++    float best_val = 0.0f;
++    uint best_idx = lid * 4u;
++
++    for (uint j = 0u; j < 4u; ++j) {
++        const uint idx = lid * 4u + j;
++        const float xv = sh[sub_offset + idx];
++        const float ax = abs(xv);
++        if (ax > best_abs) {
++            best_abs = ax;
++            best_val = xv;
++            best_idx = idx;
++        }
++    }
++
++    sh_abs[tid] = best_abs;
++    sh_val[tid] = best_val;
++    sh_idx[tid] = best_idx;
++    barrier();
++
++    /* Reduction across 64 threads in this sub-block */
++    for (uint s = 32u; s > 0u; s >>= 1u) {
++        if (lid < s) {
++            const float other_abs = sh_abs[tid + s];
++            const uint other_idx = sh_idx[tid + s];
++            if (other_abs > sh_abs[tid] || (other_abs == sh_abs[tid] && other_idx < sh_idx[tid])) {
++                sh_abs[tid] = other_abs;
++                sh_val[tid] = sh_val[tid + s];
++                sh_idx[tid] = other_idx;
++            }
++        }
++        barrier();
++    }
++
++    /* fp64 division for exact d computation matching CPU and quantize_q8_k.comp */
++    const float maxv = sh_val[sub * 64u];
++    const float iscale = maxv != 0.0f ? float(-127.0 / double(maxv)) : 0.0f;
++    const float d = iscale != 0.0f ? float(1.0 / double(iscale)) : 0.0f;
++
++    int qv[4];
++    int sum4 = 0;
++
++    for (uint j = 0u; j < 4u; ++j) {
++        const float xv = sh[sub_offset + lid * 4u + j];
++        int q = iscale != 0.0f ? nearest_int(iscale * xv) : 0;
++        if (q > 127) q = 127;
++        qv[j] = q;
++        sum4 += q;
++    }
++
++    const uint block_256 = block_1024 * 4u + sub;
++    const uint out_base = (row * pc.blocks + block_256) * Q8K_WORDS;
++
++    if (lid == 0u) {
++        q8[out_base + 0u] = floatBitsToUint(d);
++        q8[out_base + 1u] = 0u;
++    }
++    q8[out_base + 2u + lid] = pack_i8x4(qv[0], qv[1], qv[2], qv[3]);
++
++    sh_sum4[tid] = sum4;
++    barrier();
++
++    if ((lid & 3u) == 0u) {
++        sh_bsum[sub * 16u + (lid >> 2u)] = sh_sum4[tid] + sh_sum4[tid + 1u] +
++                                          sh_sum4[tid + 2u] + sh_sum4[tid + 3u];
++    }
++    barrier();
++
++    if (lid < 8u) {
++        const int s0 = sh_bsum[sub * 16u + 2u * lid + 0u];
++        const int s1 = sh_bsum[sub * 16u + 2u * lid + 1u];
++        q8[out_base + 66u + lid] = (uint(s0) & 0xffffu) | ((uint(s1) & 0xffffu) << 16u);
++    }
++}

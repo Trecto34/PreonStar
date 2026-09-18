@@ -1,0 +1,12 @@
+57796d743e761e154fa1326e5d47e2e720ca81312016a98f81fc6b482747d17b  logs/bc250-sustained-20260918/runs/f1-logits-base/frontier_000512.logits.json
+57796d743e761e154fa1326e5d47e2e720ca81312016a98f81fc6b482747d17b  logs/bc250-sustained-20260918/runs/f1-logits-candidate/frontier_000512.logits.json
+57796d743e761e154fa1326e5d47e2e720ca81312016a98f81fc6b482747d17b  logs/bc250-sustained-20260918/runs/p1-logits-base/frontier_000512.logits.json
+57796d743e761e154fa1326e5d47e2e720ca81312016a98f81fc6b482747d17b  logs/bc250-sustained-20260918/runs/p1-logits-candidate/frontier_000512.logits.json
+57796d743e761e154fa1326e5d47e2e720ca81312016a98f81fc6b482747d17b  logs/bc250-sustained-20260918/runs/p2-logits-base/frontier_000512.logits.json
+57796d743e761e154fa1326e5d47e2e720ca81312016a98f81fc6b482747d17b  logs/bc250-sustained-20260918/runs/p2-logits-candidate/frontier_000512.logits.json
+57796d743e761e154fa1326e5d47e2e720ca81312016a98f81fc6b482747d17b  logs/bc250-sustained-20260918/runs/p3-logits-base/frontier_000512.logits.json
+9545c42762f21afd290241b5c42ee22240b6551c8906ab44a3a26f03169e3f91  logs/bc250-sustained-20260918/runs/p3-logits-chunk512/frontier_000512.logits.json
+57796d743e761e154fa1326e5d47e2e720ca81312016a98f81fc6b482747d17b  logs/bc250-sustained-20260918/runs/d2-diag-base/frontier_000512.logits.json
+b40ed9e2db749d12f5dbf7a297ba3db2d7147d7744b15f8804049e05dd3130e1  logs/bc250-sustained-20260918/runs/d2-diag-base/frontier_000640.logits.json
+57796d743e761e154fa1326e5d47e2e720ca81312016a98f81fc6b482747d17b  logs/bc250-sustained-20260918/runs/d2-diag-span256/frontier_000512.logits.json
+cc822f0b3fd918c2ceb996e3f14e6e15524fbe08969c66fb0a185bfa2f4160b4  logs/bc250-sustained-20260918/runs/d2-diag-span256/frontier_000640.logits.json

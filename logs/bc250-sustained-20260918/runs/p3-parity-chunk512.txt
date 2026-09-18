@@ -1,0 +1,7 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 351.85 MiB (scratch=185.95 MiB, raw=16.28 MiB, compressed=149.62 MiB, ctx=641, backend=vulkan, prefill_chunk=512, raw_kv_rows=641, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+512,512,206.52,1,33.67,2060

@@ -1,0 +1,4 @@
+device=AMD BC-250 (RADV GFX1013) subgroup_default_query=see vulkaninfo queue_family=0 timestamp_ns=10.000 physical_bytes=536870912
+mode=0 useful_read_GB=0.537 copy_read_plus_write_GB=0.000 median_ms=2.270 useful_GBps=236.5 checksum=c02c4000/802c4000 samples_ms=2.267,2.269,2.269,2.270,2.270,2.270,2.272
+mode=1 useful_read_GB=0.537 copy_read_plus_write_GB=1.074 median_ms=2.906 useful_GBps=369.5 checksum=c02c4000/802c4000 samples_ms=2.904,2.904,2.905,2.906,2.907,2.907,2.910
+mode=2 useful_read_GB=0.470 copy_read_plus_write_GB=0.000 median_ms=2.136 useful_GBps=219.9 checksum=251ff650/d31ff650 samples_ms=2.135,2.135,2.135,2.136,2.136,2.137,2.137
