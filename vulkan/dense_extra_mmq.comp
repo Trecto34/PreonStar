@@ -1,4 +1,159 @@
 #version 460
+
+#ifdef Q36_Q2_0_ONLY
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint wb[]; };
+layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 3) readonly buffer Tables { uint tables[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint n_tok;
+    uint blocks;
+    uint row_bytes;
+    uint type;
+    float scale;
+} pc;
+
+const uint BM = 64u;
+const uint BN = 128u;
+const uint BK = 32u;
+const uint STRIDE = BK / 2u + 1u;
+const uint Q8K_WORDS = 74u;
+
+shared f16vec2 buf_a[BM * STRIDE];
+shared f16vec2 buf_b[BN * STRIDE];
+
+uint load_u16(uint off) {
+    uint word = wb[off >> 2u];
+    return (word >> (8u * (off & 3u))) & 0xffffu;
+}
+
+uint load_u32(uint off) {
+    uint shift = 8u * (off & 3u);
+    uint i = off >> 2u;
+    uint lo = wb[i];
+    return shift == 0u ? lo : (lo >> shift) | (wb[i + 1u] << (32u - shift));
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint row0 = gl_WorkGroupID.x * BM;
+    uint tok0 = gl_WorkGroupID.y * BN;
+    uint wave = gl_SubgroupID;
+    uint lane = gl_SubgroupInvocationID;
+    uint lane_row = lane & 3u;
+    uint lane_tok = lane >> 2u;
+
+    f16vec2 sum[32];
+    [[unroll]] for (uint i = 0u; i < 32u; i++) sum[i] = f16vec2(0.0);
+
+    for (uint qb = 0u; qb < pc.blocks; qb++) {
+        for (uint slice = 0u; slice < 8u; slice++) {
+            // Load weights: BM=64 rows, 16 half-pairs per row.
+            // lid < 128: lr = lid >> 1 (0..63), kw = lid & 1 (0..1: first 16 or second 16 weights)
+            {
+                uint lr = lid >> 1u;
+                uint kw = lid & 1u;
+                uint row = row0 + lr;
+                uint base_dst = lr * STRIDE + kw * 8u;
+                if (row < pc.out_dim) {
+                    uint base = row * pc.row_bytes + (qb * 4u + (slice >> 1u)) * 18u;
+                    float16_t d = float16_t(unpackHalf2x16(load_u16(base)).x * pc.scale);
+                    uint code_word = load_u32(base + 2u + (slice & 1u) * 8u + kw * 4u);
+                    [[unroll]] for (uint p = 0u; p < 4u; p++) {
+                        uint bits = (code_word >> (p * 8u)) & 0xffu;
+                        buf_a[base_dst + 2u * p] = f16vec2(
+                            float16_t(float(bits & 3u) - 1.0) * d,
+                            float16_t(float((bits >> 2u) & 3u) - 1.0) * d);
+                        buf_a[base_dst + 2u * p + 1u] = f16vec2(
+                            float16_t(float((bits >> 4u) & 3u) - 1.0) * d,
+                            float16_t(float((bits >> 6u) & 3u) - 1.0) * d);
+                    }
+                } else {
+                    [[unroll]] for (uint p = 0u; p < 8u; p++) {
+                        buf_a[base_dst + p] = f16vec2(0.0);
+                    }
+                }
+            }
+
+            // Load activations: BN=128 tokens, 16 half-pairs per token.
+            // 256 items: 2 per thread.
+            for (uint i = lid; i < BN * 2u; i += 128u) {
+                uint lt = i >> 1u;
+                uint kw = i & 1u;
+                uint tok = tok0 + lt;
+                uint base_dst = lt * STRIDE + kw * 8u;
+                if (tok < pc.n_tok) {
+                    uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
+                    float16_t scale_in = float16_t(uintBitsToFloat(q8[qbase]));
+                    [[unroll]] for (uint p = 0u; p < 4u; p++) {
+                        uint qword = q8[qbase + 2u + slice * 8u + kw * 4u + p];
+                        buf_b[base_dst + 2u * p] = f16vec2(
+                            float16_t(float(bitfieldExtract(int(qword), 0, 8))) * scale_in,
+                            float16_t(float(bitfieldExtract(int(qword), 8, 8))) * scale_in);
+                        buf_b[base_dst + 2u * p + 1u] = f16vec2(
+                            float16_t(float(bitfieldExtract(int(qword), 16, 8))) * scale_in,
+                            float16_t(float(bitfieldExtract(int(qword), 24, 8))) * scale_in);
+                    }
+                } else {
+                    [[unroll]] for (uint p = 0u; p < 8u; p++) {
+                        buf_b[base_dst + p] = f16vec2(0.0);
+                    }
+                }
+            }
+
+            barrier();
+
+            [[unroll]] for (uint k = 0u; k < BK / 2u; k++) {
+                f16vec2 av[16];
+                f16vec2 bv[4];
+                [[unroll]] for (uint r = 0u; r < 16u; r++)
+                    av[r] = buf_a[(lane_row * 16u + r) * STRIDE + k];
+                [[unroll]] for (uint st = 0u; st < 2u; st++)
+                    [[unroll]] for (uint t = 0u; t < 2u; t++)
+                        bv[st * 2u + t] = buf_b[(wave * 32u + st * 16u +
+                            lane_tok * 2u + t) * STRIDE + k];
+
+                f16vec2 b0_lo = f16vec2(bv[0].x, bv[1].x);
+                f16vec2 b0_hi = f16vec2(bv[0].y, bv[1].y);
+                f16vec2 b1_lo = f16vec2(bv[2].x, bv[3].x);
+                f16vec2 b1_hi = f16vec2(bv[2].y, bv[3].y);
+
+                [[unroll]] for (uint r = 0u; r < 16u; r++) {
+                    f16vec2 a_lo = f16vec2(av[r].x);
+                    f16vec2 a_hi = f16vec2(av[r].y);
+                    sum[r] = fma(a_lo, b0_lo, fma(a_hi, b0_hi, sum[r]));
+                    sum[16u + r] = fma(a_lo, b1_lo, fma(a_hi, b1_hi, sum[16u + r]));
+                }
+            }
+
+            barrier();
+        }
+    }
+
+    [[unroll]] for (uint t = 0u; t < 4u; t++) {
+        uint tok = tok0 + wave * 32u + (t >> 1u) * 16u +
+                   lane_tok * 2u + (t & 1u);
+        if (tok >= pc.n_tok) continue;
+        [[unroll]] for (uint r = 0u; r < 16u; r++) {
+            uint row = row0 + lane_row * 16u + r;
+            if (row < pc.out_dim)
+                y[tok * pc.out_dim + row] = float((t & 1u) == 0u ?
+                    sum[(t >> 1u) * 16u + r].x :
+                    sum[(t >> 1u) * 16u + r].y);
+        }
+    }
+}
+
+#else
 #extension GL_EXT_control_flow_attributes : enable
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -324,3 +479,4 @@ void main(void) {
         }
     }
 }
+#endif
