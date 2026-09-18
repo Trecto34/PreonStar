@@ -12,17 +12,22 @@ first.
 
 ## Status at a glance
 
-* **Track A kernel validation: PASS.** GPU decode/MMQ for types 42/142 are
-  bit-exact against the shared f16 contract at every distinct width, including
-  synthetic independent-scale native-128 blocks.
-* **The shipped PQ2_0 model is native-128** (proven against the publisher F16
-  source); no packer was needed. The old "repack" claim is retracted.
-* **Whole-model CPU↔GPU parity: closed as low priority.** GPU-first policy;
-  do not resume it.
-* **Only open item: tier-3 quality** (`hard-smoke`, 3 pass / 4 incomplete on the
-  first attempt, stopped mid-case 8). A second attempt is running at `0b3fb5b`
-  — see "Resume here" for the log/trace paths.
-* All 2026-09-18 evening changes are **committed at `0b3fb5b`**.
+* **Track A: GPU ENGINEERING: COMPLETE.**
+* **Quality evaluation: partially complete.** Completed cases retain their existing results. Cases 7, 8, 9 remain unevaluated / incomplete by deliberate project decision (do not relabel INCOMPLETE as PASS).
+* Final PQ2_0 engineering evidence:
+  - native type-142 layout/oracle validation: PASS
+  - q8_K activation parity: PASS
+  - targeted decode correctness: PASS
+  - targeted MMQ f16-contract correctness: PASS
+  - shader/path integrity: PASS
+  - no tensor CPU fallback observed
+  - sustained GPU decode 512→8192: PASS
+  - no NaN/Inf/device loss/reset
+  - paired g64 vs PQ2_0 decode median: +2.98%
+  - pp512: effectively flat
+  - thermal warning retained: 106 C edge-sensor excursion
+  - whole-model CPU parity intentionally non-blocking / low priority
+* Track A closed. Moving immediately to Track B (PTQ1_0 / type 143). Do not spend more GPU time on PQ2_0 unless PTQ1_0 work exposes a regression requiring comparison.
 
 ## Resume here (updated: build + run done)
 

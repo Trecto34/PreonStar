@@ -491,3 +491,31 @@ PQ2_0, not the other way round.
 Therefore the whole-model gates (execution integrity, stability, quality,
 performance) run directly on `gguf/Ternary-Bonsai-2-27B-PQ2_0.gguf`, already the
 native-128 model. No quantizer/packer is required.
+
+---
+
+# Track A Closure — GPU ENGINEERING: COMPLETE
+
+## Quality evaluation (Tier-3 / OlympiadBench)
+
+* Partially complete.
+* Completed cases retain their existing results.
+* Cases 7, 8, 9 remain **unevaluated / INCOMPLETE** by deliberate project decision.
+* **Do not relabel INCOMPLETE as PASS**.
+
+## Final PQ2_0 engineering evidence (GPU path)
+
+* native type-142 layout/oracle validation: **PASS**
+* q8_K activation parity: **PASS**
+* targeted decode correctness: **PASS**
+* targeted MMQ f16-contract correctness: **PASS**
+* shader/path integrity: **PASS**
+* no tensor CPU fallback observed
+* sustained GPU decode 512→8192: **PASS**
+* no NaN/Inf/device loss/reset
+* paired g64 vs PQ2_0 decode median: **+2.98 %** (paired median)
+* pp512: effectively flat (‑0.25 % median)
+* thermal warning retained: 106 °C edge-sensor excursion
+* whole-model CPU parity intentionally non‑blocking / low priority
+
+Track A is closed. PTQ1_0 (Track B) now proceeds under the same GPU‑first rule.
