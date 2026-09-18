@@ -1,0 +1,12 @@
+dense-quant-model-rows:
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-test: dense quant Q2_0    tokens=1 tensor=output.weight max_abs=4.470348e-08 rel_rms=7.966353e-08
+q36-test: dense quant Q2_0    tokens=2 tensor=output.weight max_abs=0.01098549 rel_rms=0.01066989
+q36-test: dense quant Q2_0    tokens=5 tensor=output.weight max_abs=0.01098549 rel_rms=0.010048
+q36-test: dense quant Q2_0    tokens=8 tensor=output.weight max_abs=0.01098549 rel_rms=0.009133897
+q36-test: dense quant types exercised = 1
+dense-quant-model-rows: OK
+q36 tests: ok

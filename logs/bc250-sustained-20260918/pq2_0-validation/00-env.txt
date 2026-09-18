@@ -1,0 +1,28 @@
+commit: c0e7c1a5346b2c03fde4f8560c1f24a60d833019
+date: 2026-09-18T13:13:41-03:00
+uname: Linux bc250 7.2.6-1-cachyos #1 SMP PREEMPT_DYNAMIC Thu, 17 Sep 2026 10:26:35 +0000 x86_64 GNU/Linux
+
+=== git status ===
+ M Makefile
+ M q36.c
+ M q36_vulkan.c
+ M vulkan/dense_extra_decode.comp
+ M vulkan/dense_extra_mmq.comp
+?? logs/bc250-sustained-20260918/ab_model.sh
+?? logs/bc250-sustained-20260918/attn_parity
+?? logs/bc250-sustained-20260918/baseline/q36-bench
+?? logs/bc250-sustained-20260918/hadamard_parity
+?? logs/bc250-sustained-20260918/logit_divergence.py
+?? logs/bc250-sustained-20260918/mmq_info
+?? logs/bc250-sustained-20260918/read_copy_bw
+?? logs/bc250-sustained-20260918/runs/cont-timeline-decode.txt.gz
+?? logs/bc250-sustained-20260918/runs/eval-g64-partial.trace
+?? logs/bc250-sustained-20260918/swiglu_hadamard_parity
+
+=== dirty diffstat vs HEAD ===
+ Makefile                       |  8 ++++++++
+ q36.c                          | 34 +++++++++++++++++++++++++++++++++
+ q36_vulkan.c                   | 43 +++++++++++++++++++++++++++++++++++-------
+ vulkan/dense_extra_decode.comp | 22 ++++++++++++++++++---
+ vulkan/dense_extra_mmq.comp    | 19 +++++++++++++++++--
+ 5 files changed, 114 insertions(+), 12 deletions(-)

@@ -45,6 +45,22 @@ const uint TAB_IQ2XS = 7456u;
 
 #ifdef Q36_Q2_0_ONLY
 
+/* Q2_0 and PQ2_0 share the 2-bit codec and differ only in group size: 64
+ * weights / 18 B against 128 / 34 B.  These are compile-time constants so the
+ * hot loop keeps folding them, and so the Q2_0 build's token stream -- hence
+ * its SPIR-V -- is byte-for-byte what it was before PQ2_0 existed. */
+#ifdef Q36_PQ2_0
+#define Q2_BLK_BYTES   34u
+#define Q2_BLK_PER_Q8K 2u
+#define Q2_LANE_SHIFT  2u
+#define Q2_LANE_MASK   3u
+#else
+#define Q2_BLK_BYTES   18u
+#define Q2_BLK_PER_Q8K 4u
+#define Q2_LANE_SHIFT  1u
+#define Q2_LANE_MASK   1u
+#endif
+
 uint load_u16(uint off) {
     uint word = wb[off >> 2u];
     return (word >> (8u * (off & 3u))) & 0xffffu;
@@ -90,9 +106,9 @@ void main(void) {
         [[unroll]] for (uint r = 0u; r < ROWS; r++) {
             uint row = first_row + r;
             if (row >= pc.out_dim) continue;
-            uint qblock = 4u * b + (lane8 >> 1u);
-            uint base = row * pc.row_bytes + qblock * 18u;
-            uint code_base = base + 2u + (lane8 & 1u) * 8u;
+            uint qblock = Q2_BLK_PER_Q8K * b + (lane8 >> Q2_LANE_SHIFT);
+            uint base = row * pc.row_bytes + qblock * Q2_BLK_BYTES;
+            uint code_base = base + 2u + (lane8 & Q2_LANE_MASK) * 8u;
             uint codes0 = load_u32(code_base);
             uint codes1 = load_u32(code_base + 4u);
             int sum = 0;

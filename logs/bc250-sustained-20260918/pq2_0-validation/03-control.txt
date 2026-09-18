@@ -1,0 +1,7 @@
+frontier              top1   top5  KL(nats)    max|d|     mean|d|
+000512                same   5/5   0.000e+00   0.0000     0.00000
+                      rms=0.00000  p50=0.00000  p99=0.00000  p99.9=0.00000  nan=0  inf=0  kl_skipped=0  n=248320
+
+top-1 agreement: 1/1 frontiers, vocab 248320
+KL is KL(base||cand) over softmax-normalized probabilities (IEEE double, max-subtracted); kl_skipped>0 would make it a lower bound.
+Reference: a pure kernel change must read max|d| = 0 exactly. Any nonzero value here is the quantization itself, not a bug -- judge it against the tier-3 eval, not against zero.

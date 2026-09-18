@@ -1,0 +1,27 @@
+complete pairs: 10 of 10   (incomplete pairs are dropped, not silently averaged)
+
+pair order  base_tps cand_tps  delta%   base_pp cand_pp  Ain/Aout Bin/Bout  sclkA/sclkB  pwA/pwB
+------------------------------------------------------------------------------------------------
+1    A,B      32.47    33.35   +2.71    202.75  200.74  55/68   57/67    1970/1790   164/134
+2    B,A      32.60    33.40   +2.45    204.33  199.49  56/66   56/68    500/1430   34/115
+3    A,B      32.44    33.60   +3.58    206.64  200.78  56/67   56/66    1820/1810   136/118
+4    B,A      32.44    33.27   +2.56    204.55  204.29  55/66   55/68    1800/1240   133/53
+5    A,B      32.54    33.60   +3.26    203.59  202.35  55/67   55/67    1630/1810   113/133
+6    B,A      32.64    33.54   +2.76    202.00  205.11  55/68   55/68    1830/1260   148/49
+7    A,B      32.69    33.31   +1.90    202.14  201.37  54/66   55/67    1630/500    109/133
+8    B,A      32.66    33.37   +2.17    201.84  204.04  55/68   56/67    500/1710   35/108
+9    A,B      32.62    33.45   +2.54    203.82  205.42  54/67   55/66    1900/1770   122/119
+10   B,A      32.61    33.62   +3.10    204.28  205.60  56/67   56/67    500/1340   36/106
+
+decode  baseline median  32.61 tok/s   (min 32.44 max 32.69)
+decode  candidate median 33.42 tok/s   (min 33.27 max 33.62)
+paired delta: median +2.63%   MAD 0.32   min +1.90%   max +3.58%
+pairs favouring candidate: 10/10
+
+pp512   baseline median  203.70 tok/s
+pp512   candidate median 203.19 tok/s
+pp512   paired delta: median -0.25%  min -2.84%  max +1.54%
+
+drift check: first-half median delta +2.71%, second-half +2.54%
+entry temp: min 54 max 57 C   exit temp: min 66 max 68 C   sclk: min 500 max 1970 MHz
+order effect: baseline-first pairs median +2.71%, candidate-first pairs median +2.56%

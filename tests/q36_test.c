@@ -2917,22 +2917,656 @@ static void test_vulkan_kquant_matvec(void) {
 }
 
 #ifndef Q36_NO_GPU
+/* ---------------------------------------------------------------------------
+ * Independent numeric helpers for the dense-quant oracles.
+ *
+ * These deliberately avoid the production helpers. An oracle that shares a
+ * rounding or format routine with the code under test cannot catch a bug in
+ * that routine, so the parity tests below cross-check these against production
+ * rather than either side being trusted on its own.
+ * ------------------------------------------------------------------------ */
+
+/* IEEE-754 binary16 -> binary32, from the format definition. */
+static float test_ref_half_to_float(uint16_t h) {
+    const uint32_t sign = (uint32_t)(h >> 15) & 1u;
+    const uint32_t exp = (uint32_t)(h >> 10) & 0x1fu;
+    const uint32_t man = (uint32_t)h & 0x3ffu;
+    double v;
+    if (exp == 0u) v = ldexp((double)man, -24);                  /* subnormal */
+    else if (exp == 31u) v = man ? (double)NAN : (double)INFINITY;
+    else v = ldexp((double)(man | 0x400u), (int)exp - 25);
+    return (float)(sign ? -v : v);
+}
+
+/* Round to IEEE-754 binary16 (nearest, ties to even) and widen back to float.
+ * Models the MMQ kernel's f16 staging. */
+static float test_ref_round_half(double v) {
+    double a, step, r;
+    int e;
+    if (isnan(v)) return (float)v;
+    a = fabs(v);
+    if (a >= 65520.0) return (float)(v < 0.0 ? -INFINITY : INFINITY);
+    if (a < 6.103515625e-05) {           /* binary16 subnormal: ulp = 2^-24 */
+        r = ldexp(nearbyint(ldexp(a, 24)), -24);
+    } else {
+        (void)frexp(a, &e);              /* a = m * 2^e, m in [0.5, 1) */
+        step = ldexp(1.0, e - 11);       /* binary16 keeps 11 significand bits */
+        r = nearbyint(a / step) * step;
+        if (r >= 65536.0) return (float)(v < 0.0 ? -INFINITY : INFINITY);
+    }
+    return (float)(v < 0.0 ? -r : r);
+}
+
+/* One f16 multiply and one f16 fused multiply-add, each with a single rounding
+ * as v_mul_f16 / v_fma_f16 do. The inputs are exact binary16 values, so the
+ * product and sum are exact in double and only the final rounding is inexact. */
+static float test_ref_mul_half(float a, float b) {
+    return test_ref_round_half((double)a * (double)b);
+}
+
+static float test_ref_fma_half(float a, float b, float c) {
+    return test_ref_round_half((double)a * (double)b + (double)c);
+}
+
+/* ULP distance between two finite f32 values, for decode error reporting. */
+static uint32_t test_f32_ulp_diff(float a, float b) {
+    int32_t ia, ib;
+    int64_t d;
+    if (!isfinite(a) || !isfinite(b)) return UINT32_MAX;
+    memcpy(&ia, &a, sizeof(ia));
+    memcpy(&ib, &b, sizeof(ib));
+    if (ia < 0) ia = (int32_t)(0x80000000u - (uint32_t)ia);
+    if (ib < 0) ib = (int32_t)(0x80000000u - (uint32_t)ib);
+    d = (int64_t)ia - (int64_t)ib;
+    if (d < 0) d = -d;
+    return d > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)d;
+}
+
+/* The production CPU q8_K block is NOT the GPU/test block: q36_block_q8_k is
+ * { float d; int8_t qs[256]; int16_t bsums[16] } = 292 bytes with no dmin,
+ * while the GPU block (q36_vk_block_q8_K, and test_block_q8_K here) carries a
+ * dmin and is 296. They are different structures for different consumers, so
+ * the CPU side is compared field by field at its own stride -- a memcmp
+ * against the GPU layout reads qs bytes as a float and reports nonsense. */
+enum { TEST_Q8K_CPU_BLOCK_BYTES = 4u + (uint32_t)TEST_QK_K + (uint32_t)TEST_QK_K / 16u * 2u };
+
+static int test_q8k_cpu_block_diff(const uint8_t *cpu_blk,
+                                   const test_block_q8_K *ref,
+                                   const char *pattern, uint32_t block) {
+    float d;
+    int16_t bs;
+    uint32_t i;
+    const int8_t *qs = (const int8_t *)(cpu_blk + 4);
+    memcpy(&d, cpu_blk, sizeof(d));
+    if (memcmp(&d, &ref->d, sizeof(d)) != 0) {
+        fprintf(stderr,
+                "q36-test: q8_K MISMATCH block=%u pattern='%s' field=d "
+                "cpu-prod=%.9g test-dup=%.9g\n",
+                block, pattern, (double)d, (double)ref->d);
+        return 1;
+    }
+    for (i = 0; i < TEST_QK_K; i++) {
+        if (qs[i] != ref->qs[i]) {
+            fprintf(stderr,
+                    "q36-test: q8_K MISMATCH block=%u pattern='%s' qs[%u] "
+                    "cpu-prod=%d test-dup=%d\n",
+                    block, pattern, i, (int)qs[i], (int)ref->qs[i]);
+            return 1;
+        }
+    }
+    for (i = 0; i < TEST_QK_K / 16u; i++) {
+        memcpy(&bs, cpu_blk + 4 + TEST_QK_K + i * sizeof(bs), sizeof(bs));
+        if (bs != ref->bsums[i]) {
+            fprintf(stderr,
+                    "q36-test: q8_K MISMATCH block=%u pattern='%s' bsums[%u] "
+                    "cpu-prod=%d test-dup=%d\n",
+                    block, pattern, i, (int)bs, (int)ref->bsums[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Adversarial activation blocks for the q8_K parity oracle.
+ * ------------------------------------------------------------------------ */
+static const char *test_q8k_pattern(uint32_t which, float *x, uint32_t n) {
+    uint32_t i;
+    for (i = 0; i < n; i++) x[i] = 0.0f;
+    switch (which % 13u) {
+    case 0:
+        return "all zeros";
+    case 1:
+        for (i = 0; i < n; i++) x[i] = (i & 1u) ? -1.0f : 1.0f;
+        return "alternating +/-1 (repeated extrema, both signs)";
+    case 2:
+        for (i = 0; i < n; i++)
+            x[i] = ((i & 1u) ? -1.0f : 1.0f) * 1.0e-38f * (float)(i + 1u);
+        return "very small magnitudes, near f32 subnormal";
+    case 3:
+        for (i = 0; i < n; i++)
+            x[i] = ((i & 1u) ? -1.0f : 1.0f) * 1.0e30f * (float)(i + 1u);
+        return "very large magnitudes";
+    case 4:
+        /* -127/128 is exact, so iscale is exactly 128 and (k + 0.5)/128 puts
+         * the product exactly on a rounding tie for every k: round-half-even
+         * is then the only thing separating a correct result from a wrong one. */
+        x[0] = -127.0f / 128.0f;
+        for (i = 1; i < n; i++)
+            x[i] = ((float)(int)(i % 127u) + 0.5f) / 128.0f;
+        return "exact round-half ties (iscale == 128)";
+    case 5:
+        for (i = 0; i < n; i++) x[i] = 0.25f;
+        x[7] = 1.0f;
+        x[200] = -1.0f;
+        return "repeated extrema, +max at the lower index";
+    case 6:
+        for (i = 0; i < n; i++) x[i] = 0.25f;
+        x[7] = -1.0f;
+        x[200] = 1.0f;
+        return "repeated extrema, -max at the lower index";
+    case 7:
+        for (i = 0; i < n; i++)
+            x[i] = ((i % 7u) == 0u) ? 3.5f : 1.0e-4f * (float)(i % 5u);
+        return "nonuniform, heavy-tailed";
+    case 8:
+        x[n - 1u] = -2.5f;
+        return "single nonzero at the last index";
+    case 9:
+        for (i = 0; i < n; i++) x[i] = 0.75f;
+        return "all values equal";
+    case 10:
+        for (i = 0; i < n; i++) x[i] = (i & 1u) ? -0.0f : 0.0f;
+        x[3] = 1.0f;
+        return "signed zeros with one nonzero";
+    case 11:
+        for (i = 0; i < n; i++)
+            x[i] = (float)((int)((i * 37u) % 255u) - 127) / 127.0f;
+        return "full int8 range sweep";
+    default:
+        for (i = 0; i < n; i++)
+            x[i] = sinf((float)(i * 31u + which * 17u) * 0.37f) *
+                   (float)(1u + (i % 9u));
+        return "pseudo-random mixed magnitudes";
+    }
+}
+
+/* Report the first differing field of two q8_K blocks. Returns 0 when equal. */
+static int test_q8k_block_diff(const char *lhs_name, const char *rhs_name,
+                               const test_block_q8_K *lhs,
+                               const test_block_q8_K *rhs,
+                               const char *pattern, uint32_t block) {
+    uint32_t i;
+    uint32_t lb, rb;
+    if (memcmp(lhs, rhs, sizeof(*lhs)) == 0) return 0;
+    memcpy(&lb, &lhs->d, sizeof(lb));
+    memcpy(&rb, &rhs->d, sizeof(rb));
+    if (lb != rb) {
+        fprintf(stderr,
+                "q36-test: q8_K MISMATCH block=%u pattern='%s' field=d "
+                "%s=%.9g (0x%08x) %s=%.9g (0x%08x)\n",
+                block, pattern, lhs_name, (double)lhs->d, lb,
+                rhs_name, (double)rhs->d, rb);
+        return 1;
+    }
+    if (lhs->dmin != rhs->dmin) {
+        fprintf(stderr,
+                "q36-test: q8_K MISMATCH block=%u pattern='%s' field=dmin "
+                "%s=%.9g %s=%.9g\n",
+                block, pattern, lhs_name, (double)lhs->dmin,
+                rhs_name, (double)rhs->dmin);
+        return 1;
+    }
+    for (i = 0; i < TEST_QK_K; i++) {
+        if (lhs->qs[i] != rhs->qs[i]) {
+            fprintf(stderr,
+                    "q36-test: q8_K MISMATCH block=%u pattern='%s' qs[%u] "
+                    "%s=%d %s=%d\n",
+                    block, pattern, i, lhs_name, (int)lhs->qs[i],
+                    rhs_name, (int)rhs->qs[i]);
+            return 1;
+        }
+    }
+    for (i = 0; i < TEST_QK_K / 16u; i++) {
+        if (lhs->bsums[i] != rhs->bsums[i]) {
+            fprintf(stderr,
+                    "q36-test: q8_K MISMATCH block=%u pattern='%s' bsums[%u] "
+                    "%s=%d %s=%d\n",
+                    block, pattern, i, lhs_name, (int)lhs->bsums[i],
+                    rhs_name, (int)rhs->bsums[i]);
+            return 1;
+        }
+    }
+    fprintf(stderr, "q36-test: q8_K MISMATCH block=%u pattern='%s' "
+                    "(differs in padding only)\n", block, pattern);
+    return 1;
+}
+#endif /* Q36_NO_GPU */
+
+/* ---------------------------------------------------------------------------
+ * q8_K activation parity.
+ *
+ * Three implementations of q8_K activation quantization exist and must agree
+ * byte for byte, because the dense-quant oracles use the test one to predict
+ * what the GPU consumed:
+ *
+ *   production GPU  vulkan/quantize_q8_k.comp  <- what the dense path runs
+ *   production CPU  q36_quant_q8_k (q36.c)
+ *   test-only       test_quantize_q8_k (this file), an INDEPENDENT duplicate
+ *
+ * The test one is a duplicate, not a shared implementation, so equivalence is
+ * a claim that has to be checked rather than assumed. The GPU reduction picks
+ * its max by lowest index on ties and the CPU ones by first occurrence; that
+ * agreement, the round-half-even rule and the fp64 reciprocal are exactly what
+ * the adversarial patterns here are aimed at.
+ * ------------------------------------------------------------------------ */
+static void test_q8k_activation_parity(void) {
+#ifdef Q36_NO_GPU
+    test_skip("q8k-activation-parity", "CPU-only build");
+#else
+    enum { NBLK = 3u, NPAT = 13u };
+    const uint32_t n = (uint32_t)TEST_QK_K * NBLK;
+    float *x_host = NULL;
+    test_block_q8_K *gpu = NULL, *dup = NULL;
+    void *cpu = NULL;
+    q36_gpu_tensor *x = NULL, *q8 = NULL;
+    uint32_t pat, b, mismatches = 0, compared = 0;
+
+    TEST_ASSERT(q36_gpu_init() != 0);
+
+    x_host = malloc((size_t)n * sizeof(*x_host));
+    gpu = malloc(sizeof(*gpu) * NBLK);
+    dup = malloc(sizeof(*dup) * NBLK);
+    /* Guard bytes past the expected end catch a stride disagreement instead of
+     * letting one corrupt the comparison silently. */
+    cpu = malloc((size_t)TEST_Q8K_CPU_BLOCK_BYTES * NBLK + 64u);
+    x = q36_gpu_tensor_alloc((uint64_t)n * sizeof(float));
+    q8 = q36_gpu_tensor_alloc(sizeof(test_block_q8_K) * NBLK);
+    TEST_ASSERT(x_host && gpu && dup && cpu && x && q8);
+    if (!x_host || !gpu || !dup || !cpu || !x || !q8) goto done;
+
+    for (pat = 0; pat < NPAT; pat++) {
+        const char *names[NBLK];
+        /* Give each 256-block a different pattern so block indexing is
+         * exercised at the same time as the patterns themselves. */
+        for (b = 0; b < NBLK; b++)
+            names[b] = test_q8k_pattern(pat + b, x_host + (size_t)b * TEST_QK_K,
+                                        (uint32_t)TEST_QK_K);
+
+        for (b = 0; b < NBLK; b++)
+            test_quantize_q8_k(x_host + (size_t)b * TEST_QK_K, &dup[b]);
+        memset((uint8_t *)cpu + (size_t)TEST_Q8K_CPU_BLOCK_BYTES * NBLK, 0x5a, 64u);
+        q36_quant_q8_k(x_host, cpu, (int64_t)n);
+        for (b = 0; b < 64u; b++)
+            TEST_ASSERT(((const uint8_t *)cpu)
+                        [(size_t)TEST_Q8K_CPU_BLOCK_BYTES * NBLK + b] == 0x5au);
+
+        TEST_ASSERT(q36_gpu_tensor_write(x, 0, x_host,
+                                         (uint64_t)n * sizeof(float)) != 0);
+        TEST_ASSERT(q36_gpu_quantize_q8_k_tensor(q8, x, n, 1) != 0);
+        TEST_ASSERT(q36_gpu_tensor_read(q8, 0, gpu,
+                                        sizeof(test_block_q8_K) * NBLK) != 0);
+
+        for (b = 0; b < NBLK; b++) {
+            compared++;
+            mismatches += (uint32_t)test_q8k_block_diff(
+                "gpu", "test-dup", &gpu[b], &dup[b], names[b], b);
+            mismatches += (uint32_t)test_q8k_cpu_block_diff(
+                (const uint8_t *)cpu + (size_t)TEST_Q8K_CPU_BLOCK_BYTES * b,
+                &dup[b], names[b], b);
+        }
+    }
+
+    fprintf(stderr,
+            "q36-test: q8_K activation parity: %u blocks x %u patterns "
+            "compared across gpu/cpu-prod/test-dup, %u mismatches\n",
+            compared, NPAT, mismatches);
+    TEST_ASSERT(compared == NPAT * NBLK);
+    TEST_ASSERT(mismatches == 0);
+
+done:
+    q36_gpu_tensor_free(q8);
+    q36_gpu_tensor_free(x);
+    free(cpu);
+    free(dup);
+    free(gpu);
+    free(x_host);
+    q36_gpu_cleanup();
+#endif
+}
+
+/* ---------------------------------------------------------------------------
+ * PQ2_0 (type 142) layout oracle.
+ *
+ * The dense-quant row test compares the GPU against q36_dequantize_row_pq2_0.
+ * Both sides could share one misreading of the format, so this test builds
+ * PQ2_0 blocks by hand and derives every expected value from the format as
+ * written out here, touching no production decode helper:
+ *
+ *   block  = 34 bytes = { uint16 d ; uint8 qs[32] }, 128 weights per block
+ *   weight j uses the 2 bits at qs[j / 4], shifted by (j % 4) * 2
+ *   value  = ((int)code - 1) * half_to_float(d)   code 0..3 -> -1, 0, 1, 2
+ *
+ * The probe is a one-hot activation: x[k] = -1, zero elsewhere. q8_K then sees
+ * amax = 1 at k with maxv = -1, so iscale = 127, d = 1/127 and q[k] = -127 --
+ * the round trip is exact, the activation contributes exactly -1, and
+ * out[row] = -weight[row][k]. Each probe therefore reads one weight per row
+ * with no accumulation that could hide or cancel an error.
+ *
+ * Codes and scales vary with both row and lane, so a swapped lane, a wrong
+ * block stride, a bad byte offset or a byte-order mistake all move the decoded
+ * value to a different, unmistakable number rather than a near miss.
+ * ------------------------------------------------------------------------ */
+static void test_pq2_0_layout_oracle(void) {
+#ifdef Q36_NO_GPU
+    test_skip("pq2-0-layout-oracle", "CPU-only build");
+#else
+    enum {
+        PQ2_QK = 128,             /* weights per PQ2_0 block */
+        PQ2_BYTES = 34,           /* bytes per PQ2_0 block */
+        in_dim = 512,             /* 4 PQ2_0 blocks, 2 q8_K blocks */
+        out_dim = 8,
+        n_blk = in_dim / PQ2_QK,
+    };
+    /* Distinctive scales: different magnitudes and both signs, so a block-index
+     * error changes the answer instead of scaling it slightly. */
+    static const uint16_t scale_bits[8] = {
+        0x3c00u, /*  1.0  */ 0x3800u, /*  0.5  */
+        0xb800u, /* -0.5  */ 0x4000u, /*  2.0  */
+        0x3555u, /*  ~0.333 */ 0xc000u, /* -2.0 */
+        0x3266u, /*  ~0.2  */ 0xbc00u, /* -1.0 */
+    };
+    /* Boundaries that matter to the shader: every lane position inside a packed
+     * byte, both sides of each packed-byte boundary, both sides of each 34-byte
+     * block boundary, both sides of the 256-wide q8_K block boundary, and the
+     * first and last weight of the row. */
+    static const uint32_t probes[] = {
+        0u, 1u, 2u, 3u, 4u, 5u, 7u, 8u, 31u, 32u, 63u, 64u,
+        126u, 127u, 128u, 129u, 130u, 131u, 191u, 192u,
+        254u, 255u, 256u, 257u, 383u, 384u, 510u, 511u,
+    };
+    const uint32_t n_probe = (uint32_t)(sizeof(probes) / sizeof(probes[0]));
+    const uint64_t row_bytes = (uint64_t)n_blk * PQ2_BYTES;
+    const uint64_t weight_bytes = row_bytes * out_dim;
+    const uint64_t weight_alloc =
+        test_round_up_u64(weight_bytes, (uint64_t)getpagesize());
+
+    void *weights = NULL;
+    float *x_host = NULL, *got = NULL;
+    q36_gpu_tensor *x = NULL, *out = NULL;
+    uint32_t r, j, p, failures = 0, checks = 0;
+    double worst_abs = 0.0;
+
+    TEST_ASSERT(q36_gpu_init() != 0);
+    q36_gpu_set_dense_model(true);
+
+    TEST_ASSERT(posix_memalign(&weights, (size_t)getpagesize(),
+                               (size_t)weight_alloc) == 0);
+    x_host = malloc((size_t)in_dim * sizeof(*x_host));
+    got = malloc((size_t)out_dim * sizeof(*got));
+    x = q36_gpu_tensor_alloc((uint64_t)in_dim * sizeof(float));
+    out = q36_gpu_tensor_alloc((uint64_t)out_dim * sizeof(float));
+    TEST_ASSERT(weights && x_host && got && x && out);
+    if (!weights || !x_host || !got || !x || !out) goto done;
+    memset(weights, 0, (size_t)weight_alloc);
+
+    /* The half decoder used for the expected values must itself be right. */
+    for (j = 0; j < 8u; j++) {
+        float mine = test_ref_half_to_float(scale_bits[j]);
+        float prod = q36_quant_f16_to_f32(scale_bits[j]);
+        if (mine != prod)
+            fprintf(stderr, "q36-test: half decode disagrees on 0x%04x: "
+                            "test=%.9g production=%.9g\n",
+                    scale_bits[j], (double)mine, (double)prod);
+        TEST_ASSERT(mine == prod);
+    }
+
+    /* Pack the weights straight from the format definition. */
+    for (r = 0; r < out_dim; r++) {
+        uint8_t *row = (uint8_t *)weights + (uint64_t)r * row_bytes;
+        for (j = 0; j < (uint32_t)n_blk; j++) {
+            uint8_t *blk = row + (uint64_t)j * PQ2_BYTES;
+            uint16_t d = scale_bits[(r + j) & 7u];
+            uint32_t w;
+            blk[0] = (uint8_t)(d & 0xffu);
+            blk[1] = (uint8_t)(d >> 8);
+            for (w = 0; w < (uint32_t)PQ2_QK; w++) {
+                uint32_t code = (r * 5u + (j * (uint32_t)PQ2_QK + w) * 3u) & 3u;
+                blk[2u + w / 4u] |= (uint8_t)(code << ((w % 4u) * 2u));
+            }
+        }
+    }
+    TEST_ASSERT(q36_gpu_set_model_map(weights, weight_alloc) != 0);
+
+    for (p = 0; p < n_probe; p++) {
+        const uint32_t k = probes[p];
+        const uint32_t blk_i = k / (uint32_t)PQ2_QK;
+        const uint32_t lane = k % (uint32_t)PQ2_QK;
+        for (j = 0; j < (uint32_t)in_dim; j++) x_host[j] = 0.0f;
+        x_host[k] = -1.0f;
+        TEST_ASSERT(q36_gpu_tensor_write(x, 0, x_host,
+                                         (uint64_t)in_dim * sizeof(float)) != 0);
+        TEST_ASSERT(q36_gpu_matmul_iq_quant_scaled_tensor(
+            out, weights, weight_alloc, 0, 142u, in_dim, out_dim,
+            x, 1u, 1.0f) != 0);
+        TEST_ASSERT(q36_gpu_tensor_read(out, 0, got,
+                                        (uint64_t)out_dim * sizeof(float)) != 0);
+
+        for (r = 0; r < out_dim; r++) {
+            const uint8_t *blk = (const uint8_t *)weights +
+                (uint64_t)r * row_bytes + (uint64_t)blk_i * PQ2_BYTES;
+            const uint8_t src = blk[2u + lane / 4u];
+            const uint16_t dbits = (uint16_t)(blk[0] | ((uint16_t)blk[1] << 8));
+            const uint32_t code = (uint32_t)(src >> ((lane % 4u) * 2u)) & 3u;
+            const float scale = test_ref_half_to_float(dbits);
+            const float want = -(((float)(int)code - 1.0f) * scale);
+            const double err = fabs((double)got[r] - (double)want);
+            checks++;
+            if (err > worst_abs) worst_abs = err;
+            if (err > 1.0e-5) {
+                failures++;
+                if (failures == 1u)
+                    fprintf(stderr,
+                            "q36-test: PQ2_0 LAYOUT MISMATCH\n"
+                            "  probe index k   = %u (block %u, lane %u)\n"
+                            "  row             = %u of %u\n"
+                            "  byte offset     = row*%llu + block*%u + 2 + %u\n"
+                            "  packed src byte = 0x%02x -> code %u "
+                            "(shift %u)\n"
+                            "  scale           = 0x%04x -> %.9g\n"
+                            "  expected        = %.9g\n"
+                            "  actual          = %.9g\n"
+                            "  abs err         = %.9g  rel err = %.9g\n",
+                            k, blk_i, lane, r, (uint32_t)out_dim,
+                            (unsigned long long)row_bytes, (uint32_t)PQ2_BYTES,
+                            lane / 4u, src, code, (lane % 4u) * 2u,
+                            dbits, (double)scale, (double)want,
+                            (double)got[r], err,
+                            want != 0.0f ? err / fabs((double)want) : err);
+            }
+        }
+    }
+
+    /* One dense probe as well: with every lane active, a lane permutation that
+     * happened to preserve each isolated weight would still move the sum. */
+    {
+        test_block_q8_K xq[in_dim / TEST_QK_K];
+        for (j = 0; j < (uint32_t)in_dim; j++)
+            x_host[j] = (float)((int)((j * 11u) % 251u) - 125) / 125.0f;
+        for (j = 0; j < (uint32_t)(in_dim / TEST_QK_K); j++)
+            test_quantize_q8_k(x_host + (size_t)j * TEST_QK_K, &xq[j]);
+        TEST_ASSERT(q36_gpu_tensor_write(x, 0, x_host,
+                                         (uint64_t)in_dim * sizeof(float)) != 0);
+        TEST_ASSERT(q36_gpu_matmul_iq_quant_scaled_tensor(
+            out, weights, weight_alloc, 0, 142u, in_dim, out_dim,
+            x, 1u, 1.0f) != 0);
+        TEST_ASSERT(q36_gpu_tensor_read(out, 0, got,
+                                        (uint64_t)out_dim * sizeof(float)) != 0);
+        for (r = 0; r < out_dim; r++) {
+            const uint8_t *row = (const uint8_t *)weights + (uint64_t)r * row_bytes;
+            double want = 0.0, err, rel;
+            for (j = 0; j < (uint32_t)in_dim; j++) {
+                const uint8_t *blk = row + (uint64_t)(j / PQ2_QK) * PQ2_BYTES;
+                const uint32_t lane = j % (uint32_t)PQ2_QK;
+                const uint32_t code =
+                    (uint32_t)(blk[2u + lane / 4u] >> ((lane % 4u) * 2u)) & 3u;
+                const double w = ((double)(int)code - 1.0) *
+                    (double)test_ref_half_to_float(
+                        (uint16_t)(blk[0] | ((uint16_t)blk[1] << 8)));
+                const test_block_q8_K *b = &xq[j / TEST_QK_K];
+                want += w * (double)b->d * (double)b->qs[j % TEST_QK_K];
+            }
+            err = fabs((double)got[r] - want);
+            rel = fabs(want) > 1.0e-20 ? err / fabs(want) : err;
+            checks++;
+            if (rel > 1.0e-5) {
+                failures++;
+                fprintf(stderr,
+                        "q36-test: PQ2_0 DENSE MISMATCH row=%u "
+                        "expected=%.9g actual=%.9g abs=%.9g rel=%.9g\n",
+                        r, want, (double)got[r], err, rel);
+            }
+        }
+    }
+
+    fprintf(stderr,
+            "q36-test: PQ2_0 layout oracle: %u probes x %u rows + dense, "
+            "%u checks, %u failures, worst one-hot abs err %.3g\n",
+            n_probe, (uint32_t)out_dim, checks, failures, worst_abs);
+    TEST_ASSERT(checks == n_probe * (uint32_t)out_dim + (uint32_t)out_dim);
+    TEST_ASSERT(failures == 0);
+
+done:
+    q36_gpu_tensor_free(out);
+    q36_gpu_tensor_free(x);
+    free(got);
+    free(x_host);
+    free(weights);
+    q36_gpu_set_dense_model(false);
+    q36_gpu_cleanup();
+#endif
+}
+
+#ifndef Q36_NO_GPU
 static const char *test_dense_quant_type_name(uint32_t type) {
     static const char *names[] = {
         [10] = "Q2_K", [11] = "Q3_K", [12] = "Q4_K", [13] = "Q5_K",
         [14] = "Q6_K", [16] = "IQ2_XXS", [17] = "IQ2_XS",
         [18] = "IQ3_XXS", [19] = "IQ1_S", [20] = "IQ4_NL",
         [21] = "IQ3_S", [22] = "IQ2_S", [23] = "IQ4_XS",
+        [42] = "Q2_0", [142] = "PQ2_0",
     };
     return type < sizeof(names) / sizeof(names[0]) && names[type]
         ? names[type] : "unknown";
 }
 
+/* ---------------------------------------------------------------------------
+ * f16-staged MMQ reference for the Q2_0 family (types 42 and 142).
+ *
+ * dense_extra_mmq.comp stages both operands as float16 and accumulates in an
+ * f16 fma, so an f32 reference disagrees with it by ~1 % however correct the
+ * kernel is. That mismatch used to dominate the measured error and forced a
+ * bound so loose it could not catch anything. This models what the kernel
+ * actually computes:
+ *
+ *   d        = f16(half_to_float(block scale) * pc.scale)
+ *   weight   = f16(f16(code - 1) * d)
+ *   scale_in = f16(q8_K block d)
+ *   act      = f16(f16(qs[i]) * scale_in)
+ *   sum      = fma(a_lo, b_lo, fma(a_hi, b_hi, sum))          -- all in f16
+ *
+ * including the kernel's element order: q8_K block, then slice, then the 16
+ * f16vec2 entries of the row, with the .y (high) product accumulated before
+ * the .x (low) one. Each (row, token) accumulator is owned by one thread, so
+ * that order is deterministic and can be reproduced exactly here.
+ * ------------------------------------------------------------------------ */
+static float test_mmq_q2_family_ref(const uint8_t *row_ptr,
+                                    const test_block_q8_K *xq,
+                                    uint32_t q8k_blocks,
+                                    uint32_t blk_bytes,
+                                    uint32_t blk_per_q8k,
+                                    uint32_t lane_shift,
+                                    uint32_t lane_mask,
+                                    float pc_scale) {
+    float sum = 0.0f;
+    uint32_t qb, slice, e, c;
+    for (qb = 0; qb < q8k_blocks; qb++) {
+        const float scale_in = test_ref_round_half((double)xq[qb].d);
+        for (slice = 0; slice < 8u; slice++) {
+            const uint32_t qblock = blk_per_q8k * qb + (slice >> lane_shift);
+            const uint8_t *blk = row_ptr + (uint64_t)qblock * blk_bytes;
+            const uint16_t dbits = (uint16_t)(blk[0] | ((uint16_t)blk[1] << 8));
+            const float d = test_ref_round_half(
+                (double)test_ref_half_to_float(dbits) * (double)pc_scale);
+            const uint8_t *codes = blk + 2 + (slice & lane_mask) * 8u;
+            for (e = 0; e < 16u; e++) {
+                const uint32_t kw = e >> 3;
+                const uint32_t p = (e & 7u) >> 1;
+                const uint32_t q = e & 1u;
+                const uint32_t bits = codes[kw * 4u + p];
+                float a[2], bv[2];
+                for (c = 0; c < 2u; c++) {
+                    const uint32_t sub = 2u * q + c;
+                    const uint32_t code = (bits >> (sub * 2u)) & 3u;
+                    const int8_t qv =
+                        xq[qb].qs[slice * 32u + kw * 16u + p * 4u + sub];
+                    a[c] = test_ref_mul_half(
+                        test_ref_round_half((double)(int)code - 1.0), d);
+                    bv[c] = test_ref_mul_half(
+                        test_ref_round_half((double)(int)qv), scale_in);
+                }
+                sum = test_ref_fma_half(a[1], bv[1], sum);
+                sum = test_ref_fma_half(a[0], bv[0], sum);
+            }
+        }
+    }
+    return sum;
+}
+
+typedef struct {
+    uint32_t type;
+    uint32_t eligible;        /* tensors of this type present in the model */
+    uint32_t tensors_tested;
+    uint32_t rows_tested;
+    uint32_t token_cases;
+    char tensor[256];
+} test_dense_cov;
+
 static void test_dense_quant_model_rows(void) {
+    /* 42/142 are the Q2_0 family. Without them this test used to pass on a
+     * ternary model while comparing nothing at all, because every other type
+     * it names is absent from such a file. */
     static const uint32_t types[] = {
-        10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23,
+        10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 42, 142,
     };
-    enum { out_dim = 8 };
+    static const uint32_t token_counts[] = {1u, 2u, 5u, 8u};
+    enum {
+        out_dim = 8,
+        N_TYPE = (int)(sizeof(types) / sizeof(types[0])),
+        N_TOKCASE = (int)(sizeof(token_counts) / sizeof(token_counts[0])),
+    };
+    /* Decode (tokens == 1) is an f32 dot product, so its floor is the random
+     * walk of f32 rounding over in_dim accumulations: sqrt(in_dim) * 2^-24,
+     * which is 7.9e-06 for the widest row here (in_dim 17408). 1e-5 sits just
+     * above that derived floor rather than being a multiple of whatever was
+     * last measured. */
+    const double decode_tol = 1.0e-5;
+    /* MMQ is compared against the f16-staged reference above, which models the
+     * kernel's own arithmetic (one rounding per v_mul_f16/v_fma_f16), so the
+     * two agree exactly whenever both round identically. MEASURED floor, types
+     * 42/142 across 2 models x 8 rows x 3 token counts (tokens 2/5/8): max_abs
+     * 0, rel_rms 0, every case bit-identical. The bound is one binary16 ulp, 2^-11 =
+     * 4.9e-04 relative, kept only as headroom for a host whose f16 rounding
+     * mode differs from the emulation's; the measured floor is zero. */
+    const double mmq_tol_f16 = 4.9e-4;
+    /* Types whose MMQ kernel is not modelled keep the old bound. It is two
+     * orders below the O(1) error a wrong stride or lane mapping gives, but it
+     * cannot see sub-percent drift: NOT RELEASE GRADE, and it exists only
+     * until those kernels get a reference of their own. */
+    const double mmq_tol_unmodelled = 5.0e-2;
+
+    test_dense_cov cov[N_TYPE];
+    uint32_t ti, uncovered = 0, unmodelled_types = 0;
     q36_engine *engine = NULL;
 
     if (!test_model_available(test_model_path())) {
@@ -2945,11 +3579,20 @@ static void test_dense_quant_model_rows(void) {
     TEST_ASSERT(q36_gpu_init() != 0);
     q36_gpu_set_dense_model(true);
 
-    for (size_t ti = 0; ti < sizeof(types) / sizeof(types[0]); ti++) {
+    memset(cov, 0, sizeof(cov));
+    for (ti = 0; ti < (uint32_t)N_TYPE; ti++) {
+        cov[ti].type = types[ti];
+        cov[ti].eligible =
+            q36_engine_debug_count_tensors_of_type(engine, types[ti]);
+    }
+
+    for (ti = 0; ti < (uint32_t)N_TYPE; ti++) {
         const uint32_t type = types[ti];
+        test_dense_cov *cv = &cov[ti];
         char tensor_name[256];
         uint32_t in_dim = 0, packed_type = 0, packed_n = 0;
         uint64_t row_bytes = 0;
+        const int q2_family = (type == 42u || type == 142u);
         if (q36_engine_debug_first_tensor_of_type(
                 engine, type, tensor_name, sizeof(tensor_name), &in_dim) != 0)
             continue;
@@ -2958,7 +3601,9 @@ static void test_dense_quant_model_rows(void) {
             &packed_n) == 0);
         TEST_ASSERT(type == packed_type && in_dim == packed_n);
         if (!row_bytes || type != packed_type || in_dim != packed_n) continue;
+        snprintf(cv->tensor, sizeof(cv->tensor), "%s", tensor_name);
 
+        {
         const uint64_t weight_bytes = row_bytes * out_dim;
         const uint64_t model_bytes =
             type == 18u ? 2u * weight_bytes : weight_bytes;
@@ -2966,6 +3611,7 @@ static void test_dense_quant_model_rows(void) {
             model_bytes, (uint64_t)getpagesize());
         void *weights = NULL;
         float *dequant = malloc((size_t)in_dim * sizeof(*dequant));
+        uint32_t row, tokens_i;
         TEST_ASSERT(posix_memalign(&weights, (size_t)getpagesize(),
                                   (size_t)weight_alloc) == 0);
         TEST_ASSERT(dequant != NULL);
@@ -2975,7 +3621,7 @@ static void test_dense_quant_model_rows(void) {
             continue;
         }
         memset(weights, 0, (size_t)weight_alloc);
-        for (uint32_t row = 0; row < out_dim; row++) {
+        for (row = 0; row < out_dim; row++) {
             TEST_ASSERT(q36_engine_debug_tensor_row_packed(
                 engine, tensor_name, row,
                 (uint8_t *)weights + (uint64_t)row * row_bytes, row_bytes,
@@ -2984,42 +3630,88 @@ static void test_dense_quant_model_rows(void) {
         if (type == 18u)
             memcpy((uint8_t *)weights + weight_bytes, weights,
                    (size_t)weight_bytes);
+        cv->tensors_tested = 1u;
+        cv->rows_tested = (uint32_t)out_dim;
 
-        static const uint32_t token_counts[] = {1u, 2u, 5u, 8u};
-        for (uint32_t tokens_i = 0;
-             tokens_i < sizeof(token_counts) / sizeof(token_counts[0]);
-             tokens_i++) {
+        for (tokens_i = 0; tokens_i < (uint32_t)N_TOKCASE; tokens_i++) {
             const uint32_t tokens = token_counts[tokens_i];
             const uint64_t x_count = (uint64_t)tokens * in_dim;
             const uint64_t out_count = (uint64_t)tokens * out_dim;
+            const uint32_t q8k_blocks = in_dim / (uint32_t)TEST_QK_K;
             float *x_host = malloc((size_t)x_count * sizeof(*x_host));
+            float *x_ref = malloc((size_t)x_count * sizeof(*x_ref));
             float *got = malloc((size_t)out_count * sizeof(*got));
             float *want = malloc((size_t)out_count * sizeof(*want));
+            test_block_q8_K *xq =
+                malloc((size_t)tokens * q8k_blocks * sizeof(*xq));
             q36_gpu_tensor *x = q36_gpu_tensor_alloc(x_count * sizeof(float));
             q36_gpu_tensor *out = q36_gpu_tensor_alloc(out_count * sizeof(float));
-            TEST_ASSERT(x_host && got && want && x && out);
-            if (!x_host || !got || !want || !x || !out) {
-                free(x_host); free(got); free(want);
+            uint64_t i;
+            uint32_t tok, blk_i;
+            double max_abs = 0.0, sum_abs = 0.0, rms = 0.0, ref_rms = 0.0, tol;
+            uint64_t worst_i = 0;
+            int modelled;
+            TEST_ASSERT(x_host && x_ref && got && want && xq && x && out);
+            TEST_ASSERT(in_dim % TEST_QK_K == 0);
+            if (!x_host || !x_ref || !got || !want || !xq || !x || !out ||
+                in_dim % TEST_QK_K != 0) {
+                free(x_host); free(x_ref); free(got); free(want); free(xq);
                 q36_gpu_tensor_free(x); q36_gpu_tensor_free(out);
                 continue;
             }
-            for (uint64_t i = 0; i < x_count; i++)
+            for (i = 0; i < x_count; i++)
                 x_host[i] = sinf((float)(i * 17u + type * 31u) * 0.013f)
                     * (0.25f + (float)(i % 11u) * 0.03125f);
-            for (uint32_t row = 0; row < out_dim; row++) {
-                TEST_ASSERT(q36_quant_dequantize(
-                    type, (const uint8_t *)weights + (uint64_t)row * row_bytes,
-                    dequant, in_dim));
-                for (uint32_t tok = 0; tok < tokens; tok++) {
-                    double sum = 0.0;
-                    for (uint32_t i = 0; i < in_dim; i++)
-                        sum += (double)dequant[i] * x_host[(uint64_t)tok * in_dim + i];
-                    want[(uint64_t)tok * out_dim + row] = (float)sum;
+
+            /* Every one of these kernels consumes a q8_K-quantized activation.
+             * A reference built from full-precision x measures the activation
+             * quantizer instead of the weight kernel and reads ~0.5 % relative
+             * error for every type, shipped ones included. Quantize x the same
+             * way the GPU does -- test_q8k_activation_parity proves this
+             * duplicate matches both production quantizers byte for byte. */
+            for (tok = 0; tok < tokens; tok++) {
+                for (blk_i = 0; blk_i < q8k_blocks; blk_i++) {
+                    const uint64_t off = (uint64_t)tok * in_dim +
+                        (uint64_t)blk_i * TEST_QK_K;
+                    test_block_q8_K *b = &xq[tok * q8k_blocks + blk_i];
+                    uint32_t j;
+                    test_quantize_q8_k(x_host + off, b);
+                    for (j = 0; j < (uint32_t)TEST_QK_K; j++)
+                        x_ref[off + j] = b->d * (float)b->qs[j];
                 }
             }
+
+            modelled = q2_family || tokens == 1u;
+            for (row = 0; row < out_dim; row++) {
+                const uint8_t *row_ptr =
+                    (const uint8_t *)weights + (uint64_t)row * row_bytes;
+                TEST_ASSERT(q36_quant_dequantize(type, row_ptr, dequant, in_dim));
+                for (tok = 0; tok < tokens; tok++) {
+                    if (tokens == 1u || !q2_family) {
+                        /* Decode is f32 throughout, and unmodelled MMQ kernels
+                         * get the f32 dot as their (loose) reference. */
+                        double sum = 0.0;
+                        for (i = 0; i < in_dim; i++)
+                            sum += (double)dequant[i] *
+                                   x_ref[(uint64_t)tok * in_dim + i];
+                        want[(uint64_t)tok * out_dim + row] = (float)sum;
+                    } else {
+                        want[(uint64_t)tok * out_dim + row] =
+                            test_mmq_q2_family_ref(
+                                row_ptr, &xq[tok * q8k_blocks], q8k_blocks,
+                                type == 142u ? 34u : 18u,
+                                type == 142u ? 2u : 4u,
+                                type == 142u ? 2u : 1u,
+                                type == 142u ? 3u : 1u,
+                                1.0f);
+                    }
+                }
+            }
+
             TEST_ASSERT(q36_gpu_tensor_write(
                 x, 0, x_host, x_count * sizeof(float)) != 0);
             TEST_ASSERT(q36_gpu_set_model_map(weights, weight_alloc) != 0);
+            {
             int ok = type <= 14
                 ? q36_gpu_matmul_k_quant_scaled_tensor(
                     out, weights, weight_alloc, 0, type, in_dim, out_dim,
@@ -3028,60 +3720,82 @@ static void test_dense_quant_model_rows(void) {
                     out, weights, weight_alloc, 0, type, in_dim, out_dim,
                     x, tokens, 1.0f);
             TEST_ASSERT(ok != 0);
+            }
             TEST_ASSERT(q36_gpu_tensor_read(
                 out, 0, got, out_count * sizeof(float)) != 0);
-            double max_abs = 0.0, rms = 0.0, ref_rms = 0.0;
-            for (uint64_t i = 0; i < out_count; i++) {
-                double d = (double)got[i] - want[i];
-                if (fabs(d) > max_abs) max_abs = fabs(d);
+
+            for (i = 0; i < out_count; i++) {
+                double d = (double)got[i] - (double)want[i];
+                if (fabs(d) > max_abs) { max_abs = fabs(d); worst_i = i; }
+                sum_abs += fabs(d);
                 rms += d * d;
-                ref_rms += (double)want[i] * want[i];
+                ref_rms += (double)want[i] * (double)want[i];
             }
             rms = sqrt(rms / (double)out_count);
             ref_rms = sqrt(ref_rms / (double)out_count);
+            cv->token_cases++;
+
+            tol = tokens == 1u ? decode_tol
+                               : (q2_family ? mmq_tol_f16 : mmq_tol_unmodelled);
             fprintf(stderr,
-                    "q36-test: dense quant %-7s tokens=%u tensor=%s max_abs=%.7g rel_rms=%.7g\n",
+                    "q36-test: dense quant %-7s tokens=%u tensor=%s in_dim=%u "
+                    "ref=%s\n"
+                    "q36-test:     max_abs=%.7g rel_rms=%.7g mean_abs=%.7g "
+                    "tol=%.3g\n"
+                    "q36-test:     worst tok=%u row=%u ref=%.9g gpu=%.9g "
+                    "abs=%.7g ulp=%u (row spans %u quant blocks at +%llu B)\n",
                     test_dense_quant_type_name(type), tokens, tensor_name,
-                    max_abs, rms / fmax(ref_rms, 1.0e-20));
+                    in_dim,
+                    tokens == 1u ? "f32-decode"
+                                 : (q2_family ? "f16-mmq" : "f32 (UNMODELLED)"),
+                    max_abs, rms / fmax(ref_rms, 1.0e-20),
+                    sum_abs / (double)out_count, tol,
+                    (uint32_t)(worst_i / out_dim), (uint32_t)(worst_i % out_dim),
+                    (double)want[worst_i], (double)got[worst_i],
+                    fabs((double)got[worst_i] - (double)want[worst_i]),
+                    test_f32_ulp_diff(got[worst_i], want[worst_i]),
+                    (uint32_t)(row_bytes / (type == 142u ? 34u :
+                                            (type == 42u ? 18u : 1u))),
+                    (unsigned long long)((worst_i % out_dim) * row_bytes));
+            if (!modelled) unmodelled_types++;
             TEST_ASSERT(isfinite(max_abs) && isfinite(rms));
-            TEST_ASSERT(max_abs < (tokens == 1 ? 1.0e-5 : 2.0e-3));
-            TEST_ASSERT(rms / fmax(ref_rms, 1.0e-20) <
-                        (tokens == 1 ? 1.0e-5 : 1.0e-3));
-#ifdef Q36_METAL
-            if (type == 18u && tokens == 1u) {
-                q36_gpu_tensor *out_b =
-                    q36_gpu_tensor_alloc(out_count * sizeof(float));
-                TEST_ASSERT(out_b != NULL);
-                if (out_b) {
-                    TEST_ASSERT(q36_gpu_matmul_iq3_xxs_pair_tensor(
-                        out, out_b, weights, weight_alloc,
-                        0, weight_bytes, in_dim, out_dim, x) != 0);
-                    TEST_ASSERT(q36_gpu_tensor_read(
-                        out, 0, got, out_count * sizeof(float)) != 0);
-                    double pair_max_abs = 0.0;
-                    for (uint64_t i = 0; i < out_count; i++)
-                        pair_max_abs = fmax(
-                            pair_max_abs, fabs((double)got[i] - want[i]));
-                    TEST_ASSERT(q36_gpu_tensor_read(
-                        out_b, 0, got, out_count * sizeof(float)) != 0);
-                    for (uint64_t i = 0; i < out_count; i++)
-                        pair_max_abs = fmax(
-                            pair_max_abs, fabs((double)got[i] - want[i]));
-                    fprintf(stderr,
-                            "q36-test: dense IQ3_XXS pair max_abs=%.7g\n",
-                            pair_max_abs);
-                    TEST_ASSERT(isfinite(pair_max_abs) &&
-                                pair_max_abs < 1.0e-5);
-                    q36_gpu_tensor_free(out_b);
-                }
-            }
-#endif
-            free(x_host); free(got); free(want);
+            TEST_ASSERT(rms / fmax(ref_rms, 1.0e-20) < tol);
+            if (tokens == 1u) TEST_ASSERT(max_abs < decode_tol);
+
+            free(x_host); free(x_ref); free(got); free(want); free(xq);
             q36_gpu_tensor_free(x); q36_gpu_tensor_free(out);
         }
         free(dequant);
         free(weights);
+        }
     }
+
+    /* Coverage has to be explicit per type: a different type executing must
+     * never let a present-but-skipped type report green. */
+    fprintf(stderr, "q36-test: dense quant coverage (model %s)\n",
+            test_model_path());
+    fprintf(stderr, "q36-test:   %-8s %-9s %-8s %-6s %-6s %s\n",
+            "type", "eligible", "tensors", "rows", "tokcase", "tensor");
+    for (ti = 0; ti < (uint32_t)N_TYPE; ti++) {
+        const test_dense_cov *cv = &cov[ti];
+        const int bad = cv->eligible != 0u &&
+            (cv->tensors_tested == 0u || cv->rows_tested == 0u ||
+             cv->token_cases != (uint32_t)N_TOKCASE);
+        if (cv->eligible == 0u && cv->tensors_tested == 0u) continue;
+        uncovered += (uint32_t)(bad ? 1 : 0);
+        fprintf(stderr, "q36-test:   %-8s %-9u %-8u %-6u %-6u %s%s\n",
+                test_dense_quant_type_name(cv->type), cv->eligible,
+                cv->tensors_tested, cv->rows_tested, cv->token_cases,
+                cv->tensor[0] ? cv->tensor : "-",
+                bad ? "   *** NOT COVERED ***" : "");
+    }
+    if (unmodelled_types)
+        fprintf(stderr,
+                "q36-test:   NOTE %u token-cases used the UNMODELLED f32 MMQ "
+                "reference at tol=%.3g -- not release grade\n",
+                unmodelled_types, mmq_tol_unmodelled);
+    TEST_ASSERT(uncovered == 0u);
+
     q36_gpu_set_dense_model(false);
     q36_gpu_cleanup();
     q36_engine_close(engine);
@@ -7123,6 +7837,8 @@ static const q36_test_entry test_entries[] = {
 #endif
     {"--vulkan-kernels", "vulkan-kernels", "isolated Vulkan-kernel numeric regressions", test_vulkan_kernels},
     {"--dense-quant-model-rows", "dense-quant-model-rows", "dense model quant kernels against CPU-dequantized GGUF rows", test_dense_quant_model_rows},
+    {"--q8k-activation-parity", "q8k-activation-parity", "GPU/CPU/test q8_K activation quantizers agree byte for byte", test_q8k_activation_parity},
+    {"--pq2-0-layout-oracle", "pq2-0-layout-oracle", "PQ2_0 block layout against hand-built blocks", test_pq2_0_layout_oracle},
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
 };
 

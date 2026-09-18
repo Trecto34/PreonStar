@@ -1,0 +1,15 @@
+To understand the difference between memory-bound and compute-bound GPU kernels, it helps to think of the GPU as a factory with two main resources: **workers** (CUDA cores) and **conveyor belts** (memory bandwidth).
+
+### 1. The Core Concept: The Bottleneck
+
+A GPU kernel is either **memory-bound** or **compute-bound** depending on which resource is the bottleneck limiting its performance.
+
+*   **Memory-Bound:** The GPU is waiting for data to arrive from or leave to global memory (HBM/GDDR). The compute units (CUDA cores) are often idle or underutilized because they are starved for data.
+*   **Compute-Bound:** The GPU is waiting for the arithmetic operations to finish. The memory system is able to feed data to the cores faster than the cores can process it, so the memory bandwidth is not the limiting factor.
+
+---
+
+### 2. Memory-Bound Kernels
+
+**Characteristics:**
+*

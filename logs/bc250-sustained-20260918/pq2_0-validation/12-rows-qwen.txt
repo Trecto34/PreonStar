@@ -1,0 +1,15 @@
+dense-quant-model-rows:
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-test: dense quant Q2_K    tokens=1 tensor=blk.0.ffn_down_exps.weight max_abs=7.566996e-09 rel_rms=1.007438e-07
+q36-test: dense quant Q2_K    tokens=2 tensor=blk.0.ffn_down_exps.weight max_abs=0.0002760217 rel_rms=0.003126272
+q36-test: dense quant Q2_K    tokens=5 tensor=blk.0.ffn_down_exps.weight max_abs=0.0002760217 rel_rms=0.002715908
+q36-test: dense quant Q2_K    tokens=8 tensor=blk.0.ffn_down_exps.weight max_abs=0.000295531 rel_rms=0.003064699
+q36-test: dense quant IQ2_XXS tokens=1 tensor=blk.0.ffn_gate_exps.weight max_abs=2.980232e-08 rel_rms=1.159542e-07
+q36-test: dense quant IQ2_XXS tokens=2 tensor=blk.0.ffn_gate_exps.weight max_abs=0.002748102 rel_rms=0.006137486
+q36-test: dense quant IQ2_XXS tokens=5 tensor=blk.0.ffn_gate_exps.weight max_abs=0.002748102 rel_rms=0.005135494
+q36-test: dense quant IQ2_XXS tokens=8 tensor=blk.0.ffn_gate_exps.weight max_abs=0.002748102 rel_rms=0.004972707
+q36-test: dense quant types exercised = 2
+dense-quant-model-rows: OK
+q36 tests: ok

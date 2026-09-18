@@ -1,6 +1,20 @@
 #version 460
 
 #ifdef Q36_Q2_0_ONLY
+/* Q2_0 and PQ2_0 share the 2-bit codec; only the group size differs (64
+ * weights / 18 B against 128 / 34 B).  Compile-time so the Q2_0 build's
+ * SPIR-V is unchanged -- see dense_extra_decode.comp for the same block. */
+#ifdef Q36_PQ2_0
+#define Q2_BLK_BYTES   34u
+#define Q2_BLK_PER_Q8K 2u
+#define Q2_LANE_SHIFT  2u
+#define Q2_LANE_MASK   3u
+#else
+#define Q2_BLK_BYTES   18u
+#define Q2_BLK_PER_Q8K 4u
+#define Q2_LANE_SHIFT  1u
+#define Q2_LANE_MASK   1u
+#endif
 #extension GL_EXT_control_flow_attributes : enable
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -65,9 +79,10 @@ void main(void) {
                 uint row = row0 + lr;
                 uint base_dst = lr * STRIDE + kw * 8u;
                 if (row < pc.out_dim) {
-                    uint base = row * pc.row_bytes + (qb * 4u + (slice >> 1u)) * 18u;
+                    uint base = row * pc.row_bytes +
+                        (qb * Q2_BLK_PER_Q8K + (slice >> Q2_LANE_SHIFT)) * Q2_BLK_BYTES;
                     float16_t d = float16_t(unpackHalf2x16(load_u16(base)).x * pc.scale);
-                    uint code_word = load_u32(base + 2u + (slice & 1u) * 8u + kw * 4u);
+                    uint code_word = load_u32(base + 2u + (slice & Q2_LANE_MASK) * 8u + kw * 4u);
                     [[unroll]] for (uint p = 0u; p < 4u; p++) {
                         uint bits = (code_word >> (p * 8u)) & 0xffu;
                         buf_a[base_dst + 2u * p] = f16vec2(

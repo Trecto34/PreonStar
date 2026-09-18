@@ -50,6 +50,12 @@
 #define Q36_Q4_0_BYTES 18u
 #define Q36_QK2_0 64u
 #define Q36_Q2_0_BYTES 18u
+/* PQ2_0 (Prism type 142) is the same 2-bit codec as Q2_0 with one f16
+ * scale per 128 weights instead of per 64: 34 B/128 = 2.125 bpw against
+ * Q2_0's 36 B/128 = 2.25.  Same field order, so the dequant differs only
+ * in the group size. */
+#define Q36_QK_PQ2_0 128u
+#define Q36_PQ2_0_BYTES 34u
 #define Q36_QK_K 256u
 #define Q36_K_SCALE_SIZE 12u
 #define Q36_Q8_K_BYTES 292u
@@ -275,6 +281,7 @@ static const gguf_type_info gguf_types[] = {
     [29] = {"iq1_m", 256, 56},
     [30] = {"bf16", 1, 2},
     [42] = {"q2_0", 64, 18},
+    [142] = {"pq2_0", 128, 34},
 };
 
 enum {
@@ -298,6 +305,7 @@ enum {
     Q36_TENSOR_IQ1_M = 29,
     Q36_TENSOR_BF16 = 30,
     Q36_TENSOR_Q2_0 = 42,
+    Q36_TENSOR_PQ2_0 = 142,
 };
 
 typedef struct {
@@ -354,6 +362,11 @@ typedef struct {
     uint16_t d;
     uint8_t qs[Q36_QK2_0 / 4u];
 } q36_block_q2_0;
+
+typedef struct {
+    uint16_t d;
+    uint8_t qs[Q36_QK_PQ2_0 / 4u];
+} q36_block_pq2_0;
 
 typedef struct {
     float d;
@@ -1902,6 +1915,7 @@ static bool tensor_nbytes(uint32_t type, uint64_t elements, uint64_t *bytes);
 static void q36_dequantize_row_q8_0(const q36_block_q8_0 *x, float *y, uint64_t k);
 static void q36_dequantize_row_bf16(const uint16_t *x, float *y, uint64_t k);
 static void q36_dequantize_row_q2_0(const q36_block_q2_0 *x, float *y, uint64_t k);
+static void q36_dequantize_row_pq2_0(const q36_block_pq2_0 *x, float *y, uint64_t k);
 static void q36_dequantize_row_q2_k(const q36_block_q2_k *x, float *y, uint64_t k);
 static void q36_dequantize_row_q3_k(const q36_block_q3_k *x, float *y, uint64_t k);
 static void q36_dequantize_row_q4_k(const q36_block_q4_k *x, float *y, uint64_t k);
@@ -1955,6 +1969,9 @@ static bool q36_dequantize_row_from_ptr(uint32_t type, const uint8_t *src, float
         return true;
     case Q36_TENSOR_Q2_0:
         q36_dequantize_row_q2_0((const q36_block_q2_0 *)src, dst, n);
+        return true;
+    case Q36_TENSOR_PQ2_0:
+        q36_dequantize_row_pq2_0((const q36_block_pq2_0 *)src, dst, n);
         return true;
     case Q36_TENSOR_Q2_K:
         q36_dequantize_row_q2_k((const q36_block_q2_k *)src, dst, n);
@@ -2037,6 +2054,19 @@ static void q36_dequantize_row_q2_0(const q36_block_q2_0 *x, float *y, uint64_t 
     for (uint64_t i = 0; i < nb; i++) {
         float d = q36_f16_to_f32(x[i].d);
         for (uint32_t j = 0; j < Q36_QK2_0; j++) {
+            uint8_t q = (uint8_t)((x[i].qs[j / 4u] >> ((j % 4u) * 2u)) & 0x03u);
+            *y++ = (float)((int)q - 1) * d;
+        }
+    }
+}
+
+static void q36_dequantize_row_pq2_0(const q36_block_pq2_0 *x, float *y, uint64_t k) {
+    uint64_t nb;
+    if ((k % Q36_QK_PQ2_0) != 0) q36_die("pq2_0 row size mismatch");
+    nb = k / Q36_QK_PQ2_0;
+    for (uint64_t i = 0; i < nb; i++) {
+        float d = q36_f16_to_f32(x[i].d);
+        for (uint32_t j = 0; j < Q36_QK_PQ2_0; j++) {
             uint8_t q = (uint8_t)((x[i].qs[j / 4u] >> ((j % 4u) * 2u)) & 0x03u);
             *y++ = (float)((int)q - 1) * d;
         }
@@ -2508,6 +2538,7 @@ static bool q36_tensor_type_supports_q8k_dot(uint32_t type) {
     switch (type) {
     case Q36_TENSOR_BF16:
     case Q36_TENSOR_Q2_0:
+    case Q36_TENSOR_PQ2_0:
     case Q36_TENSOR_Q2_K:
     case Q36_TENSOR_Q3_K:
     case Q36_TENSOR_Q4_K:
@@ -4185,6 +4216,7 @@ static bool tensor_type_is_cpu_matrix(uint32_t type) {
     case Q36_TENSOR_BF16:
     case Q36_TENSOR_Q8_0:
     case Q36_TENSOR_Q2_0:
+    case Q36_TENSOR_PQ2_0:
     case Q36_TENSOR_Q2_K:
     case Q36_TENSOR_Q3_K:
     case Q36_TENSOR_Q4_K:
@@ -4285,6 +4317,7 @@ static int q36_quant_bits_from_type(uint32_t type) {
     case Q36_TENSOR_IQ2_XS:
     case Q36_TENSOR_IQ2_S:
     case Q36_TENSOR_Q2_0:
+    case Q36_TENSOR_PQ2_0:
     case Q36_TENSOR_Q2_K:
         return 2;
     case Q36_TENSOR_IQ3_XXS:
@@ -6079,6 +6112,7 @@ static bool q36_gpu_tensor_matmul_q8_scaled(const q36_model *m,
         return q36_gpu_matmul_k_quant_q8_scaled_tensor(out, m->map, m->size, t->abs_offset,
                                                         t->type, in_dim, out_dim, xq, n_tok, scale) != 0;
     case Q36_TENSOR_Q2_0:
+    case Q36_TENSOR_PQ2_0:
     case Q36_TENSOR_IQ3_XXS:
     case Q36_TENSOR_IQ3_S:
     case Q36_TENSOR_IQ2_XXS:
@@ -10910,6 +10944,17 @@ int q36_engine_debug_first_tensor_of_type(q36_engine *e, uint32_t type, char *na
         return 0;
     }
     return 1;
+}
+
+uint32_t q36_engine_debug_count_tensors_of_type(q36_engine *e, uint32_t type) {
+    uint32_t n = 0;
+    if (!e) return 0;
+    for (uint64_t i = 0; i < e->model.n_tensors; i++) {
+        q36_tensor *t = &e->model.tensors[i];
+        if (t->type != type || t->ndim == 0 || t->dim[0] == 0) continue;
+        n++;
+    }
+    return n;
 }
 
 int q36_engine_debug_tensor_row_packed(q36_engine *e, const char *tensor_name, uint64_t row,
