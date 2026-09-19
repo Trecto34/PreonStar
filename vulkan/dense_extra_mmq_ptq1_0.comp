@@ -7,7 +7,10 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-shared int sh_sum[64];
+/* local_size_x=64 spans 2 subgroups at wave32 (forced on this shader,
+ * see q36_vulkan.c force_wave32) but 1 at wave64 -- size for the worst
+ * case (min subgroup size on this device is 32). */
+shared int sh_sum[2];
 
 layout(set = 0, binding = 0) readonly buffer Weights { uint8_t wb[]; };
 layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
@@ -97,16 +100,18 @@ void main(void) {
                     uint a = pb * 128u + p;
                     s += weight_at(base, p) * q8_at(tok, b, a);
                 }
-                sh_sum[lid] = s;
+                /* Two-level reduction: subgroupAdd within each subgroup
+                 * (fast, correct regardless of wave width), then one
+                 * cheap cross-subgroup combine -- a bare subgroupAdd
+                 * alone would silently sum only half the lanes under
+                 * the wave32 forced on this shader. */
+                int local = subgroupAdd(s);
+                if (subgroupElect()) sh_sum[gl_SubgroupID] = local;
                 barrier();
-                /* Parallel reduction in shared memory */
-                for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-                    if (lid < stride) {
-                        sh_sum[lid] += sh_sum[lid + stride];
-                    }
-                    barrier();
-                }
-                int total = sh_sum[0];
+                int total = 0;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) total += sh_sum[sg];
+                barrier(); /* every lane must finish reading sh_sum before the
+                            * next (pb,b) iteration's elected lane overwrites it */
                 acc[r] = fma(wd * yd, float(total), acc[r]);
             }
         }
