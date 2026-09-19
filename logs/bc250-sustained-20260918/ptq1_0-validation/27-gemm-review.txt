@@ -1,0 +1,23 @@
+Reviewer (Code Reviewer preset OpenCode) independent review of PTQ1_0 LDS GEMM kernel:
+
+1. Mathematical Equivalence:
+   - Kernel preserves integer dot product accumulation across 128 weights in sum[8][4] before applying fma(wd * yd, float(sum), acc_f32).
+   - This exactly preserves the order-free integer arithmetic contract of q36_contract_mmq_ptq1_dot, avoiding the float16 precision drift observed in float GEMM attempts.
+
+2. LDS Footprint & Bank Conflicts:
+   - buf_a: 32 * 33 = 1056 bytes.
+   - buf_b: 64 * 33 = 2112 bytes.
+   - Total LDS: 3168 bytes (~3.17 KB), well under CU hardware limits.
+   - STRIDE = 33 provides a 1-byte offset per row/token, preventing power-of-two bank conflicts during column-wise K reads.
+
+3. Synchronization & Wave Topology:
+   - Two barriers per 32-weight slice (one after collaborative load into LDS, one before next slice load).
+   - Zero inner-loop reduction barriers.
+   - Under force_wave32, wave 0 covers tokens 0..31, wave 1 covers tokens 32..63; all 64 threads participate uniformly in collaborative loading.
+
+4. Host Dispatch & Boundaries:
+   - grid_x = (out_dim + 31) / 32
+   - grid_y = (n_tok + 63) / 64
+   - Tail checks guard out_dim and n_tok on both LDS load and final global store.
+
+Conclusion: APPROVED. Architecture is verified sound, bit-exact, and barrier-optimal.

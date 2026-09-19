@@ -41,20 +41,39 @@ Expanded to `ROWS = 8u` and `TOK_TILE = 16u`:
 5. Independent review: delegated to Reviewer via Maestri canvas, approved
    (file `23-toktile16-review.txt`).
 6. Saturation diagnosed: Inner-loop reduction architecture executes 32 barriers per block
-   and 256 serialized subgroupAdd operations per workgroup. Further scaling within
-   this reduction-based loop is saturated. Reaching >100 tok/s requires full LDS-staged GEMM.
+**Root cause #2 (step 3 complete: Integer-accumulated LDS GEMM architecture):**
+Shifted from reduction-loop kernel to full LDS GEMM tile:
+1. Geometry: `BM = 32u` rows, `BN = 64u` tokens, `BK = 32u` weights per slice, `STRIDE = 33u`.
+2. Staging: `buf_a[32*33]` (1,056 B) and `buf_b[64*33]` (2,112 B) in int8 LDS (3.17 KB total).
+3. Integer register accumulation: `int sum[8][4]` accumulates order-free integer dot products
+   over 128 weights, then converts to float with `fma(wd * yd, float(sum), acc_f32)`.
+   Preserves exact mathematical equivalence to `q36_contract_mmq_ptq1_dot` without float16 drift.
+4. Barrier elimination: Completely eliminates all 2,176 inner-loop reduction barriers;
+   only 2 barriers per 32-weight slice for LDS loading.
+5. Correctness: verified bit-exact vs CPU oracle across all tensors/rows/token counts
+   (file `25-gemm-int-correctness.txt`, diff vs `18` empty).
+6. Layout oracle: passes (`--ptq1-0-layout-oracle`, 240 checks, 0 failures, 0 worst error).
+7. Prefill throughput: measured **33.92 tok/s** (chunk 64, file `26-gemm-prefill64.txt`),
+   +271% over step 2 (9.13 tok/s), and **12.61x over original baseline (2.69 tok/s)**.
+8. Independent review: delegated to Reviewer via Maestri canvas, approved
+   (file `27-gemm-review.txt`).
+9. Long-term memory: Persistently recorded in `mem0` vector store (`q36-opt-27b`).
 
 ## Repo / evidence state
 
 - Branch `trackB-ptq1_0`, clean, ahead of `e9f794b`.
 - `gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf` (5946.6 MB, 402 type-143 tensors).
-- Evidence files `00`–`23` in this dir, chronological, all real/file-backed:
+- Evidence files `00`–`27` in this dir, chronological, all real/file-backed:
   - `18-toktile8-correctness.txt`: bit-exact test log (TOK_TILE=8).
   - `19-toktile8-prefill64.txt`: 9.01 tok/s benchmark log.
   - `20-toktile8-review.txt`: independent review from Reviewer (OpenCode) via Maestri.
   - `21-toktile16-correctness.txt`: bit-exact test log (ROWS=8, TOK_TILE=16).
   - `22-toktile16-prefill64.txt`: 9.13 tok/s benchmark log.
   - `23-toktile16-review.txt`: independent review from Reviewer (OpenCode) via Maestri.
+  - `24-gemm-correctness.txt`: initial float16 GEMM drift diagnosis.
+  - `25-gemm-int-correctness.txt`: bit-exact integer GEMM test log (BM=32, BN=64).
+  - `26-gemm-prefill64.txt`: 33.92 tok/s benchmark log.
+  - `27-gemm-review.txt`: independent review from Reviewer (OpenCode) via Maestri.
 - Canvas notes "Recent Optimizations", "Optimizations & Speedups", and "Track B Coordination"
   updated in real time via Maestri CLI.
 - GPU lock `/tmp/q36-gpu.lock` free, no process holding it at stand-down.

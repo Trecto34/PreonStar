@@ -8310,10 +8310,10 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                 ok = q36_vk_run_unlocked(
                     op, mmq_kernel,
                     bindings, &push, sizeof(push),
-                    is_ptq1_0 ? ((uint32_t)out_dim + 7u) / 8u :
+                    is_ptq1_0 ? ((uint32_t)out_dim + 31u) / 32u :
                     (is_q2_0 ? ((uint32_t)out_dim + 63u) / 64u :
                                 ((uint32_t)out_dim + 31u) / 32u),
-                    is_ptq1_0 ? ((uint32_t)n_tok + 15u) / 16u :
+                    is_ptq1_0 ? ((uint32_t)n_tok + 63u) / 64u :
                                 ((uint32_t)n_tok + 127u) / 128u,
                     1);
             }

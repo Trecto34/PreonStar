@@ -1,19 +1,9 @@
 #version 460
-#extension GL_KHR_shader_subgroup_basic : require
-#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
-#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_shader_subgroup_basic : require
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-
-const uint TOK_TILE = 16u;
-
-/* local_size_x=64 spans 2 subgroups at wave32 (forced on this shader,
- * see q36_vulkan.c force_wave32) but 1 at wave64 -- size for the worst
- * case (min subgroup size on this device is 32).
- * Each token in the tile gets one slot per subgroup. */
-shared int sh_sum[TOK_TILE][2];
 
 layout(set = 0, binding = 0) readonly buffer Weights { uint8_t wb[]; };
 layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
@@ -29,11 +19,16 @@ layout(push_constant) uniform Push {
     float scale;
 } pc;
 
-const uint ROWS = 8u;
+const uint BM = 32u;
+const uint BN = 64u;
+const uint BK = 32u;
+const uint STRIDE = BK + 1u; // 33 bytes to avoid LDS bank conflicts
 const uint Q8K_WORDS = 74u;
-const uint QK_PTQ1_0 = 128u;
 const uint PTQ1_0_BYTES = 28u;
 const uint PTQ1_0_BLKS_PER_Q8K = 2u;
+
+shared int8_t buf_a[BM * STRIDE];
+shared int8_t buf_b[BN * STRIDE];
 
 uint load_u8(uint off) {
     return uint(wb[off]);
@@ -47,16 +42,8 @@ float f16_to_f32(uint h) {
     return unpackHalf2x16(h & 0xffffu).x;
 }
 
-/* int8 q8 activation for token `tok`, q8_K block `b`, element `j`. */
-int q8_at(uint tok, uint b, uint j) {
-    uint w = q8[(tok * pc.blocks + b) * Q8K_WORDS + 2u + (j >> 2u)];
-    int v = int((w >> (8u * (j & 3u))) & 0xffu);
-    return (v & 0x80) != 0 ? v - 256 : v;
-}
-
 const uint pow3[5] = {1u, 3u, 9u, 27u, 81u};
 
-/* Ternary weight value in {-1,0,1} at position p of a PTQ1_0 block. */
 int weight_at(uint base, uint p) {
     uint byte; uint n;
     if (p < 80u) {
@@ -77,68 +64,123 @@ int weight_at(uint base, uint p) {
 
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
-    uint first_row = gl_WorkGroupID.x * ROWS;
-    uint tok0 = gl_WorkGroupID.y * TOK_TILE;
+    uint row0 = gl_WorkGroupID.x * BM;
+    uint tok0 = gl_WorkGroupID.y * BN;
+    uint wave = gl_SubgroupID;
+    uint lane = gl_SubgroupInvocationID;
+    uint lane_row = lane & 3u;
+    uint lane_tok = lane >> 2u;
 
-    if (tok0 >= pc.n_tok) return;
+    int sum[8][4];
+    float acc_f32[8][4];
 
-    float acc[ROWS];
-    [[unroll]] for (uint r = 0u; r < ROWS; r++) acc[r] = 0.0f;
-
-    for (uint b = 0u; b < pc.blocks; b++) {
-        float yd = 0.0f;
-        if (lid < TOK_TILE) {
-            uint my_tok = tok0 + lid;
-            if (my_tok < pc.n_tok) {
-                yd = uintBitsToFloat(q8[(my_tok * pc.blocks + b) * Q8K_WORDS]);
-            }
+    [[unroll]] for (uint r = 0u; r < 8u; r++) {
+        [[unroll]] for (uint t = 0u; t < 4u; t++) {
+            sum[r][t] = 0;
+            acc_f32[r][t] = 0.0f;
         }
+    }
 
-        [[unroll]] for (uint r = 0u; r < ROWS; r++) {
-            uint row = first_row + r;
-            if (row >= pc.out_dim) continue;
+    for (uint qb = 0u; qb < pc.blocks; qb++) {
+        for (uint slice = 0u; slice < 8u; slice++) {
+            uint pb = slice >> 2u;
+            uint inner_slice = slice & 3u;
 
-            for (uint pb = 0u; pb < PTQ1_0_BLKS_PER_Q8K; pb++) {
-                uint qblock = PTQ1_0_BLKS_PER_Q8K * b + pb;
-                uint base = row * pc.row_bytes + qblock * PTQ1_0_BYTES;
-                float wd = f16_to_f32(load_u16(base + 26u));
-
-                // Decode 2 weights per thread once per (row, pb) and reuse across token tile
-                int w0 = weight_at(base, lid);
-                int w1 = weight_at(base, lid + 64u);
-                uint a0 = pb * 128u + lid;
-                uint a1 = pb * 128u + (lid + 64u);
-
-                for (uint t = 0u; t < TOK_TILE; t++) {
-                    uint tok = tok0 + t;
-                    if (tok >= pc.n_tok) break;
-
-                    int s = w0 * q8_at(tok, b, a0) + w1 * q8_at(tok, b, a1);
-                    int local = subgroupAdd(s);
-                    if (subgroupElect()) sh_sum[t][gl_SubgroupID] = local;
-                }
-                barrier();
-
-                if (lid < TOK_TILE) {
-                    uint my_tok = tok0 + lid;
-                    if (my_tok < pc.n_tok) {
-                        int total = 0;
-                        for (uint sg = 0u; sg < gl_NumSubgroups; sg++) total += sh_sum[lid][sg];
-                        acc[r] = fma(wd * yd, float(total), acc[r]);
+            // Load weights: BM=32 rows, 32 weights per row.
+            // 64 threads: each thread loads 16 weights (2 threads per row).
+            {
+                uint lr = lid >> 1u;
+                uint kw = lid & 1u;
+                uint row = row0 + lr;
+                uint kw_start = inner_slice * 32u + kw * 16u;
+                uint base_dst = lr * STRIDE + kw * 16u;
+                if (row < pc.out_dim) {
+                    uint base = row * pc.row_bytes + (qb * PTQ1_0_BLKS_PER_Q8K + pb) * PTQ1_0_BYTES;
+                    [[unroll]] for (uint p = 0u; p < 16u; p++) {
+                        buf_a[base_dst + p] = int8_t(weight_at(base, kw_start + p));
+                    }
+                } else {
+                    [[unroll]] for (uint p = 0u; p < 16u; p++) {
+                        buf_a[base_dst + p] = int8_t(0);
                     }
                 }
-                barrier();
+            }
+
+            // Load activations: BN=64 tokens, 32 int8 per token.
+            // 64 threads: 2 iterations of 16 int8 per thread.
+            [[unroll]] for (uint step = 0u; step < 2u; step++) {
+                uint idx = step * 64u + lid;
+                uint lt = idx >> 1u;
+                uint kw = idx & 1u;
+                uint tok = tok0 + lt;
+                uint base_dst = lt * STRIDE + kw * 16u;
+                if (tok < pc.n_tok) {
+                    uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
+                    [[unroll]] for (uint w = 0u; w < 4u; w++) {
+                        uint word = q8[qbase + 2u + slice * 8u + kw * 4u + w];
+                        buf_b[base_dst + w * 4u + 0u] = int8_t(bitfieldExtract(int(word), 0, 8));
+                        buf_b[base_dst + w * 4u + 1u] = int8_t(bitfieldExtract(int(word), 8, 8));
+                        buf_b[base_dst + w * 4u + 2u] = int8_t(bitfieldExtract(int(word), 16, 8));
+                        buf_b[base_dst + w * 4u + 3u] = int8_t(bitfieldExtract(int(word), 24, 8));
+                    }
+                } else {
+                    [[unroll]] for (uint p = 0u; p < 16u; p++) {
+                        buf_b[base_dst + p] = int8_t(0);
+                    }
+                }
+            }
+
+            barrier();
+
+            // Register tile computation: 32 K elements
+            [[unroll]] for (uint k = 0u; k < BK; k++) {
+                int a[8];
+                [[unroll]] for (uint r = 0u; r < 8u; r++) {
+                    a[r] = int(buf_a[(r * 4u + lane_row) * STRIDE + k]);
+                }
+                int b[4];
+                [[unroll]] for (uint t = 0u; t < 4u; t++) {
+                    b[t] = int(buf_b[(wave * 32u + lane_tok * 4u + t) * STRIDE + k]);
+                }
+                [[unroll]] for (uint r = 0u; r < 8u; r++) {
+                    [[unroll]] for (uint t = 0u; t < 4u; t++) {
+                        sum[r][t] += a[r] * b[t];
+                    }
+                }
+            }
+
+            barrier();
+
+            // End of 128-weight PTQ1_0 block (every 4 slices): accumulate into float acc_f32
+            if (inner_slice == 3u) {
+                [[unroll]] for (uint r = 0u; r < 8u; r++) {
+                    uint row = row0 + r * 4u + lane_row;
+                    float wd = 0.0f;
+                    if (row < pc.out_dim) {
+                        uint base = row * pc.row_bytes + (qb * PTQ1_0_BLKS_PER_Q8K + pb) * PTQ1_0_BYTES;
+                        wd = f16_to_f32(load_u16(base + 26u));
+                    }
+                    [[unroll]] for (uint t = 0u; t < 4u; t++) {
+                        uint tok = tok0 + wave * 32u + lane_tok * 4u + t;
+                        float yd = 0.0f;
+                        if (tok < pc.n_tok) {
+                            yd = uintBitsToFloat(q8[(tok * pc.blocks + qb) * Q8K_WORDS]);
+                        }
+                        acc_f32[r][t] = fma(wd * yd, float(sum[r][t]), acc_f32[r][t]);
+                        sum[r][t] = 0;
+                    }
+                }
             }
         }
     }
 
-    if (lid < TOK_TILE) {
-        uint my_tok = tok0 + lid;
-        if (my_tok < pc.n_tok) {
-            [[unroll]] for (uint r = 0u; r < ROWS; r++) {
-                uint row = first_row + r;
-                if (row < pc.out_dim) {
-                    y[my_tok * pc.out_dim + row] = acc[r] * pc.scale;
+    [[unroll]] for (uint r = 0u; r < 8u; r++) {
+        uint row = row0 + r * 4u + lane_row;
+        if (row < pc.out_dim) {
+            [[unroll]] for (uint t = 0u; t < 4u; t++) {
+                uint tok = tok0 + wave * 32u + lane_tok * 4u + t;
+                if (tok < pc.n_tok) {
+                    y[tok * pc.out_dim + row] = acc_f32[r][t] * pc.scale;
                 }
             }
         }

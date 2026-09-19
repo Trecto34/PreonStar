@@ -1,0 +1,65 @@
+dense-quant-model-rows:
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-test: dense quant PTQ1_0  tokens=1 tensor=output.weight in_dim=5120 ref=f32-decode
+q36-test:     max_abs=1.192093e-07 rel_rms=1.593752e-07 mean_abs=3.306195e-08 tol=1e-05
+q36-test:     worst tok=0 row=3 ref=-0.38587445 gpu=-0.385874569 abs=1.192093e-07 ulp=4 (row spans 40 quant blocks at +3360 B)
+q36-test:     f16-contract vs f32 reference: max_abs=8.940697e-08 rms=3.900313e-08 (by design; diagnostic, not a kernel error)
+q36-test: dense quant PTQ1_0  tokens=2 tensor=output.weight in_dim=5120 ref=ptq1-mmq
+q36-test:     max_abs=0.004837364 rel_rms=0.005901048 mean_abs=0.001139328 tol=0.00049
+q36-test:     worst tok=0 row=1 ref=0.291946739 gpu=0.287109375 abs=0.004837364 ulp=162315 (row spans 40 quant blocks at +1120 B)
+tests/q36_test.c:3885: assertion failed: rms / fmax(ref_rms, 1.0e-20) < tol
+q36-test:     f16-contract vs f32 reference: max_abs=8.940697e-08 rms=3.328664e-08 (by design; diagnostic, not a kernel error)
+q36-test: dense quant PTQ1_0  tokens=4 tensor=output.weight in_dim=5120 ref=ptq1-mmq
+q36-test:     max_abs=0.004837364 rel_rms=0.007340084 mean_abs=0.001327494 tol=0.00049
+q36-test:     worst tok=0 row=1 ref=0.291946739 gpu=0.287109375 abs=0.004837364 ulp=162315 (row spans 40 quant blocks at +1120 B)
+tests/q36_test.c:3885: assertion failed: rms / fmax(ref_rms, 1.0e-20) < tol
+q36-test:     f16-contract vs f32 reference: max_abs=8.940697e-08 rms=3.515786e-08 (by design; diagnostic, not a kernel error)
+q36-test: dense quant PTQ1_0  tokens=8 tensor=output.weight in_dim=5120 ref=ptq1-mmq
+q36-test:     max_abs=0.005233228 rel_rms=0.007740354 mean_abs=0.001489932 tol=0.00049
+q36-test:     worst tok=6 row=6 ref=-0.410049975 gpu=-0.415283203 abs=0.005233228 ulp=175598 (row spans 40 quant blocks at +6720 B)
+tests/q36_test.c:3885: assertion failed: rms / fmax(ref_rms, 1.0e-20) < tol
+q36-test: dense quant PTQ1_0  tokens=1 tensor=blk.0.ffn_down.weight in_dim=17408 ref=f32-decode
+q36-test:     max_abs=9.685755e-08 rel_rms=5.036112e-07 mean_abs=5.436596e-08 tol=1e-05
+q36-test:     worst tok=0 row=2 ref=-0.0947420895 gpu=-0.0947421864 abs=9.685755e-08 ulp=13 (row spans 136 quant blocks at +7616 B)
+q36-test:     f16-contract vs f32 reference: max_abs=1.359731e-07 rms=5.072343e-08 (by design; diagnostic, not a kernel error)
+q36-test: dense quant PTQ1_0  tokens=2 tensor=blk.0.ffn_down.weight in_dim=17408 ref=ptq1-mmq
+q36-test:     max_abs=0.005692869 rel_rms=0.01351645 mean_abs=0.002296394 tol=0.00049
+q36-test:     worst tok=0 row=0 ref=0.183638185 gpu=0.189331055 abs=0.005692869 ulp=382042 (row spans 136 quant blocks at +0 B)
+tests/q36_test.c:3885: assertion failed: rms / fmax(ref_rms, 1.0e-20) < tol
+q36-test:     f16-contract vs f32 reference: max_abs=1.359731e-07 rms=4.854756e-08 (by design; diagnostic, not a kernel error)
+q36-test: dense quant PTQ1_0  tokens=4 tensor=blk.0.ffn_down.weight in_dim=17408 ref=ptq1-mmq
+q36-test:     max_abs=0.009979144 rel_rms=0.01775468 mean_abs=0.002571128 tol=0.00049
+q36-test:     worst tok=2 row=7 ref=-0.158233747 gpu=-0.168212891 abs=0.009979144 ulp=669689 (row spans 136 quant blocks at +26656 B)
+tests/q36_test.c:3885: assertion failed: rms / fmax(ref_rms, 1.0e-20) < tol
+q36-test:     f16-contract vs f32 reference: max_abs=2.533197e-07 rms=6.007361e-08 (by design; diagnostic, not a kernel error)
+q36-test: dense quant PTQ1_0  tokens=8 tensor=blk.0.ffn_down.weight in_dim=17408 ref=ptq1-mmq
+q36-test:     max_abs=0.02581014 rel_rms=0.02375937 mean_abs=0.002818238 tol=0.00049
+q36-test:     worst tok=4 row=7 ref=0.168892011 gpu=0.194702148 abs=0.02581014 ulp=1732089 (row spans 136 quant blocks at +26656 B)
+tests/q36_test.c:3885: assertion failed: rms / fmax(ref_rms, 1.0e-20) < tol
+q36-test: dense quant PTQ1_0  tokens=1 tensor=blk.0.ssm_out.weight in_dim=6144 ref=f32-decode
+q36-test:     max_abs=5.960464e-08 rel_rms=1.166973e-07 mean_abs=3.352761e-08 tol=1e-05
+q36-test:     worst tok=0 row=6 ref=-0.441125661 gpu=-0.441125721 abs=5.960464e-08 ulp=2 (row spans 48 quant blocks at +8064 B)
+q36-test:     f16-contract vs f32 reference: max_abs=1.192093e-07 rms=5.425703e-08 (by design; diagnostic, not a kernel error)
+q36-test: dense quant PTQ1_0  tokens=2 tensor=blk.0.ssm_out.weight in_dim=6144 ref=ptq1-mmq
+q36-test:     max_abs=0.004624858 rel_rms=0.007026377 mean_abs=0.001652173 tol=0.00049
+q36-test:     worst tok=0 row=3 ref=-0.175062642 gpu=-0.1796875 abs=0.004624858 ulp=310369 (row spans 48 quant blocks at +4032 B)
+tests/q36_test.c:3885: assertion failed: rms / fmax(ref_rms, 1.0e-20) < tol
+q36-test:     f16-contract vs f32 reference: max_abs=1.192093e-07 rms=4.750658e-08 (by design; diagnostic, not a kernel error)
+q36-test: dense quant PTQ1_0  tokens=4 tensor=blk.0.ssm_out.weight in_dim=6144 ref=ptq1-mmq
+q36-test:     max_abs=0.01054862 rel_rms=0.01023276 mean_abs=0.001925337 tol=0.00049
+q36-test:     worst tok=2 row=7 ref=-0.269968957 gpu=-0.280517578 abs=0.01054862 ulp=353953 (row spans 48 quant blocks at +9408 B)
+tests/q36_test.c:3885: assertion failed: rms / fmax(ref_rms, 1.0e-20) < tol
+q36-test:     f16-contract vs f32 reference: max_abs=1.192093e-07 rms=4.317396e-08 (by design; diagnostic, not a kernel error)
+q36-test: dense quant PTQ1_0  tokens=8 tensor=blk.0.ssm_out.weight in_dim=6144 ref=ptq1-mmq
+q36-test:     max_abs=0.01054862 rel_rms=0.009336139 mean_abs=0.001849056 tol=0.00049
+q36-test:     worst tok=2 row=7 ref=-0.269968957 gpu=-0.280517578 abs=0.01054862 ulp=353953 (row spans 48 quant blocks at +9408 B)
+tests/q36_test.c:3885: assertion failed: rms / fmax(ref_rms, 1.0e-20) < tol
+q36-test: dense quant coverage (model gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf)
+q36-test:   type     eligible  tensors  rows   tokcase tensor
+q36-test:   PTQ1_0   402       3        24     12     blk.0.ssm_out.weight
+q36-test:   f16 contract differs from f32 reference in 9/9 q2 MMQ cases (expected)
+dense-quant-model-rows: ERR
+q36 tests: 9 failure(s)
