@@ -370,3 +370,65 @@ fresh implementation pass.
 Session priority shifted: investigate github.com/sudoingX/bonsai2-small-gpu
 (user-provided) as a second reference for the ternary (QT2/PQ2_0) question,
 possibly resuming that track instead of continuing this auto-tuner effort.
+
+## MTP speculative decoding on Qwen3.8-27B: root-caused regression (2026-09-19)
+
+Verified independently (Nova) that q36's in-file MTP speculative decoding
+(commit 67f3e7e, feat/qwen38-opt) is a real, reproducible net regression on
+this hardware, not a config-tuning problem.
+
+### Corrected baseline (draft=1, no speculation, 3 reps)
+17.55 / 16.46 / 16.08 tok/s (avg ~16.7), Swift-Qwen3.8-27B-IQ3_XXS.gguf,
+ctx 2048, prefill-chunk 256, tests/long_context_story_prompt.txt. (A separate
+earlier single-run measurement this session got 22.25 tok/s on the same
+setup - same order of magnitude, some run-to-run variance on this box.)
+
+### Margin sweep (draft=4, 3 interleaved reps each, results in
+logs/splash-investigation/mtp-margin-sweep.csv)
+
+| margin | gen_tps (avg of 3 reps) | spec_avg_accept |
+|---|---:|---:|
+| 0.5 | ~3.1 | 2.024 |
+| 1.0 | ~4.2 | 1.519 |
+| 1.5 | ~5.1 | 1.380 |
+| 2.0 | ~8.9 | 1.166 |
+
+Monotonic and tightly reproducible across reps (real signal). Best case
+tested (margin 2.0) is still ~half of plain greedy decode.
+
+### Root cause (file:line cited, Nova)
+The post-verification accept/commit path is already properly batched:
+full-accept uses one call (`q36_vulkan_update_last_h`, q36.c:11514),
+partial-accept replays with one batched call (`q36_forward_tokens_vulkan`,
+q36.c:11529, explicitly commented "as one batch"), and the only per-token
+loop after verification (q36.c:11538-11541) is just `q36_tokens_push`
+(q36.c:1555-1561), an O(1) amortized append - not a plausible cost source.
+
+The real cost is in the DRAFT's own self-extension: each additional draft
+token requires its own full GPU dispatch+sync+readback round trip, because
+sampling token N+1 needs token N's sampled output first - inherently
+sequential, up to `mtp_draft_tokens - 1` = 3 extra round trips per outer
+step. The margin gate (q36.c:11463 before the loop starts, q36.c:11486
+inside it) controls how many of those round trips actually run: low margin
+(0.5) rarely trips the gate early, so the loop usually runs its full 3 extra
+iterations (slow, but nets more accepted tokens, avg 2.024); high margin
+(2.0) trips the gate almost immediately, often before the loop body executes
+even once, skipping nearly all the overhead (fast, but accepts close to 1
+token/round, avg 1.166).
+
+**This is a structural cost, not a missing-batching bug**: fixed
+dispatch/sync overhead per tiny batch-1 GPU call dominates when repeated up
+to 3x per round on this backend. Connects directly to the earlier Splash
+finding (Finding 2, DFlash): DFlash's design - score multiple draft
+candidates in ONE dispatch via a learned predecessor/successor compatibility
+table, instead of one-token-at-a-time autoregressive recursion - directly
+targets this exact bottleneck. DFlash was earlier deprioritized (this
+session, Grendel review) as "high effort, uncertain payoff" relative to the
+KV sparse-binding idea; this finding is evidence its core mechanism solves a
+real, now-measured problem on this hardware, not a hypothetical one.
+
+**Disposition:** no code changed. Open question for next session/user
+direction: scope a fix for the draft self-extension round-trip cost
+(narrower, faster: e.g. batch the draft's own autoregressive steps into
+fewer dispatches, or cap draft depth lower than 4), or treat this as
+validating DFlash and revisit that as a larger effort.
