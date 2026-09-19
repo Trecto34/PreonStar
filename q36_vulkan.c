@@ -1657,7 +1657,7 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
     if (q36_vk.subgroup_size_control && force_wave32) {
         stage.pNext = &subgroup_size;
         stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
-    } else if (q36_vk.subgroup_size_control && q36_vk.subgroup_size == 64u && force_wave64) {
+    } else if (q36_vk.subgroup_size_control && q36_vk.subgroup_size == 64u && (force_wave64 || strstr(k->path,"dense_extra_decode_q2_0") != NULL || strstr(k->path,"dense_extra_decode_pq2_0") != NULL)) {
         stage.pNext = &subgroup_size64;
         stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
