@@ -1,0 +1,47 @@
+================================================================================
+CODE REVIEW: i16vec2 packed PTQ1_0 GEMM kernel (vulkan/dense_extra_mmq_ptq1_0.comp)
+Reviewer: Systems and GPU Code Reviewer
+Date: 2026-09-19
+Verdict: APPROVED
+================================================================================
+
+1. Mathematical equivalence & overflow bounds
+--------------------------------------------
+- Original scalar implementation accumulated 128 products per row in a 32‑bit int; final fma uses float conversion.
+- New implementation packs two weights per i16vec2 component, performing component‑wise multiplication and accumulation in i16vec2.
+- Each component sees at most 64 products (half of 128). Max product magnitude = 1 * 127 = 127, sum ≤ 64 * 127 = 8128 < 32767 (int16_t limit). No overflow, safe conversion to float via `int(sum[r][t].x) + int(sum[r][t].y)`.
+- Final accumulation `acc_f32 = fma(wd * yd, float(s), acc_f32)` matches reference `q36_contract_mmq_ptq1_dot` computation.
+
+2. LDS layout, alignment & bank‑conflict analysis
+------------------------------------------------
+- LDS bank = 4‑byte word; bank index = word offset mod 32; i16vec2 = 1 word.
+- buf_a: `shared i16vec2 buf_a[BM * STRIDE_A];` with BM=32, STRIDE_A=65.
+  * Row stride = 65 words. gcd(65, 32) = 1 → distinct rows map to distinct banks for the same k. Conflict‑free.
+- buf_b: `shared i16vec2 buf_b[2][BN * STRIDE_B];` with BN=64, STRIDE_B=17.
+  * Row stride = 17 words. gcd(17, 32) = 1 → distinct rows/tokens map to distinct banks for the same k. Conflict‑free.
+- Total LDS usage ≈ 8.3 KB (buf_a ≈ 8.3 KB? no: 32*65*4 = 8,320 B for buf_a alone; buf_b 2*64*17*4 = 8,704 B) → total ≈ 17 KB, still under typical Vulkan workgroup limits.
+
+3. Weight unpack thread safety
+--------------------------------
+- kw = 0 writes to indices `base_dst + 8*n + j` (j 0..3) and later blocks with offsets 40 + 4*n + j, and final block `base_dst + 60 + n`.
+- kw = 1 writes to indices shifted by +4 (or +2) in each sub‑region: `base_dst + 8*n + 4 + j`, `base_dst + 40 + 2 + j`, final block writes only when kw = 0 (handled separately).
+- Offsets for kw = 0 and kw = 1 are disjoint; each thread writes a unique location. Zero‑padding paths also write to the same disjoint locations. No cross‑thread overwrite ⇒ race‑free.
+
+4. Barrier synchronization (double‑buffering)
+---------------------------------------------
+- Initial barrier after loading slice 0 into `buf_b[0]` (line ~119).
+- Inside loop: prefetch next slice into `buf_b[next_buf]`, then compute using `buf_b[curr_buf]`.
+- Barrier executed only when `inner_slice < 3`, guaranteeing that the producer buffer is visible before the next iteration swaps roles.
+- All 64 threads participate in each barrier; no divergent paths.
+- Barrier count per block: 1 (initial) + 3 (between slices) = 4, matching claimed reduction.
+
+5. Additional observations
+--------------------------
+- `BK_PAIRS = 16` correctly halves the inner‑k loop while preserving total work (16 pairs × 2 = 32 original elements).
+- Zero‑padding for OOB rows/tokens remains unchanged and correctly guards boundary cases.
+- Use of `i16vec2` requires the `GL_EXT_shader_explicit_arithmetic_types_int16` extension, which is now enabled at line 1.
+- No new divergent control flow introduced.
+
+CONCLUSION
+----------
+Packed i16vec2 implementation is mathematically correct, overflow‑safe, free of LDS races, and barrier usage is sound. Bank‑conflict mitigation is adequate (row stride 68 B gives non‑zero offset). Verdict: APPROVED for merge.

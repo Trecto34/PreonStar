@@ -1,5 +1,6 @@
 #version 460
 #extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_KHR_shader_subgroup_basic : require
 
@@ -22,14 +23,15 @@ layout(push_constant) uniform Push {
 const uint BM = 32u;
 const uint BN = 64u;
 const uint BK = 32u;
-const uint STRIDE_A = 129u;
-const uint STRIDE_B = 33u;
+const uint BK_PAIRS = 16u;
+const uint STRIDE_A = 65u;
+const uint STRIDE_B = 17u;
 const uint Q8K_WORDS = 74u;
 const uint PTQ1_0_BYTES = 28u;
 const uint PTQ1_0_BLKS_PER_Q8K = 2u;
 
-shared int8_t buf_a[BM * STRIDE_A];
-shared int8_t buf_b[2][BN * STRIDE_B];
+shared i16vec2 buf_a[BM * STRIDE_A];
+shared i16vec2 buf_b[2][BN * STRIDE_B];
 
 const uint pow3[5] = {1u, 3u, 9u, 27u, 81u};
 
@@ -54,12 +56,12 @@ void main(void) {
     uint lane_row = lane & 3u;
     uint lane_tok = lane >> 2u;
 
-    int sum[8][4];
+    i16vec2 sum[8][4];
     float acc_f32[8][4];
 
     [[unroll]] for (uint r = 0u; r < 8u; r++) {
         [[unroll]] for (uint t = 0u; t < 4u; t++) {
-            sum[r][t] = 0;
+            sum[r][t] = i16vec2(0);
             acc_f32[r][t] = 0.0f;
         }
     }
@@ -73,38 +75,57 @@ void main(void) {
                 uint base_dst = lr * STRIDE_A;
                 if (row < pc.out_dim) {
                     uint base = row * pc.row_bytes + (qb * PTQ1_0_BLKS_PER_Q8K + pb) * PTQ1_0_BYTES;
-                    [[unroll]] for (uint b = 0u; b < 8u; b++) {
-                        uint byte_val = load_u8(base + kw * 8u + b);
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) {
+                        uint b0 = load_u8(base + kw * 8u + 2u * j);
+                        uint b1 = load_u8(base + kw * 8u + 2u * j + 1u);
                         [[unroll]] for (uint n = 0u; n < 5u; n++) {
-                            uint qq = (byte_val * pow3[n]) & 0xffu;
-                            buf_a[base_dst + 16u * n + kw * 8u + b] = int8_t(int((qq * 3u) >> 8u) - 1);
+                            uint p3 = pow3[n];
+                            uint qq0 = (b0 * p3) & 0xffu;
+                            uint qq1 = (b1 * p3) & 0xffu;
+                            int16_t w0 = int16_t(int((qq0 * 3u) >> 8u) - 1);
+                            int16_t w1 = int16_t(int((qq1 * 3u) >> 8u) - 1);
+                            buf_a[base_dst + 8u * n + kw * 4u + j] = i16vec2(w0, w1);
                         }
                     }
-                    [[unroll]] for (uint i = 0u; i < 4u; i++) {
-                        uint byte_val = load_u8(base + 16u + kw * 4u + i);
+                    [[unroll]] for (uint j = 0u; j < 2u; j++) {
+                        uint b0 = load_u8(base + 16u + kw * 4u + 2u * j);
+                        uint b1 = load_u8(base + 16u + kw * 4u + 2u * j + 1u);
                         [[unroll]] for (uint n = 0u; n < 5u; n++) {
-                            uint qq = (byte_val * pow3[n]) & 0xffu;
-                            buf_a[base_dst + 80u + 8u * n + kw * 4u + i] = int8_t(int((qq * 3u) >> 8u) - 1);
+                            uint p3 = pow3[n];
+                            uint qq0 = (b0 * p3) & 0xffu;
+                            uint qq1 = (b1 * p3) & 0xffu;
+                            int16_t w0 = int16_t(int((qq0 * 3u) >> 8u) - 1);
+                            int16_t w1 = int16_t(int((qq1 * 3u) >> 8u) - 1);
+                            buf_a[base_dst + 40u + 4u * n + kw * 2u + j] = i16vec2(w0, w1);
                         }
                     }
-                    uint byte_val = load_u8(base + 24u + kw);
-                    [[unroll]] for (uint n = 0u; n < 4u; n++) {
-                        uint qq = (byte_val * pow3[n]) & 0xffu;
-                        buf_a[base_dst + 120u + 2u * n + kw] = int8_t(int((qq * 3u) >> 8u) - 1);
+                    if (kw == 0u) {
+                        uint b24 = load_u8(base + 24u);
+                        uint b25 = load_u8(base + 25u);
+                        [[unroll]] for (uint n = 0u; n < 4u; n++) {
+                            uint p3 = pow3[n];
+                            uint qq0 = (b24 * p3) & 0xffu;
+                            uint qq1 = (b25 * p3) & 0xffu;
+                            int16_t w0 = int16_t(int((qq0 * 3u) >> 8u) - 1);
+                            int16_t w1 = int16_t(int((qq1 * 3u) >> 8u) - 1);
+                            buf_a[base_dst + 60u + n] = i16vec2(w0, w1);
+                        }
                     }
                 } else {
-                    [[unroll]] for (uint b = 0u; b < 8u; b++) {
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) {
                         [[unroll]] for (uint n = 0u; n < 5u; n++) {
-                            buf_a[base_dst + 16u * n + kw * 8u + b] = int8_t(0);
+                            buf_a[base_dst + 8u * n + kw * 4u + j] = i16vec2(0);
                         }
                     }
-                    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    [[unroll]] for (uint j = 0u; j < 2u; j++) {
                         [[unroll]] for (uint n = 0u; n < 5u; n++) {
-                            buf_a[base_dst + 80u + 8u * n + kw * 4u + i] = int8_t(0);
+                            buf_a[base_dst + 40u + 4u * n + kw * 2u + j] = i16vec2(0);
                         }
                     }
-                    [[unroll]] for (uint n = 0u; n < 4u; n++) {
-                        buf_a[base_dst + 120u + 2u * n + kw] = int8_t(0);
+                    if (kw == 0u) {
+                        [[unroll]] for (uint n = 0u; n < 4u; n++) {
+                            buf_a[base_dst + 60u + n] = i16vec2(0);
+                        }
                     }
                 }
             }
@@ -120,14 +141,16 @@ void main(void) {
                     uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
                     [[unroll]] for (uint w = 0u; w < 8u; w++) {
                         uint word = q8[qbase + 2u + slice * 8u + w];
-                        buf_b[0][base_dst + w * 4u + 0u] = int8_t(bitfieldExtract(int(word), 0, 8));
-                        buf_b[0][base_dst + w * 4u + 1u] = int8_t(bitfieldExtract(int(word), 8, 8));
-                        buf_b[0][base_dst + w * 4u + 2u] = int8_t(bitfieldExtract(int(word), 16, 8));
-                        buf_b[0][base_dst + w * 4u + 3u] = int8_t(bitfieldExtract(int(word), 24, 8));
+                        int16_t q0 = int16_t(bitfieldExtract(int(word), 0, 8));
+                        int16_t q1 = int16_t(bitfieldExtract(int(word), 8, 8));
+                        int16_t q2 = int16_t(bitfieldExtract(int(word), 16, 8));
+                        int16_t q3 = int16_t(bitfieldExtract(int(word), 24, 8));
+                        buf_b[0][base_dst + w * 2u + 0u] = i16vec2(q0, q1);
+                        buf_b[0][base_dst + w * 2u + 1u] = i16vec2(q2, q3);
                     }
                 } else {
-                    [[unroll]] for (uint p = 0u; p < 32u; p++) {
-                        buf_b[0][base_dst + p] = int8_t(0);
+                    [[unroll]] for (uint p = 0u; p < 16u; p++) {
+                        buf_b[0][base_dst + p] = i16vec2(0);
                     }
                 }
             }
@@ -147,28 +170,30 @@ void main(void) {
                         uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
                         [[unroll]] for (uint w = 0u; w < 8u; w++) {
                             uint word = q8[qbase + 2u + next_slice * 8u + w];
-                            buf_b[next_buf][base_dst + w * 4u + 0u] = int8_t(bitfieldExtract(int(word), 0, 8));
-                            buf_b[next_buf][base_dst + w * 4u + 1u] = int8_t(bitfieldExtract(int(word), 8, 8));
-                            buf_b[next_buf][base_dst + w * 4u + 2u] = int8_t(bitfieldExtract(int(word), 16, 8));
-                            buf_b[next_buf][base_dst + w * 4u + 3u] = int8_t(bitfieldExtract(int(word), 24, 8));
+                            int16_t q0 = int16_t(bitfieldExtract(int(word), 0, 8));
+                            int16_t q1 = int16_t(bitfieldExtract(int(word), 8, 8));
+                            int16_t q2 = int16_t(bitfieldExtract(int(word), 16, 8));
+                            int16_t q3 = int16_t(bitfieldExtract(int(word), 24, 8));
+                            buf_b[next_buf][base_dst + w * 2u + 0u] = i16vec2(q0, q1);
+                            buf_b[next_buf][base_dst + w * 2u + 1u] = i16vec2(q2, q3);
                         }
                     } else {
-                        [[unroll]] for (uint p = 0u; p < 32u; p++) {
-                            buf_b[next_buf][base_dst + p] = int8_t(0);
+                        [[unroll]] for (uint p = 0u; p < 16u; p++) {
+                            buf_b[next_buf][base_dst + p] = i16vec2(0);
                         }
                     }
                 }
 
-                // Compute GEMM using buf_b[curr_buf]
-                uint k_offset = inner_slice * 32u;
-                [[unroll]] for (uint k = 0u; k < BK; k++) {
-                    int a[8];
+                // Compute GEMM using buf_b[curr_buf] with 16-bit packed vector arithmetic
+                uint k_offset = inner_slice * 16u;
+                [[unroll]] for (uint k = 0u; k < BK_PAIRS; k++) {
+                    i16vec2 a[8];
                     [[unroll]] for (uint r = 0u; r < 8u; r++) {
-                        a[r] = int(buf_a[(r * 4u + lane_row) * STRIDE_A + k_offset + k]);
+                        a[r] = buf_a[(r * 4u + lane_row) * STRIDE_A + k_offset + k];
                     }
-                    int b[4];
+                    i16vec2 b[4];
                     [[unroll]] for (uint t = 0u; t < 4u; t++) {
-                        b[t] = int(buf_b[curr_buf][(wave * 32u + lane_tok * 4u + t) * STRIDE_B + k]);
+                        b[t] = buf_b[curr_buf][(wave * 32u + lane_tok * 4u + t) * STRIDE_B + k];
                     }
                     [[unroll]] for (uint r = 0u; r < 8u; r++) {
                         [[unroll]] for (uint t = 0u; t < 4u; t++) {
@@ -192,8 +217,9 @@ void main(void) {
                             if (tok < pc.n_tok) {
                                 yd = uintBitsToFloat(q8[(tok * pc.blocks + qb) * Q8K_WORDS]);
                             }
-                            acc_f32[r][t] = fma(wd * yd, float(sum[r][t]), acc_f32[r][t]);
-                            sum[r][t] = 0;
+                            int s = int(sum[r][t].x) + int(sum[r][t].y);
+                            acc_f32[r][t] = fma(wd * yd, float(s), acc_f32[r][t]);
+                            sum[r][t] = i16vec2(0);
                         }
                     }
                 }

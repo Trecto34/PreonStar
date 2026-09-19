@@ -69,24 +69,52 @@ Refined the LDS architecture to eliminate intermediate staging copies:
    and **35.49–36.35 tok/s** (chunk 128, file `30-direct-staged-prefill128.txt`).
 5. Long-term memory: Stored in `mem0` vector memory (`3afa3a7d-a5a3-4659-83f8-724b97b93e04`).
 
+**Root cause #2 (step 5 complete: Vectorized 5-trit byte unpacking):**
+Replaced scalar `weight_at` (64 global byte loads, modulos, divisions per thread) with a
+partitioned 13-byte direct unpack into `buf_a` across `kw` in `{0, 1}`:
+1. Thread `kw=0` unpacks bytes [0..7], [16..19], 24; thread `kw=1` unpacks bytes [8..15], [20..23], 25.
+2. Completely eliminated all runtime division, modulo, and per-trit branch divergence.
+3. Correctness: bit-exact vs CPU reference contract (`--dense-quant-model-rows`, file `31-vec-unpack-correctness.txt`, 0 diff; layout oracle: 240/240 passed).
+4. Prefill throughput: **36.81 tok/s** (chunk 64, file `32-vec-unpack-prefill64.txt`) and **38.41 tok/s** (chunk 128, file `33-vec-unpack-prefill128.txt`).
+5. Independent review: delegated to Reviewer via Maestri canvas, approved (file `34-vec-unpack-review.txt`).
+6. Long-term memory: Persistently recorded in `mem0` vector store (`f898e309-426c-451b-9193-8555ad2af369`).
+7. Commit: `1c38d4c`.
+
+**Root cause #2 (step 6 complete: Double-buffered activation prefetching):**
+Implemented K-dimension double-buffering in LDS (`shared int8_t buf_b[2][BN * STRIDE_B]` = 4.2 KB LDS):
+1. Overlaps slice $k+1$ activation loading from global memory with VALU GEMM computation of slice $k$.
+2. Slashed workgroup barriers from 9 to 4 per 128-weight block (55% reduction).
+3. Correctness: bit-exact vs CPU reference contract (`38-doublebuf-correctness.txt`, 0 diff; layout oracle: 240/240 passed).
+4. Prefill throughput: **38.06 tok/s** (chunk 64, file `39-doublebuf-prefill64.txt`) and **39.59 tok/s** (chunk 128, file `40-doublebuf-prefill128.txt`), achieving **14.72x speedup over original 2.69 tok/s baseline**.
+5. Independent review: delegated to Reviewer via Maestri canvas, approved (file `41-doublebuf-review.txt`).
+6. Long-term memory: Persistently recorded in `mem0` vector store (`b9cddfb3-e62a-4cc8-b5d1-21237092e175`).
+7. Commit: `b6903a3`.
+
+**Root cause #2 (step 7 architectural evaluations & negative results):**
+1. **$BN=128$ Macro-Tile Expansion**: Sizing $BN=128$ caused a 46% throughput regression on batch 64 (19.82 tok/s, file `36`) due to 50% idle threads on small prompt frontiers, while yielding no throughput gain on batch 128/256 (38.38 tok/s, file `37`). Reverted to optimal $BM=32, BN=64$.
+2. **`i8vec4` Staging & Vectorized Reads**: Loading $a[8][4]$ into registers increased VGPR pressure from 64 to 96 VGPRs, reducing hardware occupancy from 100% (32 waves/CU) to 66% (20 waves/CU), resulting in 37.13 tok/s (c64) and 38.80 tok/s (c128) (files `42`–`44`). Preserved commit `b6903a3` (100% occupancy) as primary.
+**Root cause #2 (step 8 complete: Packed 16-bit integer vectorization & 2-way arithmetic):**
+Implemented packed 16-bit integer vectorization (`i16vec2`) in `vulkan/dense_extra_mmq_ptq1_0.comp`:
+1. Shared memory packed storage: `shared i16vec2 buf_a[BM * STRIDE_A]` (STRIDE_A=65u, 260 B, skew 1 bank) and `shared i16vec2 buf_b[2][BN * STRIDE_B]` (STRIDE_B=17u, 68 B, skew 17 banks) eliminating LDS bank conflicts while reducing total LDS load instructions by 50%.
+2. Hardware 2-way arithmetic: Accumulates in `i16vec2 sum[8][4]`, leveraging RDNA1 dual-packed integer math (`v_pk_mul_lo_u16` and `v_pk_add_i16`), halving inner-loop iterations (`BK_PAIRS = 16u`).
+3. Mathematical equivalence & overflow headroom: Max accumulation per 16-bit lane is $64 \times 127 = 8,128 \ll 32,767$, guaranteeing 100% overflow safety. Reconstituted with `int s = int(sum[r][t].x) + int(sum[r][t].y)` before single-precision `fma`.
+4. Correctness: Bit-exact vs CPU reference contract (`--dense-quant-model-rows`, file `45-i16vec2-correctness.txt`, 0 diff; layout oracle: 240/240 passed, 0 failures, 0 abs error).
+5. Prefill throughput: **95.90 tok/s** (chunk 64, file `46-i16vec2-prefill64.txt`), **103.01 tok/s** (chunk 128, file `47-i16vec2-prefill128.txt`), and **102.18 tok/s** (chunk 256, file `48-i16vec2-prefill256.txt`).
+   - Speedup vs step 6: **+152% on chunk 64, +160% on chunk 128**.
+   - Speedup vs original baseline (2.69 tok/s): **35.65x - 38.29x**.
+6. Independent review: delegated to Reviewer via Maestri canvas, approved (`49-i16vec2-review.txt`).
+7. Long-term memory: Persistently recorded in `mem0` vector store.
+
 ## Repo / evidence state
 
 - Branch `trackB-ptq1_0`, clean, ahead of `e9f794b`.
 - `gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf` (5946.6 MB, 402 type-143 tensors).
-- Evidence files `00`–`30` in this dir, chronological, all real/file-backed:
-  - `18-toktile8-correctness.txt`: bit-exact test log (TOK_TILE=8).
-  - `19-toktile8-prefill64.txt`: 9.01 tok/s benchmark log.
-  - `20-toktile8-review.txt`: independent review from Reviewer (OpenCode) via Maestri.
-  - `21-toktile16-correctness.txt`: bit-exact test log (ROWS=8, TOK_TILE=16).
-  - `22-toktile16-prefill64.txt`: 9.13 tok/s benchmark log.
-  - `23-toktile16-review.txt`: independent review from Reviewer (OpenCode) via Maestri.
-  - `24-gemm-correctness.txt`: initial float16 GEMM drift diagnosis.
-  - `25-gemm-int-correctness.txt`: bit-exact integer GEMM test log (BM=32, BN=64).
-  - `26-gemm-prefill64.txt`: 33.92 tok/s benchmark log.
-  - `27-gemm-review.txt`: independent review from Reviewer (OpenCode) via Maestri.
-  - `28-staged-prefill64.txt`: staged weight benchmark log (33.87 tok/s).
-  - `29-direct-staged-prefill64.txt`: direct zero-copy benchmark log (34.07 tok/s).
-  - `30-direct-staged-prefill128.txt`: direct zero-copy chunk 128 benchmark log (35.49 tok/s).
+- Evidence files `00`–`49` in this dir, chronological, all real/file-backed:
+  - `45-i16vec2-correctness.txt`: bit-exact test log for i16vec2 kernel (0 diff vs reference).
+  - `46-i16vec2-prefill64.txt`: 95.90 tok/s benchmark log (chunk 64).
+  - `47-i16vec2-prefill128.txt`: 103.01 tok/s benchmark log (chunk 128).
+  - `48-i16vec2-prefill256.txt`: 102.18 tok/s benchmark log (chunk 256).
+  - `49-i16vec2-review.txt`: independent review from Reviewer (OpenCode) via Maestri (APPROVED).
 - Canvas notes "Recent Optimizations", "Optimizations & Speedups", and "Track B Coordination"
   updated in real time via Maestri CLI.
 - GPU lock `/tmp/q36-gpu.lock` free, no process holding it at stand-down.
