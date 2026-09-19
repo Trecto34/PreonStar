@@ -1,0 +1,18 @@
+Reviewer (Code Reviewer preset OpenCode) independent review of ROWS=8, TOK_TILE=16 diff:
+
+1. Barrier Synchronization:
+   - sh_sum[16][2] correctly accounts for 2 subgroups enforced under force_wave32 on local_size_x=64.
+   - Writes guarded by subgroupElect(), followed by full barrier() ensuring visibility across all invocations before reduction.
+   - Second barrier ensures sh_sum is not overwritten before consumers finish accumulating.
+
+2. Boundary & Tail Handling:
+   - Row loop skips rows >= out_dim.
+   - Token loops break cleanly when tok >= n_tok.
+   - Host dispatch grid uses ceiling division (out_dim + 7)/8 and (n_tok + 15)/16.
+   - Tail tokens and rows safely handled without out-of-bounds writes.
+
+3. Shared Memory & Registers:
+   - Sizing is exact: 16 * 2 * sizeof(int) = 128 bytes of LDS.
+   - Register footprint: acc[8] floats plus local decodes. No spilling observed.
+
+Conclusion: APPROVED. Diff is clean, robust, and free of race hazards.

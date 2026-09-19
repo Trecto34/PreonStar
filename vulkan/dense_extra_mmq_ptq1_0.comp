@@ -7,7 +7,7 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-const uint TOK_TILE = 8u;
+const uint TOK_TILE = 16u;
 
 /* local_size_x=64 spans 2 subgroups at wave32 (forced on this shader,
  * see q36_vulkan.c force_wave32) but 1 at wave64 -- size for the worst
@@ -29,7 +29,7 @@ layout(push_constant) uniform Push {
     float scale;
 } pc;
 
-const uint ROWS = 4u;
+const uint ROWS = 8u;
 const uint Q8K_WORDS = 74u;
 const uint QK_PTQ1_0 = 128u;
 const uint PTQ1_0_BYTES = 28u;
