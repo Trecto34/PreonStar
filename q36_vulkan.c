@@ -1641,8 +1641,24 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
     for (size_t i = 0; !force_wave32 && i < sizeof(q36_vk_force_wave32) / sizeof(*q36_vk_force_wave32); i++) {
         force_wave32 = strstr(k->path, q36_vk_force_wave32[i]) != NULL;
     }
+    /* dense_extra_decode_ptq1_0 is the mirror-image trap: it partitions all
+     * 128 weights of a PTQ1_0 block across every lane of the 64-wide
+     * workgroup (b_start = lid>>3) and recovers the true dot product with
+     * one subgroupAdd(acc[r]) over the whole workgroup. That is only
+     * correct if the workgroup compiles to a single 64-wide subgroup --
+     * the ptq1_0 == 64u dispatch gate above reads the device's *default*
+     * subgroup size, not what RADV actually picks for this pipeline, so
+     * pin it explicitly instead of trusting the heuristic. */
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size64 = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+        .requiredSubgroupSize = 64u,
+    };
+    bool force_wave64 = strstr(k->path, "dense_extra_decode_ptq1_0") != NULL;
     if (q36_vk.subgroup_size_control && force_wave32) {
         stage.pNext = &subgroup_size;
+        stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
+    } else if (q36_vk.subgroup_size_control && q36_vk.subgroup_size == 64u && force_wave64) {
+        stage.pNext = &subgroup_size64;
         stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
     VkComputePipelineCreateInfo cpci = {
