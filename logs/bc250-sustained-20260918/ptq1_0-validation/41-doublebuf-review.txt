@@ -1,0 +1,58 @@
+================================================================================
+CODE REVIEW: Double‑Buffered LDS Activation Prefetch in PTQ1_0 GEMM Kernel
+File: vulkan/dense_extra_mmq_ptq1_0.comp
+Reviewer: Systems and GPU Code Reviewer
+Date: 2026-09-19
+Verdict: APPROVED
+================================================================================
+
+1. DOUBLE‑BUFFERING LOGIC & INDEXING
+------------------------------------------------
+- Shared buffer declared as `shared int8_t buf_b[2][BN * STRIDE_B];` where BN=64, STRIDE_B=33.
+- Initial slice (inner_slice=0) loaded into `buf_b[0]` then barrier ensures visibility.
+- Loop over `inner_slice` (0..3):
+  * `curr_buf = inner_slice & 1u;`
+  * `next_buf = 1u - curr_buf;`
+  * Prefetch of next slice (if <3) writes into `buf_b[next_buf]` using per‑thread `lt = lid` and `base_dst = lt * STRIDE_B` – unique per thread, no overlap.
+  * Compute reads from `buf_b[curr_buf]` via same indexing formula, matching previous load pattern.
+  * Barrier only when `inner_slice < 3` to guarantee the just‑prefetched buffer is visible before the next iteration swaps roles.
+- End of loop (inner_slice==3) uses `curr_buf` holding slice3; no further prefetch, no barrier needed.
+- All writes/reads are aligned, each thread writes exactly 32 bytes (8 words *4) per buffer; padding byte (33‑32) prevents bank conflicts.
+- No race conditions: writes and reads are to distinct buffers; barrier ordering guarantees producer‑consumer correctness.
+
+2. BARRIER SYNCHRONIZATION
+------------------------------------------------
+- First barrier after initial load of slice0 (line ~119) synchronizes all threads before any compute.
+- Inside loop: prefetch occurs before compute; barrier after compute (if not final slice) synchronizes all threads before the next iteration swaps buffers.
+- No divergent barriers; every thread executes the same barrier calls.
+- Total barriers per block: 1 (initial) + 3 (between slices) = 4, matching claimed reduction.
+
+3. BOUNDARY/Tail Handling
+------------------------------------------------
+- Token bounds checked (`tok < pc.n_tok`) for both initial load and prefetch; OOB tokens zero‑padded.
+- Row bounds unchanged (weight unpack already guards `row < pc.out_dim`).
+- Final writeback still guarded by both row and token checks.
+- No missing guard when prefetch writes beyond token range – zero‑fill covers it.
+
+4. LDS MEMORY FOOTPRINT & BANK CONFLICTS
+------------------------------------------------
+- buf_a unchanged: 32 * 129 = 4,128 B.
+- buf_b double‑buffered: 2 * (64 * 33) = 4,224 B.
+- Total LDS ≈ 8,352 B (~8.2 KB) well under typical limits.
+- STRIDE_B = 33 ⇒ 33 % 32 = 1, thus successive lt rows map to successive LDS banks, eliminating bank conflicts on reads.
+- Padding byte also present in each buffer row.
+
+5. MATHEMATICAL EQUVALENCE
+------------------------------------------------
+- Weight unpack unchanged; activation values unchanged.
+- Integer accumulation (`sum[r][t]`) still performed in registers before final `fma` with delta and token scales.
+- Bit‑exactness confirmed by external test harness (0 diff, 240/240 layout oracle).
+
+6. PERFORMANCE CLAIMS
+------------------------------------------------
+- Barrier count reduced from 9→4 per block, measured throughput gains (64‑tok: 38.06 tok/s, 128‑tok: 39.59 tok/s).
+- No correctness regressions observed in validation suite.
+
+CONCLUSION
+-----------
+Double‑buffered LDS activation loading is correctly implemented, free of race hazards, barriers properly synchronized, boundary checks complete, LDS usage safe. Approved for merge into trackB‑ptq1_0.

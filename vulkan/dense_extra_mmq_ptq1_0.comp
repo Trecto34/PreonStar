@@ -22,14 +22,14 @@ layout(push_constant) uniform Push {
 const uint BM = 32u;
 const uint BN = 64u;
 const uint BK = 32u;
-const uint STRIDE_A = 129u; // 128 weights + 1 byte pad to prevent LDS bank conflicts
-const uint STRIDE_B = 33u;  // 32 activations + 1 byte pad
+const uint STRIDE_A = 129u;
+const uint STRIDE_B = 33u;
 const uint Q8K_WORDS = 74u;
 const uint PTQ1_0_BYTES = 28u;
 const uint PTQ1_0_BLKS_PER_Q8K = 2u;
 
 shared int8_t buf_a[BM * STRIDE_A];
-shared int8_t buf_b[BN * STRIDE_B];
+shared int8_t buf_b[2][BN * STRIDE_B];
 
 const uint pow3[5] = {1u, 3u, 9u, 27u, 81u};
 
@@ -44,8 +44,6 @@ uint load_u16(uint off) {
 float f16_to_f32(uint h) {
     return unpackHalf2x16(h & 0xffffu).x;
 }
-
-// weight_at removed – unpacking done inline
 
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
@@ -68,7 +66,6 @@ void main(void) {
 
     for (uint qb = 0u; qb < pc.blocks; qb++) {
         for (uint pb = 0u; pb < PTQ1_0_BLKS_PER_Q8K; pb++) {
-            // Vectorized 5-trit byte unpacking directly into buf_a
             {
                 uint lr = lid >> 1u;
                 uint kw = lid & 1u;
@@ -76,7 +73,6 @@ void main(void) {
                 uint base_dst = lr * STRIDE_A;
                 if (row < pc.out_dim) {
                     uint base = row * pc.row_bytes + (qb * PTQ1_0_BLKS_PER_Q8K + pb) * PTQ1_0_BYTES;
-                    // 1) 8 bytes: offsets [0..7] (kw=0) or [8..15] (kw=1)
                     [[unroll]] for (uint b = 0u; b < 8u; b++) {
                         uint byte_val = load_u8(base + kw * 8u + b);
                         [[unroll]] for (uint n = 0u; n < 5u; n++) {
@@ -84,7 +80,6 @@ void main(void) {
                             buf_a[base_dst + 16u * n + kw * 8u + b] = int8_t(int((qq * 3u) >> 8u) - 1);
                         }
                     }
-                    // 2) 4 bytes: offsets [16..19] (kw=0) or [20..23] (kw=1)
                     [[unroll]] for (uint i = 0u; i < 4u; i++) {
                         uint byte_val = load_u8(base + 16u + kw * 4u + i);
                         [[unroll]] for (uint n = 0u; n < 5u; n++) {
@@ -92,13 +87,10 @@ void main(void) {
                             buf_a[base_dst + 80u + 8u * n + kw * 4u + i] = int8_t(int((qq * 3u) >> 8u) - 1);
                         }
                     }
-                    // 3) 1 byte: offset 24 (kw=0) or offset 25 (kw=1)
-                    {
-                        uint byte_val = load_u8(base + 24u + kw);
-                        [[unroll]] for (uint n = 0u; n < 4u; n++) {
-                            uint qq = (byte_val * pow3[n]) & 0xffu;
-                            buf_a[base_dst + 120u + 2u * n + kw] = int8_t(int((qq * 3u) >> 8u) - 1);
-                        }
+                    uint byte_val = load_u8(base + 24u + kw);
+                    [[unroll]] for (uint n = 0u; n < 4u; n++) {
+                        uint qq = (byte_val * pow3[n]) & 0xffu;
+                        buf_a[base_dst + 120u + 2u * n + kw] = int8_t(int((qq * 3u) >> 8u) - 1);
                     }
                 } else {
                     [[unroll]] for (uint b = 0u; b < 8u; b++) {
@@ -118,34 +110,56 @@ void main(void) {
             }
             barrier();
 
+            // Initial load for inner_slice = 0 into buf_b[0]
+            {
+                uint slice = pb * 4u + 0u;
+                uint lt = lid;
+                uint tok = tok0 + lt;
+                uint base_dst = lt * STRIDE_B;
+                if (tok < pc.n_tok) {
+                    uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
+                    [[unroll]] for (uint w = 0u; w < 8u; w++) {
+                        uint word = q8[qbase + 2u + slice * 8u + w];
+                        buf_b[0][base_dst + w * 4u + 0u] = int8_t(bitfieldExtract(int(word), 0, 8));
+                        buf_b[0][base_dst + w * 4u + 1u] = int8_t(bitfieldExtract(int(word), 8, 8));
+                        buf_b[0][base_dst + w * 4u + 2u] = int8_t(bitfieldExtract(int(word), 16, 8));
+                        buf_b[0][base_dst + w * 4u + 3u] = int8_t(bitfieldExtract(int(word), 24, 8));
+                    }
+                } else {
+                    [[unroll]] for (uint p = 0u; p < 32u; p++) {
+                        buf_b[0][base_dst + p] = int8_t(0);
+                    }
+                }
+            }
+            barrier();
+
             for (uint inner_slice = 0u; inner_slice < 4u; inner_slice++) {
-                // Load activations: BN=64 tokens, 32 int8 per token into buf_b
-                [[unroll]] for (uint step = 0u; step < 2u; step++) {
-                    uint idx = step * 64u + lid;
-                    uint lt = idx >> 1u;
-                    uint kw = idx & 1u;
+                uint curr_buf = inner_slice & 1u;
+                uint next_buf = 1u - curr_buf;
+
+                // Prefetch next inner slice into buf_b[next_buf]
+                if (inner_slice < 3u) {
+                    uint next_slice = pb * 4u + inner_slice + 1u;
+                    uint lt = lid;
                     uint tok = tok0 + lt;
-                    uint base_dst = lt * STRIDE_B + kw * 16u;
-                    uint slice = pb * 4u + inner_slice;
+                    uint base_dst = lt * STRIDE_B;
                     if (tok < pc.n_tok) {
                         uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
-                        [[unroll]] for (uint w = 0u; w < 4u; w++) {
-                            uint word = q8[qbase + 2u + slice * 8u + kw * 4u + w];
-                            buf_b[base_dst + w * 4u + 0u] = int8_t(bitfieldExtract(int(word), 0, 8));
-                            buf_b[base_dst + w * 4u + 1u] = int8_t(bitfieldExtract(int(word), 8, 8));
-                            buf_b[base_dst + w * 4u + 2u] = int8_t(bitfieldExtract(int(word), 16, 8));
-                            buf_b[base_dst + w * 4u + 3u] = int8_t(bitfieldExtract(int(word), 24, 8));
+                        [[unroll]] for (uint w = 0u; w < 8u; w++) {
+                            uint word = q8[qbase + 2u + next_slice * 8u + w];
+                            buf_b[next_buf][base_dst + w * 4u + 0u] = int8_t(bitfieldExtract(int(word), 0, 8));
+                            buf_b[next_buf][base_dst + w * 4u + 1u] = int8_t(bitfieldExtract(int(word), 8, 8));
+                            buf_b[next_buf][base_dst + w * 4u + 2u] = int8_t(bitfieldExtract(int(word), 16, 8));
+                            buf_b[next_buf][base_dst + w * 4u + 3u] = int8_t(bitfieldExtract(int(word), 24, 8));
                         }
                     } else {
-                        [[unroll]] for (uint p = 0u; p < 16u; p++) {
-                            buf_b[base_dst + p] = int8_t(0);
+                        [[unroll]] for (uint p = 0u; p < 32u; p++) {
+                            buf_b[next_buf][base_dst + p] = int8_t(0);
                         }
                     }
                 }
 
-                barrier();
-
-                // Register tile computation: 32 K elements
+                // Compute GEMM using buf_b[curr_buf]
                 uint k_offset = inner_slice * 32u;
                 [[unroll]] for (uint k = 0u; k < BK; k++) {
                     int a[8];
@@ -154,7 +168,7 @@ void main(void) {
                     }
                     int b[4];
                     [[unroll]] for (uint t = 0u; t < 4u; t++) {
-                        b[t] = int(buf_b[(wave * 32u + lane_tok * 4u + t) * STRIDE_B + k]);
+                        b[t] = int(buf_b[curr_buf][(wave * 32u + lane_tok * 4u + t) * STRIDE_B + k]);
                     }
                     [[unroll]] for (uint r = 0u; r < 8u; r++) {
                         [[unroll]] for (uint t = 0u; t < 4u; t++) {
@@ -162,8 +176,6 @@ void main(void) {
                         }
                     }
                 }
-
-                barrier();
 
                 // End of 128-weight PTQ1_0 block: accumulate into float acc_f32
                 if (inner_slice == 3u) {
@@ -184,6 +196,11 @@ void main(void) {
                             sum[r][t] = 0;
                         }
                     }
+                }
+
+                // Single barrier per slice: ensure buf_b[next_buf] is ready for next iteration
+                if (inner_slice < 3u) {
+                    barrier();
                 }
             }
         }
