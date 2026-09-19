@@ -432,3 +432,29 @@ direction: scope a fix for the draft self-extension round-trip cost
 (narrower, faster: e.g. batch the draft's own autoregressive steps into
 fewer dispatches, or cap draft depth lower than 4), or treat this as
 validating DFlash and revisit that as a larger effort.
+
+## External independent verification (2026-09-19): MTP regression confirmed, hard ceiling found
+
+User ran the root-cause finding above through an external tool for independent
+verification. Result: analysis holds, plus one decisive additional number.
+
+- Confirmed: accepted-tokens vs TPS correlation shows draft sync dominates.
+- Timing breakdown per outer step: ~60% GPU sync, ~30% draft compute, ~10%
+  verification.
+- Confirmed: draft=1 baseline (~16.7 tok/s) is valid.
+- Confirmed: best tested config (depth 4, margin 2.0) -> 8.9 tok/s.
+- **Key new finding: even fully eliminating the sync/readback overhead in the
+  draft's autoregressive self-extension would only reach ~12-14 tok/s -
+  still BELOW the ~16.7 tok/s no-speculation baseline.**
+- Conclusion: further micro-optimization of the current MTP draft-extension
+  loop is not worth the effort - it is capped below baseline regardless. A
+  DFlash-style redesign (single dispatch, multi-candidate scoring instead of
+  autoregressive per-token draft extension) is required for this to ever be
+  a net win on this hardware, not optional polish.
+
+**Disposition:** current in-file MTP speculative decoding for Qwen3.8-27B
+should stay OFF by default (draft=1, matches shipped behavior) - it is safe
+and neutral there. Turning it on is a confirmed regression at every margin
+tested, with a hard architectural ceiling below baseline even in the best
+case. Pursuing a real win here means committing to DFlash's architecture,
+not tuning this implementation further.
