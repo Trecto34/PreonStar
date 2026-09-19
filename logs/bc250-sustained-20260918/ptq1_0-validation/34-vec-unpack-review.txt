@@ -1,0 +1,90 @@
+================================================================================
+CODE REVIEW: Vectorized PTQ1_0 Weight Unpacking in LDS GEMM Kernel
+File: vulkan/dense_extra_mmq_ptq1_0.comp
+Reviewer: Systems and GPU Code Reviewer
+Date: 2026-09-19
+Verdict: APPROVED
+================================================================================
+
+1. VECTORIZED UNPACKING MATHEMATICAL & INDEXING CORRECTNESS:
+------------------------------------------------------------
+- Partitioning: 64 threads split into 32 rows (lr = lid >> 1) and 2 halves
+  (kw = lid & 1).
+- Coverage per row: 128 ternary weights decoded from 13 bytes directly into
+  buf_a without scalar weight_at overhead:
+  * 8 bytes (kw=0: [0..7], kw=1: [8..15]): 5 trits/byte -> 40 weights each
+    Positions: 16u * n + kw * 8u + b  (covers [0..79])
+  * 4 bytes (kw=0: [16..19], kw=1: [20..23]): 5 trits/byte -> 20 weights each
+    Positions: 80u + 8u * n + kw * 4u + i  (covers [80..119])
+  * 1 byte (kw=0: [24], kw=1: [25]): 4 trits/byte -> 4 weights each
+    Positions: 120u + 2u * n + kw  (covers [120..127])
+- Total weights per row: 40 + 20 + 4 = 64 per kw; combined = 128 weights.
+- Bitfield math matches reference ternary decoding:
+    qq = (byte_val * pow3[n]) & 0xffu;
+    w  = int((qq * 3u) >> 8u) - 1;
+- Zero-padding correctly handles row >= out_dim cases.
+
+2. LDS MEMORY LAYOUT & BANK CONFLICT MITIGATION:
+------------------------------------------------
+- buf_a: [BM * STRIDE_A] = 32 * 129 = 4,128 bytes.
+  STRIDE_A = 129 bytes (128 weights + 1 byte padding).
+  129 % 32 = 1 -> adjacent rows map to successive LDS banks, preventing
+  bank conflicts during parallel computation reads.
+- buf_b: [BN * STRIDE_B] = 64 * 33 = 2,112 bytes.
+  STRIDE_B = 33 bytes (32 activations + 1 byte padding).
+  33 % 32 = 1 -> identical conflict avoidance.
+- Total LDS usage: 4,128 B + 2,112 B = 6,240 B (~6.1 KB), well within
+  standard Vulkan compute workgroup limits (typically 32-64 KB).
+
+3. BARRIER SYNCHRONIZATION & CONCURRENCY HAZARDS:
+------------------------------------------------
+- Line 119: barrier() after full 128-weight staging in buf_a.
+- Line 146: barrier() after 32-element activation slice staging in buf_b.
+- Line 166: barrier() after computation before next slice overwrites LDS.
+- All barriers are executed unconditionally by all 64 threads in the workgroup.
+- No barrier divergence hazards exist (previous row-skipping hazard is resolved).
+- Write accesses to LDS are completely disjoint across threads:
+  * buf_a: each thread writes uniquely identified by (lr, kw).
+  * buf_b: each thread writes uniquely identified by (lt, kw) per step.
+- Compute reads from LDS are conflict-free and benefit from hardware broadcast:
+  * 8 threads share the same row reading buf_a.
+  * 4 threads share the same token reading buf_b.
+
+4. BOUNDARY CHECKS & TAIL HANDLING:
+-----------------------------------
+- Row bounds:
+  * buf_a loading: row < pc.out_dim checked; OOB rows are zero-padded.
+  * Delta scale loading: row < pc.out_dim checked; OOB rows set wd = 0.0f.
+  * Final writeback: row < pc.out_dim guarded.
+- Token bounds:
+  * buf_b loading: tok < pc.n_tok checked; OOB tokens are zero-padded.
+  * yd scale loading: tok < pc.n_tok checked; OOB tokens set yd = 0.0f.
+  * Final writeback: tok < pc.n_tok guarded.
+- Workgroup early-out at line 83 from prior version was removed; tail tiles
+  are safely handled via zero-padding throughout the pipeline.
+
+5. HARDWARE PORTABILITY (WAVE32 vs WAVE64):
+-------------------------------------------
+- The kernel uses gl_SubgroupID and maps wave * 32u to token offsets.
+- Local size is 64. Under wave32, gl_NumSubgroups = 2, giving wave in {0, 1},
+  which correctly covers the 64 tokens (BN=64).
+- Under wave64, gl_NumSubgroups = 1 (wave = 0 only), leaving tokens 32..63
+  unprocessed in the compute phase.
+- Portability is maintained via the host-side enforcement in q36_vulkan.c:
+  force_wave32 flags dense_*_mmq kernels to require VK_SUBGROUP_SIZE_CONTROL
+  with wave32. This is an intentional and verified architectural invariant.
+
+6. PERFORMANCE VERIFICATION:
+----------------------------
+- CPU Reference Match: 0 diff vs baseline on --dense-quant-model-rows.
+- Layout Oracle: 240/240 tests passing.
+- Throughput Gains (BC250):
+  * Chunk 64:  34.01 -> 36.81 tok/s (+8.2%)
+  * Chunk 128: 35.94 -> 38.41 tok/s (+6.9%)
+
+CONCLUSION:
+-----------
+The vectorized unpack implementation is mathematically robust, free of race
+conditions and barrier hazards, handles all tile boundaries correctly via
+zero-padding, and delivers measurable throughput improvements. Approved for
+merge into trackB-ptq1_0.
