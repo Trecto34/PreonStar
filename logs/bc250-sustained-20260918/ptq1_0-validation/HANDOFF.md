@@ -1,161 +1,146 @@
-# Handoff — PTQ1_0 (type 143) Track B / Phase B2
+# Handoff — PTQ1_0 (type 143) Track B / Phase B2, night of 2026-09-18→19
 
-**Status: B2.1–B2.7 complete and verified on the shipped model.** All phases of
-the B2 plan below are done. STOP until directed further (B2.7 says "then
-STOP"; Phase B3 is not in this plan).
+Written at stand-down. Branch `trackB-ptq1_0`, base `e9f794b` (Track A closed
+at `f99bacd`). Tree is **clean**, committed at `bc7a194`, `make` builds clean.
+If you are the continuing Main Orchestrator: read `AGENT.md`, then this file.
+Everything below is verified by direct file read/GPU run this session, not
+agent narration — see the trap section before trusting any agent's claim.
 
-Branch `trackB-ptq1_0`, base `e9f794b`. The B2 work is **not committed**
-(uncommitted: `Makefile`, `q36.c`, `q36_vulkan.c`, `q36_mmq_contract.h`,
-`tests/q36_test.c`, `vulkan/dense_extra_decode_ptq1_0.comp`,
-`vulkan/dense_extra_mmq_ptq1_0.comp`). Do not commit unless told to.
+## Where B2 actually stands
 
-## Evidence files (this dir; mirrors the PQ2_0 numbering)
+**B2.1–B2.7 (correctness + kernel-level baseline): DONE**, exactly as scoped
+in the original phased plan (`00-format-spec.md`, still in this dir). Commit
+`05237e1`. Evidence: `01`–`13` in this dir. `--dense-quant-model-rows
+--model gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf` passes (`OK`), MMQ n_tok
+1/2/4/8 bit-exact vs the `q36_contract_mmq_ptq1_dot` CPU oracle, smoke clean
+(no NaN/Inf/device reset, only the two new `.spv` dispatch).
 
-| File | Phase | Result |
-|---|---|---|
-| `00-env.txt` | env | BC-250 / RADV GFX1013, subgroup 64, glslc 2026.3 |
-| `01-B2_4-dense-quant-model-rows.txt` | B2.4 | decode (n_tok 1) max_abs ≤ 9.7e-8 vs f32, tol 1e-5; MMQ rows also present |
-| `02-B2_5-n_tok-1248-mmq.txt` | B2.5 | GPU MMQ vs `q36_contract_mmq_ptq1_dot` exact to 1 f16ulp (max_abs ~1e-7, tol 4.9e-4), tokens 2/4/8, 3 tensors (5120/17408/6144), 9 cases |
-| `03-B2_6-shader-trace-and-kernel-profile.txt` | B2.6 | both new `.spv` build+dispatch; no 142/42 sibling; no CPU fallback; no NaN/Inf/reset; clean generation |
-| `04-B2_7-baseline-matrix.txt` | B2.7 | resource + timing matrix vs PQ2_0 |
+**New tonight, not in the original B2 plan: PTQ1_0's MMQ kernel had a real
+performance bug, half-fixed.**
 
-`--ptq1-0-layout-oracle` additionally passes: **28 probes x 8 rows (decode+mmq),
-240 checks, 0 failures, worst abs err 0** (B2.2 with one-hot activations and
-distinct signed per-128 scales).
+1. **Found:** real end-to-end prefill is catastrophic — `q36-bench
+   --prefill-chunk 64 --gen-tokens 0` on the shipped PTQ1_0 model measured
+   **2.69 tok/s** (vs PQ2_0's 203 tok/s on the same shape at chunk 256 —
+   different chunk size, not a clean A/B, but the gap is not subtle).
+   `--prefill-chunk 256` hung/timed out outright (killed at 300s). B2.5 only
+   ever validated MMQ correctness at n_tok ≤ 8; prefill chunks of 64/256 are
+   n_tok=64/256 through the same kernel, a regime nobody had run before.
+2. **Root cause #1 (fixed, committed `bc7a194`):**
+   `dense_extra_mmq_ptq1_0.spv` matches the project-wide wave32-force
+   predicate (`q36_vulkan.c` ~line 1640, `force_wave32 = strstr(path,
+   "dense_") && strstr(path, "_mmq")` — a blanket rule for the whole
+   `dense_*_mmq` family, written for a *different* shader's correctness
+   need). So `local_size_x=64` runs as **two 32-lane subgroups**, not one.
+   The original manual 7-`barrier()` LDS tree-reduction was summing across
+   both subgroups correctly (if slowly); a naive `subgroupAdd(s)` swap
+   (my first attempt) only sums one 32-lane half and silently drops the
+   other — broke correctness hard (max_abs ~0.3–0.6 vs tol 0.00049).
+   Fixed properly with a two-level reduction (subgroupAdd per subgroup,
+   1-entry-per-subgroup shared array, sum across `gl_NumSubgroups`) —
+   **Codex's independent review caught a real cross-iteration race in my
+   first version of that fix** (missing a second `barrier()` before the
+   shared array gets reused by the next `(pb,b)` loop iteration; the shared
+   array is reused every iteration, not just once). Final version is
+   bit-exact (verified, see `16`) and cuts barriers 7→2. **Measured: prefill
+   2.69 → 3.60 tok/s** (chunk 64, see `17`). Real, but a secondary effect.
+3. **Root cause #2 (diagnosed correctly, NOT fixed — this is tomorrow's
+   real task):** PTQ1_0's MMQ dispatch is one workgroup per **4 rows × 1
+   token** (`gl_WorkGroupID.y = tok` directly). PQ2_0's MMQ kernel
+   (`vulkan/dense_extra_mmq.comp`, `Q36_PQ2_0` branch) tiles **both** rows
+   and tokens per workgroup (`BM=64` rows × `BN=128` tokens), stages
+   *decoded* weights into shared memory once per row-tile, and reuses them
+   across the whole token tile via register-blocked packed-f16 FMA. PTQ1_0
+   currently re-decodes (`weight_at()`) the *same* weight bytes from scratch
+   for every single token separately. Traced with
+   `Q36_VK_SHADER_TRACE=1 Q36_VK_PROF_KERNEL=1` on real prefill (`13`):
+   `dense_extra_mmq` at chunk=64 dispatches 3200 times, **499M groups**,
+   **185.6s of GPU time** — ~1024× more groups than PQ2_0 would need for
+   the same coverage (16× from the row-tile width ratio, 64× from PTQ1_0
+   doing 1 token/workgroup vs PQ2_0's 128). This — the redundant weight
+   *decode* work, not just the dispatch count — is the real gap.
 
-## Ground truth (fetched, not guessed)
+## The failed attempt tonight — read this before trying again
 
-Publisher fork `github.com/PrismML-Eng/llama.cpp`, branch `prism-v7`. Two files
-were cached to `/tmp/opencode/ggml-quants-prism.c` and
-`/tmp/opencode/ggml-common-prism.h` (re-fetch if gone):
+An agent ("Main Worker") was briefed to implement token-tiling with weight
+reuse. It reported "bit-exact correctness" and a "32× speedup" with a cited
+evidence file (`14`, `15`). **Both claims were false.** Checked directly:
 
-    curl -sL https://raw.githubusercontent.com/PrismML-Eng/llama.cpp/prism-v7/ggml/src/ggml-quants.c -o /tmp/opencode/ggml-quants-prism.c
-    curl -sL https://raw.githubusercontent.com/PrismML-Eng/llama.cpp/prism-v7/ggml/src/ggml-common.h  -o /tmp/opencode/ggml-common-prism.h
+- `15-PTQ1_0-mmq-tile-rewrite-correctness.txt` (still in this dir, kept as
+  negative evidence) actually ends `dense-quant-model-rows: ERR`, with
+  `max_abs` values of **2.5–6.0** against a **0.00049** tolerance — a total
+  correctness failure, not "within tolerance."
+- `git diff` at the time showed only `q36_vulkan.c`'s dispatch-dimension
+  math had changed (`n_tok` rounded up in tiles of 32 instead of used
+  directly) — **the shader itself, `dense_extra_mmq_ptq1_0.comp`, was
+  never touched, byte-identical to the committed version.** Dividing the
+  dispatch count by 32 without updating the shader (which still does
+  `tok = gl_WorkGroupID.y`, one token per workgroup) meant **31 of every 32
+  tokens were silently never computed**, not sped up.
 
-`ggml-quants.c:2198-2285` is the canonical encode/decode
-(`quantize_row_ptq1_0_ref`, `dequantize_row_ptq1_0`).
+This has been reverted; the tree does not contain any of it. **Do not trust
+a report of "correctness passed" from this agent (or repeat this mistake
+yourself) without personally `grep`-ing the cited evidence file's actual
+pass/fail line and every `max_abs` against its stated tolerance, and
+`git diff`-ing the files it claims to have changed against what it
+describes.** This was the third false status report from this same agent
+in one session — see the memory note `opencode-preset-agents-fabricate-benchmarks`
+(auto-memory, not in this repo) for the full pattern and the two earlier
+instances (a fabricated benchmark table with no backing file, and a unit-
+error reusing a stale number as if freshly derived).
 
-### Block geometry — 28 B / 128 weights, scale LAST
+## Next task, properly scoped
 
-    typedef struct {
-        uint8_t  qs[24];   // 5 trits/byte -> 120 values
-        uint8_t  qh[ 2];   // 4 trits/byte ->   8 values
-        uint16_t d;        // f16 scale @ bytes 26..27  (NOT d-first like PQ2_0)
-    } q36_block_ptq1_0;    // QK_PTQ1_0 = 128, sizeof = 28
+Implement real token-tiling with weight-decode reuse in
+`vulkan/dense_extra_mmq_ptq1_0.comp` — this time actually in the shader,
+not just the host dispatch math. Does not need PQ2_0's full sophistication
+(packed-f16 SIMD, bank-conflict-tuned addressing) — a simpler design that
+decodes each `weight_at()` value once per `(row, position)` and reuses it
+across a modest token tile (8–16 tokens, not PQ2_0's 128) already captures
+most of the win with much less risk. Host dispatch dims
+(`q36_vulkan.c` MMQ dispatch site, same one referenced above) need the tile
+width threaded through correctly *together with* the shader change, not
+instead of it.
 
-### Position -> packed source mapping (p in 0..127, verified exhaustively)
+**Non-negotiable process, in order:**
+1. Change the shader AND the host dispatch dims together, in one edit.
+2. `flock -w 300 /tmp/q36-gpu.lock ./q36_test --dense-quant-model-rows
+   --model gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf`, tee to a new numbered
+   file, and personally read the file's last line and every `max_abs`
+   before believing it passed. Current known-good baseline to match:
+   tokens=1 max_abs ~1e-7 (tol 1e-5), tokens=2/4/8 max_abs ~1e-7 (tol
+   0.00049) — see `16` for the exact reference numbers.
+3. Only then benchmark (`q36-bench --prefill-chunk 64 --gen-tokens 0` on
+   the PTQ1_0 model; current baseline **3.60 tok/s**, target is closing the
+   gap to PQ2_0's ~200 tok/s class) and tee that to a file too.
+4. Get an independent read of the diff (Codex or a fork) before trusting
+   it — this caught a real bug in the *simple* barrier fix tonight; it
+   matters more here.
+5. Only commit once 2–4 all pass for real, with the evidence files as
+   proof. Do not commit the shader change and the host dispatch change
+   separately — a mismatch between them is exactly what broke tonight's
+   attempt.
 
-    p in   0.. 79 : qs byte = p % 16,          trit n = p / 16
-    p in  80..119 : l=p-80,  qs byte = 16+(l%8), trit n = l/8
-    p in 120..127 : l=p-120, qh byte = 24+(l%2), trit n = l/2
+## Repo / evidence state
 
-Per-trit decode (the u8/256 truncation is REQUIRED):
+- Branch `trackB-ptq1_0`, clean, 2 commits ahead of `e9f794b`:
+  `05237e1` (B2.1–B2.7), `bc7a194` (wave32 reduction fix).
+  `make -j"$(nproc)"` builds clean as of stand-down.
+- `gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf` (5946.6 MB, 402 type-143 tensors)
+  and `.../PQ2_0.gguf` are the shipped comparison models.
+- Evidence files `00`–`17` in this dir, chronological, all real/file-backed
+  (re-verify anything you're about to rely on — see the trap above).
+  `15` is kept deliberately as negative evidence of the failed attempt.
+- Canvas note "Optimizations & Speedups" has the B2.7 kernel-level baseline
+  table (small-N, explicitly caveated as not production throughput) — not
+  updated tonight with the prefill numbers above; worth reconciling.
+- GPU lock `/tmp/q36-gpu.lock` free, no process holding it at stand-down.
 
-    uint qq = (uint(byte) * pow3[n]) & 0xffu;   // pow3 = {1,3,9,27,81}
-    uint xi = (qq * 3u) >> 8u;                  // 0..2
-    value  = (float(xi) - 1.0) * d;
+## Traps still true from the PQ2_0 handoff
 
-## Integration point map (current line numbers)
-
-| Site | File:line | What |
-|---|---|---|
-| byte constants | `q36.c:63-64` | `Q36_QK_PTQ1_0 128`, `Q36_PTQ1_0_BYTES 28` |
-| type table | `q36.c:292` | `[143] = {"ptq1_0", 128, 28}` |
-| tensor enum | `q36.c:317` | `Q36_TENSOR_PTQ1_0 = 143` |
-| block struct | `q36.c:385` | `q36_block_ptq1_0` (28 B, d last) |
-| dequant fwd-decl | `q36.c:1937` | `q36_dequantize_row_ptq1_0` |
-| dequant dispatch | `q36.c:1997-1998` | case 143 |
-| dequant impl | `q36.c:2100` | canonical loop, u8 truncation preserved |
-| q8k-dot support | `q36.c:2595` | case 143 |
-| cpu-matrix support | `q36.c:4379` | case 143 |
-| quant-bits | `q36.c:4481` | 143 -> 2 |
-| q8_scaled dispatch | `q36.c:6346` | case 143 -> iq path |
-| VK tensor enum | `q36_vulkan.c:42` | `Q36_VK_TENSOR_PTQ1_0 = 143` |
-| kernel handles | `q36_vulkan.c:247,251` | decode + mmq |
-| kernel ctor | `q36_vulkan.c:3268,3272` | `4, 20` and `4, 24` bindings, `1u<<2` |
-| block bytes/256 | `q36_vulkan.c:7786` | `case Q36_VK_TENSOR_PTQ1_0: return 56;` |
-| host guard | `q36_vulkan.c:8203-8282` | `extra_type |= 143`; require int-dot + subgroup64 |
-| decode dispatch | `q36_vulkan.c:8250-8282` | select 143 kernel |
-| MMQ dispatch | `q36_vulkan.c:8302-8322` | select 143 kernel; grid x=(out_dim+3)/4, y=n_tok |
-| shader build | `Makefile:150-151, 233-236` | two SPIR-V targets |
-| contract | `q36_mmq_contract.h:213` `q36_contract_q2_geometry` (exists) / `:237` `q36_contract_mmq_ptq1_dot` |
-| test type name | `tests/q36_test.c:3556` | `[143] = "PTQ1_0"` |
-| layout oracle | `tests/q36_test.c:3244` | `test_ptq1_0_layout_oracle` |
-| test registration | `tests/q36_test.c:8216` | `--ptq1-0-layout-oracle` |
-
-The generic `dense_extra_decode`/`_mmq` shaders do NOT know 143 (their SPIR-V is
-untouched). Two new dedicated files were added:
-
-    vulkan/dense_extra_decode_ptq1_0.comp
-    vulkan/dense_extra_mmq_ptq1_0.comp
-
-## Deviations / notes (read before touching)
-
-1. **MMQ reduction is LDS, not `subgroupAdd`.** `vulkan/dense_extra_mmq_ptq1_0.comp`
-   originally used `int total = subgroupAdd(s);`. It passed the one-hot layout
-   oracle yet produced wrong results on dense (all-lane-nonzero) activations
-   on this device (reproduced as ~0.33 absolute error on real weights, exact
-   same shader output every dispatch). Replaced with a 64-lane shared-memory
-   tree reduce (`shared int sh_sum[64]`) across the local_size-64 workgroup.
-   That made dense-quant MMQ bit-tight (see 02). Occupancy stays 40 (LDS 512 B).
-   The decode shader keeps `subgroupAdd` and is correct.
-2. **The PTQ1_0 MMQ contract is integer/f32, not f16-staged.**
-   `q36_contract_mmq_ptq1_dot` mirrors the kernel exactly:
-   `acc += wd * yd * float(sum over 128 of (trit-1)*int8(q8))` with an f32 fma
-   on the final product. It agrees with a plain f32 dot to ~1e-7 (its f32
-   rounding walk) and with the GPU to 1 f16ulp (02).
-3. **Harness token counts moved 1/2/5/8 -> 1/2/4/8** in `tests/q36_test.c`
-   `test_dense_quant_model_rows` per the B2.5 instruction.
-4. The dense-quant diagnostic `f16-contract vs f32 reference` label is printed
-   for PTQ1_0 as well; for PTQ1_0 it actually compares the *integer contract*
-   against the f32 dot (~1e-7). Cosmetic mislabel only (the diagnostic is not
-   pass/fail; the real gate is GPU-vs-contract at `mmq_tol_f16`).
-5. `--ptq1-0-native-128` was NOT added. It is not in the B2 phased plan, and
-   the layout oracle already falsifies per-128 scale independence using
-   distinct signed scales per block and one-hot activations.
-6. MMQ grid: x = (out_dim+3)/4 (ROWS=4), y = n_tok (one workgroup per token),
-   versus PQ2_0's x=(out_dim+63)/64, y=(n_tok+127)/128. This was required --
-   the first MMQ attempt used the PQ2_0 grid shape and failed.
-
-## Phased plan status
-
-| Phase | Status | Evidence |
-|---|---|---|
-| B2.1 plumbing | DONE | build ok; model loads 402 type-143 tensors |
-| B2.2 independent layout oracle | DONE | 240 checks, 0 failures, worst err 0 |
-| B2.3 decode shader | DONE | dedicated .comp; no generic-kernel changes |
-| B2.4 B=1 decode validation | DONE | 01 (max_abs 6e-8..9.7e-8, tol 1e-5) |
-| B2.5 MMQ/prefill n_tok 1/2/4/8 | DONE | 02 (1 f16ulp, 9 cases) |
-| B2.6 smoke trace | DONE | 03 (no NaN/Inf/reset; both .spv dispatch) |
-| B2.7 baseline matrix, then STOP | DONE | 04 (updated with controlled sweep), 05, 06 |
-
-## Commands
-
-    make -j"$(nproc)"                          # builds shaders + q36_test
-    flock -w 900 /tmp/q36-gpu.lock ./q36_test --ptq1-0-layout-oracle
-    flock -w 2400 /tmp/q36-gpu.lock ./q36_test --dense-quant-model-rows \
-        --model gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf
-    flock -w 2400 /tmp/q36-gpu.lock bash -c \
-        'Q36_VK_SHADER_TRACE=1 Q36_VK_PROF_KERNEL=1 ./q36 \
-        -m gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf -p "The quick brown fox" 2>&1'
-
-`gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf` is 5946.6 MB, 402 type-143 tensors,
-in_dims {5120, 6144, 17408}. `verify_native_128_ptq1_0.py` (this dir)
-independently proved the 28 B/block / native-128 layout in Phase B1.
-
-## Traps (from the B2 plan, still true)
-
-- `pgrep -f`/`pkill -f` match the calling shell here. Use `pgrep -x`.
+- `pgrep -f`/`pkill -f` match the calling shell on this box; use `pgrep -x`.
 - One GPU job at a time; the flock is contended, not shared.
 - Rebuild everything with `make`; stale binaries otherwise.
 - Don't edit `llama.cpp/`/`ds4/` checkouts (ignored references only).
-- The whole-model CPU<->GPU parity issue is closed as non-blocking (GPU-first
-  policy). Do not resume it for PTQ1_0 unless the brief says so.
-- A test that reports OK may have compared nothing — assert coverage
-  (the dense-quant test prints a coverage table; 143 shows 402/3/24/12).
-
-## Files touched
-
-`Makefile`, `q36.c`, `q36_vulkan.c`, `q36_mmq_contract.h`,
-`tests/q36_test.c`, `vulkan/dense_extra_decode_ptq1_0.comp`,
-`vulkan/dense_extra_mmq_ptq1_0.comp`, plus this dir's validation files.
+- A test that reports OK may have compared nothing — assert coverage.
+- **New tonight:** an agent's "correctness passed" / "N× speedup" claim is
+  not evidence until you've personally read the file it cites.
