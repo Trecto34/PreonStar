@@ -187,17 +187,16 @@ void main(void) {
                 // Compute GEMM using buf_b[curr_buf] with 16-bit packed vector arithmetic
                 uint k_offset = inner_slice * 16u;
                 [[unroll]] for (uint k = 0u; k < BK_PAIRS; k++) {
-                    i16vec2 a[8];
-                    [[unroll]] for (uint r = 0u; r < 8u; r++) {
-                        a[r] = buf_a[(r * 4u + lane_row) * STRIDE_A + k_offset + k];
-                    }
+                    // Load activation slice into registers (b array stays for reuse)
                     i16vec2 b[4];
                     [[unroll]] for (uint t = 0u; t < 4u; t++) {
                         b[t] = buf_b[curr_buf][(wave * 32u + lane_tok * 4u + t) * STRIDE_B + k];
                     }
+                    // Directly load weight values from LDS per row, avoiding a[8] temporary
                     [[unroll]] for (uint r = 0u; r < 8u; r++) {
+                        i16vec2 a = buf_a[(r * 4u + lane_row) * STRIDE_A + k_offset + k];
                         [[unroll]] for (uint t = 0u; t < 4u; t++) {
-                            sum[r][t] += a[r] * b[t];
+                            sum[r][t] += a * b[t];
                         }
                     }
                 }
