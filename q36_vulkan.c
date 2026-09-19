@@ -8313,7 +8313,7 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                     is_ptq1_0 ? ((uint32_t)out_dim + 3u) / 4u :
                     (is_q2_0 ? ((uint32_t)out_dim + 63u) / 64u :
                                 ((uint32_t)out_dim + 31u) / 32u),
-                    is_ptq1_0 ? n_tok :
+                    is_ptq1_0 ? ((uint32_t)n_tok + 7u) / 8u :
                                 ((uint32_t)n_tok + 127u) / 128u,
                     1);
             }

@@ -7,10 +7,13 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+const uint TOK_TILE = 8u;
+
 /* local_size_x=64 spans 2 subgroups at wave32 (forced on this shader,
  * see q36_vulkan.c force_wave32) but 1 at wave64 -- size for the worst
- * case (min subgroup size on this device is 32). */
-shared int sh_sum[2];
+ * case (min subgroup size on this device is 32).
+ * Each token in the tile gets one slot per subgroup. */
+shared int sh_sum[TOK_TILE][2];
 
 layout(set = 0, binding = 0) readonly buffer Weights { uint8_t wb[]; };
 layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
@@ -75,15 +78,21 @@ int weight_at(uint base, uint p) {
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
     uint first_row = gl_WorkGroupID.x * ROWS;
-    uint tok = gl_WorkGroupID.y;
+    uint tok0 = gl_WorkGroupID.y * TOK_TILE;
 
-    if (tok >= pc.n_tok) return;
+    if (tok0 >= pc.n_tok) return;
 
     float acc[ROWS];
     [[unroll]] for (uint r = 0u; r < ROWS; r++) acc[r] = 0.0f;
 
     for (uint b = 0u; b < pc.blocks; b++) {
-        float yd = uintBitsToFloat(q8[(tok * pc.blocks + b) * Q8K_WORDS]);
+        float yd = 0.0f;
+        if (lid < TOK_TILE) {
+            uint my_tok = tok0 + lid;
+            if (my_tok < pc.n_tok) {
+                yd = uintBitsToFloat(q8[(my_tok * pc.blocks + b) * Q8K_WORDS]);
+            }
+        }
 
         [[unroll]] for (uint r = 0u; r < ROWS; r++) {
             uint row = first_row + r;
@@ -94,33 +103,44 @@ void main(void) {
                 uint base = row * pc.row_bytes + qblock * PTQ1_0_BYTES;
                 float wd = f16_to_f32(load_u16(base + 26u));
 
-                int s = 0;
-                for (uint pp = 0u; pp < 2u; pp++) {
-                    uint p = lid + pp * 64u;
-                    uint a = pb * 128u + p;
-                    s += weight_at(base, p) * q8_at(tok, b, a);
+                // Decode 2 weights per thread once per (row, pb) and reuse across token tile
+                int w0 = weight_at(base, lid);
+                int w1 = weight_at(base, lid + 64u);
+                uint a0 = pb * 128u + lid;
+                uint a1 = pb * 128u + (lid + 64u);
+
+                for (uint t = 0u; t < TOK_TILE; t++) {
+                    uint tok = tok0 + t;
+                    if (tok >= pc.n_tok) break;
+
+                    int s = w0 * q8_at(tok, b, a0) + w1 * q8_at(tok, b, a1);
+                    int local = subgroupAdd(s);
+                    if (subgroupElect()) sh_sum[t][gl_SubgroupID] = local;
                 }
-                /* Two-level reduction: subgroupAdd within each subgroup
-                 * (fast, correct regardless of wave width), then one
-                 * cheap cross-subgroup combine -- a bare subgroupAdd
-                 * alone would silently sum only half the lanes under
-                 * the wave32 forced on this shader. */
-                int local = subgroupAdd(s);
-                if (subgroupElect()) sh_sum[gl_SubgroupID] = local;
                 barrier();
-                int total = 0;
-                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) total += sh_sum[sg];
-                barrier(); /* every lane must finish reading sh_sum before the
-                            * next (pb,b) iteration's elected lane overwrites it */
-                acc[r] = fma(wd * yd, float(total), acc[r]);
+
+                if (lid < TOK_TILE) {
+                    uint my_tok = tok0 + lid;
+                    if (my_tok < pc.n_tok) {
+                        int total = 0;
+                        for (uint sg = 0u; sg < gl_NumSubgroups; sg++) total += sh_sum[lid][sg];
+                        acc[r] = fma(wd * yd, float(total), acc[r]);
+                    }
+                }
+                barrier();
             }
         }
     }
 
-    [[unroll]] for (uint r = 0u; r < ROWS; r++) {
-        uint row = first_row + r;
-        if (lid == 0u && row < pc.out_dim) {
-            y[tok * pc.out_dim + row] = acc[r] * pc.scale;
+    if (lid < TOK_TILE) {
+        uint my_tok = tok0 + lid;
+        if (my_tok < pc.n_tok) {
+            [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+                uint row = first_row + r;
+                if (row < pc.out_dim) {
+                    y[my_tok * pc.out_dim + row] = acc[r] * pc.scale;
+                }
+            }
         }
     }
 }

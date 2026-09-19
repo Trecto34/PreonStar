@@ -1,0 +1,12 @@
+Independent Review of PTQ1_0 MMQ Token Tiling Diff
+Reviewer: OpenCode (recruited on Maestri canvas)
+Branch: trackB-ptq1_0
+Files reviewed: vulkan/dense_extra_mmq_ptq1_0.comp, q36_vulkan.c
+
+Findings:
+- Workgroup Y indexes token tiles: tok0 = gl_WorkGroupID.y * 8
+- Weights decoded once per (row, pb) (2 weights/thread) and reused across all 8 tokens in tile
+- Inner loop iterates t=0..7, accumulates per-token partial sums in shared memory
+- Output writes 8 tokens at end (guarded by lid < TOK_TILE)
+- The reduction logic correctly handles partial tiles at tail (tok >= pc.n_tok checks).
+- No issues found. Clean diff.
