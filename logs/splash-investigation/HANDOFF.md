@@ -253,14 +253,16 @@ speculative decoding at all yet. Both are algorithm/architecture ports, not
 code ports — no splash source was copied and no q36 kernel code was
 touched in this investigation.
 
-## Design: Converting q36 Vulkan KV cache to sparse-binding paging (VK_KHR_sparse_binding)
+## Design: Converting q36 Vulkan KV cache to sparse‑binding paging (VK_KHR_sparse_binding)
 
-### Current allocation (pre‑allocates full capacity)
-* `q36_vulkan_runtime_create` allocates a full‑size K/V buffer per attention layer:
-  * `kv_cap = q36_kv_initial_cap(ctx_size)` → min(ctx, 32768)【q36.c:5319-5321】.
-  * For each full‑attention layer: `full[il].k = q36_gpu_tensor_alloc_uninitialized(kv_cap * k_row_bytes)` and same for V【q36.c:6088-6095】.
-* `q36_vulkan_runtime_reserve_kv` can grow the buffer up to the original `ctx_size` limit, but the initial allocation already backs the entire `kv_cap` upfront regardless of how many tokens are live【q36.c:6148-6165】.
-* Result: on a `--ctx 32768` session the driver commits ~32 K × row_bytes × layers of VRAM even if only a few hundred tokens are active.
+### Current allocation (incremental growth, not full pre‑allocation)
+* `q36_vulkan_runtime_create` determines the initial KV capacity with `kv_cap = q36_kv_initial_cap(ctx_size)`【q36.c:6481-6497】.
+* The actual GPU buffers are allocated per‑layer here:
+  * `rt->full[il].k = q36_gpu_tensor_alloc_uninitialized((uint64_t)kv_cap * k_row_bytes)`
+  * `rt->full[il].v = q36_gpu_tensor_alloc_uninitialized((uint64_t)kv_cap * v_row_bytes)`【q36.c:6820-6821】.
+* When more tokens are needed, `q36_vulkan_runtime_reserve_kv` (`q36.c:6874`) invokes `q36_vulkan_cache_reserve` (`q36.c:6851-6870`), which allocates new, bigger K/V buffers, GPU-copies the live rows forward with `q36_gpu_tensor_copy` + `q36_gpu_synchronize`, then frees the old buffers — confirmed: this is a synchronous realloc-and-copy, not in-place growth.
+* `q36_kv_initial_cap` starts at `min(ctx, Q36_KV_INITIAL_CAP)`【q36.c:5998-6000】 and `q36_kv_next_cap` grows by ~1.25× steps (next = cap + cap/4) up to the user‑requested limit【q36.c:6002-6009】.
+* Therefore q36 already avoids allocating the full `--ctx` buffer up front; the benefit of sparse‑binding is to **eliminate the copy‑on‑grow reallocations** and to enable **true release of pages when a session ends or the context shrinks**, which the current grow‑and‑copy approach cannot do.
 
 ### Sparse‑binding design
 
@@ -268,18 +270,23 @@ touched in this investigation.
 |--------|----------|-----------------------|
 | **Virtual buffer size** | `max_tokens = ctx_size` (the user‑requested `--ctx`). Allocate one **sparse** `VkBuffer` per layer per K and V with `VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT` and size = `max_tokens * row_bytes`. | Matches Splash’s “expose huge virtual KV address space”【HANDOFF.md:225-229】. |
 | **Page granularity** | 32 tokens = `SPLASH_TARGET_KV_BLOCK_TOKENS` (found in Splash) → page bytes = `32 * row_bytes`. 32‑token pages align with the 64 KiB sparse‑mapping tile used by Splash (32 tok × 256 B ≈ 8 KiB per row, 8 pages ≈ 64 KiB)【splash‑src/runtime/metal/abi/ExecutionGeometry.h:16】. | Keeps bind/unbind granularity identical to Splash; avoids fragmenting VRAM. |
-| **Buffer creation time** | Replace `q36_gpu_tensor_alloc_uninitialized` with a new helper `q36_vk_tensor_alloc_sparse(bytes, page_bytes)` that: <br>1. `vkCreateBuffer` with `flags = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT`.<br>2. `vkGetBufferMemoryRequirements2` → `VkMemoryRequirements2` with `VkMemoryDedicatedRequirements` for sparse.<br>3. `vkAllocateMemory` with `VkMemoryAllocateFlagsInfoKHR(flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR | VK_MEMORY_ALLOCATE_SPARSE_BIT_KHR)` (or use `VK_KHR_sparse_binding` path).<br>4. No `vkBindBufferMemory`; instead record each page bind later via `vkQueueBindSparse`. | Vulkan sparse buffers require `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` at creation and a `VkSparseBufferMemoryBindInfo` per bind【Vulkan spec】. |
-| **Per‑step binding** | In the decode/prefill loop (where `q36_vulkan_runtime_reserve_kv` is called), compute `need_pages = ceil(live_tokens / 32)`. For each newly required page: submit a `VkBindSparseInfo` with `VkSparseBufferMemoryBindInfo` pointing at the corresponding offset (`page_index * page_bytes`). Use a per‑layer bitmap to avoid duplicate binds. | Splash binds/unbinds in 64 KiB batches on‑demand【HANDOFF.md:207-212】. |
-| **Release / shrink** | When a session finishes or context window slides (e.g. after `q36_session_reset`), submit unbind operations for pages no longer needed. Keep a fence / timeline semaphore so the driver knows the page is no longer in flight before re‑using it. | Splash’s async release pacing (`releaseReady` / `awaitRelease`)【HANDOFF.md:209-212】. |
-| **Memory budget** | Total virtual size = `ctx_size * (k_row_bytes + v_row_bytes) * full_layers`. Physical backing only for bound pages. Use `VK_EXT_memory_budget` to enforce a headroom heuristic similar to Splash’s `hardBudgetBytes`【HANDOFF.md:238-242】. | Prevents over‑commit on limited VRAM. |
-| **Error handling** | If `vkQueueBindSparse` returns `VK_ERROR_OUT_OF_DEVICE_MEMORY`, fall back to truncating context or abort with a clear error (mirroring Splash’s `BudgetErrorCode::KvPoolDoesNotFit`). | Mirrors Splash hard‑fail policy【HANDOFF.md:192-194】. |
+| **Buffer creation time** | Replace the current `q36_gpu_tensor_alloc_uninitialized` calls with a new helper `q36_vk_tensor_alloc_sparse(bytes, page_bytes)` that:
+  1. Calls `vkCreateBuffer` with `flags = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT`.
+  2. Queries memory requirements via `vkGetBufferMemoryRequirements2`.
+  3. Allocates memory with `VkMemoryAllocateFlagsInfoKHR(flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR | VK_MEMORY_ALLOCATE_SPARSE_BIT_KHR)`.
+  4. Defers actual page binding to later via `vkQueueBindSparse`.
+| Vulkan sparse buffers require the creation flags above and later a `VkSparseBufferMemoryBindInfo` per bind【Vulkan spec】. |
+| **Per‑step binding** | In the decode/prefill loop (where `q36_vulkan_runtime_reserve_kv` is invoked) compute `need_pages = ceil(live_tokens / 32)`. For each newly required page, submit a `VkBindSparseInfo` with a `VkSparseBufferMemoryBindInfo` pointing at the appropriate offset (`page_index * page_bytes`). Track bound pages per‑layer to avoid duplicate work. | Mirrors Splash’s on‑demand page mapping【HANDOFF.md:207-212】. |
+| **Release / shrink** | When a session ends or the sliding context window moves, submit unbind operations for pages no longer needed and synchronize with a fence or timeline semaphore before the memory is reused. | Mirrors Splash’s async release (`releaseReady` / `awaitRelease`)【HANDOFF.md:209-212】. |
+| **Memory budget** | Virtual size = `ctx_size * (k_row_bytes + v_row_bytes) * full_layers`. Physical memory is only allocated for bound pages. Use `VK_EXT_memory_budget` to enforce a headroom heuristic similar to Splash’s `hardBudgetBytes`【HANDOFF.md:238-242】. | Prevents over‑commit on limited VRAM. |
+| **Error handling** | If `vkQueueBindSparse` fails with `VK_ERROR_OUT_OF_DEVICE_MEMORY`, fall back to truncating the context or abort with a clear error, replicating Splash’s `BudgetErrorCode::KvPoolDoesNotFit` behaviour【HANDOFF.md:192-194】. |
 
 ### Files to modify (design only – no code yet)
 * `q36_vulkan.c` – add `q36_vk_tensor_alloc_sparse`, `q36_vk_sparse_bind_pages`, `q36_vk_sparse_unbind_pages`.
-* `q36.c` – in `q36_vulkan_runtime_create` replace the K/V `q36_gpu_tensor_alloc_uninitialized` calls with sparse buffers; in `q36_vulkan_runtime_reserve_kv` / decode path call the bind helpers.
+* `q36.c` – in `q36_vulkan_runtime_create` replace the K/V `q36_gpu_tensor_alloc_uninitialized` calls with sparse buffers; in `q36_vulkan_runtime_reserve_kv` (and the decode path) invoke the bind helpers instead of realloc‑and‑copy.
 * No shader changes required; existing `kv_store` / `kv_store_quant` kernels already index by token offset, which works on a sparsely‑backed buffer because the virtual address space is contiguous.
 
 ### Single most important design decision & risk
 **Decision:** Use **32‑token pages (SPLASH_TARGET_KV_BLOCK_TOKENS)** as the sparse‑binding granularity, matching Splash’s page size and the 64 KiB tile alignment required by the hardware.
 
-**Risk:** RADV’s sparse‑buffer implementation may have higher bind/unbind latency than Metal’s placement‑sparse buffers. If bind latency per decode step becomes a bottleneck, the design would need to batch multiple page binds into a single `vkQueueBindSparse` submission or pre‑bind a larger window (e.g., next N pages) to amortize cost.
+**Risk:** RADV’s sparse‑buffer implementation may have higher bind/unbind latency than Metal’s placement‑sparse buffers. If bind latency per decode step becomes a bottleneck, the design would need to batch multiple page binds into a single `vkQueueBindSparse` submission or pre‑bind a larger window (e.g., next N pages) to amortize cost.
