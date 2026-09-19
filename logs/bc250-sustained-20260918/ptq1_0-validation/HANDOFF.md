@@ -59,11 +59,21 @@ Shifted from reduction-loop kernel to full LDS GEMM tile:
    (file `27-gemm-review.txt`).
 9. Long-term memory: Persistently recorded in `mem0` vector store (`q36-opt-27b`).
 
+**Root cause #2 (step 4 complete: Direct zero-copy 128-weight LDS staging):**
+Refined the LDS architecture to eliminate intermediate staging copies:
+1. Sized `buf_a[BM * STRIDE_A]` with `STRIDE_A = 129u` (4.1 KB LDS) to hold the full 128 weights
+   per row directly.
+2. Decodes all 128 weights once per PTQ1_0 block; inner slices directly index `k_offset + k`.
+3. Correctness: bit-exact vs CPU oracle across all model rows, tensors, token counts.
+4. Prefill throughput: **34.07 tok/s** (chunk 64, file `29-direct-staged-prefill64.txt`),
+   and **35.49–36.35 tok/s** (chunk 128, file `30-direct-staged-prefill128.txt`).
+5. Long-term memory: Stored in `mem0` vector memory (`3afa3a7d-a5a3-4659-83f8-724b97b93e04`).
+
 ## Repo / evidence state
 
 - Branch `trackB-ptq1_0`, clean, ahead of `e9f794b`.
 - `gguf/Ternary-Bonsai-2-27B-PTQ1_0.gguf` (5946.6 MB, 402 type-143 tensors).
-- Evidence files `00`–`27` in this dir, chronological, all real/file-backed:
+- Evidence files `00`–`30` in this dir, chronological, all real/file-backed:
   - `18-toktile8-correctness.txt`: bit-exact test log (TOK_TILE=8).
   - `19-toktile8-prefill64.txt`: 9.01 tok/s benchmark log.
   - `20-toktile8-review.txt`: independent review from Reviewer (OpenCode) via Maestri.
@@ -74,6 +84,9 @@ Shifted from reduction-loop kernel to full LDS GEMM tile:
   - `25-gemm-int-correctness.txt`: bit-exact integer GEMM test log (BM=32, BN=64).
   - `26-gemm-prefill64.txt`: 33.92 tok/s benchmark log.
   - `27-gemm-review.txt`: independent review from Reviewer (OpenCode) via Maestri.
+  - `28-staged-prefill64.txt`: staged weight benchmark log (33.87 tok/s).
+  - `29-direct-staged-prefill64.txt`: direct zero-copy benchmark log (34.07 tok/s).
+  - `30-direct-staged-prefill128.txt`: direct zero-copy chunk 128 benchmark log (35.49 tok/s).
 - Canvas notes "Recent Optimizations", "Optimizations & Speedups", and "Track B Coordination"
   updated in real time via Maestri CLI.
 - GPU lock `/tmp/q36-gpu.lock` free, no process holding it at stand-down.
