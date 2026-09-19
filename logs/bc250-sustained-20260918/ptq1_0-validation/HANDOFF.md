@@ -93,6 +93,30 @@ Implemented K-dimension double-buffering in LDS (`shared int8_t buf_b[2][BN * ST
 **Root cause #2 (step 7 architectural evaluations & negative results):**
 1. **$BN=128$ Macro-Tile Expansion**: Sizing $BN=128$ caused a 46% throughput regression on batch 64 (19.82 tok/s, file `36`) due to 50% idle threads on small prompt frontiers, while yielding no throughput gain on batch 128/256 (38.38 tok/s, file `37`). Reverted to optimal $BM=32, BN=64$.
 2. **`i8vec4` Staging & Vectorized Reads**: Loading $a[8][4]$ into registers increased VGPR pressure from 64 to 96 VGPRs, reducing hardware occupancy from 100% (32 waves/CU) to 66% (20 waves/CU), resulting in 37.13 tok/s (c64) and 38.80 tok/s (c128) (files `42`–`44`). Preserved commit `b6903a3` (100% occupancy) as primary.
+3. **Weight double-buffering over `pb` sub-blocks (negative result)**: Mirrored the
+   step-6 activation double-buffering on the weight side -- parameterised the decode
+   as `load_weight_block(qb, pb, buf)`, doubled `buf_a` to
+   `shared i16vec2 buf_a[2][BM * STRIDE_A]`, linearised the `(qb, pb)` loop over
+   `lin = qb*2 + pb`, and staged sub-block `lin+1` into the spare slot while
+   sub-block `lin` was consumed.
+   - Correctness was clean: `--dense-quant-model-rows` OK (0 diff) and
+     `--ptq1-0-layout-oracle` 240/240 passed, 0 failures, worst abs err 0, so the
+     staging/barrier restructure itself was functionally sound.
+   - Throughput regressed: **79.58 tok/s (chunk 64), 80.34 (chunk 128), 81.26
+     (chunk 256)** -- **17-21% slower** than the shipped i16vec2 kernel's
+     95.90 / 103.01 / 102.18 tok/s at the same frontiers.
+   - Cause (not yet profiled): doubling `buf_a` lifted per-workgroup LDS from ~17 KB
+     to ~25 KB and folded the inlined weight decode into the hot loop, so the extra
+     in-flight block costs more LDS occupancy and issue slots than the overlap
+     hides -- same resource-pressure trap as the `i8vec4` (VGPR 64->96) and `BN=128`
+     attempts above.
+   - Reverted with `git checkout -- vulkan/dense_extra_mmq_ptq1_0.comp`, `make`
+     rebuilt clean. **Not committed** -- Reviewer rejected the diff. Raw evidence:
+     `ptq1_0-prefill64.log`, `ptq1_0-prefill128.log`, `ptq1_0-prefill256.log`
+     (this dir).
+   - Not attempted here: a smaller/skewed LDS layout that keeps the overlap without
+     doubling the footprint (single-buffered weights + register-staged next block, or
+     reduced `STRIDE_A`) -- left to the next decision point.
 **Root cause #2 (step 8 complete: Packed 16-bit integer vectorization & 2-way arithmetic):**
 Implemented packed 16-bit integer vectorization (`i16vec2`) in `vulkan/dense_extra_mmq_ptq1_0.comp`:
 1. Shared memory packed storage: `shared i16vec2 buf_a[BM * STRIDE_A]` (STRIDE_A=65u, 260 B, skew 1 bank) and `shared i16vec2 buf_b[2][BN * STRIDE_B]` (STRIDE_B=17u, 68 B, skew 17 banks) eliminating LDS bank conflicts while reducing total LDS load instructions by 50%.
@@ -104,6 +128,40 @@ Implemented packed 16-bit integer vectorization (`i16vec2`) in `vulkan/dense_ext
    - Speedup vs original baseline (2.69 tok/s): **35.65x - 38.29x**.
 6. Independent review: delegated to Reviewer via Maestri canvas, approved (`49-i16vec2-review.txt`).
 7. Long-term memory: Persistently recorded in `mem0` vector store.
+
+## Decode path (single-token generation): DONE, target met
+
+Separate from the MMQ/prefill work above. Target was **decode faster than
+PQ2_0 (32.21 tok/s)**.
+
+1. Decode v1-v3 (coalesced LDS -> vector dwords -> branchless zero-barrier
+   block-parallel + dotPacked4x8EXT + delayed reduction): 5.08 -> 17.37 tok/s.
+2. Decode v4 (Stride-16 LDS LUT, commit `d5c8749`): cooperative 2 KB LDS LUT
+   (trit_tab/trit4_tab) built once at entry eliminates all inner-loop
+   barriers; 4x4 register byte transpose amortizes activation packing across
+   ROWS=4; pure dotPacked4x8EXT cuts arithmetic 14x (183 -> 13 ops/lane).
+   **33.97 tok/s (64 tok) / 32.23 tok/s (128 tok sustained) -- exceeds PQ2_0.**
+   Bit-exact: 240/240 layout oracle, 0 diff model rows.
+3. **Post-commit fix (commit `2425487`):** independent review of `d5c8749`
+   (only commit on this branch that shipped without a review pass -- see
+   "traps" below) found the reduction restructure made this kernel require
+   the workgroup to compile to a single 64-wide subgroup (single
+   `subgroupAdd(acc[r])` over a lane-partitioned dot product), but nothing
+   pinned that -- the dispatch gate only reads the device's *default*
+   subgroup size, not the per-pipeline compiled width, a distinction this
+   same file documents for the wave32-forced `_mmq` family. Fixed by adding
+   `requiredSubgroupSize=64` + `REQUIRE_FULL_SUBGROUPS_BIT` to this pipeline.
+   Re-verified after the fix: layout oracle 240/240, model-rows OK, decode
+   unchanged at 34.00 / 32.34 tok/s (evidence `60`-`63`). **This class of bug
+   (device-default subgroup size treated as a per-pipeline guarantee) has
+   not been audited on the other decode kernels (`dense_extra_decode_pq2_0`,
+   `dense_extra_decode_q2_0`, generic `dense_extra_decode`) -- they use the
+   same `subgroup_size == 64u` gate and are not wave-pinned either. Not
+   fixed here (out of scope of what was reviewed); worth a follow-up audit
+   before trusting their numbers under a different driver/GPU.**
+
+Next planned item per canvas Task Registry: prefill weight double-buffering
+across `pb` sub-blocks (not started).
 
 ## Repo / evidence state
 
@@ -128,3 +186,9 @@ Implemented packed 16-bit integer vectorization (`i16vec2`) in `vulkan/dense_ext
 - A test that reports OK may have compared nothing — assert coverage.
 - **New tonight:** an agent's "correctness passed" / "N× speedup" claim is
   not evidence until you've personally read the file it cites.
+- **New (2026-09-19):** every commit on this branch got an independent
+  Reviewer pass except `d5c8749` (decode v4) -- it shipped straight from
+  benchmark to commit. It shipped with a real bug (see above). A passing
+  bit-exact test on one GPU/driver does not catch a subgroup-width
+  assumption; review every shader touching `subgroupAdd`/`gl_Subgroup*`
+  before committing, not just before declaring victory.

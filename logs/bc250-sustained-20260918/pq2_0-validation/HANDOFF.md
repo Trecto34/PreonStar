@@ -276,3 +276,42 @@ Artifacts in this directory; `REPORT.md` has the full write-up.
 * Rebuilding only some targets leaves stale binaries; `make` everything.
 * A test that reports OK may have compared nothing. Assert coverage, not just
   absence of failure.
+
+## Negative result (2026-09-19): activation double-buffering, shared MMQ kernel
+
+Attempted porting the activation double-buffer pattern that worked for
+PTQ1_0 prefill (commit `b6903a3`) to the shared PQ2_0/Q2_0 MMQ kernel
+(`vulkan/dense_extra_mmq.comp`): `buf_b` changed from single-buffered
+(`shared f16vec2 buf_b[BN*STRIDE]`) to double-buffered
+(`shared f16vec2 buf_b[2][BN*STRIDE]`), prefetching the next K-slice's
+activations while computing on the current one.
+
+1. **Correctness:** bit-exact. `--dense-quant-model-rows` OK for PQ2_0
+   (max_abs=0, rel_rms=0 on the PQ2_0 dense-quant cases). An initial version
+   dropped the second `barrier()` at the end of the per-slice loop body,
+   which introduces a write-after-read race (iteration N+1's prefetch writes
+   into the exact buffer iteration N's compute is still reading, since
+   curr/next ping-pong each iteration) -- caught before any GPU test, by
+   independent review (Reviewer + Grendel via Maestri canvas), fixed by
+   restoring that barrier. Bit-exact holds with the barrier restored.
+2. **Performance: REGRESSION.** Direct A/B on identical
+   `q36-bench --vulkan --model gguf/Ternary-Bonsai-2-27B-PQ2_0.gguf
+   --prefill-chunk 64` runs, ctx-max capped to 4096-8192 for turnaround:
+   - Fixed (double-buffered): ctx 2048 -> 63.26 tok/s, ctx 4096 -> 53.51 tok/s
+   - Baseline (single-buffered, HEAD): ctx 2048 -> 68.44 tok/s, ctx 4096 -> 55.82 tok/s
+   - **4-8% slower** than the existing single-buffered kernel, not faster.
+3. **Likely cause:** doubling `buf_b`'s LDS footprint on a kernel already
+   under-occupied (128 VGPRs, 13,312 B LDS, 8/16 wave32 subgroups/SIMD = 50%
+   occupancy per shaderstats) most likely drops occupancy further -- the
+   same class of trap as PTQ1_0's BN=128 and i8vec4 attempts (added
+   pressure costs more than the overlap buys back). Not re-measured after
+   the fact; worth confirming with shaderstats before trying again.
+4. **Disposition:** reverted, not committed. Working tree is back to the
+   single-buffered baseline. The diff is preserved in this session's shell
+   history (`git stash show -p` on the dropped stash, tag
+   `qc36-pq2-ab-baseline-<timestamp>`) if it needs resurrecting.
+5. **Next idea for this kernel:** profile-first, same as PTQ1_0's queue --
+   don't add register/LDS pressure; look for something that reduces
+   instruction count or improves occupancy instead (the a[8]-elimination
+   trick that worked for PTQ1_0 may have an analogous redundant-temporary
+   somewhere in this kernel's f16 path).
