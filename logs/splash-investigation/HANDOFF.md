@@ -252,3 +252,34 @@ accept/reject) is the higher-effort but higher-payoff idea since q36 has no
 speculative decoding at all yet. Both are algorithm/architecture ports, not
 code ports — no splash source was copied and no q36 kernel code was
 touched in this investigation.
+
+## Design: Converting q36 Vulkan KV cache to sparse-binding paging (VK_KHR_sparse_binding)
+
+### Current allocation (pre‑allocates full capacity)
+* `q36_vulkan_runtime_create` allocates a full‑size K/V buffer per attention layer:
+  * `kv_cap = q36_kv_initial_cap(ctx_size)` → min(ctx, 32768)【q36.c:5319-5321】.
+  * For each full‑attention layer: `full[il].k = q36_gpu_tensor_alloc_uninitialized(kv_cap * k_row_bytes)` and same for V【q36.c:6088-6095】.
+* `q36_vulkan_runtime_reserve_kv` can grow the buffer up to the original `ctx_size` limit, but the initial allocation already backs the entire `kv_cap` upfront regardless of how many tokens are live【q36.c:6148-6165】.
+* Result: on a `--ctx 32768` session the driver commits ~32 K × row_bytes × layers of VRAM even if only a few hundred tokens are active.
+
+### Sparse‑binding design
+
+| Aspect | Decision | Rationale / reference |
+|--------|----------|-----------------------|
+| **Virtual buffer size** | `max_tokens = ctx_size` (the user‑requested `--ctx`). Allocate one **sparse** `VkBuffer` per layer per K and V with `VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT` and size = `max_tokens * row_bytes`. | Matches Splash’s “expose huge virtual KV address space”【HANDOFF.md:225-229】. |
+| **Page granularity** | 32 tokens = `SPLASH_TARGET_KV_BLOCK_TOKENS` (found in Splash) → page bytes = `32 * row_bytes`. 32‑token pages align with the 64 KiB sparse‑mapping tile used by Splash (32 tok × 256 B ≈ 8 KiB per row, 8 pages ≈ 64 KiB)【splash‑src/runtime/metal/abi/ExecutionGeometry.h:16】. | Keeps bind/unbind granularity identical to Splash; avoids fragmenting VRAM. |
+| **Buffer creation time** | Replace `q36_gpu_tensor_alloc_uninitialized` with a new helper `q36_vk_tensor_alloc_sparse(bytes, page_bytes)` that: <br>1. `vkCreateBuffer` with `flags = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT`.<br>2. `vkGetBufferMemoryRequirements2` → `VkMemoryRequirements2` with `VkMemoryDedicatedRequirements` for sparse.<br>3. `vkAllocateMemory` with `VkMemoryAllocateFlagsInfoKHR(flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR | VK_MEMORY_ALLOCATE_SPARSE_BIT_KHR)` (or use `VK_KHR_sparse_binding` path).<br>4. No `vkBindBufferMemory`; instead record each page bind later via `vkQueueBindSparse`. | Vulkan sparse buffers require `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` at creation and a `VkSparseBufferMemoryBindInfo` per bind【Vulkan spec】. |
+| **Per‑step binding** | In the decode/prefill loop (where `q36_vulkan_runtime_reserve_kv` is called), compute `need_pages = ceil(live_tokens / 32)`. For each newly required page: submit a `VkBindSparseInfo` with `VkSparseBufferMemoryBindInfo` pointing at the corresponding offset (`page_index * page_bytes`). Use a per‑layer bitmap to avoid duplicate binds. | Splash binds/unbinds in 64 KiB batches on‑demand【HANDOFF.md:207-212】. |
+| **Release / shrink** | When a session finishes or context window slides (e.g. after `q36_session_reset`), submit unbind operations for pages no longer needed. Keep a fence / timeline semaphore so the driver knows the page is no longer in flight before re‑using it. | Splash’s async release pacing (`releaseReady` / `awaitRelease`)【HANDOFF.md:209-212】. |
+| **Memory budget** | Total virtual size = `ctx_size * (k_row_bytes + v_row_bytes) * full_layers`. Physical backing only for bound pages. Use `VK_EXT_memory_budget` to enforce a headroom heuristic similar to Splash’s `hardBudgetBytes`【HANDOFF.md:238-242】. | Prevents over‑commit on limited VRAM. |
+| **Error handling** | If `vkQueueBindSparse` returns `VK_ERROR_OUT_OF_DEVICE_MEMORY`, fall back to truncating context or abort with a clear error (mirroring Splash’s `BudgetErrorCode::KvPoolDoesNotFit`). | Mirrors Splash hard‑fail policy【HANDOFF.md:192-194】. |
+
+### Files to modify (design only – no code yet)
+* `q36_vulkan.c` – add `q36_vk_tensor_alloc_sparse`, `q36_vk_sparse_bind_pages`, `q36_vk_sparse_unbind_pages`.
+* `q36.c` – in `q36_vulkan_runtime_create` replace the K/V `q36_gpu_tensor_alloc_uninitialized` calls with sparse buffers; in `q36_vulkan_runtime_reserve_kv` / decode path call the bind helpers.
+* No shader changes required; existing `kv_store` / `kv_store_quant` kernels already index by token offset, which works on a sparsely‑backed buffer because the virtual address space is contiguous.
+
+### Single most important design decision & risk
+**Decision:** Use **32‑token pages (SPLASH_TARGET_KV_BLOCK_TOKENS)** as the sparse‑binding granularity, matching Splash’s page size and the 64 KiB tile alignment required by the hardware.
+
+**Risk:** RADV’s sparse‑buffer implementation may have higher bind/unbind latency than Metal’s placement‑sparse buffers. If bind latency per decode step becomes a bottleneck, the design would need to batch multiple page binds into a single `vkQueueBindSparse` submission or pre‑bind a larger window (e.g., next N pages) to amortize cost.
