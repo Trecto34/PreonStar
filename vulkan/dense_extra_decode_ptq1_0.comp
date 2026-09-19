@@ -1,13 +1,12 @@
 #version 460
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : require
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer Weights { uint8_t wb[]; };
+layout(set = 0, binding = 0) readonly buffer Weights { uint wb[]; };
 layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
 layout(set = 0, binding = 3) readonly buffer Tables { uint tables[]; };
@@ -22,83 +21,146 @@ layout(push_constant) uniform Push {
 
 const uint ROWS = 4u;
 const uint Q8K_WORDS = 74u;
-const uint QK_PTQ1_0 = 128u;
-const uint PTQ1_0_BYTES = 28u;
-const uint PTQ1_0_BLKS_PER_Q8K = 2u;
 
-uint load_u8(uint off) {
-    return uint(wb[off]);
-}
-
-uint load_u16(uint off) {
-    return uint(wb[off]) | (uint(wb[off + 1u]) << 8u);
-}
+shared uint trit_tab[256];
+shared uint trit4_tab[256];
 
 float f16_to_f32(uint h) {
     return unpackHalf2x16(h & 0xffffu).x;
 }
 
-int q8_at(uint b, uint j) {
-    uint w = q8[b * Q8K_WORDS + 2u + (j >> 2u)];
-    int v = int((w >> (8u * (j & 3u))) & 0xffu);
-    return (v & 0x80) != 0 ? v - 256 : v;
-}
-
-const uint pow3[5] = {1u, 3u, 9u, 27u, 81u};
-
-int weight_at(uint base, uint p) {
-    uint byte; uint n;
-    if (p < 80u) {
-        byte = load_u8(base + p % 16u);
-        n = p / 16u;
-    } else if (p < 120u) {
-        uint l = p - 80u;
-        byte = load_u8(base + 16u + l % 8u);
-        n = l / 8u;
-    } else {
-        uint l = p - 120u;
-        byte = load_u8(base + 24u + l % 2u);
-        n = l / 2u;
+void init_luts(uint lid) {
+    for (uint i = lid; i < 256u; i += 64u) {
+        uint t0 = (((i * 1u) & 0xffu) * 3u) >> 8u;
+        uint t1 = (((i * 3u) & 0xffu) * 3u) >> 8u;
+        uint t2 = (((i * 9u) & 0xffu) * 3u) >> 8u;
+        uint t3 = (((i * 27u) & 0xffu) * 3u) >> 8u;
+        uint t4 = (((i * 81u) & 0xffu) * 3u) >> 8u;
+        uint u0 = (t0 - 1u) & 0xffu;
+        uint u1 = (t1 - 1u) & 0xffu;
+        uint u2 = (t2 - 1u) & 0xffu;
+        uint u3 = (t3 - 1u) & 0xffu;
+        uint u4 = (t4 - 1u) & 0xffu;
+        trit_tab[i] = u0 | (u1 << 8u) | (u2 << 16u) | (u3 << 24u);
+        trit4_tab[i] = u4;
     }
-    uint qq = (byte * pow3[n]) & 0xffu;
-    uint xi = (qq * 3u) >> 8u;
-    return int(xi) - 1;
+    barrier();
 }
 
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
+    init_luts(lid);
+
+    uint lane8 = lid & 7u;
+    uint lane_pb = lane8 >> 2u; // 0 for lanes 0..3, 1 for lanes 4..7
+    uint k = lane8 & 3u;        // lane 0, 1, 2, 3
+    uint b_start = lid >> 3u;   // 0..7
+
     uint first_row = gl_WorkGroupID.x * ROWS;
     float acc[ROWS];
     [[unroll]] for (uint r = 0u; r < ROWS; r++) acc[r] = 0.0f;
 
-    for (uint b = 0u; b < pc.blocks; b++) {
-        float yd = uintBitsToFloat(q8[b * Q8K_WORDS]);
+    uint row_words = pc.row_bytes >> 2u;
+    uint pb_word_offset = lane_pb * 32u;
+
+    for (uint b = b_start; b < pc.blocks; b += 8u) {
+        uint qbase = b * Q8K_WORDS;
+        float yd = uintBitsToFloat(q8[qbase]);
+        uint pb_base = qbase + 2u + pb_word_offset;
+
+        // --- Pre-pack Section 1 activations ---
+        uint w0 = q8[pb_base + k];
+        uint w1 = q8[pb_base + 4u + k];
+        uint w2 = q8[pb_base + 8u + k];
+        uint w3 = q8[pb_base + 12u + k];
+        uint qp_sec1[4];
+        qp_sec1[0] = (w0 & 0xffu) | ((w1 & 0xffu) << 8u) | ((w2 & 0xffu) << 16u) | ((w3 & 0xffu) << 24u);
+        qp_sec1[1] = ((w0 >> 8u) & 0xffu) | (((w1 >> 8u) & 0xffu) << 8u) | (((w2 >> 8u) & 0xffu) << 16u) | (((w3 >> 8u) & 0xffu) << 24u);
+        qp_sec1[2] = ((w0 >> 16u) & 0xffu) | (((w1 >> 16u) & 0xffu) << 8u) | (((w2 >> 16u) & 0xffu) << 16u) | (((w3 >> 16u) & 0xffu) << 24u);
+        qp_sec1[3] = (w0 >> 24u) | ((w1 >> 24u) << 8u) | ((w2 >> 24u) << 16u) | ((w3 >> 24u) << 24u);
+        uint qp_sec1_pow4 = q8[pb_base + 16u + k];
+
+        // --- Pre-pack Section 2 activations ---
+        uint s0 = q8[pb_base + 20u + (k >> 1u)];
+        uint s1 = q8[pb_base + 22u + (k >> 1u)];
+        uint s2 = q8[pb_base + 24u + (k >> 1u)];
+        uint s3 = q8[pb_base + 26u + (k >> 1u)];
+        uint s4 = q8[pb_base + 28u + (k >> 1u)];
+        if ((k & 1u) == 1u) {
+            s0 >>= 16u; s1 >>= 16u; s2 >>= 16u; s3 >>= 16u; s4 >>= 16u;
+        }
+        uint qp_sec2[2];
+        qp_sec2[0] = (s0 & 0xffu) | ((s1 & 0xffu) << 8u) | ((s2 & 0xffu) << 16u) | ((s3 & 0xffu) << 24u);
+        qp_sec2[1] = ((s0 >> 8u) & 0xffu) | (((s1 >> 8u) & 0xffu) << 8u) | (((s2 >> 8u) & 0xffu) << 16u) | (((s3 >> 8u) & 0xffu) << 24u);
+        uint qp_sec2_pow4 = s4 & 0xffffu;
+
+        // --- Pre-pack Section 3 activations ---
+        uint qp_sec3 = 0u;
+        if (k < 2u) {
+            uint d30 = q8[pb_base + 30u];
+            uint d31 = q8[pb_base + 31u];
+            uint sh = 8u * k;
+            uint a0 = (d30 >> sh) & 0xffu;
+            uint a1 = (d30 >> (16u + sh)) & 0xffu;
+            uint a2 = (d31 >> sh) & 0xffu;
+            uint a3 = (d31 >> (16u + sh)) & 0xffu;
+            qp_sec3 = a0 | (a1 << 8u) | (a2 << 16u) | (a3 << 24u);
+        }
 
         [[unroll]] for (uint r = 0u; r < ROWS; r++) {
             uint row = first_row + r;
             if (row >= pc.out_dim) continue;
 
-            for (uint pb = 0u; pb < PTQ1_0_BLKS_PER_Q8K; pb++) {
-                uint qblock = PTQ1_0_BLKS_PER_Q8K * b + pb;
-                uint base = row * pc.row_bytes + qblock * PTQ1_0_BYTES;
-                float wd = f16_to_f32(load_u16(base + 26u));
+            uint base_dw = row * row_words + (2u * b + lane_pb) * 7u;
+            uint dw6 = wb[base_dw + 6u];
+            float wd = unpackHalf2x16(dw6).y;
 
-                int s = 0;
-                for (uint pp = 0u; pp < 2u; pp++) {
-                    uint p = lid + pp * 64u;
-                    uint a = pb * 128u + p;
-                    s += weight_at(base, p) * q8_at(b, a);
-                }
-                int total = subgroupAdd(s);
-                acc[r] = fma(wd * yd, float(total), acc[r]);
+            // Section 1
+            uint dw_sec1 = wb[base_dw + k];
+            uint b0 = dw_sec1 & 0xffu;
+            uint b1 = (dw_sec1 >> 8u) & 0xffu;
+            uint b2 = (dw_sec1 >> 16u) & 0xffu;
+            uint b3 = (dw_sec1 >> 24u) & 0xffu;
+
+            int s = 0;
+            s += dotPacked4x8EXT(int(trit_tab[b0]), int(qp_sec1[0]));
+            s += dotPacked4x8EXT(int(trit_tab[b1]), int(qp_sec1[1]));
+            s += dotPacked4x8EXT(int(trit_tab[b2]), int(qp_sec1[2]));
+            s += dotPacked4x8EXT(int(trit_tab[b3]), int(qp_sec1[3]));
+
+            uint t4_sec1 = (trit4_tab[b0] & 0xffu) |
+                           ((trit4_tab[b1] & 0xffu) << 8u) |
+                           ((trit4_tab[b2] & 0xffu) << 16u) |
+                           ((trit4_tab[b3] & 0xffu) << 24u);
+            s += dotPacked4x8EXT(int(t4_sec1), int(qp_sec1_pow4));
+
+            // Section 2
+            uint dw_sec2 = wb[base_dw + 4u + (k >> 1u)];
+            uint dw_sec2_sh = dw_sec2 >> ((k & 1u) * 16u);
+            uint c0 = dw_sec2_sh & 0xffu;
+            uint c1 = (dw_sec2_sh >> 8u) & 0xffu;
+
+            s += dotPacked4x8EXT(int(trit_tab[c0]), int(qp_sec2[0]));
+            s += dotPacked4x8EXT(int(trit_tab[c1]), int(qp_sec2[1]));
+
+            uint t4_sec2 = (trit4_tab[c0] & 0xffu) | ((trit4_tab[c1] & 0xffu) << 8u);
+            s += dotPacked4x8EXT(int(t4_sec2), int(qp_sec2_pow4));
+
+            // Section 3
+            if (k < 2u) {
+                uint c_sec3 = (dw6 >> (8u * k)) & 0xffu;
+                s += dotPacked4x8EXT(int(trit_tab[c_sec3]), int(qp_sec3));
             }
+
+            acc[r] = fma(wd * yd, float(s), acc[r]);
         }
     }
 
     [[unroll]] for (uint r = 0u; r < ROWS; r++) {
         uint row = first_row + r;
+        float total = subgroupAdd(acc[r]);
         if (lid == 0u && row < pc.out_dim) {
-            y[row] = acc[r] * pc.scale;
+            y[row] = total * pc.scale;
         }
     }
 }
