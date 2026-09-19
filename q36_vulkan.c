@@ -39,6 +39,7 @@ enum {
     Q36_VK_TENSOR_IQ1_M   = 29,
     Q36_VK_TENSOR_Q2_0    = 42,
     Q36_VK_TENSOR_PQ2_0   = 142,
+    Q36_VK_TENSOR_PTQ1_0  = 143,
 };
 
 typedef struct q36_gpu_tensor {
@@ -243,9 +244,11 @@ typedef struct {
     q36_vk_kernel dense_extra_decode;
     q36_vk_kernel dense_extra_decode_q2_0;
     q36_vk_kernel dense_extra_decode_pq2_0;
+    q36_vk_kernel dense_extra_decode_ptq1_0;
     q36_vk_kernel dense_extra_mmq;
     q36_vk_kernel dense_extra_mmq_q2_0;
     q36_vk_kernel dense_extra_mmq_pq2_0;
+    q36_vk_kernel dense_extra_mmq_ptq1_0;
     q36_vk_kernel dense_kquant_mmq;
     q36_vk_kernel predequant_b16;
     q36_vk_kernel dense_kquant_decode;
@@ -3262,9 +3265,11 @@ int q36_gpu_init(void) {
     q36_vk.dense_extra_decode = Q36_VK_KERNEL("vulkan/dense_extra_decode.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode_pq2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_pq2_0.spv", 4, 20, 1u << 2);
+    q36_vk.dense_extra_decode_ptq1_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_ptq1_0.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
     q36_vk.dense_extra_mmq_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
     q36_vk.dense_extra_mmq_pq2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_pq2_0.spv", 4, 24, 1u << 2);
+    q36_vk.dense_extra_mmq_ptq1_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_ptq1_0.spv", 4, 24, 1u << 2);
     q36_vk.dense_kquant_mmq = Q36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
     q36_vk.predequant_b16 = Q36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
     q36_vk.dense_kquant_decode = Q36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
@@ -7778,6 +7783,7 @@ static uint64_t q36_vk_iq_block_bytes(uint32_t type) {
     case Q36_VK_TENSOR_IQ1_M: return 56;
     case Q36_VK_TENSOR_Q2_0: return 72;
     case Q36_VK_TENSOR_PQ2_0: return 68;
+    case Q36_VK_TENSOR_PTQ1_0: return 56;
     default: return 0;
     }
 }
@@ -8188,13 +8194,13 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
     const unsigned char *source;
     int ok;
 
-    bool extra_type = weight_type == Q36_VK_TENSOR_IQ2_XXS ||
+bool extra_type = weight_type == Q36_VK_TENSOR_IQ2_XXS ||
                       weight_type == Q36_VK_TENSOR_IQ2_XS ||
                       weight_type == Q36_VK_TENSOR_IQ2_S ||
                       weight_type == Q36_VK_TENSOR_IQ1_S ||
                       weight_type == Q36_VK_TENSOR_IQ4_NL ||
-                      weight_type == Q36_VK_TENSOR_Q2_0 ||
-                      weight_type == Q36_VK_TENSOR_PQ2_0;
+                      weight_type == Q36_VK_TENSOR_PQ2_0 ||
+                      weight_type == Q36_VK_TENSOR_PTQ1_0;
     if ((weight_type != Q36_VK_TENSOR_IQ3_XXS &&
          weight_type != Q36_VK_TENSOR_IQ3_S &&
          weight_type != Q36_VK_TENSOR_IQ4_XS &&
@@ -8239,8 +8245,9 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                     (uint32_t)out_dim, (uint32_t)blocks,
                     (uint32_t)row_bytes, weight_type, scale,
                 };
-                bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
-                                 weight_type == Q36_VK_TENSOR_PQ2_0;
+bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
+                                  weight_type == Q36_VK_TENSOR_PQ2_0;
+                bool ptq1_0 = weight_type == Q36_VK_TENSOR_PTQ1_0;
                 /* The generic dense_extra_decode shader knows Q2_0 but not
                  * PQ2_0, and silently misreading type 142 as type 42 would
                  * produce plausible garbage.  Refuse loudly instead: the
@@ -8255,6 +8262,14 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                     pthread_mutex_unlock(&q36_vk_mu);
                     return 0;
                 }
+                if (ptq1_0 &&
+                    !(q36_vk.have_int_dot && q36_vk.subgroup_size == 64u &&
+                      q36_vk.subgroup_arithmetic)) {
+                    fprintf(stderr, "q36: ptq1_0 needs integer dot product, "
+                                    "subgroup size 64 and subgroup arithmetic\n");
+                    pthread_mutex_unlock(&q36_vk_mu);
+                    return 0;
+                }
                 q36_vk_kernel *decode_kernel =
                     q2_family &&
                     q36_vk.have_int_dot && q36_vk.subgroup_size == 64u &&
@@ -8262,6 +8277,9 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                         (weight_type == Q36_VK_TENSOR_PQ2_0 ?
                             &q36_vk.dense_extra_decode_pq2_0 :
                             &q36_vk.dense_extra_decode_q2_0) :
+                    ptq1_0 && q36_vk.have_int_dot && q36_vk.subgroup_size == 64u &&
+                    q36_vk.subgroup_arithmetic ?
+                        &q36_vk.dense_extra_decode_ptq1_0 :
                         &q36_vk.dense_extra_decode;
                 ok = q36_vk_run_unlocked(
                     op, decode_kernel,
@@ -8281,17 +8299,23 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                     weight_type, scale,
                 };
                 bool is_pq2_0 = weight_type == Q36_VK_TENSOR_PQ2_0;
+                bool is_ptq1_0 = weight_type == Q36_VK_TENSOR_PTQ1_0;
                 bool is_q2_0 = weight_type == Q36_VK_TENSOR_Q2_0 || is_pq2_0;
-                q36_vk_kernel *mmq_kernel = is_pq2_0 ?
-                    &q36_vk.dense_extra_mmq_pq2_0 :
-                    (is_q2_0 ? &q36_vk.dense_extra_mmq_q2_0 :
-                               &q36_vk.dense_extra_mmq);
+                q36_vk_kernel *mmq_kernel = is_ptq1_0 ?
+                    &q36_vk.dense_extra_mmq_ptq1_0 :
+                    (is_pq2_0 ?
+                        &q36_vk.dense_extra_mmq_pq2_0 :
+                        (is_q2_0 ? &q36_vk.dense_extra_mmq_q2_0 :
+                                   &q36_vk.dense_extra_mmq));
                 ok = q36_vk_run_unlocked(
                     op, mmq_kernel,
                     bindings, &push, sizeof(push),
-                    is_q2_0 ? ((uint32_t)out_dim + 63u) / 64u :
-                              ((uint32_t)out_dim + 31u) / 32u,
-                    ((uint32_t)n_tok + 127u) / 128u, 1);
+                    is_ptq1_0 ? ((uint32_t)out_dim + 3u) / 4u :
+                    (is_q2_0 ? ((uint32_t)out_dim + 63u) / 64u :
+                                ((uint32_t)out_dim + 31u) / 32u),
+                    is_ptq1_0 ? n_tok :
+                                ((uint32_t)n_tok + 127u) / 128u,
+                    1);
             }
         }
         pthread_mutex_unlock(&q36_vk_mu);

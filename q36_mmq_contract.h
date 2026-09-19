@@ -226,4 +226,63 @@ static inline uint32_t q36_contract_q2_geometry(uint32_t type,
     return 0u;
 }
 
+/* PTQ1_0 (type 143) MMQ contract.
+ *
+ * The production dense_extra_mmq_ptq1_0 kernel integer-accumulates
+ * weight*q8 over the 128 positions of each PTQ1_0 block, one subgroupAdd per
+ * block, then scales once: acc = fma(wd*yd, float(total), acc), all f32 after
+ * the exact integer dot. 128 ternary weights per block (28 B), 2 blocks per
+ * q8_K, trit decode xi = ((byte*3^n) & 0xff)*3 >> 8, weight = xi-1 in
+ * {-1,0,1}. This mirrors that kernel exactly (integer dot is order-free). */
+static inline float q36_contract_mmq_ptq1_dot(const uint8_t *row_ptr,
+                                              const uint8_t *xq,
+                                              uint32_t xq_block_bytes,
+                                              uint32_t qs_offset,
+                                              uint32_t q8k_blocks,
+                                              float pc_scale) {
+    const uint32_t pow3[5] = {1u, 3u, 9u, 27u, 81u};
+    float acc = 0.0f;
+    uint32_t qb, pb, p;
+
+    for (qb = 0; qb < q8k_blocks; qb++) {
+        const uint8_t *xb = xq + (uint64_t)qb * xq_block_bytes;
+        const int8_t *qs = (const int8_t *)(xb + qs_offset);
+        float yd;
+        memcpy(&yd, xb, sizeof(yd));
+        for (pb = 0; pb < 2u; pb++) {
+            const uint8_t *blk = row_ptr + (uint64_t)(2u * qb + pb) * 28u;
+            const uint16_t dbits =
+                (uint16_t)(blk[26] | ((uint16_t)blk[27] << 8));
+            const float wd = q36_contract_half_to_float(dbits);
+            int s = 0;
+            for (p = 0; p < 128u; p++) {
+                uint8_t byte;
+                uint32_t n;
+                if (p < 80u) {
+                    byte = blk[p % 16u];
+                    n = p / 16u;
+                } else if (p < 120u) {
+                    uint32_t l = p - 80u;
+                    byte = blk[16u + l % 8u];
+                    n = l / 8u;
+                } else {
+                    uint32_t l = p - 120u;
+                    byte = blk[24u + l % 2u];
+                    n = l / 2u;
+                }
+                uint32_t qq = (byte * pow3[n]) & 0xffu;
+                uint32_t xi = (qq * 3u) >> 8u;
+                int w = (int)xi - 1;
+                int qv = (int)qs[pb * 128u + p];
+                s += w * qv;
+            }
+            {
+                float wdyd = wd * yd;
+                acc = fmaf(wdyd, (float)s, acc);
+            }
+        }
+    }
+    return acc * pc_scale;
+}
+
 #endif /* Q36_MMQ_CONTRACT_H */
