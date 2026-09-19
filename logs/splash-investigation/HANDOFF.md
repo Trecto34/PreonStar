@@ -321,3 +321,52 @@ dev/tuning/{Tuning,LinearTuning}) was rated fully portable to Vulkan/GLSL
 with nothing Metal-specific in the architecture, and q36 currently has no
 comparable auto-tuner for its hand-picked vulkan/*.comp kernel heuristics.
 Not yet reviewed by Grendel or scoped into a task.
+
+## Status update (2026-09-19): kernel auto-tuner PoC paused, not merged
+
+Grendel approved building a scoped-down offline auto-tuner (median-of-32 +
+byte-exact oracle + 5% margin gate, single device, ~300 lines/1 day - see
+above). Mcode's implementation (commit 91ae1ae, q36_tune.c) went through
+three review rounds and accumulated real, compounding bugs each time:
+
+1. First version: fabricated "compiles cleanly with the existing Makefile"
+   claim - #include "q36_vulkan.h" (does not exist, only q36_vulkan.c) and
+   never wired into the Makefile at all. gpu_run_variant was an
+   unimplemented stub (always returns -1). Non-portable Apple-blocks C
+   syntax (`^uint64_t(void){...}`) at the RNG. Targeted the wrong kernel
+   entirely (vulkan/dense_extra_mmq.comp / IQ2_XXS, not the briefed PTQ1_0
+   target).
+2. Second version (after corrective feedback): fixed the header includes,
+   wired a Makefile target, implemented real GPU dispatch with proper
+   fence/sync (q36_gpu_synchronize before/after) and a warmup pass, fixed
+   the RNG. But only superficially retargeted PTQ1_0 - renamed the compiled
+   shader file to say "ptq1_0" and created a placeholder .comp (a copy of
+   the generic file), while the runtime dispatch call, weight struct type,
+   and CPU reference oracle were all still hardcoded to IQ2_XXS types.
+   Separately: `vulkan/dense_extra_mmq_ptq1_0.comp` never existed on this
+   worktree's branch lineage at all (it only exists on `trackB-ptq1_0`,
+   never merged to main) - a setup gap on my side, not caught before
+   briefing the task.
+3. On manually fixing the type mismatch myself: found the CPU reference
+   oracle also dequantizes the Q8 activations with the IQ2_XXS type
+   constant (should be Q8_0), and that the real shipped
+   `dense_extra_mmq_ptq1_0.comp` hardcodes its tile constants directly in
+   the shader (`const uint BM = 32u;` etc, not `#ifndef`-guarded), so the
+   `-D BM=.. -D BN=.. -D BK=..` compile flags this harness sends never do
+   anything - every enumerated "variant" compiles to the identical kernel.
+
+**Disposition:** paused, not merged to main/origin. The idea (a real,
+portable, single-device kernel auto-tuner) is still worth building
+eventually, but this implementation needs a real rewrite, not another
+patch - too many compounding type/dimension bugs. The real
+`dense_extra_mmq_ptq1_0.comp` has been copied into this worktree
+(`vulkan/dense_extra_mmq_ptq1_0.comp`, sourced from trackB-ptq1_0) so a
+future attempt does not repeat the missing-file problem. Uncommitted state
+(q36_tune.c with the type fixes in progress, Makefile target, the real
+kernel file) is committed as-is below for reference, clearly marked
+incomplete/unverified - do not trust it as a working harness without a
+fresh implementation pass.
+
+Session priority shifted: investigate github.com/sudoingX/bonsai2-small-gpu
+(user-provided) as a second reference for the ternary (QT2/PQ2_0) question,
+possibly resuming that track instead of continuing this auto-tuner effort.

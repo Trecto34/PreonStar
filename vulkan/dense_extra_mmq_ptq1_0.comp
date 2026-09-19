@@ -1,0 +1,245 @@
+#version 460
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint8_t wb[]; };
+layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 3) readonly buffer Tables { uint tables[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint n_tok;
+    uint blocks;
+    uint row_bytes;
+    uint type;
+    float scale;
+} pc;
+
+const uint BM = 32u;
+const uint BN = 64u;
+const uint BK = 32u;
+const uint BK_PAIRS = 16u;
+const uint STRIDE_A = 65u;
+const uint STRIDE_B = 17u;
+const uint Q8K_WORDS = 74u;
+const uint PTQ1_0_BYTES = 28u;
+const uint PTQ1_0_BLKS_PER_Q8K = 2u;
+
+shared i16vec2 buf_a[BM * STRIDE_A];
+shared i16vec2 buf_b[2][BN * STRIDE_B];
+
+const uint pow3[5] = {1u, 3u, 9u, 27u, 81u};
+
+uint load_u8(uint off) {
+    return uint(wb[off]);
+}
+
+uint load_u16(uint off) {
+    return uint(wb[off]) | (uint(wb[off + 1u]) << 8u);
+}
+
+float f16_to_f32(uint h) {
+    return unpackHalf2x16(h & 0xffffu).x;
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint row0 = gl_WorkGroupID.x * BM;
+    uint tok0 = gl_WorkGroupID.y * BN;
+    uint wave = gl_SubgroupID;
+    uint lane = gl_SubgroupInvocationID;
+    uint lane_row = lane & 3u;
+    uint lane_tok = lane >> 2u;
+
+    i16vec2 sum[8][4];
+    float acc_f32[8][4];
+
+    [[unroll]] for (uint r = 0u; r < 8u; r++) {
+        [[unroll]] for (uint t = 0u; t < 4u; t++) {
+            sum[r][t] = i16vec2(0);
+            acc_f32[r][t] = 0.0f;
+        }
+    }
+
+    for (uint qb = 0u; qb < pc.blocks; qb++) {
+        for (uint pb = 0u; pb < PTQ1_0_BLKS_PER_Q8K; pb++) {
+            {
+                uint lr = lid >> 1u;
+                uint kw = lid & 1u;
+                uint row = row0 + lr;
+                uint base_dst = lr * STRIDE_A;
+                if (row < pc.out_dim) {
+                    uint base = row * pc.row_bytes + (qb * PTQ1_0_BLKS_PER_Q8K + pb) * PTQ1_0_BYTES;
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) {
+                        uint b0 = load_u8(base + kw * 8u + 2u * j);
+                        uint b1 = load_u8(base + kw * 8u + 2u * j + 1u);
+                        [[unroll]] for (uint n = 0u; n < 5u; n++) {
+                            uint p3 = pow3[n];
+                            uint qq0 = (b0 * p3) & 0xffu;
+                            uint qq1 = (b1 * p3) & 0xffu;
+                            int16_t w0 = int16_t(int((qq0 * 3u) >> 8u) - 1);
+                            int16_t w1 = int16_t(int((qq1 * 3u) >> 8u) - 1);
+                            buf_a[base_dst + 8u * n + kw * 4u + j] = i16vec2(w0, w1);
+                        }
+                    }
+                    [[unroll]] for (uint j = 0u; j < 2u; j++) {
+                        uint b0 = load_u8(base + 16u + kw * 4u + 2u * j);
+                        uint b1 = load_u8(base + 16u + kw * 4u + 2u * j + 1u);
+                        [[unroll]] for (uint n = 0u; n < 5u; n++) {
+                            uint p3 = pow3[n];
+                            uint qq0 = (b0 * p3) & 0xffu;
+                            uint qq1 = (b1 * p3) & 0xffu;
+                            int16_t w0 = int16_t(int((qq0 * 3u) >> 8u) - 1);
+                            int16_t w1 = int16_t(int((qq1 * 3u) >> 8u) - 1);
+                            buf_a[base_dst + 40u + 4u * n + kw * 2u + j] = i16vec2(w0, w1);
+                        }
+                    }
+                    if (kw == 0u) {
+                        uint b24 = load_u8(base + 24u);
+                        uint b25 = load_u8(base + 25u);
+                        [[unroll]] for (uint n = 0u; n < 4u; n++) {
+                            uint p3 = pow3[n];
+                            uint qq0 = (b24 * p3) & 0xffu;
+                            uint qq1 = (b25 * p3) & 0xffu;
+                            int16_t w0 = int16_t(int((qq0 * 3u) >> 8u) - 1);
+                            int16_t w1 = int16_t(int((qq1 * 3u) >> 8u) - 1);
+                            buf_a[base_dst + 60u + n] = i16vec2(w0, w1);
+                        }
+                    }
+                } else {
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) {
+                        [[unroll]] for (uint n = 0u; n < 5u; n++) {
+                            buf_a[base_dst + 8u * n + kw * 4u + j] = i16vec2(0);
+                        }
+                    }
+                    [[unroll]] for (uint j = 0u; j < 2u; j++) {
+                        [[unroll]] for (uint n = 0u; n < 5u; n++) {
+                            buf_a[base_dst + 40u + 4u * n + kw * 2u + j] = i16vec2(0);
+                        }
+                    }
+                    if (kw == 0u) {
+                        [[unroll]] for (uint n = 0u; n < 4u; n++) {
+                            buf_a[base_dst + 60u + n] = i16vec2(0);
+                        }
+                    }
+                }
+            }
+            barrier();
+
+            // Initial load for inner_slice = 0 into buf_b[0]
+            {
+                uint slice = pb * 4u + 0u;
+                uint lt = lid;
+                uint tok = tok0 + lt;
+                uint base_dst = lt * STRIDE_B;
+                if (tok < pc.n_tok) {
+                    uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
+                    [[unroll]] for (uint w = 0u; w < 8u; w++) {
+                        uint word = q8[qbase + 2u + slice * 8u + w];
+                        int16_t q0 = int16_t(bitfieldExtract(int(word), 0, 8));
+                        int16_t q1 = int16_t(bitfieldExtract(int(word), 8, 8));
+                        int16_t q2 = int16_t(bitfieldExtract(int(word), 16, 8));
+                        int16_t q3 = int16_t(bitfieldExtract(int(word), 24, 8));
+                        buf_b[0][base_dst + w * 2u + 0u] = i16vec2(q0, q1);
+                        buf_b[0][base_dst + w * 2u + 1u] = i16vec2(q2, q3);
+                    }
+                } else {
+                    [[unroll]] for (uint p = 0u; p < 16u; p++) {
+                        buf_b[0][base_dst + p] = i16vec2(0);
+                    }
+                }
+            }
+            barrier();
+
+            for (uint inner_slice = 0u; inner_slice < 4u; inner_slice++) {
+                uint curr_buf = inner_slice & 1u;
+                uint next_buf = 1u - curr_buf;
+
+                // Prefetch next inner slice into buf_b[next_buf]
+                if (inner_slice < 3u) {
+                    uint next_slice = pb * 4u + inner_slice + 1u;
+                    uint lt = lid;
+                    uint tok = tok0 + lt;
+                    uint base_dst = lt * STRIDE_B;
+                    if (tok < pc.n_tok) {
+                        uint qbase = (tok * pc.blocks + qb) * Q8K_WORDS;
+                        [[unroll]] for (uint w = 0u; w < 8u; w++) {
+                            uint word = q8[qbase + 2u + next_slice * 8u + w];
+                            int16_t q0 = int16_t(bitfieldExtract(int(word), 0, 8));
+                            int16_t q1 = int16_t(bitfieldExtract(int(word), 8, 8));
+                            int16_t q2 = int16_t(bitfieldExtract(int(word), 16, 8));
+                            int16_t q3 = int16_t(bitfieldExtract(int(word), 24, 8));
+                            buf_b[next_buf][base_dst + w * 2u + 0u] = i16vec2(q0, q1);
+                            buf_b[next_buf][base_dst + w * 2u + 1u] = i16vec2(q2, q3);
+                        }
+                    } else {
+                        [[unroll]] for (uint p = 0u; p < 16u; p++) {
+                            buf_b[next_buf][base_dst + p] = i16vec2(0);
+                        }
+                    }
+                }
+
+                // Compute GEMM using buf_b[curr_buf] with 16-bit packed vector arithmetic
+                uint k_offset = inner_slice * 16u;
+                [[unroll]] for (uint k = 0u; k < BK_PAIRS; k++) {
+                    // Load activation slice into registers (b array stays for reuse)
+                    i16vec2 b[4];
+                    [[unroll]] for (uint t = 0u; t < 4u; t++) {
+                        b[t] = buf_b[curr_buf][(wave * 32u + lane_tok * 4u + t) * STRIDE_B + k];
+                    }
+                    // Directly load weight values from LDS per row, avoiding a[8] temporary
+                    [[unroll]] for (uint r = 0u; r < 8u; r++) {
+                        i16vec2 a = buf_a[(r * 4u + lane_row) * STRIDE_A + k_offset + k];
+                        [[unroll]] for (uint t = 0u; t < 4u; t++) {
+                            sum[r][t] += a * b[t];
+                        }
+                    }
+                }
+
+                // End of 128-weight PTQ1_0 block: accumulate into float acc_f32
+                if (inner_slice == 3u) {
+                    [[unroll]] for (uint r = 0u; r < 8u; r++) {
+                        uint row = row0 + r * 4u + lane_row;
+                        float wd = 0.0f;
+                        if (row < pc.out_dim) {
+                            uint base = row * pc.row_bytes + (qb * PTQ1_0_BLKS_PER_Q8K + pb) * PTQ1_0_BYTES;
+                            wd = f16_to_f32(load_u16(base + 26u));
+                        }
+                        [[unroll]] for (uint t = 0u; t < 4u; t++) {
+                            uint tok = tok0 + wave * 32u + lane_tok * 4u + t;
+                            float yd = 0.0f;
+                            if (tok < pc.n_tok) {
+                                yd = uintBitsToFloat(q8[(tok * pc.blocks + qb) * Q8K_WORDS]);
+                            }
+                            int s = int(sum[r][t].x) + int(sum[r][t].y);
+                            acc_f32[r][t] = fma(wd * yd, float(s), acc_f32[r][t]);
+                            sum[r][t] = i16vec2(0);
+                        }
+                    }
+                }
+
+                // Single barrier per slice: ensure buf_b[next_buf] is ready for next iteration
+                if (inner_slice < 3u) {
+                    barrier();
+                }
+            }
+        }
+    }
+
+    [[unroll]] for (uint r = 0u; r < 8u; r++) {
+        uint row = row0 + r * 4u + lane_row;
+        if (row < pc.out_dim) {
+            [[unroll]] for (uint t = 0u; t < 4u; t++) {
+                uint tok = tok0 + wave * 32u + lane_tok * 4u + t;
+                if (tok < pc.n_tok) {
+                    y[tok * pc.out_dim + row] = acc_f32[r][t] * pc.scale;
+                }
+            }
+        }
+    }
+}
