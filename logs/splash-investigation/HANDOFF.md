@@ -290,3 +290,34 @@ touched in this investigation.
 **Decision:** Use **32‑token pages (SPLASH_TARGET_KV_BLOCK_TOKENS)** as the sparse‑binding granularity, matching Splash’s page size and the 64 KiB tile alignment required by the hardware.
 
 **Risk:** RADV’s sparse‑buffer implementation may have higher bind/unbind latency than Metal’s placement‑sparse buffers. If bind latency per decode step becomes a bottleneck, the design would need to batch multiple page binds into a single `vkQueueBindSparse` submission or pre‑bind a larger window (e.g., next N pages) to amortize cost.
+
+## Negative result (2026-09-19): sparse-binding KV paging - DROPPED
+
+Grendel's ruthless review of the corrected design above: drop it, not worth
+building on this hardware/workload.
+
+- KV capacity growth (q36_vulkan_cache_reserve, q36.c:6851-6870) happens
+  ~10-15 times per session at most (1.25x steps from Q36_KV_INITIAL_CAP up
+  to --ctx), front-loaded during prefill/early decode, not steady-state
+  generation.
+- Total copy volume across a whole session is bounded by a geometric series,
+  roughly 5x the final live KV size - a one-time cost, likely under ~200ms
+  total, not a per-token or per-step tax.
+- On this box (BC-250, 14GB shared RAM), the real ceiling is steady-state KV
+  footprint, not one-time copy churn. Sparse binding would add new Vulkan
+  alloc/bind/unbind plumbing, per-decode-step vkQueueBindSparse
+  submissions, fence tracking, and RADV driver risk, all to eliminate a cost
+  that isn't the bottleneck.
+- Grendel's suggested alternative (Q8 KV quantization to roughly halve KV
+  footprint) is a dead end too: q36 already defaults to Q8_0 K / Q4_0 V
+  typed KV cache on Vulkan (q36_cli.c -ctk/-ctv usage text: "Default:
+  Vulkan/Metal q8_0" / "q4_0"). Nothing to build there.
+
+Disposition: no code changes were made (design-only pass throughout). Both
+KV-cache-adjacent ideas surfaced from the splash investigation are now
+closed. Remaining open idea from Scout's research: Finding 1 (offline
+paired-timing kernel-variant auto-tuner, modeled on splash's
+dev/tuning/{Tuning,LinearTuning}) was rated fully portable to Vulkan/GLSL
+with nothing Metal-specific in the architecture, and q36 currently has no
+comparable auto-tuner for its hand-picked vulkan/*.comp kernel heuristics.
+Not yet reviewed by Grendel or scoped into a task.
