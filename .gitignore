@@ -63,3 +63,6 @@ TODO.md
 /start-server-bg.sh
 /stop-server.sh
 .infino/
+splash-src/
+.maestri/
+
