@@ -2822,7 +2822,14 @@ static char *render_qwen_chat_prompt_text(const chat_msgs *msgs, const char *too
                 buf_puts(&out, reasoning);
                 buf_puts(&out, "\n</think>\n\n");
             }
-            if (!keep_reasoning && m->calls.replay_empty_think)
+            /* With thinking off the generation prompt writes a closed empty
+             * think block.  When reasoning is preserved, history must keep that
+             * same block: it is in the live KV graph, and dropping it makes the
+             * next prompt stop being a token/byte prefix, which forces a
+             * full-context re-prefill in canonicalize_thinking_checkpoint(). */
+            if (!keep_reasoning && (m->calls.replay_empty_think ||
+                                    (!thinking && preserve_thinking &&
+                                     !text_has_trimmed_content(reasoning))))
                 buf_puts(&out, "<think>\n\n</think>\n\n");
             buf_puts(&out, content);
             append_qwen_tool_calls_text(&out, &m->calls, tool_orders,
@@ -8541,9 +8548,14 @@ static bool should_canonicalize_thinking_checkpoint(const request *r,
                                                     const thinking_state *thinking,
                                                     const char *finish) {
     if (!r || r->kind != REQ_CHAT) return false;
-    if (!r->kat_coder && !q36_think_mode_enabled(r->think_mode))
+    if (!r->kat_coder && !q36_think_mode_enabled(r->think_mode)) {
+        /* When history keeps the empty think block, the live graph already
+         * matches what the next turn will render.  Canonicalizing would strip
+         * that block and re-prefill the whole context for nothing. */
+        if (r->preserve_thinking) return false;
         return !finish || (!strcmp(finish, "stop") &&
                            (!thinking || !thinking->inside));
+    }
     if (r->has_tools && !r->kat_coder) return false;
     if (r->prompt_preserves_reasoning) return false;
     if (!q36_think_mode_enabled(r->think_mode)) return false;
@@ -12870,6 +12882,10 @@ static void test_thinking_checkpoint_canonicalization_gate(void) {
     TEST_ASSERT(!should_canonicalize_thinking_checkpoint(&r, &st, "stop"));
     r.has_tools = false;
     r.think_mode = Q36_THINK_NONE;
+    /* Preserved reasoning (the default) keeps the empty think block in history,
+     * so the live graph already matches the next render: nothing to canonicalize. */
+    TEST_ASSERT(!should_canonicalize_thinking_checkpoint(&r, &st, "stop"));
+    r.preserve_thinking = false;
     TEST_ASSERT(should_canonicalize_thinking_checkpoint(&r, &st, "stop"));
     TEST_ASSERT(!should_canonicalize_thinking_checkpoint(&r, &st, "length"));
 
