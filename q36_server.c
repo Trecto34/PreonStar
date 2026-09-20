@@ -7959,8 +7959,78 @@ static int kv_cache_find_text_prefix(kv_disk_cache *kc, const char *prompt_text,
     return best;
 }
 
+static void strip_assistant_reasoning_blocks(buf *out, const char *text, size_t len);
+
+static bool kv_read_entry_text(const kv_entry *e, char **out_text, uint32_t *out_len) {
+    if (!e || !e->path) return false;
+    FILE *fp = fopen(e->path, "rb");
+    if (!fp) return false;
+    kv_entry hdr = {0};
+    uint32_t text_bytes = 0;
+    bool ok = kv_read_header(fp, &hdr, &text_bytes);
+    char *text = NULL;
+    if (ok) {
+        text = xmalloc((size_t)text_bytes + 1);
+        ok = fread(text, 1, text_bytes, fp) == text_bytes;
+        if (ok) text[text_bytes] = '\0';
+    }
+    fclose(fp);
+    if (!ok) {
+        free(text);
+        return false;
+    }
+    *out_text = text;
+    if (out_len) *out_len = text_bytes;
+    return true;
+}
+
+/* Fallback for clients that drop reasoning_content: an entry's stored text
+ * carries the sampled reasoning block, but the resent prompt does not, so the
+ * full-text hash (kv_cache_find_text_prefix) misses.  Match the
+ * reasoning-stripped stored text as a literal prompt prefix instead, mirroring
+ * live_text_prefix_prompt for the in-memory checkpoint. */
+static int kv_cache_find_stripped_prefix(kv_disk_cache *kc, const char *prompt_text,
+                                         int quant_bits, int ctx_size) {
+    if (!prompt_text) return -1;
+    const size_t prompt_bytes = strlen(prompt_text);
+    int best = -1;
+    size_t best_len = 0;
+    for (int i = 0; i < kc->len; i++) {
+        kv_entry *e = &kc->entry[i];
+        if ((int)e->tokens < kc->opt.min_tokens) continue;
+        if ((uint32_t)ctx_size < e->ctx_size) continue;
+        if (kc->reject_different_quant && e->quant_bits != (uint8_t)quant_bits) continue;
+        if (e->text_bytes == 0) continue;
+        char *text = NULL;
+        uint32_t text_bytes = 0;
+        if (!kv_read_entry_text(e, &text, &text_bytes)) continue;
+        /* Reject a checkpoint captured before a turn generated anything: its
+         * text ends on an open generation prompt, and a reasoning-less suffix
+         * would be prefilled into that think block as if it were reasoning. */
+        static const char open_gen[] = "<|im_start|>assistant\n<think>\n";
+        if (text_bytes >= sizeof(open_gen) - 1 &&
+            !memcmp(text + text_bytes - (sizeof(open_gen) - 1), open_gen, sizeof(open_gen) - 1)) {
+            free(text);
+            continue;
+        }
+        buf stripped = {0};
+        strip_assistant_reasoning_blocks(&stripped, text, text_bytes);
+        bool ok = stripped.len > 0 && stripped.len < text_bytes &&
+                  stripped.len <= prompt_bytes &&
+                  byte_prefix_match(prompt_text, prompt_bytes, stripped.ptr, stripped.len);
+        if (ok && (best < 0 || stripped.len > best_len ||
+                   (stripped.len == best_len && e->tokens > kc->entry[best].tokens))) {
+            best = i;
+            best_len = stripped.len;
+        }
+        buf_free(&stripped);
+        free(text);
+    }
+    return best;
+}
+
 static int kv_cache_try_load_text(server *s, server_slot *slot,
-                                  const char *prompt_text,
+                                  const char *prompt_text, bool allow_stripped,
                                   q36_tokens *effective_prompt,
                                   char **loaded_path_out) {
     if (loaded_path_out) *loaded_path_out = NULL;
@@ -7972,6 +8042,12 @@ static int kv_cache_try_load_text(server *s, server_slot *slot,
     const size_t prompt_bytes = strlen(prompt_text);
     int idx = kv_cache_find_text_prefix(kc, prompt_text, quant_bits,
                                         q36_session_ctx(slot->session));
+    bool stripped_mode = false;
+    if (idx < 0 && allow_stripped) {
+        idx = kv_cache_find_stripped_prefix(kc, prompt_text, quant_bits,
+                                            q36_session_ctx(slot->session));
+        stripped_mode = idx >= 0;
+    }
     if (idx < 0) return 0;
 
     kv_entry e = kc->entry[idx];
@@ -7987,27 +8063,36 @@ static int kv_cache_try_load_text(server *s, server_slot *slot,
     const char *fail_reason = "invalid header";
     bool header_ok = kv_read_header(fp, &hdr, &text_bytes);
     char *cached_text = NULL;
+    buf stripped_text = {0};
+    size_t prefix_bytes = text_bytes;
     if (header_ok) {
-        if ((uint64_t)text_bytes > prompt_bytes) {
+        cached_text = xmalloc((size_t)text_bytes + 1);
+        if (fread(cached_text, 1, text_bytes, fp) != text_bytes) {
             header_ok = false;
-            fail_reason = "cached text is longer than prompt";
+            fail_reason = "truncated cached text";
         } else {
-            cached_text = xmalloc((size_t)text_bytes + 1);
-            if (fread(cached_text, 1, text_bytes, fp) != text_bytes) {
+            cached_text[text_bytes] = '\0';
+            char text_sha[41];
+            sha1_bytes_hex(cached_text, text_bytes, text_sha);
+            if (strcmp(text_sha, e.sha)) {
                 header_ok = false;
-                fail_reason = "truncated cached text";
-            } else {
-                cached_text[text_bytes] = '\0';
-                char text_sha[41];
-                sha1_bytes_hex(cached_text, text_bytes, text_sha);
-                if (strcmp(text_sha, e.sha)) {
+                fail_reason = "cached text hash mismatch";
+            } else if (stripped_mode) {
+                /* The stored text still carries the sampled reasoning, so it can
+                 * be longer than the resent prompt; match its stripped form. */
+                strip_assistant_reasoning_blocks(&stripped_text, cached_text, text_bytes);
+                if (stripped_text.len == 0 || stripped_text.len >= text_bytes ||
+                    !byte_prefix_match(prompt_text, prompt_bytes,
+                                       stripped_text.ptr, stripped_text.len)) {
                     header_ok = false;
-                    fail_reason = "cached text hash mismatch";
-                } else if (!byte_prefix_match(prompt_text, prompt_bytes,
-                                              cached_text, text_bytes)) {
-                    header_ok = false;
-                    fail_reason = "cached text prefix mismatch";
+                    fail_reason = "cached stripped text prefix mismatch";
+                } else {
+                    prefix_bytes = stripped_text.len;
                 }
+            } else if (!byte_prefix_match(prompt_text, prompt_bytes,
+                                          cached_text, text_bytes)) {
+                header_ok = false;
+                fail_reason = "cached text prefix mismatch";
             }
         }
     }
@@ -8023,7 +8108,7 @@ static int kv_cache_try_load_text(server *s, server_slot *slot,
                  * prompt we give q36_session_sync() from that exact history and
                  * tokenize only the text suffix after the byte prefix. */
                 build_prompt_from_exact_prefix_and_text_suffix(
-                    s->engine, loaded_tokens, prompt_text + text_bytes,
+                    s->engine, loaded_tokens, prompt_text + prefix_bytes,
                     effective_prompt);
             }
             if (hdr.ext_flags & KV_EXT_TOOL_MAP) kv_tool_map_load_from_pos(s, fp, NULL);
@@ -8048,9 +8133,11 @@ static int kv_cache_try_load_text(server *s, server_slot *slot,
         slot->continued_last_store_tokens = loaded;
         kv_cache_touch_file(path, hdr.hits + 1);
         server_log(Q36_LOG_KVCACHE,
-                   "q36-server: kv cache hit text tokens=%d text=%u quant=%u load=%.1f ms file=%s",
-                   loaded, text_bytes, hdr.quant_bits, load_ms, path);
+                   "q36-server: kv cache hit text tokens=%d text=%u%s quant=%u load=%.1f ms file=%s",
+                   loaded, text_bytes, stripped_mode ? " stripped=1" : "",
+                   hdr.quant_bits, load_ms, path);
     }
+    buf_free(&stripped_text);
     free(cached_text);
     free(path);
     return loaded;
@@ -8154,12 +8241,12 @@ static void server_kv_store_current(server *s, server_slot *slot,
 }
 
 static int server_kv_try_load_text(server *s, server_slot *slot,
-                                   const char *prompt_text,
+                                   const char *prompt_text, bool allow_stripped,
                                    q36_tokens *effective_prompt,
                                    char **loaded_path_out) {
     pthread_mutex_lock(&s->inference_mu);
     pthread_mutex_lock(&s->kv_mu);
-    int loaded = kv_cache_try_load_text(s, slot, prompt_text,
+    int loaded = kv_cache_try_load_text(s, slot, prompt_text, allow_stripped,
                                         effective_prompt, loaded_path_out);
     pthread_mutex_unlock(&s->kv_mu);
     pthread_mutex_unlock(&s->inference_mu);
@@ -8171,7 +8258,8 @@ static int server_kv_try_load(server *s, server_slot *slot,
                               q36_tokens *effective_prompt,
                               char **loaded_path_out) {
     return server_kv_try_load_text(s, slot,
-            req ? req->prompt_text : NULL, effective_prompt, loaded_path_out);
+            req ? req->prompt_text : NULL, req ? req->preserve_thinking : false,
+            effective_prompt, loaded_path_out);
 }
 
 /* =========================================================================
@@ -9071,7 +9159,7 @@ static void canonicalize_thinking_checkpoint(server *s, server_slot *slot,
         char *path = NULL;
         q36_tokens effective = {0};
         int loaded = server_kv_try_load_text(s, slot, rendered.ptr ? rendered.ptr : "",
-                                            &effective, &path);
+                                            false, &effective, &path);
         if (loaded == 0) q36_session_invalidate(slot->session);
 
         char sync_err[160] = {0};
@@ -9207,7 +9295,7 @@ static void canonicalize_tool_checkpoint(server *s, server_slot *slot,
         char *path = NULL;
         q36_tokens effective = {0};
         int loaded = server_kv_try_load_text(s, slot, rendered.ptr ? rendered.ptr : "",
-                                            &effective, &path);
+                                            false, &effective, &path);
         if (loaded == 0) q36_session_invalidate(slot->session);
 
         char sync_err[160] = {0};
@@ -13180,6 +13268,91 @@ static void test_kv_cache_lookup_uses_longest_text_prefix(void) {
     rmdir(dir);
 }
 
+static void test_kv_cache_lookup_matches_stripped_reasoning(void) {
+    char tmpl[] = "/tmp/q36-kv-strip-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *stored =
+        "<|im_start|>user\nhi<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\nwhy\n</think>\n\nanswer";
+    const char *stripped =
+        "<|im_start|>user\nhi<|im_end|>\n"
+        "<|im_start|>assistant\nanswer";
+    const char *plain = "<|im_start|>assistant\nno reasoning";
+    test_kv_text_stub_file(dir, stored, 512, 0);
+    test_kv_text_stub_file(dir, plain, 512, 0);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+
+    char drop_prompt[256];
+    snprintf(drop_prompt, sizeof(drop_prompt), "%s<|im_start|>user\nnext", stripped);
+    TEST_ASSERT(kv_cache_find_text_prefix(&kc, drop_prompt, 2, 32768) < 0);
+    int idx = kv_cache_find_stripped_prefix(&kc, drop_prompt, 2, 32768);
+    TEST_ASSERT(idx >= 0 && kc.entry[idx].tokens == 512);
+
+    char resend_prompt[256];
+    snprintf(resend_prompt, sizeof(resend_prompt), "%s<|im_start|>user\nnext", stored);
+    TEST_ASSERT(kv_cache_find_text_prefix(&kc, resend_prompt, 2, 32768) >= 0);
+
+    /* A stored text without reasoning has no stripped form to match. */
+    char plain_prompt[128];
+    snprintf(plain_prompt, sizeof(plain_prompt), "%s<|im_start|>user\nnext", plain);
+    TEST_ASSERT(kv_cache_find_stripped_prefix(&kc, plain_prompt, 2, 32768) < 0);
+
+    kv_cache_close(&kc);
+    char sha[41];
+    char name[44];
+    sha1_bytes_hex(stored, strlen(stored), sha);
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    char *path = path_join(dir, name);
+    unlink(path);
+    free(path);
+    sha1_bytes_hex(plain, strlen(plain), sha);
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    path = path_join(dir, name);
+    unlink(path);
+    free(path);
+    rmdir(dir);
+}
+
+static void test_kv_cache_stripped_lookup_rejects_open_generation_prompt(void) {
+    char tmpl[] = "/tmp/q36-kv-open-gen-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *cold =
+        "<|im_start|>user\nhi<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n";
+    test_kv_text_stub_file(dir, cold, 512, 0);
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+
+    const char *prompt =
+        "<|im_start|>user\nhi<|im_end|>\n"
+        "<|im_start|>assistant\nanswer<|im_end|>\n"
+        "<|im_start|>user\nnext";
+    TEST_ASSERT(kv_cache_find_stripped_prefix(&kc, prompt, 2, 32768) < 0);
+
+    kv_cache_close(&kc);
+    char sha[41];
+    char name[44];
+    sha1_bytes_hex(cold, strlen(cold), sha);
+    snprintf(name, sizeof(name), "%.40s.kv", sha);
+    char *path = path_join(dir, name);
+    unlink(path);
+    free(path);
+    rmdir(dir);
+}
+
 static void test_kv_tool_map_filters_by_qwen_tool_text(void) {
     const char *qwen_tool_keep =
         "\n\n<tool_call>\n<function=bash>\n"
@@ -14516,6 +14689,8 @@ static void q36_server_unit_tests_run(void) {
     test_sha1_bytes_hex_matches_known_vector();
     test_tool_id_set_handles_large_history();
     test_kv_cache_lookup_uses_longest_text_prefix();
+    test_kv_cache_lookup_matches_stripped_reasoning();
+    test_kv_cache_stripped_lookup_rejects_open_generation_prompt();
     test_kv_cache_entry_can_be_touched_twice();
     test_kv_cache_eviction_values_fresh_snapshots();
     test_kv_cache_eviction_keeps_aligned_continued_frontiers();
