@@ -1,0 +1,131 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Micro-batch (2..8 token) variant of dense_iq4_xs_decode for the MTP
+ * speculative verify/replay pass (mtp-audit report section 25, same
+ * pattern as dense_iq3_xxs_mmq_nx / section 21). The IQ4_XS weight block
+ * (per-block scale/ls metadata + 4-bit codebook lookup) is decoded once
+ * per block and reused across every token's accumulator in registers,
+ * instead of re-decoding it inside the large-tile mmq kernel's fixed
+ * 128-token GEMM tile - dense_iq4_xs_mmq pays close to the same cost for
+ * 2 real tokens as for a full 128-token tile, since the tile size never
+ * shrinks.
+ *
+ * Reads raw Q8_K activation blocks directly (matching dense_iq4_xs_decode
+ * and dense_iq3_xxs_mmq_nx), and keeps dense_iq4_xs_decode's exact
+ * per-token accumulation order (raw int8 products summed first, the block
+ * scale/ls applied once at the end) - each token's accumulator is an
+ * independent register, so interleaving other tokens' arithmetic between
+ * its fma steps changes nothing about its own bit pattern. A verified row
+ * is bit-identical to the same row decoded alone via dense_iq4_xs_decode. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint ww[]; };
+layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint n_tok;
+    uint blocks;
+    uint row_bytes;
+    float scale;
+} pc;
+
+const uint ROWS = 4u;
+const uint NT = 8u;
+const uint Q8K_WORDS = 74u;
+const int values[16] = int[16](
+    -127, -104, -83, -65, -49, -35, -22, -10,
+       1,   13,  25,  38,  53,  69,  89, 113);
+shared float value_lut[16];
+
+vec4 unpack_i8(uint v) {
+    return vec4(float(bitfieldExtract(int(v), 0, 8)),
+                float(bitfieldExtract(int(v), 8, 8)),
+                float(bitfieldExtract(int(v), 16, 8)),
+                float(bitfieldExtract(int(v), 24, 8)));
+}
+
+vec4 unpack_iq4(uint v, uint shift) {
+    return vec4(value_lut[(v >> (shift + 0u)) & 15u],
+                value_lut[(v >> (shift + 8u)) & 15u],
+                value_lut[(v >> (shift + 16u)) & 15u],
+                value_lut[(v >> (shift + 24u)) & 15u]);
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint itid = lid & 7u;
+    uint first_row = gl_WorkGroupID.x * ROWS;
+    float acc[ROWS][NT];
+    for (uint r = 0u; r < ROWS; r++)
+        for (uint t = 0u; t < NT; t++) acc[r][t] = 0.0;
+    if (lid < 16u) value_lut[lid] = float(values[lid]);
+    barrier();
+
+    for (uint b = lid >> 3u; b < pc.blocks; b += 8u) {
+        uint ib = itid;
+        vec4 qv[NT][8];
+        float yd[NT];
+        for (uint t = 0u; t < NT; t++) {
+            if (t >= pc.n_tok) break;
+            uint qbase = (t * pc.blocks + b) * Q8K_WORDS;
+            for (uint l = 0u; l < 8u; l++)
+                qv[t][l] = unpack_i8(q8[qbase + 2u + 8u * itid + l]);
+            yd[t] = uintBitsToFloat(q8[qbase]);
+        }
+
+        for (uint r = 0u; r < ROWS; r++) {
+            uint row = first_row + r;
+            if (row >= pc.out_dim) continue;
+            uint base = (row * pc.row_bytes + 136u * b) >> 2u;
+            uint meta0 = ww[base];
+            uint meta1 = ww[base + 1u];
+            float sum[NT];
+            for (uint t = 0u; t < NT; t++) sum[t] = 0.0;
+            for (uint l = 0u; l < 4u; l++) {
+                uint packed = ww[base + 2u + 4u * ib + l];
+                vec4 w0 = unpack_iq4(packed, 0u);
+                vec4 w1 = unpack_iq4(packed, 4u);
+                for (uint t = 0u; t < NT; t++) {
+                    if (t >= pc.n_tok) break;
+                    vec4 q0 = qv[t][l];
+                    vec4 q1 = qv[t][l + 4u];
+                    sum[t] = fma(w0.x, q0.x,
+                          fma(w0.y, q0.y,
+                          fma(w0.z, q0.z,
+                          fma(w0.w, q0.w,
+                          fma(w1.x, q1.x,
+                          fma(w1.y, q1.y,
+                          fma(w1.z, q1.z,
+                          fma(w1.w, q1.w, sum[t]))))))));
+                }
+            }
+            uint sl = meta1 >> (8u * (ib >> 1u));
+            uint sh = meta0 >> 16u;
+            int ls = int((sl >> (4u * (ib & 1u))) & 15u) |
+                     int(((sh >> (2u * ib)) & 3u) << 4u);
+            float wd = unpackHalf2x16(meta0).x;
+            for (uint t = 0u; t < NT; t++) {
+                if (t >= pc.n_tok) break;
+                acc[r][t] = fma(wd * yd[t] * float(ls - 32), sum[t], acc[r][t]);
+            }
+        }
+    }
+
+    for (uint r = 0u; r < ROWS; r++) {
+        uint row = first_row + r;
+        for (uint t = 0u; t < NT; t++) {
+            if (t >= pc.n_tok) break;
+            float total = subgroupAdd(acc[r][t]);
+            if (lid == 0u && row < pc.out_dim)
+                y[t * pc.out_dim + row] = total * pc.scale;
+        }
+    }
+}
