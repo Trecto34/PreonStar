@@ -1,6 +1,6 @@
 # QA Before Releases
 
-This is the release gate for QuarkStar. Run it before tagging or publishing a
+This is the release gate for PreonStar. Run it before tagging or publishing a
 release build. It focuses on the paths that have historically regressed:
 Qwen prompt rendering, Metal and Vulkan kernels and fusions, SSD expert
 streaming, long context state, disk KV checkpoints, server protocols, and the

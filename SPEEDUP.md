@@ -1,6 +1,6 @@
 # Speedup Rules
 
-This file is a rulebook for implementing new Quarkstar speedups and kernel optimizations to improve prefill and decode tokens per second (t/s) for a target runtime (Vulkan, Metal) and a target model.
+This file is a rulebook for implementing new PreonStar speedups and kernel optimizations to improve prefill and decode tokens per second (t/s) for a target runtime (Vulkan, Metal) and a target model.
 
 * A speedup must remain effective as the context size grows. Benchmark `q36_bench.c` with multiple context sizes, such as 128, 2K, and 4K tokens. In some cases, also test 8K and 16K.
 
