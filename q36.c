@@ -567,6 +567,7 @@ struct q36_engine {
     int power_percent;
     int mtp_draft_tokens;
     float mtp_margin;
+    bool mtp_force_serial_replay;
     float mtp_expert_weights_scale;
     q36_kv_cache_type cache_type_k;
     q36_kv_cache_type cache_type_v;
@@ -9995,6 +9996,7 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
     e->mtp_draft_tokens = opt->mtp_draft_tokens > 0 ? opt->mtp_draft_tokens : 1;
     if (e->mtp_draft_tokens > Q36_MTP_MAX_DRAFT) e->mtp_draft_tokens = Q36_MTP_MAX_DRAFT;
     e->mtp_margin = opt->mtp_margin >= 0.0f ? opt->mtp_margin : 0.0f;
+    e->mtp_force_serial_replay = opt->mtp_force_serial_replay;
     if (opt->directional_steering_file && opt->directional_steering_file[0]) {
         e->directional_steering_file = q36_strdup(opt->directional_steering_file);
     }
@@ -11606,8 +11608,36 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
             prev_token = s->mtp_draft_token;
         }
 
+        /* Gate 1 (mtp-audit report section 25/27): e->mtp_force_serial_replay
+         * swaps both the verify decision and the post-accept state
+         * adoption/replay for a loop of genuine n_tok==1 forward calls,
+         * identical in shape to plain decode, instead of one batched
+         * n_tok>1 call. This is the permanent reference mode that proves
+         * the speculative bookkeeping itself (rollback, frontier snapshot/
+         * restore, KV coverage, accept/reject logic) is correct,
+         * independent of GPU batched-kernel numerics; it is deliberately
+         * not the production fast path (it reintroduces the full
+         * per-token verify cost MTP exists to avoid), and is never
+         * enabled unless the caller explicitly asks for it via
+         * q36_engine_options.mtp_force_serial_replay. */
+        bool force_serial = e->mtp_force_serial_replay;
         if (!q36_vulkan_spec_frontier_snapshot(rt)) return 1;
-        if (!q36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
+        if (force_serial) {
+            bool ok = true;
+            for (int i = 0; i < verify_n && ok; i++) {
+                ok = q36_forward_tokens_vulkan(s, &verify[i], 1u, start_pos + (uint32_t)i, true);
+                if (ok && i + 1 < verify_n) {
+                    int top = q36_session_argmax(s);
+                    if (top < 0) { ok = false; break; }
+                    row_tops[i] = top;
+                }
+            }
+            if (!ok) {
+                if (!q36_vulkan_spec_frontier_restore(rt)) q36_session_invalidate(s);
+                if (err && errlen) snprintf(err, errlen, "MTP target verifier (forced-serial) failed at pos %u", start_pos);
+                return -1;
+            }
+        } else if (!q36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
             if (!q36_vulkan_spec_frontier_restore(rt)) q36_session_invalidate(s);
             if (err && errlen) snprintf(err, errlen, "MTP target verifier failed at pos %u", start_pos);
             return -1;
@@ -11625,7 +11655,7 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
             }
         }
 
-        if (commit_n == verify_n) {
+        if (commit_n == verify_n && !force_serial) {
             /* Full accept: the verify pass already ran every committed
              * token's forward and left the last row's logits in s->logits;
              * adopting its KV/recurrent frontier makes the replay free.
@@ -11667,12 +11697,27 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
                 q36_session_invalidate(s);
                 return -1;
             }
-            /* Replay the accepted prefix as one batch; refreshes s->logits
-             * and last_h from the last accepted row. */
             bool replay;
-            q36_gpu_set_micro_batch(true);
-            replay = q36_forward_tokens_vulkan(s, verify, (uint32_t)commit_n, start_pos, true);
-            q36_gpu_set_micro_batch(false);
+            if (force_serial) {
+                replay = true;
+                for (int i = 0; i < commit_n && replay; i++) {
+                    replay = q36_forward_tokens_vulkan(
+                        s, &verify[i], 1u, start_pos + (uint32_t)i, i == commit_n - 1);
+                }
+                if (replay && commit_n == verify_n) {
+                    q36_gpu_tensor *last_row = q36_vulkan_row(rt->norm, 0, Q36_N_EMBD);
+                    replay = last_row != NULL &&
+                             q36_mtp_prefill_kv_populate_vulkan(
+                                 s, verify[commit_n - 1], start_pos + (uint32_t)commit_n - 1u, last_row);
+                    q36_gpu_tensor_free(last_row);
+                }
+            } else {
+                /* Replay the accepted prefix as one batch; refreshes s->logits
+                 * and last_h from the last accepted row. */
+                q36_gpu_set_micro_batch(true);
+                replay = q36_forward_tokens_vulkan(s, verify, (uint32_t)commit_n, start_pos, true);
+                q36_gpu_set_micro_batch(false);
+            }
             if (!replay) {
                 if (err && errlen) snprintf(err, errlen, "MTP accepted-prefix replay failed at pos %u", start_pos);
                 q36_session_invalidate(s);

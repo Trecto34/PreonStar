@@ -89,6 +89,19 @@ typedef struct {
     uint32_t prefill_chunk;
     int mtp_draft_tokens;
     float mtp_margin;
+    /* Gate 1 (mtp-audit report section 25/27): forces MTP verify and
+     * accept/replay to run as a loop of genuine n_tok==1 forward calls
+     * instead of one batched n_tok>1 call, so the resulting state is
+     * byte-for-byte what plain serial greedy decode would produce. This
+     * is a permanent regression oracle for the SPECULATIVE BOOKKEEPING
+     * (rollback, frontier snapshot/restore, KV/mtp_kv_valid coverage,
+     * accept/reject logic) independent of GPU batched-kernel numerics -
+     * it is not the production fast path and is not meant to be, since
+     * it reintroduces the full per-token verify cost MTP exists to
+     * avoid. Gate 1 requires 0 divergences here; Gate 2 (a separate,
+     * differential characterization) covers the accelerated batched
+     * path's floating-point divergence from this reference. */
+    bool mtp_force_serial_replay;
     const char *directional_steering_file;
     float directional_steering_attn;
     float directional_steering_ffn;
