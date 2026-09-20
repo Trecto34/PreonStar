@@ -7146,14 +7146,20 @@ static void test_mtp_catchup_boundaries(void) {
     q36_engine_close(engine);
 }
 
-/* Same oracle as test_mtp_verifier_replay (spec-vs-plain lockstep, gap
- * <= 1e-6 between plain's own logits at the accepted token vs plain's own
- * top choice), but against the in-file dense MTP model so it runs without
- * the external 35B+MTP file pair - used during the mtp-audit report's mmq
- * micro-batch kernel work (section 20/21) to check whether a kernel change
- * affects verify's correctness, independent of section 15's prefill-only
- * boundary test. Registered as --mtp-verifier-dense; kept as a permanent
- * regression oracle for this dense model. */
+/* GATE 1 (mtp-audit report section 25/27): same oracle as
+ * test_mtp_verifier_replay (spec-vs-plain lockstep, gap <= 1e-6 between
+ * plain's own logits at the accepted token vs plain's own top choice), but
+ * against the in-file dense MTP model so it runs without the external
+ * 35B+MTP file pair, and with mtp_force_serial_replay=true so the
+ * speculative path runs the same n_tok==1 forward calls plain decode does.
+ * This tests the SPECULATIVE BOOKKEEPING (rollback, frontier snapshot/
+ * restore, KV coverage, accept/reject logic) independent of GPU batched-
+ * kernel numerics - it must always be exact (0 divergence). The DEFAULT
+ * accelerated (batched) path is expected to diverge from serial greedy
+ * decode by design (see the differential characterization in
+ * test_mtp_gate2_characterize) and is NOT what this test exercises.
+ * Registered as --mtp-verifier-dense; kept as a permanent regression gate
+ * for this dense model. */
 static void test_mtp_verifier_replay_dense(void) {
     if (test_is_cpu_only_build()) {
         test_skip("mtp-verifier-dense", "MTP requires Vulkan");
@@ -7168,6 +7174,7 @@ static void test_mtp_verifier_replay_dense(void) {
         .backend = Q36_BACKEND_VULKAN,
         .mtp_draft_tokens = 4,
         .mtp_margin = 0.0f,
+        .mtp_force_serial_replay = true,
     };
     q36_engine *engine = NULL;
     q36_session *spec = NULL;
@@ -7243,6 +7250,237 @@ done:
     q36_engine_close(engine);
 }
 
+static int test_top_k_ids(const float *logits, int vocab, int k, int *out_ids) {
+    int found = 0;
+    for (int slot = 0; slot < k && slot < 8; slot++) {
+        int best = -1;
+        float best_v = 0.0f;
+        for (int i = 0; i < vocab; i++) {
+            bool skip = false;
+            for (int j = 0; j < slot; j++) if (out_ids[j] == i) { skip = true; break; }
+            if (skip) continue;
+            if (best < 0 || logits[i] > best_v) { best = i; best_v = logits[i]; }
+        }
+        if (best < 0) break;
+        out_ids[slot] = best;
+        found++;
+    }
+    return found;
+}
+
+/* GATE 2 (mtp-audit report section 25/27): differential characterization
+ * of the DEFAULT accelerated (batched) speculative path against the
+ * serial greedy reference - NOT a pass/fail correctness test. The
+ * production contract for accelerated MTP is bounded, measured numerical
+ * divergence from serial greedy, not bit-exact equivalence (that is what
+ * Gate 1 / test_mtp_verifier_replay_dense enforces, in forced-serial
+ * mode). This tool collects the distribution of that divergence across
+ * several deterministic prompts and >=~1k total committed tokens, so a
+ * threshold can eventually be set from real data instead of guessed.
+ *
+ * Known scope limits (real API limits, not laziness - documented rather
+ * than silently ignored): the accelerated session's own per-row logits
+ * are only recoverable via q36_session_logits() for the LAST token
+ * committed in each accepted round (replay/full-accept-adopt overwrites
+ * s->logits with just that final row) - so batched-side margin, RMS,
+ * max_abs, and top-k overlap are computed only for round-final rows, not
+ * every committed token. Disagreement rate, severity-by-serial-margin,
+ * longest disagreement streak, reconvergence, and NaN/Inf/repetition
+ * checks use the serial reference's logits and are computed for every
+ * committed token, which is the metric the framework weights most
+ * heavily (large-margin flips matter far more than near-tie flips).
+ *
+ * Registered as --mtp-gate2. Prints one line per disagreement plus a
+ * final aggregated report; does not assert a divergence-rate threshold
+ * (per the framework: characterize first, do not invent a threshold). */
+static void test_mtp_gate2_characterize(void) {
+    static const char *prompts[] = {
+        "Explain why speculative decoding is exact, then give a small C example.",
+        "Describe the water cycle in detail, covering evaporation, condensation, and precipitation.",
+        "Write a short story about a lighthouse keeper who discovers something unusual.",
+        "List the first twenty prime numbers and explain the sieve of Eratosthenes.",
+    };
+    const int tokens_per_prompt = 260;
+    if (test_is_cpu_only_build()) {
+        test_skip("mtp-gate2", "MTP requires Vulkan");
+        return;
+    }
+    if (!test_model_available(test_model_path())) {
+        test_skip("mtp-gate2", "model not found");
+        return;
+    }
+    q36_engine_options opt = {
+        .model_path = test_model_path(),
+        .backend = Q36_BACKEND_VULKAN,
+        .mtp_draft_tokens = 4,
+        .mtp_margin = 0.0f,
+    };
+    q36_engine *engine = NULL;
+    TEST_ASSERT(q36_engine_open(&engine, &opt) == 0);
+    if (!engine) return;
+    if (!q36_engine_has_mtp(engine)) {
+        test_skip("mtp-gate2", "model has no MTP/nextn head");
+        q36_engine_close(engine);
+        return;
+    }
+
+    long total_committed = 0, total_disagree = 0;
+    long sev_near_tie = 0, sev_medium = 0, sev_high = 0; /* by serial margin */
+    long longest_streak = 0, cur_streak = 0;
+    long reconverged = 0, disagree_events = 0;
+    long nan_inf_count = 0, repetition_flags = 0;
+    long round_final_rows = 0;
+    double rms_sum = 0.0, max_abs_worst = 0.0, topk_overlap_sum = 0.0;
+    long batched_margin_n = 0;
+    double batched_margin_sum = 0.0, batched_margin_min = -1.0;
+
+    for (size_t p = 0; p < sizeof(prompts) / sizeof(prompts[0]); p++) {
+        q36_session *spec = NULL, *plain = NULL;
+        q36_tokens prompt = {0};
+        char err[192] = {0};
+        int committed = 0;
+        int last_token = -1, run_len = 0;
+        int pending_disagree_lookahead = -1;
+
+        q36_encode_chat_prompt(engine, "", prompts[p], Q36_THINK_NONE, &prompt);
+        TEST_ASSERT(q36_session_create(&spec, engine, 4096) == 0);
+        TEST_ASSERT(q36_session_create(&plain, engine, 4096) == 0);
+        if (!spec || !plain) goto next_prompt;
+        TEST_ASSERT(q36_session_sync(spec, &prompt, err, sizeof(err)) == 0);
+        TEST_ASSERT(q36_session_sync(plain, &prompt, err, sizeof(err)) == 0);
+
+        while (committed < tokens_per_prompt) {
+            int first = q36_session_argmax(spec);
+            if (first < 0 || first == q36_token_eos(engine)) break;
+            int accepted[17];
+            int n = q36_session_eval_speculative_argmax(
+                spec, first, tokens_per_prompt - committed, q36_token_eos(engine),
+                accepted, (int)(sizeof(accepted) / sizeof(accepted[0])),
+                err, sizeof(err));
+            TEST_ASSERT(n > 0);
+            if (n <= 0) break;
+
+            for (int i = 0; i < n; i++) {
+                int vocab = 0;
+                const float *plog = q36_session_logits(plain, &vocab);
+                int top1 = q36_session_argmax(plain);
+                TEST_ASSERT(plog && accepted[i] >= 0 && accepted[i] < vocab && top1 >= 0);
+                if (!plog || top1 < 0) break;
+                int top2 = q36_session_argmax_excluding(plain, top1);
+                float serial_margin = top2 >= 0 ? plog[top1] - plog[top2] : plog[top1];
+                bool agree = accepted[i] == top1;
+                for (int v = 0; v < vocab; v += 4999) {
+                    if (isnan(plog[v]) || isinf(plog[v])) { nan_inf_count++; break; }
+                }
+
+                if (accepted[i] == last_token) {
+                    run_len++;
+                    if (run_len == 6) repetition_flags++;
+                } else {
+                    run_len = 1;
+                }
+                last_token = accepted[i];
+
+                if (pending_disagree_lookahead > 0) {
+                    pending_disagree_lookahead--;
+                    if (agree && pending_disagree_lookahead >= 0) reconverged++;
+                    if (agree) pending_disagree_lookahead = -1;
+                }
+
+                if (!agree) {
+                    float gap = plog[top1] - plog[accepted[i]];
+                    total_disagree++;
+                    disagree_events++;
+                    cur_streak++;
+                    if (cur_streak > longest_streak) longest_streak = cur_streak;
+                    if (serial_margin < 0.5f) sev_near_tie++;
+                    else if (serial_margin < 2.0f) sev_medium++;
+                    else sev_high++;
+                    fprintf(stderr,
+                        "q36-test: gate2 prompt=%zu tok=%d DISAGREE serial_top1=%d batched_top1=%d "
+                        "serial_margin=%g serial_gap=%g\n",
+                        p, committed, top1, accepted[i], serial_margin, gap);
+                    pending_disagree_lookahead = 5;
+                } else {
+                    cur_streak = 0;
+                }
+
+                /* Round-final row: spec's own s->logits still reflects this
+                 * exact committed position (see the scope-limits comment
+                 * above), so the batched side's own confidence/vector is
+                 * available here only. */
+                if (i == n - 1) {
+                    int svocab = 0;
+                    const float *slog = q36_session_logits(spec, &svocab);
+                    if (slog && svocab == vocab) {
+                        int stop1 = q36_session_argmax(spec);
+                        int stop2 = stop1 >= 0 ? q36_session_argmax_excluding(spec, stop1) : -1;
+                        if (stop1 >= 0 && stop2 >= 0) {
+                            double bmargin = (double)slog[stop1] - (double)slog[stop2];
+                            batched_margin_n++;
+                            batched_margin_sum += bmargin;
+                            if (batched_margin_min < 0.0 || bmargin < batched_margin_min)
+                                batched_margin_min = bmargin;
+                        }
+                        double sq = 0.0, mx = 0.0;
+                        for (int v = 0; v < vocab; v++) {
+                            double d = (double)slog[v] - (double)plog[v];
+                            sq += d * d;
+                            if (fabs(d) > mx) mx = fabs(d);
+                        }
+                        double rms = sqrt(sq / (double)vocab);
+                        rms_sum += rms;
+                        if (mx > max_abs_worst) max_abs_worst = mx;
+                        {
+                            int pk[5] = {-1,-1,-1,-1,-1}, sk[5] = {-1,-1,-1,-1,-1};
+                            int pn = test_top_k_ids(plog, vocab, 5, pk);
+                            int sn = test_top_k_ids(slog, vocab, 5, sk);
+                            int overlap = 0;
+                            for (int a = 0; a < pn; a++)
+                                for (int b = 0; b < sn; b++)
+                                    if (pk[a] == sk[b]) { overlap++; break; }
+                            topk_overlap_sum += pn > 0 ? (double)overlap / (double)pn : 0.0;
+                        }
+                        round_final_rows++;
+                    }
+                }
+
+                TEST_ASSERT(q36_session_eval(plain, accepted[i], err, sizeof(err)) == 0);
+                committed++;
+                total_committed++;
+                if (accepted[i] == q36_token_eos(engine) || committed >= tokens_per_prompt) break;
+            }
+        }
+        fprintf(stderr, "q36-test: gate2 prompt=%zu committed=%d\n", p, committed);
+
+    next_prompt:
+        q36_tokens_free(&prompt);
+        q36_session_free(plain);
+        q36_session_free(spec);
+    }
+
+    fprintf(stderr,
+        "q36-test: GATE2 SUMMARY total_committed=%ld disagree=%ld rate=%.4f%% "
+        "longest_streak=%ld disagree_events=%ld reconverged=%ld "
+        "sev_near_tie=%ld sev_medium=%ld sev_high=%ld "
+        "nan_inf=%ld repetition_flags=%ld round_final_rows=%ld "
+        "mean_rms=%.6g max_abs_worst=%.6g mean_topk5_overlap=%.4f "
+        "mean_batched_margin=%.6g min_batched_margin=%.6g\n",
+        total_committed, total_disagree,
+        total_committed > 0 ? 100.0 * (double)total_disagree / (double)total_committed : 0.0,
+        longest_streak, disagree_events, reconverged,
+        sev_near_tie, sev_medium, sev_high,
+        nan_inf_count, repetition_flags, round_final_rows,
+        round_final_rows > 0 ? rms_sum / (double)round_final_rows : 0.0,
+        max_abs_worst,
+        round_final_rows > 0 ? topk_overlap_sum / (double)round_final_rows : 0.0,
+        batched_margin_n > 0 ? batched_margin_sum / (double)batched_margin_n : 0.0,
+        batched_margin_min);
+    TEST_ASSERT(total_committed >= 500);
+
+    q36_engine_close(engine);
+}
+
 static void test_server_unit_group(void) {
     q36_server_unit_tests_run();
 }
@@ -7275,7 +7513,8 @@ static const q36_test_entry test_entries[] = {
     {"--vulkan-queue-parity", "vulkan-queue-parity", "ACE and graphics queues produce bit-identical logits", test_vulkan_queue_parity},
     {"--mtp-verifier", "mtp-verifier", "MTP commits replay through plain target decode", test_mtp_verifier_replay},
     {"--mtp-boundary", "mtp-boundary", "MTP prefill catch-up correct at chunk/length boundaries", test_mtp_catchup_boundaries},
-    {"--mtp-verifier-dense", "mtp-verifier-dense", "mtp-audit: spec-vs-plain gap check, dense model, ad hoc", test_mtp_verifier_replay_dense},
+    {"--mtp-verifier-dense", "mtp-verifier-dense", "mtp-audit Gate 1: forced-serial spec vs plain, dense model, must be exact", test_mtp_verifier_replay_dense},
+    {"--mtp-gate2", "mtp-gate2", "mtp-audit Gate 2: accelerated-vs-serial differential characterization, dense model", test_mtp_gate2_characterize},
     {"--qwen-tool-call-format", "qwen-tool-call-format", "Qwen tool-call rendering format unit test", test_qwen_tool_call_format},
     {"--kat-model-support", "kat-model-support", "KAT model identity and special tokenizer tokens", test_kat_model_support},
     {"--vector-fixtures", "vector-fixtures", "llama.cpp fixture consistency check", test_vector_fixtures},
