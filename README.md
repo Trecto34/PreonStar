@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="logo.svg" alt="QuarkStar logo" width="220">
+  <img src="logo.svg" alt="PreonStar logo" width="220">
 </p>
 
-**QuarkStar** is a small native inference engine for **Qwen3.6-35B-A3B**,
+**PreonStar** is a small native inference engine for **Qwen3.6-35B-A3B**,
 **Qwen3.8-27B**.
 It is self-contained and deliberately narrow, not a general GGUF runner. 
 The main paths are `qwen35moe`-specific Vulkan and Metal graph executors with
@@ -10,9 +10,11 @@ Q36-specific loading, prompt rendering, tool calls, KV state, HTTP server,
 and coding agent. The repository also includes tools and data for GGUF,
 imatrix, quality, and speed.
 
-This project would not exist without **DwarfStar**, **llama.cpp and GGML**, make
-sure to read the acknowledgements section, a big thank you to Salvatore Sanfilippo 
-aka Antirez and Georgi Gerganov and all the other contributors.
+PreonStar started as a fork of [**q36**](https://github.com/Ninnix/q36)
+(branded QuarkStar) by Ninnix, and neither it nor q36 would exist without
+**DwarfStar**, **llama.cpp and GGML** — make sure to read the acknowledgements
+section, a big thank you to Ninnix, Salvatore Sanfilippo aka Antirez, Georgi
+Gerganov, and all the other contributors.
 
 Model support is intentionally opportunistic. The project follows the best open
 weights for useful local machine sizes, especially 16 GB machines and 24/32 GB
