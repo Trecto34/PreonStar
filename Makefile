@@ -130,6 +130,7 @@ VULKAN_SHADERS := \
 	vulkan/dense_iq3_xxs_decode.spv \
 	vulkan/dense_iq3_xxs_decode_r4.spv \
 	vulkan/dense_iq3_xxs_mmq.spv \
+	vulkan/dense_iq3_xxs_mmq_nx.spv \
 	vulkan/dense_iq3_s_decode.spv \
 	vulkan/dense_iq3_s_decode_full.spv \
 	vulkan/dense_iq3_s_decode_r4.spv \
@@ -175,6 +176,9 @@ vulkan/dense_iq3_xxs_decode_r4.spv: vulkan/dense_iq3_xxs_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_ROWS=4 -DQ36_BOUNDS=0 -o $@ $<
 
 vulkan/dense_iq3_xxs_mmq.spv: vulkan/dense_iq3_xxs_mmq.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/dense_iq3_xxs_mmq_nx.spv: vulkan/dense_iq3_xxs_mmq_nx.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/dense_iq3_s_decode.spv: vulkan/dense_iq3_s_decode.comp q36_iq3s_grid_values.inc

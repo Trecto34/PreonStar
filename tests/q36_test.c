@@ -7146,6 +7146,103 @@ static void test_mtp_catchup_boundaries(void) {
     q36_engine_close(engine);
 }
 
+/* Same oracle as test_mtp_verifier_replay (spec-vs-plain lockstep, gap
+ * <= 1e-6 between plain's own logits at the accepted token vs plain's own
+ * top choice), but against the in-file dense MTP model so it runs without
+ * the external 35B+MTP file pair - used during the mtp-audit report's mmq
+ * micro-batch kernel work (section 20/21) to check whether a kernel change
+ * affects verify's correctness, independent of section 15's prefill-only
+ * boundary test. Registered as --mtp-verifier-dense; kept as a permanent
+ * regression oracle for this dense model. */
+static void test_mtp_verifier_replay_dense(void) {
+    if (test_is_cpu_only_build()) {
+        test_skip("mtp-verifier-dense", "MTP requires Vulkan");
+        return;
+    }
+    if (!test_model_available(test_model_path())) {
+        test_skip("mtp-verifier-dense", "model not found");
+        return;
+    }
+    q36_engine_options opt = {
+        .model_path = test_model_path(),
+        .backend = Q36_BACKEND_VULKAN,
+        .mtp_draft_tokens = 4,
+        .mtp_margin = 0.0f,
+    };
+    q36_engine *engine = NULL;
+    q36_session *spec = NULL;
+    q36_session *plain = NULL;
+    q36_tokens prompt = {0};
+    char err[192] = {0};
+    int committed = 0;
+    int multi = 0;
+    int partial = 0;
+    float worst_gap = 0.0f;
+
+    TEST_ASSERT(q36_engine_open(&engine, &opt) == 0);
+    if (!engine) return;
+    if (!q36_engine_has_mtp(engine)) {
+        test_skip("mtp-verifier-dense", "model has no MTP/nextn head");
+        q36_engine_close(engine);
+        return;
+    }
+    TEST_ASSERT(q36_engine_mtp_draft_tokens(engine) > 2);
+    q36_encode_chat_prompt(engine, "",
+        "Explain why speculative decoding is exact, then give a small C example.",
+        Q36_THINK_NONE, &prompt);
+    TEST_ASSERT(q36_session_create(&spec, engine, 4096) == 0);
+    TEST_ASSERT(q36_session_create(&plain, engine, 4096) == 0);
+    if (!spec || !plain) goto done;
+    TEST_ASSERT(q36_session_sync(spec, &prompt, err, sizeof(err)) == 0);
+    TEST_ASSERT(q36_session_sync(plain, &prompt, err, sizeof(err)) == 0);
+
+    while (committed < 96) {
+        int first = q36_session_argmax(spec);
+        if (first < 0 || first == q36_token_eos(engine)) break;
+        int accepted[17];
+        int n = q36_session_eval_speculative_argmax(
+            spec, first, 96 - committed, q36_token_eos(engine),
+            accepted, (int)(sizeof(accepted) / sizeof(accepted[0])),
+            err, sizeof(err));
+        TEST_ASSERT(n > 0);
+        if (n <= 0) break;
+        if (n > 1) multi++;
+        if (n > 1 && n < q36_engine_mtp_draft_tokens(engine)) partial++;
+
+        for (int i = 0; i < n; i++) {
+            int vocab = 0;
+            const float *logits = q36_session_logits(plain, &vocab);
+            int top = q36_session_argmax(plain);
+            TEST_ASSERT(logits && accepted[i] >= 0 && accepted[i] < vocab);
+            TEST_ASSERT(top >= 0);
+            if (!logits || top < 0 || accepted[i] < 0 || accepted[i] >= vocab) break;
+            float gap = logits[top] - logits[accepted[i]];
+            if (gap > worst_gap) worst_gap = gap;
+            fprintf(stderr, "q36-test: mtp-verifier-dense i=%d accepted=%d top=%d gap=%g\n",
+                    committed, accepted[i], top, gap);
+            TEST_ASSERT(gap <= 1.0e-6f);
+            TEST_ASSERT(q36_session_eval(plain, accepted[i], err, sizeof(err)) == 0);
+            committed++;
+            if (accepted[i] == q36_token_eos(engine) || committed >= 96) break;
+        }
+        TEST_ASSERT(q36_session_pos(spec) == q36_session_pos(plain));
+        TEST_ASSERT(q36_session_argmax(spec) == q36_session_argmax(plain));
+    }
+
+    fprintf(stderr,
+            "q36-test: MTP replay dense committed=%d multi=%d partial=%d worst_argmax_gap=%g\n",
+            committed, multi, partial, worst_gap);
+    TEST_ASSERT(committed >= 16);
+    TEST_ASSERT(multi > 0);
+    TEST_ASSERT(partial > 0);
+
+done:
+    q36_tokens_free(&prompt);
+    q36_session_free(plain);
+    q36_session_free(spec);
+    q36_engine_close(engine);
+}
+
 static void test_server_unit_group(void) {
     q36_server_unit_tests_run();
 }
@@ -7178,6 +7275,7 @@ static const q36_test_entry test_entries[] = {
     {"--vulkan-queue-parity", "vulkan-queue-parity", "ACE and graphics queues produce bit-identical logits", test_vulkan_queue_parity},
     {"--mtp-verifier", "mtp-verifier", "MTP commits replay through plain target decode", test_mtp_verifier_replay},
     {"--mtp-boundary", "mtp-boundary", "MTP prefill catch-up correct at chunk/length boundaries", test_mtp_catchup_boundaries},
+    {"--mtp-verifier-dense", "mtp-verifier-dense", "mtp-audit: spec-vs-plain gap check, dense model, ad hoc", test_mtp_verifier_replay_dense},
     {"--qwen-tool-call-format", "qwen-tool-call-format", "Qwen tool-call rendering format unit test", test_qwen_tool_call_format},
     {"--kat-model-support", "kat-model-support", "KAT model identity and special tokenizer tokens", test_kat_model_support},
     {"--vector-fixtures", "vector-fixtures", "llama.cpp fixture consistency check", test_vector_fixtures},

@@ -224,6 +224,7 @@ typedef struct {
     q36_vk_kernel dense_iq3_xxs_decode;
     q36_vk_kernel dense_iq3_xxs_decode_r4;
     q36_vk_kernel dense_iq3_xxs_mmq;
+    q36_vk_kernel dense_iq3_xxs_mmq_nx;
     q36_vk_kernel dense_iq3_s_decode;
     q36_vk_kernel dense_iq3_s_decode_full;
     q36_vk_kernel dense_iq3_s_decode_r4;
@@ -3031,6 +3032,7 @@ int q36_gpu_init(void) {
     q36_vk.dense_iq3_xxs_decode = Q36_VK_KERNEL("vulkan/dense_iq3_xxs_decode.spv", 4, 16, 1u << 2);
     q36_vk.dense_iq3_xxs_decode_r4 = Q36_VK_KERNEL("vulkan/dense_iq3_xxs_decode_r4.spv", 4, 16, 1u << 2);
     q36_vk.dense_iq3_xxs_mmq = Q36_VK_KERNEL("vulkan/dense_iq3_xxs_mmq.spv", 5, 20, 1u << 2);
+    q36_vk.dense_iq3_xxs_mmq_nx = Q36_VK_KERNEL("vulkan/dense_iq3_xxs_mmq_nx.spv", 4, 20, 1u << 2);
     q36_vk.dense_iq3_s_decode = Q36_VK_KERNEL("vulkan/dense_iq3_s_decode.spv", 4, 16, 1u << 2);
     q36_vk.dense_iq3_s_decode_full = Q36_VK_KERNEL("vulkan/dense_iq3_s_decode_full.spv", 4, 16, 1u << 2);
     q36_vk.dense_iq3_s_decode_r4 = Q36_VK_KERNEL("vulkan/dense_iq3_s_decode_r4.spv", 4, 16, 1u << 2);
@@ -3447,6 +3449,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_mmq_r4);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_xxs_mmq);
+    q36_vk_kernel_destroy(&q36_vk.dense_iq3_xxs_mmq_nx);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_xxs_decode_r4);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_xxs_decode);
     q36_vk_kernel_destroy(&q36_vk.moe_matvec_fast);
@@ -3871,6 +3874,7 @@ static void q36_vk_prepare_dense_kernels(void) {
         &q36_vk.dense_iq3_s_mmq,
         &q36_vk.dense_iq3_s_mmq_r4,
         &q36_vk.dense_iq3_xxs_mmq,
+        &q36_vk.dense_iq3_xxs_mmq_nx,
         &q36_vk.dense_kquant_mmq,
         &q36_vk.predequant_b16,
         &q36_vk.dense_iq3_s_decode,
@@ -7996,6 +8000,34 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                         ((uint32_t)out_dim + 3u) / 4u :
                         ((uint32_t)out_dim + 4u) / 5u,
                     1, 1);
+            } else if (weight_type == Q36_VK_TENSOR_IQ3_XXS &&
+                       q36_vk_micro_batch && n_tok >= 2u && n_tok <= 8u &&
+                       out_dim % 4u == 0u) {
+                /* Micro-batch tier for MTP verify/replay (mtp-audit report
+                 * section 20): the large-tile mmq kernel below pays close
+                 * to its full 128-token-tile cost even at n_tok 2-4, since
+                 * the tile size never shrinks. This kernel amortizes the
+                 * weight decode across n_tok the same way the mmq kernel's
+                 * decode-time sibling does for Q8_0 weights
+                 * (matmul_q8_0_f32b_nx). Same 4 bindings as the n_tok==1
+                 * decode path above - no b16 predequant needed. */
+                struct {
+                    uint32_t out_dim;
+                    uint32_t n_tok;
+                    uint32_t blocks;
+                    uint32_t row_bytes;
+                    float scale;
+                } push = {
+                    (uint32_t)out_dim, (uint32_t)n_tok,
+                    (uint32_t)blocks, (uint32_t)row_bytes, scale,
+                };
+                const char *op = q36_vk_prof_iq3_shape(
+                    weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
+                    (uint32_t)out_dim, "dense_iq3_xxs_mmq_nx");
+                ok = q36_vk_run_unlocked(
+                    op, &q36_vk.dense_iq3_xxs_mmq_nx,
+                    bindings, &push, sizeof(push),
+                    ((uint32_t)out_dim + 3u) / 4u, 1, 1);
             } else {
                 struct {
                     uint32_t out_dim;
