@@ -69,3 +69,29 @@ TODO.md
 
 # mem0-local MCP server for this repo (see .local/share/mem0-local/README.md)
 !.mcp.json
+
+# Maestri canvas session/role state (AGENTS.md, CLAUDE.md, scratchpad per
+# spawned role) -- regenerated per session, not repo work product.
+/.maestri/
+
+# Raw per-run captures under the sustained-validation logs: numbered
+# .txt/.csv/.trace dumps, dmesg snapshots, and compiled probe binaries. The
+# curated scripts, patches, manifests and HANDOFF.md decision docs in the
+# same tree stay tracked.
+logs/bc250-sustained-20260918/*-validation/*.txt
+logs/bc250-sustained-20260918/*-validation/*.csv
+logs/bc250-sustained-20260918/*-validation/*.trace
+logs/bc250-sustained-20260918/*-validation/run-gpu-gates.sh
+logs/bc250-sustained-20260918/barrier-fix-*/*.txt
+logs/bc250-sustained-20260918/runs/
+logs/bc250-sustained-20260918/baseline/q36-bench
+logs/bc250-sustained-20260918/attn_parity
+logs/bc250-sustained-20260918/hadamard_parity
+logs/bc250-sustained-20260918/mmq_info
+logs/bc250-sustained-20260918/read_copy_bw
+logs/bc250-sustained-20260918/swiglu_hadamard_parity
+
+# Local sustained-rerun script: hardcodes this worktree's path, same as the
+# other local launcher scripts above.
+/run_sustained_rerun.sh
+/mmq_info
