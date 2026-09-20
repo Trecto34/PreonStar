@@ -791,6 +791,13 @@ typedef struct {
     q36_gpu_tensor *mtp_head;
     q36_gpu_tensor *mtp_logits;
     bool mtp_enabled;
+    /* Count of leading positions [0, mtp_kv_valid) confirmed to have real
+     * K/V in mtp_full - the permanent coverage invariant checked in
+     * q36_session_eval_speculative_argmax. Reset to 0 in
+     * q36_vulkan_runtime_reset; bumped only by confirmed (non-speculative)
+     * writes: the prefill catch-up and q36_session_eval_with_draft's own
+     * real-token draft, never the recursive speculative draft loop. */
+    uint32_t mtp_kv_valid;
 } q36_vulkan_runtime;
 #endif
 
@@ -5859,6 +5866,7 @@ static bool q36_vulkan_runtime_reset(q36_vulkan_runtime *rt) {
     uint64_t state_dim = (uint64_t)Q36_N_SSM_STATE * Q36_N_SSM_STATE * Q36_N_SSM_DT_RANK;
     uint64_t state_bytes;
     if (!rt) return false;
+    rt->mtp_kv_valid = 0;
     state_bytes = state_dim * (rt->recur_state_f16 ? sizeof(uint16_t) : sizeof(float));
     if (!q36_gpu_tensor_zero(rt->hidden) || !q36_gpu_tensor_zero(rt->next_hidden)) return false;
     if (rt->last_h && !q36_gpu_tensor_zero(rt->last_h)) return false;
@@ -8608,18 +8616,29 @@ static bool q36_mtp_concat(q36_gpu_tensor *out,
                                b, 0, (uint64_t)Q36_N_EMBD * sizeof(float));
 }
 
-static bool q36_mtp_eval_vulkan(q36_session *s,
-                                int token,
-                                uint32_t pos,
-                                const q36_gpu_tensor *h_in) {
+/* Shared prefix of the MTP block: embed -> concat(enorm, hnorm) -> eh_proj ->
+ * attn_norm -> the block's one full-attention layer, which stores this
+ * position's K/V into *cache as a side effect. Stops right after the
+ * attention block, before the residual add that would otherwise mix this
+ * position's own attention output back in. Both the decode-time draft
+ * (q36_mtp_eval_vulkan) and the prefill catch-up pass
+ * (q36_mtp_prefill_kv_populate_vulkan) call this exact function, so any K/V
+ * a catch-up call writes for a historical position is bit-for-bit what a
+ * decode-time call would have written for that same token/pos/h_in - the
+ * two paths cannot diverge because they are the same code, not similar code. */
+static bool q36_mtp_block_prefix_vulkan(q36_session *s,
+                                        int token,
+                                        uint32_t pos,
+                                        const q36_gpu_tensor *h_in,
+                                        q36_vulkan_full_attn_cache *cache) {
     q36_engine *e;
     q36_vulkan_runtime *rt;
     q36_mtp_weights *mw;
     q36_layer_weights *l;
-    if (!s || !h_in) return false;
+    if (!s || !h_in || !cache) return false;
     e = s->engine;
     rt = (q36_vulkan_runtime *)s->runtime;
-    if (!e || !e->mtp_ready || !rt || !rt->mtp_enabled || !s->mtp_logits) return false;
+    if (!e || !e->mtp_ready || !rt || !rt->mtp_enabled) return false;
     mw = &e->mtp_weights;
     l = &mw->block;
 
@@ -8658,18 +8677,52 @@ static bool q36_mtp_eval_vulkan(q36_session *s,
                                              Q36_N_EMBD,
                                              1,
                                              Q36_RMS_EPS)) return false;
-    if (!q36_forward_full_attn_vulkan_model(rt,
-                                            &e->mtp_model,
-                                            l,
-                                            &rt->mtp_full,
-                                            e->quality,
-                                            Q36_N_LAYER,
-                                            pos,
-                                            (uint32_t)((int32_t)pos + s->rope_delta),
-                                            NULL,
-                                            1,
-                                            rt->norm,
-                                            rt->mtp_next)) return false;
+    return q36_forward_full_attn_vulkan_model(rt,
+                                              &e->mtp_model,
+                                              l,
+                                              cache,
+                                              e->quality,
+                                              Q36_N_LAYER,
+                                              pos,
+                                              (uint32_t)((int32_t)pos + s->rope_delta),
+                                              NULL,
+                                              1,
+                                              rt->norm,
+                                              rt->mtp_next);
+}
+
+/* Prefill catch-up: populates rt->mtp_full's K/V for one already-prefilled
+ * prompt position, without computing this position's own attention output,
+ * FFN, or logits - a later position only ever reads the cached K/V here,
+ * never this position's hidden state or logits, so that tail is unneeded.
+ * Mirrors llama.cpp's process() "catch-up decode" (mtp-audit report section
+ * 10): without this, the MTP head's own attention reads uninitialized cache
+ * rows for the whole prompt on its first decode-time draft call. */
+static bool q36_mtp_prefill_kv_populate_vulkan(q36_session *s,
+                                               int token,
+                                               uint32_t pos,
+                                               const q36_gpu_tensor *h_in) {
+    q36_vulkan_runtime *rt = s ? (q36_vulkan_runtime *)s->runtime : NULL;
+    if (!rt) return false;
+    return q36_mtp_block_prefix_vulkan(s, token, pos, h_in, &rt->mtp_full);
+}
+
+static bool q36_mtp_eval_vulkan(q36_session *s,
+                                int token,
+                                uint32_t pos,
+                                const q36_gpu_tensor *h_in) {
+    q36_engine *e;
+    q36_vulkan_runtime *rt;
+    q36_mtp_weights *mw;
+    q36_layer_weights *l;
+    if (!s || !h_in) return false;
+    e = s->engine;
+    rt = (q36_vulkan_runtime *)s->runtime;
+    if (!e || !e->mtp_ready || !rt || !rt->mtp_enabled || !s->mtp_logits) return false;
+    mw = &e->mtp_weights;
+    l = &mw->block;
+
+    if (!q36_mtp_block_prefix_vulkan(s, token, pos, h_in, &rt->mtp_full)) return false;
     if (!q36_gpu_add_tensor(rt->mtp_next, rt->mtp_next, rt->mtp_cur, Q36_N_EMBD)) return false;
     if (!q36_gpu_rms_norm_weight_rows_tensor(rt->norm,
                                              rt->mtp_next,
@@ -10652,6 +10705,31 @@ void q36_session_set_cancel(q36_session *s, q36_session_cancel_fn fn, void *ud) 
  * s->logits.  The Vulkan runtime walks the range in prefill-sized batches;
  * the CPU path uses smaller layer-major chunks that keep recurrent state
  * updates ordered while batching projections and FFN work. */
+#ifndef Q36_NO_GPU
+/* Runs the prefill catch-up (q36_mtp_prefill_kv_populate_vulkan) over one
+ * just-prefilled chunk, reusing that chunk's still-resident rt->norm rows as
+ * each position's h_in - no recompute, no retained state beyond what the
+ * chunk's own forward call already left behind. See q36_mtp_block_prefix_vulkan
+ * and mtp-audit report sections 6/9/10/11 for why this exists. */
+static bool q36_mtp_prefill_catchup_vulkan(q36_session *s, const int *tokens,
+                                           uint32_t n_tok, uint32_t pos0) {
+    q36_vulkan_runtime *rt;
+    if (!s || !tokens || n_tok == 0) return true;
+    if (!q36_engine_has_mtp(s->engine) || !q36_engine_uses_vulkan_runtime(s->engine)) return true;
+    rt = (q36_vulkan_runtime *)s->runtime;
+    if (!rt || !rt->mtp_enabled) return true;
+    for (uint32_t i = 0; i < n_tok; i++) {
+        q36_gpu_tensor *h_row = q36_vulkan_row(rt->norm, i, Q36_N_EMBD);
+        bool ok = h_row != NULL &&
+                  q36_mtp_prefill_kv_populate_vulkan(s, tokens[i], pos0 + i, h_row);
+        q36_gpu_tensor_free(h_row);
+        if (!ok) return false;
+    }
+    if (pos0 + n_tok > rt->mtp_kv_valid) rt->mtp_kv_valid = pos0 + n_tok;
+    return true;
+}
+#endif
+
 static int q36_session_prefill_range(q36_session *s, const q36_tokens *prompt, int start,
                                      char *err, size_t errlen) {
     int i = start;
@@ -10703,6 +10781,13 @@ static int q36_session_prefill_range(q36_session *s, const q36_tokens *prompt, i
             s->checkpoint_valid = false;
             return 1;
         }
+#ifndef Q36_NO_GPU
+        if (!q36_mtp_prefill_catchup_vulkan(s, prompt->v + i, (uint32_t)n, (uint32_t)i)) {
+            if (err && errlen) snprintf(err, errlen, "MTP prefill catch-up failed at token %d", i);
+            s->checkpoint_valid = false;
+            return 1;
+        }
+#endif
         for (int j = 0; j < n; j++) q36_tokens_push(&s->checkpoint, prompt->v[i + j]);
         s->checkpoint_valid = true;
         i += n;
@@ -11219,6 +11304,7 @@ static int q36_session_eval_with_draft(q36_session *s, int token, char *err, siz
             s->checkpoint_valid = false;
             return 1;
         }
+        if (pos + 1u > rt->mtp_kv_valid) rt->mtp_kv_valid = pos + 1u;
         s->logits_host_valid = true;
         s->gpu_top2_valid = false;
         s->mtp_draft_token = sample_argmax_margin(s->mtp_logits, Q36_N_VOCAB, &s->mtp_draft_margin);
@@ -11438,12 +11524,44 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
         int prev_token;
         if (!rt || !rt->last_h || !rt->logits) return 0;
 
-        /* Draft backoff: after unconfident drafts, decode plainly for a
-         * few tokens so hard content does not pay the draft head on every
-         * token. Confident content resets to drafting every token. */
+        /* Permanent invariant: the MTP head must never attend over cache
+         * rows this session never actually populated (mtp-audit report
+         * finding 6 / section 6-13). mtp_kv_valid tracks how many leading
+         * positions have confirmed K/V (bumped only by the prefill catch-up
+         * and by q36_session_eval_with_draft's own real-token write, never
+         * by tentative recursive drafts). If it does not yet cover the
+         * confirmed frontier, something bypassed or broke the catch-up hook:
+         * release builds fall back to plain decode for this one step rather
+         * than draft blind; quality/test builds fail loudly so the gap gets
+         * caught immediately instead of silently degrading. */
+        if (rt->mtp_kv_valid < (uint32_t)s->checkpoint.len) {
+            if (e->quality) {
+                char msg[160];
+                snprintf(msg, sizeof(msg),
+                         "internal error: MTP KV coverage invariant violated "
+                         "(mtp_kv_valid=%u, checkpoint=%d)",
+                         rt->mtp_kv_valid, s->checkpoint.len);
+                q36_die(msg);
+            }
+            if (q36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+            accepted[0] = first_token;
+            return 1;
+        }
+
+        /* Draft backoff: after unconfident drafts, don't use the draft head
+         * for a few tokens so hard content does not pay the verify cost on
+         * every token - but still run it for free alongside the real decode
+         * (q36_session_eval_with_draft, not a plain q36_session_eval_internal)
+         * so mtp_kv_valid keeps covering every position. A plain decode here
+         * would silently reopen the exact cold-KV gap this whole fix exists
+         * to close, and the coverage invariant above would then correctly
+         * (but permanently, for the rest of the session) disable MTP the
+         * next time backoff ends - discovered by running the mtp-audit
+         * 3-point rerun and seeing accept counts flatline after one reject.
+         * Confident content still resets to drafting every token below. */
         if (s->mtp_backoff > 0) {
             s->mtp_backoff--;
-            if (q36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+            if (q36_session_eval_with_draft(s, first_token, err, errlen) != 0) return -1;
             accepted[0] = first_token;
             return 1;
         }
@@ -11510,7 +11628,34 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
         if (commit_n == verify_n) {
             /* Full accept: the verify pass already ran every committed
              * token's forward and left the last row's logits in s->logits;
-             * adopting its KV/recurrent frontier makes the replay free. */
+             * adopting its KV/recurrent frontier makes the replay free.
+             *
+             * MTP K/V gap: the recursive draft loop above writes MTP's own
+             * cache for verify[0..verify_n-2] (each iteration writes the
+             * position of the token it just embedded, one step behind the
+             * candidate it produces) but never gets a further iteration to
+             * write verify[verify_n-1]'s own position - and the verify pass
+             * only advances the TARGET model's caches, never rt->mtp_full.
+             * On a full accept that last position is confirmed real content
+             * with no MTP K/V anywhere, which is exactly the cold-KV bug
+             * this whole fix exists to close, just reopened one position at
+             * a time on every maximal draft. Close it here the same way the
+             * prefill catch-up does: reuse the verify pass's own last-row
+             * hidden state (still sitting in rt->norm) as h_in. Found by
+             * actually running the mtp-audit 3-point rerun and watching
+             * accept counts flatline after the draft's first 3-token full
+             * accept - a boundary case section 15's prefill-only tests
+             * could not have caught, since it lives in the decode path. */
+            q36_gpu_tensor *last_row = q36_vulkan_row(rt->norm, (uint32_t)verify_n - 1u, Q36_N_EMBD);
+            bool kv_ok = last_row != NULL &&
+                         q36_mtp_prefill_kv_populate_vulkan(
+                             s, verify[commit_n - 1], start_pos + (uint32_t)commit_n - 1u, last_row);
+            q36_gpu_tensor_free(last_row);
+            if (!kv_ok) {
+                if (err && errlen) snprintf(err, errlen, "MTP full-accept KV close-up failed at pos %u", start_pos);
+                q36_session_invalidate(s);
+                return -1;
+            }
             if (!q36_vulkan_update_last_h(rt, (uint32_t)verify_n - 1u)) {
                 if (err && errlen) snprintf(err, errlen, "MTP frontier adopt failed at pos %u", start_pos);
                 q36_session_invalidate(s);
@@ -11533,6 +11678,14 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
                 q36_session_invalidate(s);
                 return -1;
             }
+        }
+        /* Every position in [start_pos, start_pos+commit_n) is now confirmed
+         * real content with correct MTP K/V: the recursive loop's own writes
+         * cover it on a partial accept, and the close-up write above covers
+         * the one position the recursive loop couldn't reach on a full
+         * accept. Bump the coverage invariant to match either way. */
+        if (start_pos + (uint32_t)commit_n > rt->mtp_kv_valid) {
+            rt->mtp_kv_valid = start_pos + (uint32_t)commit_n;
         }
 
         for (int i = 0; i < commit_n; i++) {
@@ -11611,6 +11764,18 @@ void q36_session_rewind(q36_session *s, int pos) {
 
 int q36_session_pos(q36_session *s) {
     return s ? s->checkpoint.len : 0;
+}
+
+int64_t q36_debug_mtp_kv_valid(q36_session *s) {
+#ifndef Q36_NO_GPU
+    if (s && q36_engine_uses_vulkan_runtime(s->engine)) {
+        q36_vulkan_runtime *rt = (q36_vulkan_runtime *)s->runtime;
+        if (rt) return (int64_t)rt->mtp_kv_valid;
+    }
+#else
+    (void)s;
+#endif
+    return -1;
 }
 
 int q36_session_ctx(q36_session *s) {

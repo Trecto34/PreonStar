@@ -7081,6 +7081,71 @@ done:
     q36_engine_close(engine);
 }
 
+/* Boundary-condition check for the prefill MTP catch-up (mtp-audit report
+ * sections 11/13/14): prefill_cap chunking and the shared block-prefix
+ * function are each simple on their own, but an off-by-one at a chunk
+ * boundary, or a skipped first/last prompt token, would hide behind the
+ * "correct by construction" argument for the per-position math. This tests
+ * indexing directly - after syncing a prompt of exactly N tokens, mtp_kv_valid
+ * must equal N, for N straddling several prefill_cap=256-ish boundaries and
+ * at least one prompt spanning more than one chunk. Uses the in-file dense
+ * MTP model (no separate --mtp file needed) so it runs against whatever
+ * Q36_TEST_MODEL points at, as long as that model carries a nextn head. */
+static void test_mtp_catchup_boundaries(void) {
+    if (test_is_cpu_only_build()) {
+        test_skip("mtp-boundary", "MTP requires Vulkan");
+        return;
+    }
+    if (!test_model_available(test_model_path())) {
+        test_skip("mtp-boundary", "model not found");
+        return;
+    }
+    q36_engine_options opt = {
+        .model_path = test_model_path(),
+        .backend = Q36_BACKEND_VULKAN,
+        .mtp_draft_tokens = 4,
+    };
+    q36_engine *engine = NULL;
+    TEST_ASSERT(q36_engine_open(&engine, &opt) == 0);
+    if (!engine) return;
+    if (!q36_engine_has_mtp(engine)) {
+        test_skip("mtp-boundary", "model has no MTP/nextn head to catch up");
+        q36_engine_close(engine);
+        return;
+    }
+
+    static const int lengths[] = {1, 2, 31, 32, 63, 64, 65, 127, 128, 129, 300};
+    for (size_t li = 0; li < sizeof(lengths) / sizeof(lengths[0]); li++) {
+        int n = lengths[li];
+        q36_session *s = NULL;
+        q36_tokens prompt = {0};
+        char err[192] = {0};
+        TEST_ASSERT(q36_session_create(&s, engine, 4096) == 0);
+        if (!s) continue;
+        /* Any in-range token id works here - this checks indexing, not
+         * semantic content. Cycling the id avoids an all-identical-row
+         * cache that could hide a constant-offset bug. */
+        for (int i = 0; i < n; i++) {
+            q36_tokens_push(&prompt, 100 + (i % 37));
+        }
+        int rc = q36_session_sync(s, &prompt, err, sizeof(err));
+        TEST_ASSERT(rc == 0);
+        if (rc == 0) {
+            int64_t kv_valid = q36_debug_mtp_kv_valid(s);
+            fprintf(stderr,
+                    "q36-test: mtp-boundary n=%d mtp_kv_valid=%lld session_pos=%d\n",
+                    n, (long long)kv_valid, q36_session_pos(s));
+            TEST_ASSERT(kv_valid == (int64_t)n);
+            TEST_ASSERT(q36_session_pos(s) == n);
+        } else {
+            fprintf(stderr, "q36-test: mtp-boundary n=%d sync failed: %s\n", n, err);
+        }
+        q36_tokens_free(&prompt);
+        q36_session_free(s);
+    }
+    q36_engine_close(engine);
+}
+
 static void test_server_unit_group(void) {
     q36_server_unit_tests_run();
 }
@@ -7112,6 +7177,7 @@ static const q36_test_entry test_entries[] = {
     {"--vulkan-fusion-parity", "vulkan-fusion-parity", "fused Vulkan path against complete feature fallbacks", test_vulkan_fusion_parity},
     {"--vulkan-queue-parity", "vulkan-queue-parity", "ACE and graphics queues produce bit-identical logits", test_vulkan_queue_parity},
     {"--mtp-verifier", "mtp-verifier", "MTP commits replay through plain target decode", test_mtp_verifier_replay},
+    {"--mtp-boundary", "mtp-boundary", "MTP prefill catch-up correct at chunk/length boundaries", test_mtp_catchup_boundaries},
     {"--qwen-tool-call-format", "qwen-tool-call-format", "Qwen tool-call rendering format unit test", test_qwen_tool_call_format},
     {"--kat-model-support", "kat-model-support", "KAT model identity and special tokenizer tokens", test_kat_model_support},
     {"--vector-fixtures", "vector-fixtures", "llama.cpp fixture consistency check", test_vector_fixtures},

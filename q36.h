@@ -324,6 +324,10 @@ int q36_session_ctx(q36_session *s);
 int q36_engine_routed_quant_bits(q36_engine *e);
 bool q36_engine_has_mtp(q36_engine *e);
 int q36_engine_mtp_draft_tokens(q36_engine *e);
+/* Test/debug only: leading positions confirmed to have real MTP K/V, or -1
+ * if not applicable (CPU backend, no runtime, MTP disabled). See the
+ * mtp-audit report's boundary-condition tests. */
+int64_t q36_debug_mtp_kv_valid(q36_session *s);
 const q36_tokens *q36_session_tokens(q36_session *s);
 int q36_engine_debug_tensor_row(q36_engine *e, const char *tensor_name, uint64_t row, float *dst, uint32_t n);
 int q36_engine_debug_first_tensor_of_type(q36_engine *e, uint32_t type, char *name, size_t name_cap, uint32_t *n);
