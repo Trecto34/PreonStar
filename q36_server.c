@@ -8056,6 +8056,43 @@ static int kv_cache_try_load_text(server *s, server_slot *slot,
     return loaded;
 }
 
+/* A thinking-on assistant turn is rendered as
+ *   "<|im_start|>assistant\n<think>\nREASONING\n</think>\n\nCONTENT<|im_end|>\n"
+ * and the live graph samples exactly that block.  Clients that drop
+ * reasoning_content from resent history render the turn without it, so the
+ * live text is no longer a byte prefix and the whole conversation would be
+ * re-prefilled.  Removing the block recovers the bytes those clients rendered,
+ * keeping the live checkpoint authoritative for the reasoning state. */
+static void strip_assistant_reasoning_blocks(buf *out, const char *text, size_t len) {
+    static const char assistant[] = "<|im_start|>assistant\n";
+    static const char open_tag[] = "<think>\n";
+    static const char close_tag[] = "</think>";
+    const char *p = text;
+    const char *end = text + len;
+    while (p < end) {
+        const char *block = strstr(p, "<|im_start|>assistant\n<think>\n");
+        if (!block) break;
+        const char *body = block + strlen(assistant) + strlen(open_tag);
+        const char *close_at = strstr(body, close_tag);
+        const char *end_mark = strstr(body, "<|im_end|>");
+        const char *next_mark = strstr(body, "<|im_start|>");
+        if (next_mark && (!end_mark || next_mark < end_mark)) end_mark = next_mark;
+        buf_append(out, p, (size_t)(block - p));
+        buf_puts(out, assistant);
+        const char *after;
+        if (close_at && (!end_mark || close_at < end_mark)) {
+            after = close_at + strlen(close_tag);
+            for (int nl = 0; nl < 2 && after < end && *after == '\n'; nl++) after++;
+        } else {
+            /* A turn cut off at max_tokens has no closing tag and no content;
+             * its reasoning ends at the next structural marker. */
+            after = end_mark ? end_mark : end;
+        }
+        p = after;
+    }
+    if (p < end) buf_append(out, p, (size_t)(end - p));
+}
+
 static int live_text_prefix_prompt(server *s, server_slot *slot,
                                    const request *req,
                                    q36_tokens *effective_prompt) {
@@ -8066,20 +8103,32 @@ static int live_text_prefix_prompt(server *s, server_slot *slot,
     size_t live_text_len = 0;
     char *live_text = render_tokens_text(s->engine, live_tokens, &live_text_len);
     const size_t prompt_text_len = strlen(req->prompt_text);
-    if (!byte_prefix_match(req->prompt_text, prompt_text_len,
-                           live_text, live_text_len))
-    {
-        free(live_text);
-        return 0;
-    }
-
     /* This is the core text-prefix case.  The live graph is authoritative, so
      * keep its sampled tokenization and tokenize only the request bytes that
      * come after it.  Reusing req->prompt's token suffix would be wrong: full
      * prompt BPE may have merged across this byte boundary. */
+    const char *suffix = NULL;
+    buf stripped = {0};
+    if (byte_prefix_match(req->prompt_text, prompt_text_len, live_text, live_text_len)) {
+        suffix = req->prompt_text + live_text_len;
+    } else if (req->preserve_thinking) {
+        strip_assistant_reasoning_blocks(&stripped, live_text, live_text_len);
+        if (stripped.len > 0 && stripped.len < live_text_len &&
+            byte_prefix_match(req->prompt_text, prompt_text_len, stripped.ptr, stripped.len) &&
+            /* If the client sent the reasoning back, the suffix would restart
+             * the think block and duplicate the reasoning already in the live
+             * graph; leave that case to the cold path. */
+            strncmp(req->prompt_text + stripped.len, "<think>", 7) != 0)
+            suffix = req->prompt_text + stripped.len;
+    }
+    if (!suffix) {
+        buf_free(&stripped);
+        free(live_text);
+        return 0;
+    }
     build_prompt_from_exact_prefix_and_text_suffix(
-        s->engine, live_tokens, req->prompt_text + live_text_len,
-        effective_prompt);
+        s->engine, live_tokens, suffix, effective_prompt);
+    buf_free(&stripped);
     free(live_text);
     return live_tokens->len;
 }
@@ -12862,6 +12911,40 @@ static void test_thinking_state_tracks_prompt_and_generated_tags(void) {
     request_free(&r);
 }
 
+static void test_strip_assistant_reasoning_blocks(void) {
+    const char *terminated =
+        "<|im_start|>user\nhi<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\nwhy\n</think>\n\nanswer<|im_end|>\n"
+        "<|im_start|>user\nnext<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n";
+    buf out = {0};
+    strip_assistant_reasoning_blocks(&out, terminated, strlen(terminated));
+    TEST_ASSERT(out.ptr && !strcmp(out.ptr,
+        "<|im_start|>user\nhi<|im_end|>\n"
+        "<|im_start|>assistant\nanswer<|im_end|>\n"
+        "<|im_start|>user\nnext<|im_end|>\n"
+        "<|im_start|>assistant\n"));
+    buf_free(&out);
+
+    const char *truncated =
+        "<|im_start|>assistant\n<think>\npartial reasoning<|im_end|>\n"
+        "<|im_start|>user\nnext<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n";
+    out = (buf){0};
+    strip_assistant_reasoning_blocks(&out, truncated, strlen(truncated));
+    TEST_ASSERT(out.ptr && !strcmp(out.ptr,
+        "<|im_start|>assistant\n<|im_end|>\n"
+        "<|im_start|>user\nnext<|im_end|>\n"
+        "<|im_start|>assistant\n"));
+    buf_free(&out);
+
+    const char *plain = "<|im_start|>assistant\nplain<|im_end|>\n";
+    out = (buf){0};
+    strip_assistant_reasoning_blocks(&out, plain, strlen(plain));
+    TEST_ASSERT(out.ptr && !strcmp(out.ptr, plain));
+    buf_free(&out);
+}
+
 static void test_thinking_checkpoint_canonicalization_gate(void) {
     request r;
     request_init(&r, REQ_CHAT, 128);
@@ -14424,6 +14507,7 @@ static void q36_server_unit_tests_run(void) {
     test_gguf_counts_are_rejected_before_allocation();
     test_client_socket_nonblocking_flag();
     test_thinking_state_tracks_prompt_and_generated_tags();
+    test_strip_assistant_reasoning_blocks();
     test_thinking_checkpoint_canonicalization_gate();
     test_tool_marker_state_ignores_orphan_end();
     test_canonical_rewrite_rebuilds_when_live_tail_changes();
