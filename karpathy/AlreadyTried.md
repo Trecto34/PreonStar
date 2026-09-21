@@ -691,3 +691,73 @@ Full audit report: `karpathy/evidence/raw/W7-VERDICT.md`, audit tool `karpathy/e
 - **Verdict**: **REJECTED (NOT A LEVER)**. Closed without code churn.
 - `reconsider_if`: Batch size or token chunk changes to an irregular dimension that produces small grids (< 80 workgroups) with severe partial-wave cliffs, or targeting a GPU with a non-divisible CU count (e.g. 36 or 68 CUs).
 
+## Dense K-quant fast path widened to MoE models — ACCEPTED (2026-09-21)
+
+Branch `trackB-ptq1_0`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Guard:
+`Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf`.
+
+- **HANDOFF-iq2s-20260920.md's ranked item #1 was misdiagnosed and this
+  supersedes it.** It attributed the `dense_kquant`/`matmul_kquant.spv`
+  hotspot (48.2% of IQ2_M decode, 10.7 ms/tok at the time) to "non-expert
+  IQ2_S tensors" and proposed writing a new IQ2_S decode shader. Reproducing
+  the differential profile on current HEAD (`Q36_VK_PROF_KERNEL=1`, gen 1 vs
+  gen 65, ctx 512) still showed **9.453 ms/tok, 41 dispatches/tok** — the
+  figure hadn't moved across W2-W7. Parsing the GGUF header directly
+  (`gguf-tools`-style tensor listing) instead of trusting the label showed
+  the 41 tensors are **40x `Q4_K` `blk.N.attn_qkv.weight` + 1x `Q5_K`
+  `output.weight`** — real K-quants, not IQ2_S at all.
+- **Root cause**: `q36_gpu_matmul_k_quant_q8_scaled_tensor()` (`q36_vulkan.c`)
+  has tuned decode (`n_tok==1`) and mmq (`n_tok>1`) branches that dispatch
+  `dense_kquant_decode`/`dense_q4k_decode`/`dense_q5k_decode`/
+  `dense_kquant_mmq` — kernels that read only the one tensor's own
+  `in_dim`/`out_dim`/`blocks`/`row_bytes`/`type`/`scale` from push constants,
+  nothing model-wide. Both branches were gated on `q36_gpu_dense_model`, true
+  only for the dense Swift-27B/UD-IQ3_S launches (`q36_gpu_set_dense_model`
+  is called once per engine open with `Q36_MODEL_DENSE`). Nobody widened it
+  when a MoE model started shipping its own K-quant trunk tensors, so IQ2_M's
+  Q4_K/Q5_K rows fell through to the generic AVX2-style 8-rows-x-8-lanes
+  `matmul_kquant` fallback unconditionally, on both prefill and decode.
+- **Fix**: `q36_vulkan.c`, two-line change — drop `q36_gpu_dense_model &&`
+  from both branch conditions. Also widened `q36_gpu_set_dense_model()` to
+  always call `q36_vk_prepare_dense_kernels()` (was `if (dense)` only), so
+  MoE models get the same pipeline prewarm at model-open instead of paying a
+  multi-second RADV pipeline-compile stall on the first live decode/prefill
+  token — caught by an independent review (Claude2, since Codex was over its
+  usage cap) before this landed; the review's other finding (a comment citing
+  a not-yet-written ledger entry) was also fixed.
+- **Parity**: guard frontier-513 logits byte-identical (`max_abs_diff=0`,
+  top-1 identical) — expected, the guard has zero K-quant trunk tensors so
+  this is a pure no-op-on-guard check. IQ2_M frontier-513: top-1 preserved in
+  every configuration tested (combined change, mmq-path-only, decode-path-
+  only, frontier-512 mmq-only-no-tail, and the candidate binary run twice for
+  self-consistency — the last is `max_abs_diff=0`, fully deterministic).
+  Combined max_abs=1.523, mean_abs=0.190, top-64 overlap 60/64. This is the
+  same order of magnitude and *shape* as HANDOFF's own accepted W1 calibration
+  (accepted-arm-vs-previous max_abs 0.907/top-64 62/64; cruder all-matvec-arm
+  max_abs 1.245/top-64 60/64): differences spread near-uniformly across all
+  248,320 logits (mean 0.19 on a ~29-wide logit range), consistent with
+  `output.weight` directly producing every logit so any kernel-order
+  floating-point reassociation shows up everywhere, not concentrated on a
+  handful of tokens the way a real bug would look. `./q36_test
+  --vulkan-kernels` (CPU-reference dot-product oracle, tolerance 2e-3) also
+  passes and, for the first time, actually exercises this decode path — it
+  was dead code in that test before this change since `q36_gpu_dense_model`
+  was never set true there.
+- **7-rep interleaved A/B** (`tests/bench_ab.sh`, ctx 512, gen 128, matching
+  HANDOFF's own IQ2_M convention): prefill **244.35 (MAD 2.360) -> 507.87
+  (MAD 9.130) = +107.85%**, decode **47.34 (MAD 0.410) -> 75.56 (MAD 0.130) =
+  +59.61%**. Gate is MoE prefill >=3.4%; cleared by ~32x. Both arms show
+  tight spread and no overlap.
+- **Verdict: ACCEPTED, default ON** (same env vars as before,
+  `Q36_VK_DENSE_KQUANT_DECODE=0` / `Q36_VK_DENSE_KQUANT_MMQ=0` still disable
+  each branch individually if needed — nothing new to opt into).
+  `reconsider_if`: a future MoE model whose non-expert K-quant tensor shapes
+  don't hit the `out_dim % 4 == 0` "full" variant (would still take the
+  bounds-checked generic `dense_kquant_decode`/`dense_kquant_mmq`, just
+  without that extra edge), or new evidence that the fast kernel's numerics
+  are wrong rather than merely reassociated (would need to show up as
+  *localized*, not uniform, logit deltas).
+- Raw evidence: `karpathy/evidence/raw/ab-kquant-moe-decode.csv`,
+  `ab-kquant-moe-decode-summary.txt`, `kquant-moe-diffprof-gen{1,65}.txt`,
+  `kquant-moe-parity-summary.txt`, `kquant-moe-unit-test.txt`.
+

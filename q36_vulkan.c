@@ -4188,7 +4188,12 @@ static void q36_vk_prepare_dense_kernels(void) {
 
 void q36_gpu_set_dense_model(bool dense) {
     q36_gpu_dense_model = dense;
-    if (dense) q36_vk_prepare_dense_kernels();
+    /* Prewarm regardless of model class: MoE trunk tensors reach the same
+     * K-quant decode/mmq kernels (see q36_gpu_matmul_k_quant_q8_scaled_tensor)
+     * and some MoE files carry non-expert IQ3_S tensors too, so skipping this
+     * for dense == false just moves the multi-second RADV pipeline-compile
+     * stall onto the first live decode/prefill token instead of model open. */
+    q36_vk_prepare_dense_kernels();
 }
 
 void q36_gpu_set_ssd_streaming(bool enabled) {
@@ -5483,7 +5488,14 @@ int q36_gpu_matmul_k_quant_q8_scaled_tensor(q36_gpu_tensor *out,
     const unsigned char *source = q36_gpu_weight_bytes(model_map, model_size, weight_offset, weight_bytes);
     if (!source) return 0;
 
-    if (q36_gpu_dense_model && !q36_gpu_quality && n_tok == 1u &&
+    /* Named for the dense-model launch scripts that first exercised it, but
+     * the kernel itself only reads this one tensor's own dims/type/scale --
+     * nothing here depends on the rest of the model being dense.  MoE models
+     * carry K-quant non-expert tensors too (e.g. attn_qkv/output.weight on
+     * Qwen3.8-35B-A3B-IQ2_M), and those hit the AVX2-style 8x8 generic
+     * matmul_kquant fallback below unconditionally because this gate was
+     * never widened past q36_gpu_dense_model. */
+    if (!q36_gpu_quality && n_tok == 1u &&
         q36_vk_env_default_on("Q36_VK_DENSE_KQUANT_DECODE")) {
         pthread_mutex_lock(&q36_vk_mu);
         q36_gpu_tensor *weights = q36_vk_weight_get_unlocked(source, weight_bytes);
@@ -5524,7 +5536,9 @@ int q36_gpu_matmul_k_quant_q8_scaled_tensor(q36_gpu_tensor *out,
         return ok;
     }
 
-    if (q36_gpu_dense_model && !q36_gpu_quality && n_tok > 1u &&
+    /* Same widening as the decode branch above: prefill-side K-quant trunk
+     * tensors are just as generic on a MoE model. */
+    if (!q36_gpu_quality && n_tok > 1u &&
         q36_vk.have_f16 && q36_vk.subgroup_size_control &&
         q36_vk_env_default_on("Q36_VK_DENSE_KQUANT_MMQ")) {
         pthread_mutex_lock(&q36_vk_mu);

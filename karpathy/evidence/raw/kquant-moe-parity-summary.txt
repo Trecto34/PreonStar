@@ -1,0 +1,29 @@
+Guard (Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf, zero K-quant trunk
+tensors) frontier-513, ref vs candidate: max_abs_diff = 0.0 (byte-identical),
+top-1 identical (5316).
+
+IQ2_M (Qwen3.8-35B-A3B-IQ2_M.gguf, 40x Q4_K attn_qkv + 1x Q5_K output.weight)
+frontier-513, ref vs candidate:
+  combined (mmq+decode changed):     max_abs=1.5229 mean_abs=0.1901 top1=match top64=60/64
+  frontier-512 (mmq-only, no decode tail): max_abs=0.7278 mean_abs=0.1148 top1=match top64=63/64
+  frontier-513 mmq-only (decode env off):  max_abs=1.6548 mean_abs=0.1837 top1=match top64=59/64
+  frontier-513 decode-only (mmq env off):  max_abs=0.5946 mean_abs=0.0988 top1=match top64=62/64
+  candidate run twice (self-consistency):  max_abs=0.0 (fully deterministic)
+
+Calibration reference (HANDOFF-iq2s-20260920.md section 3, W1's own accepted
+posture): accepted arm vs previous default max_abs=0.907 top64=62/64; vs the
+cruder all-matvec arm max_abs=1.245 top64=60/64. This change's deltas are the
+same order of magnitude and shape (uniform small differences spread across
+~all 248320 logits -- consistent with output.weight directly producing every
+logit, so any kernel-order reassociation shows up everywhere, not a handful
+of "wrong" tokens), not a discrete/localized error pattern. Top-1 argmax is
+preserved in every one of the 5 configurations tested above.
+
+Shader hashes: no .comp file touched by this change (host-dispatch only);
+all guard-relevant .spv hashes unchanged from HANDOFF-iq2s-20260920.md.
+
+Unit test: ./q36_test --vulkan-kernels passes, including
+test_vulkan_kquant_matvec (GPU-vs-CPU-reference dot product, tolerance
+2.0e-3), which now exercises the widened decode fast path for Q2_K/Q4_K/
+Q5_K/Q6_K for the first time (previously dead in this test context since
+q36_gpu_dense_model was never set true here).

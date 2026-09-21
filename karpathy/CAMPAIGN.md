@@ -4,12 +4,17 @@
 `## Pick up in 5 minutes` and `## The rules that decide a verdict`, then go
 straight to `## Open items, ranked`.
 
-Last updated: 2026-09-21 · repo `/home/server/q36-opt-27b` ·
-branch `trackB-ptq1_0` · HEAD `4b83ef9` (docs sync for the W7 Stream-K
-rejection). PLAN items W2–W7 (`karpathy/PLAN-implementation-2026-09-20.md`)
-are all closed as of this HEAD; see the new entries in this section and the
-matching `AlreadyTried.md` rows. Open work is HANDOFF's ranked list
-(`karpathy/HANDOFF-iq2s-20260920.md` §5) plus PLAN's W8/W9.
+Last updated: 2026-09-21 (continuation session) · repo `/home/server/q36-opt-27b` ·
+branch `trackB-ptq1_0`. PLAN items W2–W7 (`karpathy/PLAN-implementation-2026-09-20.md`)
+are all closed; see the entries in this section and the matching
+`AlreadyTried.md` rows. HANDOFF's ranked item #1
+(`karpathy/HANDOFF-iq2s-20260920.md` §5) was **misdiagnosed** — the "IQ2_S
+tuned dense decode" it proposed doesn't exist; the actual hotspot was IQ2_M's
+Q4_K/Q5_K trunk tensors (`attn_qkv`/`output.weight`) missing a dense-only
+kernel-selection gate. Fixed and landed this session (prefill +107.85% /
+decode +59.61%, see §6.1 and `AlreadyTried.md`). Remaining open work: HANDOFF
+§5 items 2-3 (small-batch IQ2_S kernels, q8-route residue — item 3 assigned
+to Mcode this session) plus PLAN's W8/W9.
 
 ---
 
@@ -27,7 +32,7 @@ Current standing, measured on both engines, ctx 1024:
 | Swift Qwen3.8-27B IQ3_XXS (dense) | 171.09 / 23.19 | 105.43 / 22.13 | **+58.7% / +8.0%** |
 | Qwen3.6-35B-A3B IQ2XXS (MoE guard) | 909.49 / 87.37 | 615.08 / 78.72 | **+47.9% / +11.0%** |
 | RavenX-35B-Q36-IQ2XXS (MoE) | 717.36 / 89.47 | 545.46 / 77.96 | **+31.5% / +14.8%** |
-| Qwen3.8-35B-A3B-IQ2_M (MoE) | **241.27 / 47.14** (landed `6ef9ceb`/`e8cb6de`, rep 245.55/48.68) | 529.90 / **91.53** | **−54% / −48%** — W1 landed, ranked next §6.1 |
+| Qwen3.8-35B-A3B-IQ2_M (MoE) | **507.87 / 75.56** at ctx 512 (landed K-quant gate widening, this session; row above is ctx 1024) | 529.90 / **91.53** at ctx 1024 | **~-4% / -17%** at comparable prefill scale — gap nearly closed, was -54%/-48%; ranked next §6.1 |
 
 The engine leads on every file it can load. It is already ~1.6x upstream on
 dense prefill. So the remaining work is not "make it fast" — it is "close the
@@ -151,10 +156,31 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    Prefill rose **108.21 → 241.27 t/s (2.23×)**, decode rose **29.52 → 47.14 t/s (1.60×)**
    (reproduced 245.55 / 48.68 at ctx 512). Guard is 100% byte-identical (`b46fa81a…`,
    `93a38508…`, `601d56a9…`, `946097d8…`, `3f316c16…`), frontier-513 parity verified.
-   Remaining open levers for IQ2_M: (1) IQ2_S tuned dense decode for `matmul_kquant`
-   (48% of decode time, ~10.7 ms/tok); (2) small-batch 2..31 token f32 kernels;
-   (3) q8-route residue (7.6%). Evidence: `karpathy/HANDOFF-iq2s-20260920.md`,
-   `evidence/raw/iq2s-*`, `AlreadyTried.md`.
+   **1b. Dense K-quant fast path widened to MoE — LANDED & ACCEPTED (2026-09-21).**
+   HANDOFF's own "ranked next step #1" (a new IQ2_S dense decode shader for
+   `matmul_kquant`, 48% of decode) was misdiagnosed: parsing the GGUF header
+   showed the 41 hot tensors are 40x **Q4_K** `attn_qkv` + 1x **Q5_K**
+   `output.weight`, not IQ2_S. The engine already had tuned
+   `dense_kquant_decode`/`dense_q4k_decode`/`dense_q5k_decode`/
+   `dense_kquant_mmq` kernels for exactly this, gated on `q36_gpu_dense_model`
+   (dense-launch-only, never widened for MoE). Dropping that gate (2 lines in
+   `q36_vulkan.c`) plus widening the kernel prewarm to match: 7-rep
+   interleaved A/B (ctx 512, gen 128) prefill **244.35 → 507.87 t/s
+   (+107.85%)**, decode **47.34 → 75.56 t/s (+59.61%)**, gate ≥3.4% cleared by
+   ~32x. Guard frontier-513 byte-identical (has no K-quant trunk tensors);
+   IQ2_M frontier-513 top-1 preserved in every tested configuration, max_abs
+   deltas same order/shape as HANDOFF's own accepted W1 calibration (uniform
+   across all 248,320 logits, consistent with `output.weight` reassociation,
+   not a localized bug). `./q36_test --vulkan-kernels` CPU-reference oracle
+   passes and now actually exercises this path for the first time. Upstream
+   gap nearly closed: 507.87/75.56 (ctx 512) vs llama.cpp 529.90/91.53 (ctx
+   1024, not directly comparable but close). Remaining open levers for IQ2_M:
+   (1) small-batch 2..31 token f32 kernels (HANDOFF §5 item 2); (2) q8-route
+   residue, ~7.6% of decode (HANDOFF §5 item 3, assigned to Mcode this
+   session); (3) re-profile now that item 1b has changed where the time goes.
+   Evidence: `karpathy/HANDOFF-iq2s-20260920.md`, `evidence/raw/iq2s-*`,
+   `evidence/raw/kquant-moe-*`, `evidence/raw/ab-kquant-moe-decode*`,
+   `AlreadyTried.md`.
 2. **Wave32 for the non-mmq paths — MEASURED NEGATIVE, closed (2026-09-17,
    fully closed 2026-09-20).**
    The cheap bound was run first, before any build: `RADV_PERFTEST=cswave32` vs
