@@ -255,10 +255,12 @@ typedef struct {
     q36_vk_kernel dense_extra_decode_pq2_0;
     q36_vk_kernel dense_extra_decode_ptq1_0;
     q36_vk_kernel dense_extra_decode_iq2s_pair;
+    q36_vk_kernel dense_extra_decode_iq2s;
     q36_vk_kernel dense_extra_mmq;
     q36_vk_kernel dense_extra_mmq_q2_0;
     q36_vk_kernel dense_extra_mmq_pq2_0;
     q36_vk_kernel dense_extra_mmq_ptq1_0;
+    q36_vk_kernel dense_extra_mmq_iq2s;
     q36_vk_kernel dense_kquant_mmq;
     q36_vk_kernel predequant_b16;
     q36_vk_kernel dense_kquant_decode;
@@ -3324,10 +3326,12 @@ int q36_gpu_init(void) {
     q36_vk.dense_extra_decode_ptq1_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_ptq1_0.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode_iq2s_pair = Q36_VK_KERNEL(
         "vulkan/dense_extra_decode_iq2s_pair.spv", 6, 24, (1u << 4) | (1u << 5));
+    q36_vk.dense_extra_decode_iq2s = Q36_VK_KERNEL("vulkan/dense_extra_decode_iq2s.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
     q36_vk.dense_extra_mmq_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
     q36_vk.dense_extra_mmq_pq2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_pq2_0.spv", 4, 24, 1u << 2);
     q36_vk.dense_extra_mmq_ptq1_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_ptq1_0.spv", 4, 24, 1u << 2);
+    q36_vk.dense_extra_mmq_iq2s = Q36_VK_KERNEL("vulkan/dense_extra_mmq_iq2s.spv", 4, 24, 1u << 2);
     q36_vk.dense_kquant_mmq = Q36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
     q36_vk.predequant_b16 = Q36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
     q36_vk.dense_kquant_decode = Q36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
@@ -3722,10 +3726,12 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_pq2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0);
+    q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_iq2s);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_pq2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_iq2s_pair);
+    q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_iq2s);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_mmq);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs);
@@ -4187,6 +4193,9 @@ static void q36_vk_prepare_dense_kernels(void) {
         &q36_vk.dense_iq3_xxs_decode_r4,
         &q36_vk.dense_q4k_decode,
         &q36_vk.dense_kquant_decode,
+        &q36_vk.dense_extra_decode_iq2s,
+        &q36_vk.dense_extra_mmq_iq2s,
+        &q36_vk.dense_extra_decode_iq2s_pair,
     };
     if (!q36_vk_env_default_on("Q36_VK_PREPARE_DENSE")) return;
     pthread_mutex_lock(&q36_vk_mu);
@@ -8471,6 +8480,8 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                     pthread_mutex_unlock(&q36_vk_mu);
                     return 0;
                 }
+                bool iq2s_fast = weight_type == Q36_VK_TENSOR_IQ2_S &&
+                                 q36_vk_env_default_on("Q36_VK_IQ2S_EXTRA");
                 q36_vk_kernel *decode_kernel =
                     q2_family &&
                     q36_vk.have_int_dot && q36_vk.subgroup_size == 64u &&
@@ -8481,6 +8492,7 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                     ptq1_0 && q36_vk.have_int_dot && q36_vk.subgroup_size == 64u &&
                     q36_vk.subgroup_arithmetic ?
                         &q36_vk.dense_extra_decode_ptq1_0 :
+                    iq2s_fast ? &q36_vk.dense_extra_decode_iq2s :
                         &q36_vk.dense_extra_decode;
                 ok = q36_vk_run_unlocked(
                     op, decode_kernel,
@@ -8502,11 +8514,14 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                 bool is_pq2_0 = weight_type == Q36_VK_TENSOR_PQ2_0;
                 bool is_ptq1_0 = weight_type == Q36_VK_TENSOR_PTQ1_0;
                 bool is_q2_0 = weight_type == Q36_VK_TENSOR_Q2_0 || is_pq2_0;
+                bool is_iq2s_fast = weight_type == Q36_VK_TENSOR_IQ2_S &&
+                                    q36_vk_env_default_on("Q36_VK_IQ2S_EXTRA");
                 q36_vk_kernel *mmq_kernel = is_ptq1_0 ?
                     &q36_vk.dense_extra_mmq_ptq1_0 :
                     (is_pq2_0 ?
                         &q36_vk.dense_extra_mmq_pq2_0 :
                         (is_q2_0 ? &q36_vk.dense_extra_mmq_q2_0 :
+                         is_iq2s_fast ? &q36_vk.dense_extra_mmq_iq2s :
                                    &q36_vk.dense_extra_mmq));
                 ok = q36_vk_run_unlocked(
                     op, mmq_kernel,

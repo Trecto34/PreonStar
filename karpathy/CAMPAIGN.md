@@ -241,11 +241,50 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    parity + mechanism + 21-rep separation rather than a clean gate pass.
    Evidence: `evidence/raw/ab-iq2s-ssm-pair{,-7rep}.csv`,
    `ab-iq2s-ssm-pair-summary.txt`, `iq2s-ssm-pair-parity.txt`.
+   **1f. Tuned IQ2_S decode/mmq kernel (`attn_gate`/`ssm_out`/shared-expert)
+   — ACCEPTED, real but small (2026-09-21).** Second half of 1d/1e's plan.
+   Same lever as the existing `Q36_Q2_0_ONLY` compile-time specialization
+   (cited "-19..28%" precedent): new `Q36_IQ2S_ONLY` `#ifdef` in
+   `dense_extra_decode.comp`/`dense_extra_mmq.comp` (math copied verbatim
+   from the existing IQ2_S branch, just without the runtime `pc.type`
+   branch chain) -> `dense_extra_decode_iq2s.spv`/`dense_extra_mmq_iq2s.spv`.
+   ISA checked before building anything real (`mmq_info`, W8-probe style):
+   decode VGPRs 64->56 + occupancy 16->18 subgroups/SIMD (both improved, no
+   cliff), mmq VGPRs 88->84 (LDS/occupancy unchanged) — no register-pressure
+   risk. Parity bit-exact three ways (combined, prefill-only, decode-only),
+   shader hashes of every pre-existing build variant (generic/Q2_0/PQ2_0)
+   confirmed byte-identical. A real bug was caught before landing: the first
+   draft's specialized mmq had `barrier()` inside the accumulation loop
+   instead of after it (16x too many per slice, from a copy-paste slip) —
+   found by re-reading the function side-by-side with the generic one, not
+   by a failed test, matching the W3-precedent risk this item was flagged
+   for going in. Whole-model 21-rep A/B was weak/ambiguous on its own
+   (decode +0.52% with heavy overlap, prefill -2.02% inside the 3.4% floor
+   but this fix *does* touch prefill unlike 1e). Resolved by kernel-level
+   profiling instead of more reps: decode op cost 1.891->1.822 ms/tok
+   (-3.7%, ~0.58% of whole-model decode — matches the noisy +0.52% almost
+   exactly), and a single-shot prefill profile settles prefill directly:
+   `dense_extra_mmq_iq2s` 132.151ms vs `dense_extra_mmq` 138.320ms (-4.46%),
+   whole-prefill GPU time 808.025ms vs 825.393ms (-2.10%) — prefill is
+   measurably *faster*, confirming the A/B's -2.02% was session noise.
+   Why smaller than the ISA numbers suggested: `pc.type` is a push constant
+   (uniform across a dispatch), so the removed branches were already cheap
+   uniform/predicated branches, not per-thread-divergent ones — the
+   remaining cost is the dequant arithmetic itself, left untouched to
+   guarantee bit-exactness. That's the next lever on this kernel if anyone
+   wants it; not attempted. Default on, `Q36_VK_IQ2S_EXTRA=0` disables.
+   A/B'd in isolated worktrees (`q36-wt/iq2s-tuned-kernel{,-base}`) built
+   from clean `44143d8`; two profiling runs had to `flock`-queue behind the
+   same concurrent instance from 1e, still mid-flight on HANDOFF item 2.
+   Evidence: `evidence/raw/ab-iq2s-tuned-kernel{,-7rep}.csv`,
+   `ab-iq2s-tuned-kernel-summary.txt`, `iq2s-tuned-kernel-parity.txt`,
+   `iq2s-tuned-kernel-shader-hashes.txt`,
+   `iq2s-tuned-prof-{on,off}-{gen1,gen65,prefill}.txt`.
    Remaining open levers for IQ2_M: (1) small-batch 2..31 token f32 kernels
-   (HANDOFF §5 item 2); (2) the tuned IQ2_S decode/mmq kernel for
-   `attn_gate`/`ssm_out`/shared-expert from 1d/1e, now the largest unclaimed
-   lever (~79% of the 194.6 MB/tok this residue reads, most of the ~17% of
-   prefill/decode it costs). Evidence:
+   (HANDOFF §5 item 2, owned by a concurrent instance); (2) the dequant
+   arithmetic itself inside `dense_extra_decode_iq2s`/`dense_extra_mmq_iq2s`
+   (1f's own `reconsider_if`) — the residue's generic-vs-tuned kernel gap is
+   now closed, what's left is genuine ALU cost, not misrouting. Evidence:
    `karpathy/HANDOFF-iq2s-20260920.md`, `evidence/raw/iq2s-*`,
    `evidence/raw/kquant-moe-*`, `evidence/raw/ab-kquant-moe-decode*`,
    `AlreadyTried.md`.

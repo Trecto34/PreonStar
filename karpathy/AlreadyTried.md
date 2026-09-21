@@ -936,3 +936,103 @@ unstarted work).
 - Raw evidence: `karpathy/evidence/raw/ab-iq2s-ssm-pair.csv` (21 reps),
   `ab-iq2s-ssm-pair-7rep.csv`, `ab-iq2s-ssm-pair-summary.txt`,
   `iq2s-ssm-pair-parity.txt`.
+
+## IQ2_S tuned decode/mmq kernel (`attn_gate`/`ssm_out`/shared-expert) — ACCEPTED, real but small (2026-09-21)
+
+Branch `trackB-ptq1_0`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Second and last
+piece of the 1d/1e two-part plan — the ALU-bound big-tensor half (~79% of
+the 194.6 MB/tok the IQ2_S residue reads: `attn_gate`, `ssm_out`,
+shared-expert gate/up/down), vs 1e's overhead-bound small-tensor half
+(`ssm_alpha`/`ssm_beta`).
+
+- **What it is.** `dense_extra_decode.comp` / `dense_extra_mmq.comp` are
+  generic kernels that runtime-branch on `pc.type` to serve
+  IQ2_XXS/IQ2_XS/IQ2_S/IQ1_S/IQ4_NL/Q2_0 from one shader (Q2_0/PQ2_0/PTQ1_0
+  already get their own compile-time-specialized variant via
+  `Q36_Q2_0_ONLY`, precedent cited in the source comments: "-19..28% on
+  dense_extra_decode_q2_0" from a LUT). Added the same treatment for IQ2_S:
+  a `Q36_IQ2S_ONLY` `#ifdef` in both files producing
+  `dense_extra_decode_iq2s.spv` / `dense_extra_mmq_iq2s.spv`, math copied
+  verbatim from the existing `pc.type == IQ2_S` arm (same block layout,
+  same `signed_grid`/`tables` lookups, same accumulation order), just
+  without the runtime type-branch chain. Wired into
+  `q36_gpu_matmul_iq_quant_q8_scaled_tensor`'s decode/mmq kernel selection,
+  gated on `weight_type == IQ2_S` and `Q36_VK_IQ2S_EXTRA` (default on).
+  Both new kernels added to `q36_vk_prepare_dense_kernels()`'s prewarm list
+  (along with 1e's `dense_extra_decode_iq2s_pair`, missed there originally)
+  so the RADV pipeline-compile cost lands at model-open, not the first live
+  token — same class of fix 1b needed for its kernels.
+- **A real bug caught and fixed before landing**: the first draft of the
+  specialized mmq `main()` had `barrier()` moved inside the `BK/2`
+  accumulation loop instead of after it (a copy-paste slip while manually
+  reconstructing the function body) — not a silent-corruption bug since all
+  threads in a workgroup still hit the same barrier count, but it would
+  have added 16 barriers per slice instead of 1, quietly eating most of the
+  kernel's intended win. Caught by re-reading the specialized function
+  against the generic one side by side before compiling, not by a failed
+  test. This is exactly the class of risk flagged going in (W3 latent-bug
+  precedent) — found by review, not by luck.
+- **Parity: bit-exact**, checked three ways on the exact binaries A/B'd
+  (isolated worktrees, see below): combined prefill+1-decode frontier
+  (`max_abs_diff=0.0`, 248,320 logits, top-1/top-64 identical),
+  prefill-only isolation (`--gen-tokens 0`), and the decode-only diff used
+  for 1e — all three bit-exact, expected since the dequant math is
+  unchanged, only the branch chain is removed.
+- **Shader byte-identity**: `dense_extra_decode.spv` / `_q2_0` / `_pq2_0`
+  and `dense_extra_mmq.spv` / `_q2_0` / `_pq2_0` (the builds the guard model
+  and any Q2_0/PQ2_0/PTQ1_0-carrying file actually use) are sha256-identical
+  before and after — the new `Q36_IQ2S_ONLY` branch is additive, the
+  existing branches are untouched. Guard not separately A/B'd for this
+  reason, same as 1e.
+- **ISA, checked before building anything real** (`mmq_info`,
+  `VK_KHR_pipeline_executable_properties`, matching the W8 probe
+  methodology): decode VGPRs 64->56, occupancy 16->18 subgroups/SIMD (both
+  *improved*, no cliff — unlike W8's QT-widening probe); mmq VGPRs 88->84,
+  LDS/occupancy unchanged (11776 B, 10 subgroups/SIMD). No register-pressure
+  risk anywhere.
+- **Whole-model 21-rep interleaved A/B was weak and ambiguous on its own**
+  (ctx 512, gen 128; 7-rep even weaker): decode 78.75->79.16 = **+0.52%**,
+  heavy overlap between arms (not the clean separation 1e's 21-rep run
+  showed); prefill 556.77->545.53 = **-2.02%**, inside the 3.4% MoE floor
+  but this fix *does* touch prefill (unlike 1e), so "probably noise" wasn't
+  good enough on its own.
+- **Resolved by kernel-level profiling instead of more reps** — a cleaner
+  instrument than fighting session noise with rep count. Differential
+  profile (`Q36_VK_PROF_KERNEL=1`, gen 1 vs gen 65 delta/64) isolates the
+  kernel directly: decode op cost **1.891 -> 1.822 ms/tok (-3.7%)**, which
+  is ~0.58% of the 11.9-12.0 ms/tok whole-model decode budget — matching
+  the noisy end-to-end +0.52% almost exactly, not a coincidence. Single-shot
+  prefill profile (`--gen-tokens 0`) settles the prefill question directly:
+  `dense_extra_mmq_iq2s` **132.151 ms vs dense_extra_mmq 138.320 ms
+  (-4.46%)**, and *whole-prefill* GPU time **808.025 ms vs 825.393 ms
+  (-2.10%)** — prefill is measurably faster with this change, which
+  directly contradicts the throughput A/B's -2.02% reading and confirms it
+  was session noise, not a regression.
+- **Why the win is smaller than the ISA numbers suggested going in**: worth
+  recording so a future session doesn't re-derive it. `pc.type` is a push
+  constant — the same value for every thread in a dispatch — so the
+  "runtime branch chain" this removes was already a *uniform* (non-divergent)
+  branch, which GPUs execute cheaply via predication/scalar jumps, not the
+  per-thread-divergent branching that's actually expensive on SIMD hardware.
+  The VGPR/occupancy improvement is real (fewer live temporaries from dead
+  branches), but the dominant remaining cost is the dequant arithmetic
+  itself — multiple `load_u8` calls, `signed_grid`/table lookups, bitfield
+  extracts — which this change deliberately left untouched to guarantee
+  bit-exactness. That arithmetic is the next lever if anyone wants to keep
+  pushing this specific kernel; not attempted here.
+- **Verdict: ACCEPTED.** Small (2-4% on the specific kernels, <1% decode /
+  ~2% prefill end-to-end) but real by two independent measurements
+  (kernel-level profile and, for prefill, a controlled single-shot total),
+  bit-exact, zero measured downside anywhere, and the one real bug found
+  during construction was caught by review before it ever reached a
+  benchmark. Default on, `Q36_VK_IQ2S_EXTRA=0` disables.
+- A/B'd in isolated worktrees (`q36-wt/iq2s-tuned-kernel{,-base}`) built
+  from clean `44143d8`, not the shared main worktree — the same concurrent
+  instance from 1e was still mid-flight on HANDOFF item 2 (small-batch
+  IQ2_S kernels) in the main worktree the whole time this was built; two
+  benchmark runs had to queue behind their GPU usage via `flock` rather
+  than racing `bench_ab.sh`'s bare `pgrep` check.
+- Raw evidence: `karpathy/evidence/raw/ab-iq2s-tuned-kernel.csv` (21 reps),
+  `ab-iq2s-tuned-kernel-7rep.csv`, `ab-iq2s-tuned-kernel-summary.txt`,
+  `iq2s-tuned-kernel-parity.txt`, `iq2s-tuned-kernel-shader-hashes.txt`,
+  `iq2s-tuned-prof-{on,off}-{gen1,gen65,prefill}.txt`.
