@@ -761,3 +761,117 @@ Branch `trackB-ptq1_0`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Guard:
   `ab-kquant-moe-decode-summary.txt`, `kquant-moe-diffprof-gen{1,65}.txt`,
   `kquant-moe-parity-summary.txt`, `kquant-moe-unit-test.txt`.
 
+## W8 — long-context KV dequant redundancy — go/no-go MEASURED POSITIVE,
+## QT-widening mechanism REJECTED (VGPR ceiling), scratch-cache UNEXPLORED (2026-09-21)
+
+Branch `trackB-ptq1_0`. Models: guard `Huihui-Qwen3.6-35B-A3B-Abliterated-
+Q36-IQ2XXS.gguf` (MoE), `Swift-Qwen3.8-27B-IQ3_XXS.gguf` (dense).
+
+- **Step 1, per the plan (`PLAN-implementation-2026-09-20.md` §W8): measure
+  attention's prefill share at ctx 4096/8192 before touching any shader.**
+  `Q36_VK_PROF_KERNEL=1 ./q36-bench --vulkan -m <model> --prompt-file
+  tests/long_context_story_prompt.txt --ctx-start N --ctx-max N
+  --prefill-chunk 256 --gen-tokens 0`, single-frontier runs (no sweep, no
+  decode), attention kernel's `pct` from the per-kernel GPU-time report:
+
+  | model | shader | ctx 1024 (plan's own baseline) | ctx 4096 | ctx 8192 |
+  |---|---|---|---|---|
+  | guard (MoE) | `attn_prefill_qtile2.spv` | ~3.1% | 20.7% (1491.6/7188.8 ms) | 31.5% (5430.1/17264.9 ms) |
+  | Swift-27B (dense) | `attn_prefill_qtile2_gqa6.spv` | — | 12.6% (3931.1/31210.2 ms) | 20.7% (15984.3/77044.6 ms) |
+
+  Both climb sharply with context and clear the informal go/no-go (a partial
+  win on this kernel would easily clear the formal ≥1.5%-prefill gate at
+  these shares) — proceed to design a fix.
+- **Root cause, read from `vulkan/attn_prefill_qtile2{,_gqa6}.comp`:** each
+  workgroup already shares K/V dequant across its own `QT=2` query tokens and
+  all `HQ` GQA heads for one `kvh` (dequant happens once per key, feeds all
+  `ROWS=QT*HQ` rows via `sh_w`). The redundancy is *across* workgroups: at
+  ctx 8192 there are `n_tok/QT` query-tile workgroups per `kvh`, and causal
+  attention means nearly every one re-dequantizes the same early KV spans
+  independently.
+- **Mechanism 1 tried: widen `QT` (more query rows sharing each dequant).**
+  Cheap probe before any real build (matching the W6 LUT-staging probe
+  precedent): scratch copy of `attn_prefill_qtile2.comp` with only
+  `QT 2u->4u` / `ROWS 8u->16u` changed (compiles, not correct — this is a
+  register/LDS probe only, no repo files touched), built with the Makefile's
+  own `glslc -O --target-env=vulkan1.1`, inspected with `./mmq_info`
+  (`VK_KHR_pipeline_executable_properties`):
+  - QT=2 (current): VGPRs=168, LDS=21504 B, **6 subgroups/SIMD**.
+  - QT=4 (probe): VGPRs=**256** (RDNA's hard per-wave ceiling, zero
+    headroom), LDS=43008 B, **2 subgroups/SIMD**.
+  - **Verdict on this mechanism: REJECTED without a build or A/B.** Doubling
+    `QT` at best halves per-key dequant work, but a 3x occupancy cut
+    (6->2 subgroups/SIMD) is very likely to erase or reverse that — the same
+    register/LDS trap this campaign hit in W4 and the "packed-native shader
+    restructuring" items. The probe is the evidence; no throughput run was
+    needed to reject it.
+- **Mechanism 2, not attempted this session: a KV-dequant-once scratch
+  cache** (materialize each `(kvh, span)`'s dequantized K/V once, shared
+  across query-tile dispatches, instead of growing per-lane state — no VGPR
+  risk). No cheap compile-time probe exists for this one (it's a bandwidth
+  question, not a register-allocation one), and the plan's own note is
+  skeptical of a related technique ("materializing fp16 KV to scratch adds
+  write+read traffic on top of a compact quantized cache — the coopmat1
+  result does not transfer"). Explicitly **left unexplored** rather than
+  built speculatively.
+- **Verdict: item closed for this session.** The underlying hotspot is real
+  and confirmed growing (Step 1), the first mechanism tried is dead by direct
+  measurement, and the second has a real unresolved bandwidth risk with no
+  cheap way to bound it the way the VGPR probe bounded the first. Rather than
+  sink a full build+A/B into an unmeasured design, stopping here.
+- `reconsider_if`: (a) someone designs and measures the KV-scratch-cache
+  mechanism (build it, A/B at ctx>=4096, check parity — this is real,
+  unstarted work, not a dead end); (b) per-lane state in the `QT=2` kernel
+  can be shrunk enough (e.g. f16 accumulators instead of f32) that `QT=4`
+  fits under the VGPR ceiling without the occupancy cliff; (c) a driver/HW
+  change raises the VGPR-per-wave ceiling on this target.
+- Raw evidence: `karpathy/evidence/raw/w8-attn-share-{guard,swift}-ctx{4096,8192}.txt`,
+  `karpathy/evidence/raw/w8-vgpr-probe.txt`.
+
+
+## IQ2_M's q8-route residue closed: IQ3_S down projection added to the fused f32 expert path — ACCEPTED (2026-09-21)
+
+Branch `trackB-ptq1_0`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`, base HEAD `e6c15ba`.
+Closes `HANDOFF-iq2s-20260920.md` §5 item 3 for this file. Full write-up:
+`karpathy/evidence/raw/iq3s-down-VERDICT.md`.
+
+- **Root cause (measured with a diagnostic, not inferred).** The new
+  `Q36_VK_MOE_ROUTE_DEBUG=1` print in `q36.c` fires on every fused-f32-path
+  miss and pins the residue exactly: layers **0, 1, 2 only**, on both prefill
+  and decode, with `gate=22 up=22 down=21` (22 = `IQ2_S`, 21 = `IQ3_S`).
+  `q36_gpu_moe_ffn_f32_tensor()` required all three expert tensors to share one
+  quant, and those three layers ship an **IQ3_S down under IQ2_S gate/up**
+  (GGUF tensor table: `ffn_down_exps` IQ2_S x37, IQ3_S x3 at il 0-2, Q8_0 x1 at
+  il 40 = the MTP block). They fell to the q8_K route, whose
+  `moe_iq2s_gate_up` + `moe_matvec` + `moe_tiles` cost 19.6% of profiled
+  prefill GPU and 6.8% of decode per token.
+- **Fix**: `-DQ36_MOE_IQ3S` builds of `moe_down_q2k_sum_decode.comp` and
+  `moe_down_gemm.comp` (`moe_down_q2k_sum_decode_iq3s.spv`,
+  `moe_down_gemm_iq3s.spv`) + host wiring: `iq2s` split into `gu_iq2s` /
+  `down_iq2s` / `down_iq3s`, `down_stride` 82 or 110 bytes, the down dispatch
+  site chooses the variant. IQ3_S block `[d f16][64 qs][8 qh][32 signs][4 scales]`
+  = 110 B, 9-bit grid index (8 qs bits + 1 qh bit per 4 weights) against the
+  IQ3_S grid already in the shared IQ tables buffer at word 2592, scale
+  `d*(2*nib+1)` — same convention as `dense_iq3_s_decode.comp`. All new code is
+  inside `#ifdef Q36_MOE_IQ3S`; IQ2_S/legacy builds stay byte-identical.
+- **Parity** (frontier dumps vs the `e6c15ba` binary, 248,320 logits): IQ2_M
+  frontier 512 (`max_abs` 0.762, mean 0.112, top-1 match, top64 62/64);
+  frontier 513 (0.865, mean 0.138, top-1 match, top64 61/64); guard frontier
+  513 **sha256-identical, `max_abs` 0.0** (the guard has no IQ3_S experts, so
+  this is a pure no-op for it). Deltas are the same order and *shape* as W1's
+  own accepted calibration (0.907/62-64) and smaller than it; spread across
+  ~all logits (7.7%/15.0% of logits above 0.25, max ~2x p99), not localized.
+- **7-rep interleaved A/B** (`tests/bench_ab.sh`, ctx 512, gen 128,
+  `Q36_AB_MIN_GAIN=3.4`): prefill **497.00 (MAD 15.150) -> 556.21 (MAD 12.400)
+  = +11.91%**, decode **75.26 (MAD 0.180) -> 78.40 (MAD 0.100) = +4.17%**
+  (decode separates rep-by-rep, no overlap). Gate is MoE prefill >= 3.4% ->
+  PASS, ~3.5x. `./q36_test --vulkan-kernels` OK; `compat_gate.sh` PASS.
+- **Verdict: ACCEPTED, default ON** (no new env var; type-driven inside the
+  existing fused path, `Q36_VK_MOE_F32B=0` still disables it).
+  `reconsider_if`: a file mixes the other way (IQ3_S gate/up under an IQ2_S or
+  IQ3_S down) — that needs the gate/up side ported and is still rejected into
+  the q8 route (safe, unchanged); or an IQ3_S expert tensor whose
+  `in_dim % 256 != 0`.
+- Raw evidence: `karpathy/evidence/raw/ab-iq3s-down.csv`,
+  `ab-iq3s-down-summary.txt`, `iq3s-down-parity.txt`,
+  `iq3s-down-parity-stats.txt`, `iq2m-prof-postkquant-{decode,prefill}.txt`.

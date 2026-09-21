@@ -12,9 +12,12 @@ are all closed; see the entries in this section and the matching
 tuned dense decode" it proposed doesn't exist; the actual hotspot was IQ2_M's
 Q4_K/Q5_K trunk tensors (`attn_qkv`/`output.weight`) missing a dense-only
 kernel-selection gate. Fixed and landed this session (prefill +107.85% /
-decode +59.61%, see §6.1 and `AlreadyTried.md`). Remaining open work: HANDOFF
+decode +59.61%, see §6.1 and `AlreadyTried.md`). W8 (long-context KV dequant
+redundancy) measured its go/no-go positive but rejected the QT-widening
+mechanism on a VGPR-ceiling probe before any build; a KV-scratch-cache
+mechanism is real, unstarted work (see 4f). Remaining open work: HANDOFF
 §5 items 2-3 (small-batch IQ2_S kernels, q8-route residue — item 3 assigned
-to Mcode this session) plus PLAN's W8/W9.
+to Mcode this session), the W8 scratch-cache mechanism, plus PLAN's W9.
 
 ---
 
@@ -307,6 +310,32 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    free. Default stays split (`Q36_VK_FUSED_RMS_Q8=0`); scaffolding kept
    behind the flag, not deleted. Evidence: `evidence/raw/ab-w5-fusedrms*.csv`,
    `evidence/raw/W5-VERDICT.md`.
+4f. **W8 — long-context KV dequant redundancy — go/no-go POSITIVE, QT-widening
+   mechanism REJECTED, scratch-cache UNEXPLORED (2026-09-21).** Plan's own gate:
+   measure attention prefill share at ctx 4096/8192 before touching any shader.
+   `attn_prefill_qtile2{,_gqa6}.spv` share climbs from ~3.1% (ctx 1024) to
+   **20.7% (guard) / 12.6% (Swift) at ctx 4096** to **31.5% (guard) / 20.7%
+   (Swift) at ctx 8192** — clears the informal go/no-go easily. Root cause
+   confirmed by reading the source: each workgroup already shares K/V dequant
+   across its own `QT=2` tokens x all GQA heads; the redundancy is *across*
+   workgroups (every query-tile workgroup for a `kvh` re-dequantizes the same
+   early spans under causal attention). First mechanism tried — widen `QT` to
+   4 so more query rows share each dequant — was rejected by a cheap
+   compile-only probe (scratch `QT`/`ROWS` bump, `glslc` + `./mmq_info`, no
+   real build) before any A/B: VGPRs 168→**256** (RDNA's hard ceiling), LDS
+   21504→43008 B, occupancy **6→2 subgroups/SIMD**. A 3x occupancy cut is
+   very likely to erase the halved-dequant win, matching this campaign's prior
+   register/LDS traps (W4, item 3b). Second mechanism — a KV-dequant-once
+   scratch cache shared across query-tile dispatches — has no VGPR risk but
+   an unresolved bandwidth question the plan itself flagged skepticism about,
+   and no cheap probe exists for it; **left unexplored, not built
+   speculatively**. Closed for this session rather than sinking a build+A/B
+   into an unmeasured design. `reconsider_if`: someone builds and measures the
+   scratch-cache mechanism (real open work, not a dead end), per-lane state
+   shrinks enough (e.g. f16 accumulators) to fit `QT=4` without the occupancy
+   cliff, or a driver/HW change raises the VGPR ceiling. Evidence:
+   `evidence/raw/w8-attn-share-{guard,swift}-ctx{4096,8192}.txt`,
+   `evidence/raw/w8-vgpr-probe.txt`.
 5. **Where the time actually goes** (Swift IQ3_XXS profile): prefill
    `dense_iq3_xxs_mmq` = **68.1%** of prefill GPU and is *instruction/latency*
    bound (~39% of packed-f16 peak); decode `dense_iq3_xxs_decode_r4` = 57.8% and

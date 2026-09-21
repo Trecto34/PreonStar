@@ -1,0 +1,24 @@
+W8 probe: does widening QT (query tokens per attn_prefill_qtile2 workgroup)
+from 2 to 4 fit BC-250's register/LDS budget? Scratch copy of
+vulkan/attn_prefill_qtile2.comp with only `#define QT 2u`->`4u` and
+`#define ROWS 8u`->`16u` changed (rest of the source left semantically
+unmodified -- this is a compile-only probe, not a working kernel), compiled
+with the same `glslc -O --target-env=vulkan1.1` the Makefile uses, inspected
+with ./mmq_info (VK_KHR_pipeline_executable_properties). No repo files
+touched; probe files lived under /tmp only.
+
+Baseline (current, QT=2), ./mmq_info vulkan/attn_prefill_qtile2.spv:
+  SGPRs=108  VGPRs=168  Spilled VGPRs=0  LDS=21504 B  Subgroups/SIMD=6
+
+Probe (QT=4, ROWS=16), ./mmq_info /tmp/.../probe_qt4.spv:
+  SGPRs=108  VGPRs=256  Spilled VGPRs=0  LDS=43008 B  Subgroups/SIMD=2
+
+VGPRs hit 256 (RDNA's hard per-wave allocation ceiling) with zero headroom
+left, and LDS nearly doubled. Subgroups/SIMD (occupancy) drops 6 -> 2, a 3x
+cut in latency-hiding capacity. Doubling QT would halve the redundant K/V
+dequant work per key at best, but a 3x occupancy cut is very likely to erase
+or reverse that, matching this campaign's prior register/LDS tradeoff
+findings (W4 wave32, the packed-native-shader section of AlreadyTried.md).
+Not built or A/B'd for throughput: the probe already answers the question
+cheaply, same as the W6 LUT-staging probe did before that item was
+implemented.
