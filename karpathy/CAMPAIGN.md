@@ -4,9 +4,12 @@
 `## Pick up in 5 minutes` and `## The rules that decide a verdict`, then go
 straight to `## Open items, ranked`.
 
-Last updated: 2026-09-17 (late session) · repo `/home/server/q36-opt-27b` ·
-branch `experiment/radiance-transfer-bc250` · HEAD `e0b7eb4` (w7 loader fix +
-its verdict docs; a docs-only verification commit follows it).
+Last updated: 2026-09-21 · repo `/home/server/q36-opt-27b` ·
+branch `trackB-ptq1_0` · HEAD `4b83ef9` (docs sync for the W7 Stream-K
+rejection). PLAN items W2–W7 (`karpathy/PLAN-implementation-2026-09-20.md`)
+are all closed as of this HEAD; see the new entries in this section and the
+matching `AlreadyTried.md` rows. Open work is HANDOFF's ranked list
+(`karpathy/HANDOFF-iq2s-20260920.md` §5) plus PLAN's W8/W9.
 
 ---
 
@@ -152,7 +155,8 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    (48% of decode time, ~10.7 ms/tok); (2) small-batch 2..31 token f32 kernels;
    (3) q8-route residue (7.6%). Evidence: `karpathy/HANDOFF-iq2s-20260920.md`,
    `evidence/raw/iq2s-*`, `AlreadyTried.md`.
-2. **Wave32 for the non-mmq paths — MEASURED NEGATIVE, closed (2026-09-17).**
+2. **Wave32 for the non-mmq paths — MEASURED NEGATIVE, closed (2026-09-17,
+   fully closed 2026-09-20).**
    The cheap bound was run first, before any build: `RADV_PERFTEST=cswave32` vs
    stock on Swift 27B, 7 interleaved reps, ctx 1024 -> prefill **171.14 ->
    169.88 = -0.74%** (MAD 0.600/1.540), negative in all seven pairs; decode a
@@ -173,10 +177,16 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    n_tok <= 128`), latent for all three local models. Fix + A/B (no change:
    -0.03% / -0.05%, gate PASS) merged as `6e999eb`; row in `AlreadyTried.md`.
    The audit's §3b list — nine clean-scan shaders blocked only by the comment's
-   *letter*, including `moe_matvec`, which holds 67% of IQ2_M's GPU time — is
-   still **one unrun test**, and it is the same test that would settle item 1's
-   dispatch question from the other side. Evidence:
-   `evidence/wave32-eligibility.md`, `evidence/raw/w11-wave32-r4-fix.txt`.
+   *letter*, including `moe_matvec`, which holds 67% of IQ2_M's GPU time — has
+   since been run as **W4 (2026-09-20): REJECTED, NEUTRAL/NO WIN.** Forcing
+   wave32 across the §3b set (`moe_matvec`, `moe_matvec_fast`,
+   `matmul_q8_0_decode*`, `add_rms_norm`, `rms_norm*`, `kv_store_quant`) on
+   IQ2_M/Guard: parity bit-exact, prefill 242.43→240.00 = **-1.00%** (fails
+   ≥3.4% MoE gate), decode 46.62→46.62 = **+0.00%** exact tie. Native wave64
+   remains optimal for these shaders on GFX1013; closed, no
+   `reconsider_if` short of a hardware/compiler revision. Evidence:
+   `evidence/raw/ab-w4-wave32-iq2m*.csv`, `evidence/raw/W4-VERDICT.md`,
+   `AlreadyTried.md` (W4 entry).
 3. **Packed-native shader restructuring.** The only surviving general lever
    class: this driver exposes **no** usable dot-product intrinsics
    (`int dot: 0`, all accelerated variants false) and no bf16, so the wins have
@@ -191,6 +201,16 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    **-0.11%**, decode +0.05% -> FAIL, rejected. Staging/barrier/LDS is CLOSED
    *within one projection*; sharing the stage across the gate/up pair is a
    different lever and it paid — see 4b. Evidence: `evidence/raw/ab-w8-mmq.csv`.
+   **3c. W2 — IQ3_XXS ISA/ALU ablation — SETTLED, NOT PURELY DRAM-BOUND
+   (2026-09-20).** Answers the question 3b opened: `Q36_IQ3XXS_ABLATE` (keep
+   loads, drop decode ALU) on `dense_iq3_xxs_decode_r4` measured baseline
+   26.578 ms/tok (282.2 GB/s, 62.1% of the 454.4 GB/s roofline) vs ablated
+   20.081 ms/tok (373.5 GB/s, 82.2% of roofline). **Exposed ALU cost is 24.44%
+   of kernel time**, mostly the 4x DPP cross-lane reduction chains
+   (`quad_perm`/`row_half_mirror`/`row_mirror`/`v_permlanex16_b32`/
+   `v_readlane_b32`). Diagnostic ceiling is the 20.08 ms/tok DRAM floor; no ALU
+   fix beats it. No code change (diagnostic only). Evidence:
+   `evidence/raw/iq3xxs-isa/W2-VERDICT.md`.
 4. **FA LDS staging — TRIED, NEUTRAL, rejected (2026-09-17).** The peer's row
    claims PP +5.4% / TG +12.4% and was the largest *unread* gap in that doc. It
    has now been read and implemented rather than assumed: codex +20/-5 to
@@ -233,6 +253,34 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    Stream-K introduces atomic K-reductions and split-K barriers for < 1.8% theoretical
    headroom. Gate was > 3.0% of kernel time -> **REJECTED (NOT A LEVER)**. Closed
    without code churn. Evidence: `evidence/raw/W7-VERDICT.md`, `evidence/raw/w7_streamk_audit.py`.
+4d. **W3 — `delta_net_cols` prefill on BC-250 — REJECTED, FROZEN; latent wave32
+   bug FIXED (2026-09-20).** 7-rep A/B via `Q36_VK_DELTA_COL_PREFILL=1`: prefill
+   170.77→166.54 = **-2.48%** (negative in all 7 pairs, fails ≥1.5% gate),
+   decode -0.72%. Native wave64 register recurrence
+   (`delta_net_decode_reg_f16`) beats the "load once/loop/store once" column
+   kernel here; the `!q36_vk.bc250` guard stays frozen. Found and fixed in
+   passing: `q36_vk_force_wave32`'s pattern matched `"delta_net_cols.spv"` but
+   missed the f16 variant `delta_net_cols_f16.spv` actually dispatched for
+   Swift's recurrent state, so it ran at native wave64 (2 subgroups instead of
+   4) and left half the state columns unwritten — OOB writes to row 159 of a
+   128-row buffer, `max_abs` 19.12, top-1 flip. Widening the pattern to
+   `"delta_net_cols"` restored parity (`max_abs` 0.767, top-64 61/64). This bug
+   was latent in every prior wave32 audit on this file. Evidence:
+   `evidence/raw/ab-w3-deltacol*.csv`, `evidence/raw/W3-VERDICT.md`.
+4e. **W5 — RMSNorm → q8_K producer fusion — REJECTED, GATE NOT MET
+   (2026-09-21).** Fusing `quantize_q8_k` into `add_rms_norm` removes an
+   activation write/read round-trip; parity bit-exact (`max_abs_diff = 0`,
+   248,320 logits). 7-rep A/B on Swift 27B: prefill 170.38→169.83 =
+   **-0.32%** (fails ≥0.70% dense gate), decode -0.83% (noise). Root cause:
+   `add_rms_norm` is one 1024-thread workgroup per row; `quantize_q8_k` is
+   64-thread/256-element blocks, 20 independent workgroups per row across 40
+   CUs. Fusing serializes those 20 blocks into 2 rounds of 10 workgroup-wide
+   barriers inside the bigger workgroup, triples LDS (8 KiB → 25.6 KiB), and
+   drops subgroup occupancy 40→32 — the barrier/occupancy cost outweighs
+   avoiding the L2 round-trip the two separate dispatches already get for
+   free. Default stays split (`Q36_VK_FUSED_RMS_Q8=0`); scaffolding kept
+   behind the flag, not deleted. Evidence: `evidence/raw/ab-w5-fusedrms*.csv`,
+   `evidence/raw/W5-VERDICT.md`.
 5. **Where the time actually goes** (Swift IQ3_XXS profile): prefill
    `dense_iq3_xxs_mmq` = **68.1%** of prefill GPU and is *instruction/latency*
    bound (~39% of packed-f16 peak); decode `dense_iq3_xxs_decode_r4` = 57.8% and
