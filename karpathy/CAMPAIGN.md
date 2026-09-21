@@ -197,10 +197,31 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    62-64), guard byte-identical, `q36_test --vulkan-kernels` + compat gate
    PASS. Evidence: `evidence/raw/iq3s-down-VERDICT.md`,
    `evidence/raw/ab-iq3s-down.{csv}` + summary, `evidence/raw/iq3s-down-parity*.txt`.
+   **1d. Re-profile after 1b+1c — done (2026-09-21).** HANDOFF §5 item 4.
+   Decode collapsed **22.235 -> 11.902 ms/tok (-46.5%)**; prefill (ctx 512)
+   **3666 -> 862 ms (-76.5%)**. `dense_kquant`/`matmul_kquant` (old #1, 48.2%
+   of decode) is gone from the profile entirely, replaced by `dense_q4k_decode`
+   (disp=40) / `dense_q5k_decode` (disp=1) at a fraction of the cost, exactly
+   as 1b's commit predicted. New ranking: decode led by
+   `moe_iq2s_down_sum_decode` (21.0%, tuned/existing) then **`dense_extra_decode`
+   (17.4%, 258 disp/tok)**; prefill led by `moe_iq2s_gate_up_gemm` (43.7%,
+   tuned/existing) then **`dense_extra_mmq`** (16.8%). `dense_extra_mmq/decode`
+   is IQ2_S-exclusive (single call site, `q36_vulkan.c:8366`, reachable only
+   for IQ2_XXS/IQ2_XS/IQ2_S/IQ1_S/IQ4_NL/PQ2_0/PTQ1_0 — this file has only
+   IQ2_S among those). `Q36_VK_MOE_ROUTE_DEBUG=1` shows **zero** route misses,
+   ruling out the mechanism 1c just fixed. Root cause instead: the
+   **shared-expert** gate/up/down (`ffn_*_shexp`) are IQ2_S on 38-40/41
+   layers, but the only fast shared-expert path
+   (`q36_gpu_shared_ffn_decode_tensor`) requires Q8_0 — so ~40 layers x 3
+   tensors (~120 of the 258 disp/tok) fall through to this generic path;
+   remainder not yet traced. **Next lever, not yet attempted:** teach the
+   shared-expert fast path (or a new decode/mmq variant) to accept IQ2_S,
+   same pattern as 1b/1c. Evidence: `evidence/raw/iq2m-reprofile-2026-09-21.md`
+   (full ranked tables + method), `evidence/raw/iq2m-reprof-*.txt`,
+   `evidence/raw/iq2m-route-debug.txt`.
    Remaining open levers for IQ2_M: (1) small-batch 2..31 token f32 kernels
-   (HANDOFF §5 item 2); (2) re-profile now that 1b+1c have moved the time —
-   decode is now led by `moe_iq2s_down_sum_decode` (20.3%) and
-   `dense_extra_decode` (16.8%, 258 dispatches/token). Evidence:
+   (HANDOFF §5 item 2); (2) the shared-expert IQ2_S fast path from 1d, now
+   the largest unclaimed lever at ~17% of both prefill and decode. Evidence:
    `karpathy/HANDOFF-iq2s-20260920.md`, `evidence/raw/iq2s-*`,
    `evidence/raw/kquant-moe-*`, `evidence/raw/ab-kquant-moe-decode*`,
    `AlreadyTried.md`.
