@@ -220,9 +220,11 @@ typedef struct {
     q36_vk_kernel top2;
     q36_vk_kernel topk8;
     q36_vk_kernel moe_gate_up_f32b;
+    q36_vk_kernel moe_gate_up_f32b_iq2s;
     q36_vk_kernel moe_gate_up_decode;
     q36_vk_kernel moe_gate_up_decode_iq2s;
     q36_vk_kernel moe_down_q2k_f32b;
+    q36_vk_kernel moe_down_q2k_f32b_iq2s;
     q36_vk_kernel moe_down_q2k_sum_decode;
     q36_vk_kernel moe_down_q2k_sum_decode_iq2s;
     q36_vk_kernel moe_down_q2k_sum_decode_iq3s;
@@ -3288,9 +3290,11 @@ int q36_gpu_init(void) {
     q36_vk.kv_store_quant = Q36_VK_KERNEL("vulkan/kv_store_quant.spv", 2, 20, 1u << 0);
     q36_vk.rms_norm_rope_kv_quant = Q36_VK_KERNEL("vulkan/rms_norm_rope_kv_qwen_quant.spv", 5, 32, (1u << 2) | (1u << 4));
     q36_vk.moe_gate_up_f32b = Q36_VK_KERNEL("vulkan/moe_gate_up_f32b.spv", 8, 24, 1u << 6);
+    q36_vk.moe_gate_up_f32b_iq2s = Q36_VK_KERNEL("vulkan/moe_gate_up_f32b_iq2s.spv", 8, 24, 1u << 6);
     q36_vk.moe_gate_up_decode = Q36_VK_KERNEL("vulkan/moe_gate_up_decode.spv", 8, 24, 1u << 6);
     q36_vk.moe_gate_up_decode_iq2s = Q36_VK_KERNEL("vulkan/moe_gate_up_decode_iq2s.spv", 8, 24, 1u << 6);
     q36_vk.moe_down_q2k_f32b = Q36_VK_KERNEL("vulkan/moe_down_q2k_f32b.spv", 5, 24, 1u << 4);
+    q36_vk.moe_down_q2k_f32b_iq2s = Q36_VK_KERNEL("vulkan/moe_down_q2k_f32b_iq2s.spv", 6, 24, 1u << 4);
     q36_vk.moe_down_q2k_sum_decode = Q36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode.spv", 6, 24, 1u << 5);
     q36_vk.moe_down_q2k_sum_decode_iq2s = Q36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq2s.spv", 7, 24, 1u << 5);
     q36_vk.moe_down_q2k_sum_decode_iq3s = Q36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq3s.spv", 7, 24, 1u << 5);
@@ -3759,9 +3763,11 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.kv_store_quant);
     q36_vk_kernel_destroy(&q36_vk.rms_norm_rope_kv_quant);
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_f32b);
+    q36_vk_kernel_destroy(&q36_vk.moe_gate_up_f32b_iq2s);
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_decode);
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_decode_iq2s);
     q36_vk_kernel_destroy(&q36_vk.moe_down_q2k_f32b);
+    q36_vk_kernel_destroy(&q36_vk.moe_down_q2k_f32b_iq2s);
     q36_vk_kernel_destroy(&q36_vk.moe_down_q2k_sum_decode);
     q36_vk_kernel_destroy(&q36_vk.moe_down_q2k_sum_decode_iq2s);
     q36_vk_kernel_destroy(&q36_vk.moe_down_q2k_sum_decode_iq3s);
@@ -9284,10 +9290,11 @@ int q36_gpu_moe_ffn_f32_tensor(q36_gpu_tensor *out,
     bool gemm = !identity && !q36_vk_micro_batch &&
                 n_tok >= q36_vk_moe_gemm_min() &&
                 q36_vk_env_default_on("Q36_VK_MOE_GEMM");
-    /* IQ2_S experts have the GEMM pair and the identity decode pair; the
-     * small-batch (2..31 token) kernels are still IQ2_XXS/Q2_K-only and must
-     * not see 82-byte blocks. */
-    if (iq2s && !(gemm || (identity && down_sum_decode))) return 0;
+    /* IQ2_S experts: the prefill GEMM pair, the identity decode pair, and the
+     * small-batch (2..127 token) f32 pair.  The f32 pair needs an IQ2_S down
+     * as well, so the IQ3_S-down layers (IQ2_M il 0-2) still fall back to the
+     * q8 route outside the GEMM range. */
+    if (iq2s && !(gemm || down_iq2s || (identity && down_sum_decode))) return 0;
     uint32_t pair_tile = gemm ? Q36_VK_MOE_GEMM_TILE : Q36_VK_MOE_PAIR_TILE;
     uint32_t tile_count = (uint32_t)n_slot;
     if (!identity && !overflow) {
@@ -9384,10 +9391,11 @@ int q36_gpu_moe_ffn_f32_tensor(q36_gpu_tensor *out,
                                                 gb, &gpush, sizeof(gpush),
                                                 (mid_dim + 63u) / 64u, wave_tile_count, 1)
                           : q36_vk_run_unlocked(identity ? (gu_iq2s ? "moe_iq2s_gate_up_decode" : "moe_iq2_gate_up_decode")
-                                                         : "moe_iq2_gate_up",
+                                                         : (gu_iq2s ? "moe_iq2s_gate_up_f32b" : "moe_iq2_gate_up"),
                                                 identity ? (gu_iq2s ? &q36_vk.moe_gate_up_decode_iq2s
-                                                                 : &q36_vk.moe_gate_up_decode)
-                                                         : &q36_vk.moe_gate_up_f32b,
+                                                                    : &q36_vk.moe_gate_up_decode)
+                                                         : (gu_iq2s ? &q36_vk.moe_gate_up_f32b_iq2s
+                                                                     : &q36_vk.moe_gate_up_f32b),
                                                 gb, &gpush, sizeof(gpush), mid_dim, wave_tile_count, 1);
             }
         }
@@ -9431,7 +9439,10 @@ int q36_gpu_moe_ffn_f32_tensor(q36_gpu_tensor *out,
                                                                        : &q36_vk.moe_down_gemm),
                                                 db, &dpush, sizeof(dpush),
                                                 (out_dim + 63u) / 64u, wave_tile_count, 1)
-                          : q36_vk_run_unlocked("moe_q2k_down", &q36_vk.moe_down_q2k_f32b, db, &dpush, sizeof(dpush),
+                          : q36_vk_run_unlocked(down_iq2s ? "moe_iq2s_down_f32b" : "moe_q2k_down",
+                                                down_iq2s ? &q36_vk.moe_down_q2k_f32b_iq2s
+                                                          : &q36_vk.moe_down_q2k_f32b,
+                                                db, &dpush, sizeof(dpush),
                                                 out_dim, wave_tile_count, 1);
             }
         }

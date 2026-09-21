@@ -122,6 +122,8 @@ VULKAN_SHADERS := \
 	vulkan/top2.spv \
 	vulkan/topk8.spv \
 	vulkan/moe_gate_up_f32b.spv \
+	vulkan/moe_gate_up_f32b_iq2s.spv \
+	vulkan/moe_down_q2k_f32b_iq2s.spv \
 	vulkan/moe_gate_up_decode.spv \
 	vulkan/moe_gate_up_decode_iq2s.spv \
 	vulkan/moe_down_q2k_sum_decode_iq2s.spv \
@@ -307,6 +309,14 @@ vulkan/matmul_q8_0_f32b_nx.spv: vulkan/matmul_q8_0_f32b_nx.comp
 
 vulkan/moe_gate_up_f32b.spv: vulkan/moe_gate_up_f32b.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+# IQ2_S expert variants of the small-batch (2..127 token) fused kernels, same
+# sources as the IQ2_XXS/Q2_K builds which stay byte-identical.
+vulkan/moe_gate_up_f32b_iq2s.spv: vulkan/moe_gate_up_f32b.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
+
+vulkan/moe_down_q2k_f32b_iq2s.spv: vulkan/moe_down_q2k_f32b.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
 
 # Same source as moe_gate_up.comp with IQ2_S weight decode (Qwen3.8-35B-A3B-IQ2_M
 # and other IQ2_S expert files).  The IQ2_XXS build stays byte-identical.

@@ -33,6 +33,20 @@ layout(push_constant) uniform Push {
 
 /* One IQ2_XXS superblock is 33 uint16 words: [d_f16][32 x qs words]. */
 const uint IQ2_U16 = 33u;
+#ifdef Q36_MOE_IQ2S
+/* IQ2_S: [d f16][32 qs][32 signs][8 qh][8 scales], 82 bytes per 256-element
+ * superblock, 9-bit grid entry.  The 1024-entry grid is 2048 words at table
+ * word 544, so it is read from the global buffer instead of the 512-word
+ * shared grid the IQ2_XXS path stages. */
+const uint IQ2S_BYTES = 82u;
+const uint TAB_IQ2S = 544u;
+uint gate_u8(uint off) {
+    return (uint(gw[off >> 1u]) >> (8u * (off & 1u))) & 255u;
+}
+uint up_u8(uint off) {
+    return (uint(uw[off >> 1u]) >> (8u * (off & 1u))) & 255u;
+}
+#endif
 const uint PAIR_TILE = 8u;
 const uint TILE_WORDS = 1u + PAIR_TILE;
 const uint INVALID = 0xffffffffu;
@@ -76,11 +90,18 @@ void main(void) {
     uint itid = tid & 15u;
     uint ix = tid >> 4u;
 
+#ifndef Q36_MOE_IQ2S
     for (uint w = tid; w < 512u; w += 64u) sh_grid[w] = tables[w];
     barrier();
+#endif
 
+#ifdef Q36_MOE_IQ2S
+    uint row_bytes = pc.blocks * IQ2S_BYTES;
+    uint base_bytes = (expert * pc.mid_dim + row) * row_bytes;
+#else
     uint row_u16 = pc.blocks * IQ2_U16;
     uint base_u16 = (expert * pc.mid_dim + row) * row_u16;
+#endif
     uint ib32 = itid >> 1u;
     uint qpair = itid & 1u;
 
@@ -92,6 +113,20 @@ void main(void) {
     }
 
     for (uint i = ix; i < pc.blocks; i += 4u) {
+#ifdef Q36_MOE_IQ2S
+        /* IQ2_S: 82-byte byte-addressed superblock.  Scale is per 8-group
+         * (lg = 2*qpair + l, low nibble for lg < 2), magnitude and sign per
+         * element, exactly as the GEMM and sum-decode ports read it. */
+        uint gb = base_bytes + i * IQ2S_BYTES;
+        float gd = unpackHalf2x16(uint(gw[gb >> 1u])).x;
+        float ud = unpackHalf2x16(uint(uw[gb >> 1u])).x;
+        uint gsc_b = gate_u8(gb + 74u + ib32);
+        uint usc_b = up_u8(gb + 74u + ib32);
+        float gdb = gd * 0.25 * (0.5 + float(qpair == 0u ? (gsc_b & 15u) : (gsc_b >> 4u)));
+        float udb = ud * 0.25 * (0.5 + float(qpair == 0u ? (usc_b & 15u) : (usc_b >> 4u)));
+        uint gqh = gate_u8(gb + 66u + ib32);
+        uint uqh = up_u8(gb + 66u + ib32);
+#else
         uint gb = base_u16 + i * IQ2_U16;
         float gd = unpackHalf2x16(uint(gw[gb])).x;
         float ud = unpackHalf2x16(uint(uw[gb])).x;
@@ -102,9 +137,30 @@ void main(void) {
         float udb = ud * 0.25 * (0.5 + float(uss >> 28u));
         uint gidx_w = uint(gw[gq + qpair]);
         uint uidx_w = uint(uw[gq + qpair]);
+#endif
         uint y4 = (i * 256u + 16u * itid) >> 2u;
 
         for (uint l = 0u; l < 2u; l++) {
+#ifdef Q36_MOE_IQ2S
+            uint lg = 2u * qpair + l;
+            uint gent = gate_u8(gb + 2u + 4u * ib32 + lg) |
+                        ((gqh << (8u - 2u * lg)) & 0x300u);
+            uint uent = up_u8(gb + 2u + 4u * ib32 + lg) |
+                        ((uqh << (8u - 2u * lg)) & 0x300u);
+            uint gsign = gate_u8(gb + 34u + 4u * ib32 + lg);
+            uint usign = up_u8(gb + 34u + 4u * ib32 + lg);
+            vec4 g0 = vec4(unpack8(tables[TAB_IQ2S + gent * 2u]));
+            vec4 g1 = vec4(unpack8(tables[TAB_IQ2S + gent * 2u + 1u]));
+            vec4 u0 = vec4(unpack8(tables[TAB_IQ2S + uent * 2u]));
+            vec4 u1 = vec4(unpack8(tables[TAB_IQ2S + uent * 2u + 1u]));
+
+            /* IQ2_S signs are one byte per element, not the 7-bit parity
+             * packing IQ2_XXS uses. */
+            g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (gsign & 128u) != 0u));
+            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
+            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (usign & 128u) != 0u));
+#else
             uint sbit = 7u * (2u * qpair + l);
 
             uint gqs = (gidx_w >> (8u * l)) & 255u;
@@ -120,6 +176,7 @@ void main(void) {
             vec4 u1 = vec4(unpack8(sh_grid[uqs * 2u + 1u]));
             u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
             u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (bitCount(usign) & 1) != 0));
+#endif
 
             for (uint u = 0u; u < nu; u++) {
                 if (!live[u]) continue;
