@@ -528,3 +528,26 @@ was IQ2_XXS/Q2_K-only, so the host guard dropped IQ2_S back to the q8 route.
   IQ2_M still falls to the q8 route; and the per-token decode profile is now
   dominated by `dense_kquant` (9.89 ms/tok = 36%) and `moe_tiles` (1.71 ms/tok =
   6% of dispatch overhead) — the experts are no longer the leading decode cost.
+
+## W2 — IQ3_XXS ISA + ALU diagnostic ablation — SETTLED, NOT PURELY DRAM-BOUND (2026-09-20)
+
+Branch `trackB-ptq1_0`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`. Full write-up:
+`karpathy/evidence/raw/iq3xxs-isa/W2-VERDICT.md`.
+
+- **Diagnostic question settled:** "234 GB/s logical = DRAM-bound" is NOT a
+  complete description. `dense_iq3_xxs_decode_r4` was tested under
+  `Q36_IQ3XXS_ABLATE` (keep loads, drop decode ALU): baseline production decode
+  26.578 ms/token (282.2 GB/s, 62.1% of roofline) vs ablated 20.081 ms/token
+  (373.5 GB/s, 82.2% of the 454.4 GB/s hardware roofline).
+- **Exposed ALU cost is 6.497 ms/token (24.44% of kernel execution time).** The
+  kernel is partially ALU-taxed, primarily by the 4× DPP cross-lane reduction
+  chains (`quad_perm`, `row_half_mirror`, `row_mirror`, `v_permlanex16_b32`,
+  `v_readlane_b32`).
+- **Occupancy verified via `mmq_info` (`VK_KHR_pipeline_executable_properties`):**
+  `dense_iq3_xxs_decode_r4` compiles to 64 VGPRs, 108 SGPRs, 0 spills, 16
+  subgroups/SIMD, 1024 B LDS (vs `dense_iq3_xxs_mmq` at 96 VGPRs, 10
+  subgroups/SIMD, 12288 B LDS).
+- **Ceiling:** the hard DRAM roofline floor on this weight format is 20.08 ms/token
+  (373.5 GB/s). ALU optimizations cannot exceed this floor.
+- Raw evidence: `karpathy/evidence/raw/iq3xxs-isa/` (`base_gen*.txt`,
+  `ablate_gen*.txt`, `*.stats.txt`, `*.isa.txt`, `W2-VERDICT.md`).
