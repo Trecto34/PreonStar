@@ -47,13 +47,14 @@ uint load_u16_m(uint off, uint m) {
     return (word >> shift) & 65535u;
 }
 
-/* A word load only ever crosses a word boundary when off & 3 == 3; the second
+/* A word load only ever crosses a word boundary when off & 3 != 0; the second
  * half comes from the matrix the item belongs to. */
 uint load_u32_m(uint off, uint m) {
     uint shift = (off & 3u) * 8u;
     uint word = m == 0u ? wg[off >> 2u] : wu[off >> 2u];
+    if (shift == 0u) return word;
     uint next = m == 0u ? wg[(off >> 2u) + 1u] : wu[(off >> 2u) + 1u];
-    return shift == 0u ? word : (word >> shift) | (next << (32u - shift));
+    return (word >> shift) | (next << (32u - shift));
 }
 
 uint tab_u8(uint word_base, uint byte_idx) {

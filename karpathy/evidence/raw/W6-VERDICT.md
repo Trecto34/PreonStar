@@ -98,3 +98,12 @@ Raw evidence: `karpathy/evidence/raw/ab-w6-pair.csv`,
 `ab-w6-pair-summary.txt`, `ab-w6-pair-parity.txt`, `ab-w6-pair-profile.txt`,
 `w6-baseline-profile.txt`, `w6-ablate-probe.txt`,
 `w6-pairoff-profile-raw.txt`, `w6-pairon-profile-raw.txt`.
+
+### Claude2 Audit Follow-up (Zero-Cost Correctness Fix)
+During independent audit, Claude2 identified that in `load_u32_m`, the second word read `next = ...[(off >> 2u) + 1u]` was evaluated unconditionally, causing a 4-byte out-of-bounds read past the buffer nominal end on the final block/slice when `shift == 0u`. While discarded numerically (hence bit-exact), this was an undefined behavior risk in Vulkan without `robustBufferAccess`.
+Restructured `load_u32_m` to return `word` immediately if `shift == 0u`, short-circuiting the `(off >> 2u) + 1u` read.
+Re-verification:
+- Frontier-513 oracle parity: `max_abs_diff = 0.0000`, top-1 agreement 1/1, vocab 248,320 (bit-exact).
+- Interleaved A/B benchmark: Arm A median 170.51 t/s vs Arm B median 172.83 t/s (+1.36% prefill, decode +0.16% neutral, non-overlapping distributions).
+- Hardware properties: 128 VGPRs, 108 SGPRs, 0 spills, 8 subgroups/SIMD.
+
