@@ -24,7 +24,7 @@ Current standing, measured on both engines, ctx 1024:
 | Swift Qwen3.8-27B IQ3_XXS (dense) | 171.09 / 23.19 | 105.43 / 22.13 | **+58.7% / +8.0%** |
 | Qwen3.6-35B-A3B IQ2XXS (MoE guard) | 909.49 / 87.37 | 615.08 / 78.72 | **+47.9% / +11.0%** |
 | RavenX-35B-Q36-IQ2XXS (MoE) | 717.36 / 89.47 | 545.46 / 77.96 | **+31.5% / +14.8%** |
-| Qwen3.8-35B-A3B-IQ2_M (MoE) | **116.51 / 29.29** (loads since `f9d537d`) | 529.90 / **91.53** | **−78% / −68%** — kernel selection, §6.1 |
+| Qwen3.8-35B-A3B-IQ2_M (MoE) | **241.27 / 47.14** (landed `6ef9ceb`/`e8cb6de`, rep 245.55/48.68) | 529.90 / **91.53** | **−54% / −48%** — W1 landed, ranked next §6.1 |
 
 The engine leads on every file it can load. It is already ~1.6x upstream on
 dense prefill. So the remaining work is not "make it fast" — it is "close the
@@ -143,17 +143,15 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
 
 ## 6. Open items, ranked
 
-1. **Quant-aware dispatch for the `IQ2_S` / K-quant MoE — the real IQ2_M lever,
-   and now the highest-value item on the board.** The loader fix landed
-   (`f9d537d`), so `Qwen3.8-35B-A3B-IQ2_M` loads and decodes at **116.51 /
-   29.29** where upstream gets **529.90 / 91.53**. The profile says why: its
-   `IQ2_S` experts fall through to generic `moe_matvec` (**11,845 ms = 67% of all
-   GPU time**) and its K-quant trunk to `dense_kquant` (**4,662 ms**), while the
-   guard reaches `moe_iq2_gate_up_gemm` 878.7 + `moe_q2k_down_gemm` 432.6 and
-   `dense_q8_0_p_*` GEMMs (~950 ms). `IQ2_S` support already exists in-tree, so
-   the work is routing these shapes into the per-quant prefill GEMM family:
-   **in-tree prior art, not new shader work.** Evidence:
-   `evidence/raw/w7-iq2m-prof.txt`, ledger §"kernel SELECTION".
+1. **Quant-aware dispatch for the `IQ2_S` / K-quant MoE — W1 LANDED & ACCEPTED (2026-09-20).**
+   Landed in `6ef9ceb` (fused gate/up + GEMM pair) and `e8cb6de` (f32 identity decode pair).
+   Prefill rose **108.21 → 241.27 t/s (2.23×)**, decode rose **29.52 → 47.14 t/s (1.60×)**
+   (reproduced 245.55 / 48.68 at ctx 512). Guard is 100% byte-identical (`b46fa81a…`,
+   `93a38508…`, `601d56a9…`, `946097d8…`, `3f316c16…`), frontier-513 parity verified.
+   Remaining open levers for IQ2_M: (1) IQ2_S tuned dense decode for `matmul_kquant`
+   (48% of decode time, ~10.7 ms/tok); (2) small-batch 2..31 token f32 kernels;
+   (3) q8-route residue (7.6%). Evidence: `karpathy/HANDOFF-iq2s-20260920.md`,
+   `evidence/raw/iq2s-*`, `AlreadyTried.md`.
 2. **Wave32 for the non-mmq paths — MEASURED NEGATIVE, closed (2026-09-17).**
    The cheap bound was run first, before any build: `RADV_PERFTEST=cswave32` vs
    stock on Swift 27B, 7 interleaved reps, ctx 1024 -> prefill **171.14 ->
