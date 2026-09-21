@@ -122,6 +122,8 @@ VULKAN_SHADERS := \
 	vulkan/topk8.spv \
 	vulkan/moe_gate_up_f32b.spv \
 	vulkan/moe_gate_up_decode.spv \
+	vulkan/moe_gate_up_decode_iq2s.spv \
+	vulkan/moe_down_q2k_sum_decode_iq2s.spv \
 	vulkan/moe_down_q2k_f32b.spv \
 	vulkan/moe_down_q2k_sum_decode.spv \
 	vulkan/moe_gate_up_q4k_f32b.spv \
@@ -294,6 +296,12 @@ vulkan/moe_gate_up_iq2s.spv: vulkan/moe_gate_up.comp
 
 vulkan/moe_gate_up_decode.spv: vulkan/moe_gate_up_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/moe_gate_up_decode_iq2s.spv: vulkan/moe_gate_up_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
+
+vulkan/moe_down_q2k_sum_decode_iq2s.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
 
 vulkan/moe_down_q2k_f32b.spv: vulkan/moe_down_q2k_f32b.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<

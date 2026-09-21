@@ -17,6 +17,9 @@ layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
 layout(set = 0, binding = 3) readonly buffer Scales { float scales[]; };
 layout(set = 0, binding = 4) readonly buffer RouteWeights { float route[]; };
 layout(set = 0, binding = 5) writeonly buffer Output { float y[]; };
+#ifdef Q36_MOE_IQ2S
+layout(set = 0, binding = 6) readonly buffer Tables { uint tables[]; };
+#endif
 
 layout(push_constant) uniform Push {
     uint out_dim;
@@ -28,6 +31,15 @@ layout(push_constant) uniform Push {
 } pc;
 
 const uint Q2K_U16 = 42u;
+#ifdef Q36_MOE_IQ2S
+/* IQ2_S superblock: [d f16][64 qs][8 qh][8 scales] = 82 bytes. */
+const uint IQ2S_BYTES = 82u;
+const uint TAB_IQ2S = 544u;
+
+uint wb_u8(uint off) {
+    return (uint(wb[off >> 1u]) >> (8u * (off & 1u))) & 255u;
+}
+#endif
 
 float fma32(float a, float b, float c) {
     double p = double(a) * double(b);
@@ -55,15 +67,54 @@ void main(void) {
     uint l0 = 2u * v_in;
     uint q_off16 = (32u * v_im + l0) >> 1u;
     uint y_off = 128u * v_im + l0;
+#ifdef Q36_MOE_IQ2S
+    uint row_bytes = pc.blocks * IQ2S_BYTES;
+#else
     uint row_u16 = pc.blocks * Q2K_U16;
+#endif
     float sum = 0.0;
 
     for (uint u = 0u; u < pc.n_used; u++) {
         uint expert = selected[u];
+#ifdef Q36_MOE_IQ2S
+        uint base_bytes = (expert * pc.out_dim + row) * row_bytes;
+#else
         uint base_u16 = (expert * pc.out_dim + row) * row_u16;
+#endif
         uint m2 = u * pc.in_dim / 2u;
         float acc = 0.0;
 
+#ifdef Q36_MOE_IQ2S
+        /* Same element slotting as the Q2_K path: this thread owns the two
+         * elements at y_off + 16*p for p = 0..7 and each 16-element group
+         * carries one IQ2_S scale, one grid index and one sign byte. */
+        for (uint i = ix; i < pc.blocks; i += 2u) {
+            uint bb = base_bytes + i * IQ2S_BYTES;
+            float d = unpackHalf2x16(uint(wb[bb >> 1u])).x;
+            uint y2 = m2 + ((i * 256u + y_off) >> 1u);
+            for (uint p = 0u; p < 8u; p++) {
+                uint n = y_off + 16u * p;
+                uint ib32 = n >> 5u;
+                uint lg = (n >> 3u) & 3u;
+                uint j = n & 7u;
+                uint scb = wb_u8(bb + 74u + ib32);
+                float wsc = d * 0.25 * (0.5 + float(lg < 2u ? (scb & 15u) : (scb >> 4u)));
+                uint entry = wb_u8(bb + 2u + 4u * ib32 + lg) |
+                             ((wb_u8(bb + 66u + ib32) << (8u - 2u * lg)) & 0x300u);
+                uint signs = wb_u8(bb + 34u + 4u * ib32 + lg);
+                uint word = tables[TAB_IQ2S + entry * 2u + (j >> 2u)];
+                /* Both elements share the 8-group's scale, entry and sign byte,
+                 * but each has its own magnitude byte and sign bit. */
+                vec2 gv = vec2(float((word >> (8u * (j & 3u))) & 255u),
+                               float((word >> (8u * ((j + 1u) & 3u))) & 255u));
+                vec2 gsg = mix(vec2(1.0), vec2(-1.0),
+                               bvec2(((signs >> j) & 1u) != 0u,
+                                     ((signs >> (j + 1u)) & 1u) != 0u));
+                vec2 bv = mid[y2 + 8u * p];
+                acc = fma(wsc, dot(gv * gsg, bv), acc);
+            }
+        }
+#else
         for (uint i = ix; i < pc.blocks; i += 2u) {
             uint bb = base_u16 + i * Q2K_U16;
             uint qs_u32 = uint(wb[bb + 8u + q_off16]) |
@@ -117,6 +168,7 @@ void main(void) {
             }
             acc = fma(dm.x, sum1, fma(-dm.y, sum2, acc));
         }
+#endif
 
         acc = subgroupAdd(acc);
         if (tid == 0u) {

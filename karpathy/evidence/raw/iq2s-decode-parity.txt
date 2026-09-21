@@ -1,0 +1,8 @@
+== arm new (defaults) vs arm prev (MOE_DOWN_SUM_DECODE=0), frontier 513
+max_abs_diff=0.906835 at 2810  ref=-2.120771 new=-3.027606
+top1 ref=5316 (18.508701)  new=5316 (18.403240)  same=True
+top64 overlap: 62 /64
+== arm new vs pure matvec arm, frontier 513
+max_abs_diff=1.24518 at 97600  ref=-0.130541 new=-1.375723
+top1 ref=5316 (18.324285)  new=5316 (18.403240)  same=True
+top64 overlap: 60 /64

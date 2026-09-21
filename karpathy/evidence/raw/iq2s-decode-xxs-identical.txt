@@ -1,0 +1,8 @@
+/tmp/preedit/moe_gate_up_decode.comp
+vulkan/moe_gate_up_decode.comp
+/tmp/preedit/moe_down_q2k_sum_decode.comp
+vulkan/moe_down_q2k_sum_decode.comp
+946097d8a26050ef1d0422f659d0f85d85bc1eee9d4af44b03bb0b1a73cb542b  /tmp/x1.spv
+946097d8a26050ef1d0422f659d0f85d85bc1eee9d4af44b03bb0b1a73cb542b  /tmp/x2.spv
+3f316c1615008ed9301434171c9d6dce4b83de1489262bb90c53da8a46621dd5  /tmp/x3.spv
+3f316c1615008ed9301434171c9d6dce4b83de1489262bb90c53da8a46621dd5  /tmp/x4.spv

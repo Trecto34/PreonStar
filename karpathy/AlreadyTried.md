@@ -485,3 +485,46 @@ has IQ2_S members, so `Qwen3.8-35B-A3B-IQ2_M` stops falling into `moe_matvec`.
   still IQ2_XXS-only — porting them should beat the current 1.18× decode, since the
   guard's decode runs exactly those. Upstream's 91.5 t/s decode stays out of reach
   while 10.06 GB of IQ2_S experts stream per token.
+
+## IQ2_M decode takes the f32 identity pair (2026-09-20, accepted)
+
+Continues the entry above. With IQ2_S in the prefill GEMM pair, IQ2_M's decode still
+ran the Q8_K-activation kernels plus a generic `moe_matvec` down; the f32 identity
+pair the guard's own decode uses (`moe_gate_up_decode` + `moe_down_q2k_sum_decode`)
+was IQ2_XXS/Q2_K-only, so the host guard dropped IQ2_S back to the q8 route.
+
+- **What changed.** Both shaders gain an IQ2_S decode built from the same sources
+  with `-DQ36_MOE_IQ2S` (`moe_gate_up_decode_iq2s.spv`,
+  `moe_down_q2k_sum_decode_iq2s.spv`; the down one gains a 7th `tables` binding).
+  The host predicate is now `iq2s && !(gemm || (identity && down_sum_decode))` — the
+  2..31-token small-batch kernels (`moe_gate_up_f32b`, `moe_down_q2k_f32b`) are still
+  IQ2_XXS/Q2_K-only and must not see 82-byte blocks.
+- **Measured (7-rep interleaved, soak-gated entry ≤55 °C, ctx 512, gen 128; arm A =
+  `Q36_VK_MOE_DOWN_SUM_DECODE=0`, i.e. the previous default posture on the same
+  binary):** decode **34.97 → 47.14 t/s = 1.34×** (paired 1.273-1.356, MAD 0.28 →
+  0.16). Prefill is the null control and it is flat: 241.56 → 241.27 (**1.002**),
+  which is what proves the two arms differ only on the decode path.
+- **Cumulative against the all-matvec arm:** prefill 108.21 → 241.27 (**2.23×**),
+  decode 29.52 → 47.14 (**1.60×**).
+- **Parity, frontier 513** (that forward pass is a 1-token identity chunk, i.e.
+  exactly the two new kernels, on top of a 512-token GEMM prefill): vs the previous
+  default posture top-1 identical, top-64 62/64, max_abs 0.907; vs the pure-matvec
+  arm 60/64, max_abs 1.245. The accepted GEMM pair alone measured 64/64 / 0.82, so
+  the decode pair adds a same-class delta, not a new one.
+- **The bug worth remembering.** The first version applied one grid magnitude to
+  both mid elements of each `vec2`: in IQ2_S the *scale* is per 8-group but the
+  *magnitude and sign* are per element. It read as top-64 37/64 with a top-1 flip
+  and max_abs 7.19 — a hard failure, but only because the decode path was compared
+  at a frontier that actually exercises it. Prefill-only frontiers would have
+  shipped it.
+- **Guard:** the IQ2_XXS/Q2_K builds of both touched shaders are byte-identical to
+  the pre-change sources (`946097d8…` gate/up decode, `3f316c16…` down sum-decode).
+- Raw: `evidence/raw/iq2s-decode-ab-iq2m.csv`, `iq2s-decode-ab.sh`,
+  `iq2s-decode-parity.txt`, `iq2s-decode-parity-prefix.txt`,
+  `iq2s-decode-xxs-identical.txt`, `iq2s-decode-diffprof.txt`.
+- **Accepted because** the pair the guard already trusts now covers IQ2_S too, at
+  +34% decode with the guard byte-identical. **Reconsider_if:** the small-batch
+  (2..31 token) f32 kernels are still unported, so a batched server workload on
+  IQ2_M still falls to the q8 route; and the per-token decode profile is now
+  dominated by `dense_kquant` (9.89 ms/tok = 36%) and `moe_tiles` (1.71 ms/tok =
+  6% of dispatch overhead) — the experts are no longer the leading decode cost.
