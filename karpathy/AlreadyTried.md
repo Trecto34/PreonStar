@@ -1036,3 +1036,85 @@ shared-expert gate/up/down), vs 1e's overhead-bound small-tensor half
   `ab-iq2s-tuned-kernel-7rep.csv`, `ab-iq2s-tuned-kernel-summary.txt`,
   `iq2s-tuned-kernel-parity.txt`, `iq2s-tuned-kernel-shader-hashes.txt`,
   `iq2s-tuned-prof-{on,off}-{gen1,gen65,prefill}.txt`.
+
+## IQ2_S in the small-batch (2..127 token) fused MoE expert pair — ACCEPTED (2026-09-21)
+
+Branch `trackB-ptq1_0`, base HEAD `44143d8`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`.
+HANDOFF-iq2s-20260920.md §5 item 2 — the last known q8-route residue on this
+file outside the GEMM range. Full write-up:
+`evidence/raw/iq2s-smallbatch-VERDICT.md`.
+
+- **What it is.** `moe_gate_up_f32b` / `moe_down_q2k_f32b` were IQ2_XXS/Q2_K-only
+  builds, so the admission predicate
+  `if (iq2s && !(gemm || (identity && down_sum_decode))) return 0;` rejected
+  IQ2_S for every `n_tok` between the 1-token identity pair and the GEMM range,
+  and the whole MoE FFN took the q8 route. Ported the same IQ2_S element
+  mapping the decode and GEMM ports already use (82-byte block, `d` f16 at 0,
+  `qs[64]` at 2, signs at 34, `qh[8]` at 66, `scales[8]` at 74, grid at table
+  word 544) into both kernels behind `#ifdef Q36_MOE_IQ2S`, added the `tables`
+  binding the down kernel needed (6 vs 5), and widened the predicate to
+  `if (iq2s && !(gemm || down_iq2s || (identity && down_sum_decode))) return 0;`.
+  Coverage is `n_tok` 2..127, wider than HANDOFF's stated 2..31
+  (`Q36_VK_MOE_PAIR_TILE = 8`, `Q36_VK_MOE_GEMM_MIN` default 128).
+- **Scope is `down_iq2s`-only on purpose**: the IQ3_S-down layers (`il=0,1,2`,
+  entry 1c) still fall back to q8 outside the GEMM range, so this change cannot
+  put an IQ2_S kernel in front of a 110-byte block.
+- **Route-miss evidence that the change is live, not the A/B's assumption**
+  (`Q36_VK_MOE_ROUTE_DEBUG=1`, ctx 512, `--prefill-chunk 16`, `--gen-tokens 0`):
+  A `44143d8` = **1280** misses, B = **96**, and the surviving 96 are exactly
+  `il=0,1,2 × 32 forwards` — i.e. 37 IQ2_S-down layers × 32 forwards moved onto
+  the new kernels. Remaining misses belong to 1c's scope, not this one.
+- **A bug was caught before the benchmark, by measurement not by review.** The
+  first draft hand-derived the IQ2_S slotting and was wrong — `max_abs` 7.86 vs
+  the q8 route, top64 41/64. Isolating it at `n_tok=1` by forcing identity
+  forwards (`Q36_VK_MOE_DOWN_SUM_DECODE=1` vs `=0`) pinned the fault to the down
+  kernel. Replaced the custom layout with the accepted sum-decode IQ2_S loop
+  copied verbatim (`y_off = 128*(itid>>3) + 2*(itid&7)`, `i += 2`, inner
+  `p = 0..7`): 7.86 -> 0.858 vs sum-decode, 0.788 vs q8. Copying an accepted
+  loop beat debugging a novel one.
+- **Parity** (frontier 512, 248,320 logits, three arms): f32b(new) vs q8
+  `max_abs` 0.779015 / top-1 match (13) / top64 61/64; the accepted GEMM arm vs
+  q8 1.15471 / 61/64; f32b vs gemm16 0.980383 / 62/64; guard vs q8 0.796737 /
+  63/64. The new pair is *closer* to q8 than the already-accepted GEMM arm, and
+  61/64 is this file's existing `n_tok>1` round-off floor — same score as the
+  accepted arm, not a new defect.
+- **Verdict: ACCEPTED.** 7-rep interleaved A/B (ctx 512, gen 128, gate 3.4%):
+  at `--prefill-chunk 16` — the arm that actually dispatches `n_tok=16` —
+  prefill **72.92 -> 116.21 t/s = +59.37%** (MAD 0.440/0.130), decode 70.60 ->
+  69.45 = -1.63% (A MAD 1.310). The `--prefill-chunk 256` null control
+  (`n_tok=256` -> `gemm`, changed dispatch site not on the path) reads +3.23%
+  with B MAD 17.08 and fully overlapping ranges: inside the 3.4% MoE floor, no
+  signal, which is the correct result for an untouched path. Decode has no
+  mechanism for a regression (`Q36_VK_MOE_DOWN_SUM_DECODE` defaults on, so the
+  1-token pair was already admitted) and both deltas sit inside the 9.4% spread.
+- Base builds byte-identical: `vulkan/moe_down_q2k_f32b.spv`
+  `0ce317941dbef148…` and `vulkan/moe_gate_up_f32b.spv` `9701f0330b5b5d73…`,
+  equal to the same files built from clean `44143d8`, so every non-IQ2_S build
+  variant is bit-for-bit unchanged. `compat_gate.sh` -> PASS.
+- **Method notes worth reusing.** (1) `--prefill-chunk 16` is the only way the
+  existing harness can be made to dispatch `n_tok ∈ 2..31` at all; a chunk-256
+  A/B would have measured nothing and looked like a null result for a correct
+  change. (2) The baseline must be a worktree at the *candidate's* HEAD, not a
+  stale `/tmp/q36-*` copy: the first attempt used a `b738610` baseline and would
+  have folded the other session's -2.01% `ssm-pair` prefill into this delta.
+  (3) `tests/bench_ab.sh` has no `flock`, so its bare `pgrep` check bounces
+  whenever a *parallel instance* runs a benchmark — two attempts failed that way
+  before the run was queued behind `/tmp/q36-gpu.lock`.
+- Caveat: the target workload (a batched server with concurrent requests) cannot
+  be measured here — `bench_ab.sh` has no concurrency knob — so chunk 16 is a
+  proxy for the routing, not a serving measurement.
+- **Attribution caveat, disclosed rather than buried.** The B arm was the shared
+  main worktree, which at run time also carried the concurrent instance's
+  `dense_extra_*` IQ2_S specialization (default on, committed afterwards as
+  `f36daf4`). The +59.37% is therefore "their change + this one" versus
+  `44143d8`, not this change alone. Two independent reasons it still stands:
+  their own 21-rep A/B measured that peer change at decode +0.52% / prefill
+  -2.02% (both inside the noise floors), and the `--prefill-chunk 256` null
+  control below — where *this* change's dispatch site is never reached — bounds
+  the two combined at <=3.23% with fully overlapping ranges. The route-miss
+  count (1280 -> 96) is specific to this change, was taken on the same B binary,
+  and is what the verdict actually rests on.
+- Raw evidence: `karpathy/evidence/raw/iq2s-smallbatch-VERDICT.md`,
+  `ab-iq2s-smallbatch-chunk{16,256}.{csv,summary}`,
+  `iq2s-smallbatch-parity.txt`, `route-miss-A.txt`, `route-miss-B.txt`,
+  `iq2s-smallbatch-ab3.sh`.

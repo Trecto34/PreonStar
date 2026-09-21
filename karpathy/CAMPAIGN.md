@@ -19,8 +19,12 @@ mechanism is real, unstarted work (see 4f). HANDOFF §5 item 3 (the q8-route
 residue on IQ2_M) was **closed this session** by Mcode: the fused f32 expert
 path now also accepts IQ3_S down projections (prefill +11.91% / decode +4.17%
 at ctx 512, 7 interleaved reps — see 1c and `evidence/raw/iq3s-down-VERDICT.md`).
-Remaining open work: HANDOFF §5 item 2 (small-batch 2..31-token IQ2_S kernels),
-the W8 scratch-cache mechanism, plus PLAN's W9.
+HANDOFF §5 item 2 (small-batch 2..31-token IQ2_S kernels) was **closed this
+session** by the same instance that diagnosed it: the fused f32 expert pair now
+takes IQ2_S at `n_tok` 2..127, route misses at `--prefill-chunk 16` fell
+1280 -> 96, and prefill at that chunk rose 72.92 -> 116.21 t/s (+59.37%, see 1g
+and `evidence/raw/iq2s-smallbatch-VERDICT.md`). Remaining open work: the W8
+scratch-cache mechanism, plus PLAN's W9.
 
 ---
 
@@ -281,13 +285,59 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    `iq2s-tuned-kernel-shader-hashes.txt`,
    `iq2s-tuned-prof-{on,off}-{gen1,gen65,prefill}.txt`.
    Remaining open levers for IQ2_M: (1) small-batch 2..31 token f32 kernels
-   (HANDOFF §5 item 2, owned by a concurrent instance); (2) the dequant
+   (HANDOFF §5 item 2) — **closed by 1g**, landed by the concurrent instance;
+   (2) the dequant
    arithmetic itself inside `dense_extra_decode_iq2s`/`dense_extra_mmq_iq2s`
    (1f's own `reconsider_if`) — the residue's generic-vs-tuned kernel gap is
    now closed, what's left is genuine ALU cost, not misrouting. Evidence:
    `karpathy/HANDOFF-iq2s-20260920.md`, `evidence/raw/iq2s-*`,
    `evidence/raw/kquant-moe-*`, `evidence/raw/ab-kquant-moe-decode*`,
    `AlreadyTried.md`.
+   **1g. IQ2_S in the small-batch (2..127 token) fused MoE expert pair —
+   ACCEPTED (2026-09-21).** HANDOFF §5 item 2, and the last known q8-route
+   residue on IQ2_M outside the GEMM range. `moe_gate_up_f32b` /
+   `moe_down_q2k_f32b` were IQ2_XXS/Q2_K-only builds, so the admission
+   predicate rejected IQ2_S for every `n_tok` between the 1-token identity pair
+   and the GEMM range and the whole MoE FFN took q8. Ported the same IQ2_S
+   mapping the decode/GEMM ports use (82-byte block, grid at table word 544)
+   into both kernels behind `#ifdef Q36_MOE_IQ2S`, added the `tables` binding
+   the down kernel needed (6 vs 5), and widened the predicate to
+   `if (iq2s && !(gemm || down_iq2s || (identity && down_sum_decode))) return 0;`
+   — coverage is `n_tok` 2..127, wider than HANDOFF's stated 2..31
+   (`Q36_VK_MOE_PAIR_TILE = 8`, `Q36_VK_MOE_GEMM_MIN` default 128). Scope is
+   `down_iq2s`-only so the IQ3_S-down layers (1c's `il=0,1,2`) keep their q8
+   fallback and no IQ2_S kernel can ever read a 110-byte block.
+   Route misses (`Q36_VK_MOE_ROUTE_DEBUG=1`, ctx 512, `--prefill-chunk 16`,
+   `--gen-tokens 0`): **1280 -> 96**, the 96 being exactly `il=0,1,2 × 32
+   forwards` — i.e. the change is provably live, which is what makes the chunk
+   16 A/B legible. 7-rep interleaved A/B (ctx 512, gen 128, gate 3.4%):
+   `--prefill-chunk 16` (the arm that actually dispatches `n_tok=16`) prefill
+   **72.92 -> 116.21 t/s (+59.37%, MAD 0.440/0.130)**, decode -1.63% (A MAD
+   1.310, inside the 9.4% spread and with no mechanism — `n_tok==1` routing is
+   untouched). The `--prefill-chunk 256` null control reads +3.23% with B MAD
+   17.08 and fully overlapping ranges: inside the 3.4% floor, no signal, the
+   correct result for a path whose dispatch site is not reached at
+   `n_tok >= Q36_VK_MOE_GEMM_MIN`. Parity (frontier 512, three arms) f32b vs q8
+   `max_abs` 0.779015 / top-1 match / top64 61/64, vs the accepted GEMM arm
+   0.980383 / 62/64 — the new pair is *closer* to q8 than the accepted arm, and
+   61/64 is this file's existing `n_tok>1` floor, not a new defect; guard
+   0.796737 / 63/64 is the pre-existing IQ2_XXS f32b baseline. Base builds
+   byte-identical (`moe_down_q2k_f32b.spv` `0ce317941dbef148…`,
+   `moe_gate_up_f32b.spv` `9701f0330b5b5d73…`); `compat_gate.sh` PASS.
+   One bug caught before landing: the first draft hand-derived the IQ2_S
+   slotting and measured `max_abs` 7.86 / top64 41-of-64; isolated at
+   `n_tok=1` via `Q36_VK_MOE_DOWN_SUM_DECODE=1` vs `=0`, then replaced with the
+   accepted sum-decode loop copied verbatim (7.86 -> 0.858). Attribution
+   disclosed: the B arm was the shared main worktree and also carried the
+   concurrent instance's `dense_extra_*` specialization (1f, committed as
+   `f36daf4` after this run), so the +59.37% is that pair vs `44143d8` — bounded
+   independently by 1f's own measured ~0 and by the chunk-256 control above.
+   Caveat: the real
+   target is a batched server and `bench_ab.sh` has no concurrency knob, so
+   chunk 16 is a routing proxy, not a serving measurement. Evidence:
+   `evidence/raw/iq2s-smallbatch-VERDICT.md`,
+   `ab-iq2s-smallbatch-chunk{16,256}.{csv,summary}`,
+   `iq2s-smallbatch-parity.txt`, `route-miss-{A,B}.txt`.
 2. **Wave32 for the non-mmq paths — MEASURED NEGATIVE, closed (2026-09-17,
    fully closed 2026-09-20).**
    The cheap bound was run first, before any build: `RADV_PERFTEST=cswave32` vs
