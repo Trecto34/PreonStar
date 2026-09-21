@@ -8215,6 +8215,11 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
                                           rt->ffn_selected, rt->ffn_weights,
                                           il, Q36_N_EXPERT_USED, inp, n_tok,
                                           Q36_N_EMBD, Q36_N_FF_EXP, Q36_N_EMBD, Q36_N_EXPERT) != 0;
+    /* Diagnostic only: why a layer left the fused f32 expert path. */
+    if (!routed_done && getenv("Q36_VK_MOE_ROUTE_DEBUG")) {
+        fprintf(stderr, "q36: moe f32 route miss il=%u n_tok=%u gate=%u up=%u down=%u\n",
+                il, n_tok, gate.type, up.type, down.type);
+    }
     if (routed_done && (n_tok == 1 || session_batch) &&
         l->ffn_gate_shexp->type == Q36_TENSOR_Q8_0 &&
         l->ffn_up_shexp->type == Q36_TENSOR_Q8_0 &&

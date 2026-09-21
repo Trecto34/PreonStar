@@ -15,9 +15,12 @@ kernel-selection gate. Fixed and landed this session (prefill +107.85% /
 decode +59.61%, see §6.1 and `AlreadyTried.md`). W8 (long-context KV dequant
 redundancy) measured its go/no-go positive but rejected the QT-widening
 mechanism on a VGPR-ceiling probe before any build; a KV-scratch-cache
-mechanism is real, unstarted work (see 4f). Remaining open work: HANDOFF
-§5 items 2-3 (small-batch IQ2_S kernels, q8-route residue — item 3 assigned
-to Mcode this session), the W8 scratch-cache mechanism, plus PLAN's W9.
+mechanism is real, unstarted work (see 4f). HANDOFF §5 item 3 (the q8-route
+residue on IQ2_M) was **closed this session** by Mcode: the fused f32 expert
+path now also accepts IQ3_S down projections (prefill +11.91% / decode +4.17%
+at ctx 512, 7 interleaved reps — see 1c and `evidence/raw/iq3s-down-VERDICT.md`).
+Remaining open work: HANDOFF §5 item 2 (small-batch 2..31-token IQ2_S kernels),
+the W8 scratch-cache mechanism, plus PLAN's W9.
 
 ---
 
@@ -35,7 +38,7 @@ Current standing, measured on both engines, ctx 1024:
 | Swift Qwen3.8-27B IQ3_XXS (dense) | 171.09 / 23.19 | 105.43 / 22.13 | **+58.7% / +8.0%** |
 | Qwen3.6-35B-A3B IQ2XXS (MoE guard) | 909.49 / 87.37 | 615.08 / 78.72 | **+47.9% / +11.0%** |
 | RavenX-35B-Q36-IQ2XXS (MoE) | 717.36 / 89.47 | 545.46 / 77.96 | **+31.5% / +14.8%** |
-| Qwen3.8-35B-A3B-IQ2_M (MoE) | **507.87 / 75.56** at ctx 512 (landed K-quant gate widening, this session; row above is ctx 1024) | 529.90 / **91.53** at ctx 1024 | **~-4% / -17%** at comparable prefill scale — gap nearly closed, was -54%/-48%; ranked next §6.1 |
+| Qwen3.8-35B-A3B-IQ2_M (MoE) | **556.21 / 78.40** at ctx 512 (landed K-quant gate widening + IQ3_S down projection, this session; row above is ctx 1024) | 529.90 / **91.53** at ctx 1024 | **+5% / -14%** at comparable prefill scale — prefill now ahead, was -54%/-48%; decode still the gap, ranked next §6.1b |
 
 The engine leads on every file it can load. It is already ~1.6x upstream on
 dense prefill. So the remaining work is not "make it fast" — it is "close the
@@ -177,11 +180,28 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    not a localized bug). `./q36_test --vulkan-kernels` CPU-reference oracle
    passes and now actually exercises this path for the first time. Upstream
    gap nearly closed: 507.87/75.56 (ctx 512) vs llama.cpp 529.90/91.53 (ctx
-   1024, not directly comparable but close). Remaining open levers for IQ2_M:
-   (1) small-batch 2..31 token f32 kernels (HANDOFF §5 item 2); (2) q8-route
-   residue, ~7.6% of decode (HANDOFF §5 item 3, assigned to Mcode this
-   session); (3) re-profile now that item 1b has changed where the time goes.
-   Evidence: `karpathy/HANDOFF-iq2s-20260920.md`, `evidence/raw/iq2s-*`,
+   1024, not directly comparable but close).
+   **1c. IQ2_M's q8-route residue — CLOSED & ACCEPTED (2026-09-21, Mcode).**
+   HANDOFF §5 item 3's suspects (in-file MTP/`nextn` head, bank-cache-off
+   layers) were wrong: `Q36_VK_MOE_ROUTE_DEBUG=1` showed the fused f32 expert
+   path was missing on exactly `il=0,1,2`, whose `ffn_down_exps` are
+   **IQ3_S×3** while the other 37 are IQ2_S — a mixed-quant file, not an MTP
+   effect. Fixed by adding an `#ifdef Q36_MOE_IQ3S` branch (110-byte blocks,
+   9-bit grid index) to the *existing* `moe_down_q2k_sum_decode.comp` /
+   `moe_down_gemm.comp` rather than writing a new shader, plus the dispatch
+   split in `q36_vulkan.c`. 7-rep interleaved A/B (ctx 512, gen 128) prefill
+   **497.00 → 556.21 t/s (+11.91%, MAD 15.15/12.40)**, decode **75.26 → 78.40
+   t/s (+4.17%, MAD 0.18/0.10)** — gate ≥3.4% cleared ~3.5x on prefill; the
+   decode claim rests on non-overlapping reps, not a formal gate. Route-miss
+   check now clean; frontier parity at 512/513 preserved (top-1 match, top64
+   62-64), guard byte-identical, `q36_test --vulkan-kernels` + compat gate
+   PASS. Evidence: `evidence/raw/iq3s-down-VERDICT.md`,
+   `evidence/raw/ab-iq3s-down.{csv}` + summary, `evidence/raw/iq3s-down-parity*.txt`.
+   Remaining open levers for IQ2_M: (1) small-batch 2..31 token f32 kernels
+   (HANDOFF §5 item 2); (2) re-profile now that 1b+1c have moved the time —
+   decode is now led by `moe_iq2s_down_sum_decode` (20.3%) and
+   `dense_extra_decode` (16.8%, 258 dispatches/token). Evidence:
+   `karpathy/HANDOFF-iq2s-20260920.md`, `evidence/raw/iq2s-*`,
    `evidence/raw/kquant-moe-*`, `evidence/raw/ab-kquant-moe-decode*`,
    `AlreadyTried.md`.
 2. **Wave32 for the non-mmq paths — MEASURED NEGATIVE, closed (2026-09-17,

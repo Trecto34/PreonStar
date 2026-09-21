@@ -1,0 +1,16 @@
+ctx512 prefill(+1 tok) GPU total = 1899.1 ms ; prefill tps equiv = 269.6
+   629.5 ms   33.1%  disp=  148  moe_iq2s_gate_up_gemm
+   271.5 ms   14.3%  disp= 1032  dense_extra_mmq
+   243.7 ms   12.8%  disp=  148  moe_iq2s_down_gemm
+   227.6 ms   12.0%  disp=   15  moe_iq2s_gate_up
+   145.2 ms    7.6%  disp=   15  moe_matvec
+   124.4 ms    6.6%  disp=  160  dense_kquant_mmq
+    50.5 ms    2.7%  disp=  160  dense_f32f_p_256x2048
+    44.3 ms    2.3%  disp=   40  attn_prefill_qtile2
+    32.5 ms    1.7%  disp=  150  delta_net_decode
+    23.6 ms    1.2%  disp=   48  dense_iq3_mmq
+    21.4 ms    1.1%  disp=  150  recurrent_conv_silu_decode
+    13.9 ms    0.7%  disp=  120  recurrent_norm_gate
+    13.0 ms    0.7%  disp= 1088  q8_k_quant
+    11.4 ms    0.6%  disp=  163  moe_reduce
+512,512,478.91,1,54.10,2060

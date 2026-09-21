@@ -1,0 +1,32 @@
+=== route check (expect no 'route miss' lines) ===
+route check done
+/tmp/q36-bench-ref2 ctx=512 exit=0
+./q36-bench ctx=512 exit=0
+--- IQ2_M frontier 512 ---
+keys: ['source', 'model', 'backend', 'quality', 'quant_bits', 'prompt_tokens', 'frontier_tokens', 'prefill_tokens', 'ctx', 'vocab', 'argmax_id', 'argmax_logit']
+len 248320 248320
+max_abs_diff=0.761865 at 35360  ref=-1.052526 new=-1.814391
+top1 ref=13 (22.091860)  new=13 (22.085030)  same=True
+argmax_id field: 13 13
+top64 overlap: 62 /64
+/tmp/q36-bench-ref2 ctx=513 exit=0
+./q36-bench ctx=513 exit=0
+--- IQ2_M frontier 513 ---
+keys: ['source', 'model', 'backend', 'quality', 'quant_bits', 'prompt_tokens', 'frontier_tokens', 'prefill_tokens', 'ctx', 'vocab', 'argmax_id', 'argmax_logit']
+len 248320 248320
+max_abs_diff=0.865239 at 32617  ref=2.026708 new=1.161470
+top1 ref=5316 (18.779139)  new=5316 (18.809847)  same=True
+argmax_id field: 5316 5316
+top64 overlap: 61 /64
+/tmp/q36-bench-ref2 ctx=513 exit=0
+./q36-bench ctx=513 exit=0
+--- guard frontier 513 ---
+d43ad1c6bc4acd2ef639330caa61ba1b064788871f757a81adcd983e7c6709d5  /tmp/pa-gref/frontier_000513.logits.json
+d43ad1c6bc4acd2ef639330caa61ba1b064788871f757a81adcd983e7c6709d5  /tmp/pa-gnew/frontier_000513.logits.json
+keys: ['source', 'model', 'backend', 'quality', 'quant_bits', 'prompt_tokens', 'frontier_tokens', 'prefill_tokens', 'ctx', 'vocab', 'argmax_id', 'argmax_logit']
+len 248320 248320
+max_abs_diff=0 at -1  ref=-2.786724 new=-2.786724
+top1 ref=5316 (20.067192)  new=5316 (20.067192)  same=True
+argmax_id field: 5316 5316
+top64 overlap: 64 /64
+=== ALL DONE ===

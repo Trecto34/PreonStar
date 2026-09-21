@@ -125,6 +125,7 @@ VULKAN_SHADERS := \
 	vulkan/moe_gate_up_decode.spv \
 	vulkan/moe_gate_up_decode_iq2s.spv \
 	vulkan/moe_down_q2k_sum_decode_iq2s.spv \
+	vulkan/moe_down_q2k_sum_decode_iq3s.spv \
 	vulkan/moe_down_q2k_f32b.spv \
 	vulkan/moe_down_q2k_sum_decode.spv \
 	vulkan/moe_gate_up_q4k_f32b.spv \
@@ -132,6 +133,7 @@ VULKAN_SHADERS := \
 	vulkan/moe_gate_up_gemm.spv \
 	vulkan/moe_gate_up_gemm_iq2s.spv \
 	vulkan/moe_down_gemm_iq2s.spv \
+	vulkan/moe_down_gemm_iq3s.spv \
 	vulkan/moe_down_gemm.spv \
 	vulkan/moe_matvec.spv \
 	vulkan/moe_matvec_fast.spv \
@@ -308,6 +310,11 @@ vulkan/moe_gate_up_decode_iq2s.spv: vulkan/moe_gate_up_decode.comp
 vulkan/moe_down_q2k_sum_decode_iq2s.spv: vulkan/moe_down_q2k_sum_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
 
+# IQ3_S down projection (Qwen3.8-35B-A3B-IQ2_M layers 0-2 carry IQ3_S experts
+# under IQ2_S gate/up).  Same sources as the Q2_K/IQ2_S variants.
+vulkan/moe_down_q2k_sum_decode_iq3s.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3S -o $@ $<
+
 vulkan/moe_down_q2k_f32b.spv: vulkan/moe_down_q2k_f32b.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
@@ -330,6 +337,9 @@ vulkan/moe_gate_up_gemm_iq2s.spv: vulkan/moe_gate_up_gemm.comp
 
 vulkan/moe_down_gemm_iq2s.spv: vulkan/moe_down_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
+
+vulkan/moe_down_gemm_iq3s.spv: vulkan/moe_down_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3S -o $@ $<
 
 vulkan/moe_down_gemm.spv: vulkan/moe_down_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
