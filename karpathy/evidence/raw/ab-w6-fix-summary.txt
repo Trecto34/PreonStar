@@ -1,0 +1,6 @@
+bin  n     prefill_med    mad       decode_med     mad       source
+A    5     170.51         0.430     18.26          0.130     /tmp/w6-armA (Q36_VK_DENSE_IQ3_PAIR=0)
+B    5     172.83         0.790     18.29          0.030     /tmp/w6-armB (Q36_VK_DENSE_IQ3_PAIR=1, fixed load_u32_m)
+
+B vs A prefill: +1.36%   decode: +0.16%   (gate: >= +0.70%)
+verdict: PASS (prefill exceeds +0.70% gate by ~2x; distributions strictly non-overlapping: max A 170.94 < min B 172.04)
