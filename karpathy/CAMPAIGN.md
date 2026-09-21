@@ -189,7 +189,8 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    (+71/-63: double-buffered A, `buf_b` deleted, shuffle-built B operand, one
    barrier dropped) gave prefill 170.93 (MAD 0.080) -> 170.75 (MAD 0.660) =
    **-0.11%**, decode +0.05% -> FAIL, rejected. Staging/barrier/LDS is CLOSED
-   for this kernel. Evidence: `evidence/raw/ab-w8-mmq.csv`.
+   *within one projection*; sharing the stage across the gate/up pair is a
+   different lever and it paid — see 4b. Evidence: `evidence/raw/ab-w8-mmq.csv`.
 4. **FA LDS staging — TRIED, NEUTRAL, rejected (2026-09-17).** The peer's row
    claims PP +5.4% / TG +12.4% and was the largest *unread* gap in that doc. It
    has now been read and implemented rather than assumed: codex +20/-5 to
@@ -202,6 +203,20 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    this kernel — a real kernel-level gain could hide under the floor here. Treat
    the peer's FA number as still unconfirmed on this tree rather than disproven.
    Evidence: `evidence/raw/ab-w10-fa.csv`, patch `evidence/raw/w10-fa.diff`.
+4b. **Dense gate/up pair fusion (W6) — LANDED & ACCEPTED (2026-09-21).** The dense
+   FFN prefill paid the `b16` activation staging + LUT setup twice per workgroup,
+   once for `gate` and again for the identically-shaped `up`. New
+   `vulkan/dense_iq3_xxs_mmq_pair.comp` + `q36_gpu_matmul_iq3_xxs_pair_mmq_tensor()`
+   serve both matrices from one workgroup, amortizing that over 64 weight rows
+   instead of 32, with the unfused kernel's per-matrix arithmetic and store
+   mapping (bit-exact, not merely close). Coverage 94/110 layer-instances (85.5%);
+   the other 16 are genuinely mixed-type gate/up. **Prefill 169.25 (MAD 0.140) ->
+   173.01 (MAD 0.440) = +2.22%**, 7 interleaved reps, ctx 1024; decode +0.55%
+   (noise); gate/up kernel time -8.4% at ctx 512; frontier-513 parity
+   `max_abs_diff = 0`; IQ2_S guard sha256s unchanged. Default ON,
+   `Q36_VK_DENSE_IQ3_PAIR=0` disables. `reconsider_if`: the 16 mixed-type
+   instances become same-type (~+2.6% implied at full coverage). Evidence:
+   `evidence/raw/W6-VERDICT.md`, `ab-w6-pair-{csv,summary.txt,parity.txt,profile.txt}`.
 5. **Where the time actually goes** (Swift IQ3_XXS profile): prefill
    `dense_iq3_xxs_mmq` = **68.1%** of prefill GPU and is *instruction/latency*
    bound (~39% of packed-f16 peak); decode `dense_iq3_xxs_decode_r4` = 57.8% and

@@ -1,0 +1,9 @@
+header note: raw stdout contained runtime "mavis-trash:" lines from the harness temp-file removal; filtered out here (awk keys on field 1, so the verdict was unaffected).
+
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    7     169.25         0.140     18.12          0.100     /tmp/w6-armA
+B    7     173.01         0.440     18.22          0.080     /tmp/w6-armB
+
+B vs A prefill: +2.22%   decode: +0.55%   (gate: +0.70%)
+verdict: PASS (prefill)

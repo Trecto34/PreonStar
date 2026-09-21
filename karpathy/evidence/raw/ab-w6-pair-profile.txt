@@ -1,0 +1,31 @@
+Kernel-time attribution, Swift-27B IQ3_XXS, ctx 512, chunk 256, gen 0.
+Q36_VK_PROF_KERNEL=1 Q36_VK_PROF_PREFILL=1 Q36_VK_PROF_SHAPE=1, same binary,
+arm A Q36_VK_DENSE_IQ3_PAIR=0, arm B =1, single run each (attribution only --
+the verdict comes from the 7-rep interleaved tests/bench_ab.sh run).
+
+== arm A (pair off): gate/up and mmq totals ==
+q36:   op dense_iq3_xxs_mmq_17408x5120_n256 dispatches=118 flushes=0 groups=37760 record_ms=0.359 submit_wait_ms=0.000 gpu_ms=571.803 wall_ms=0.000
+q36:   op dense_iq3_xxs_mmq_5120x17408_n256 dispatches=220 flushes=0 groups=239360 record_ms=0.859 submit_wait_ms=0.000 gpu_ms=937.582 wall_ms=0.000
+q36:   vulkan/dense_iq3_xxs_mmq.spv     dispatches=510 groups=372608 gpu_ms=1892.873 pct=67.8
+q36: Vulkan kernel GPU time total_ms=2792.716
+
+== arm B (pair on) ==
+q36:   op dense_iq3_xxs_mmq_17408x5120_n256 dispatches=118 flushes=0 groups=37760 record_ms=0.257 submit_wait_ms=0.000 gpu_ms=575.164 wall_ms=0.000
+q36:   op dense_iq3_xxs_mmq_5120x10240_n256 dispatches=70 flushes=0 groups=44800 record_ms=0.232 submit_wait_ms=0.000 gpu_ms=175.858 wall_ms=0.000
+q36:   op dense_iq3_xxs_mmq_5120x12288_n256 dispatches=30 flushes=0 groups=23040 record_ms=0.086 submit_wait_ms=0.000 gpu_ms=91.137 wall_ms=0.000
+q36:   op dense_iq3_xxs_mmq_5120x17408_n256 dispatches=126 flushes=0 groups=137088 record_ms=0.376 submit_wait_ms=0.000 gpu_ms=858.915 wall_ms=0.000
+q36:   op dense_iq3_xxs_mmq_5120x6144_n256 dispatches=72 flushes=0 groups=27648 record_ms=0.131 submit_wait_ms=0.000 gpu_ms=116.422 wall_ms=0.000
+q36:   vulkan/dense_iq3_xxs_mmq_pair.spv dispatches=94 groups=102272 gpu_ms=728.038 pct=27.3
+q36:   vulkan/dense_iq3_xxs_mmq.spv     dispatches=322 groups=168064 gpu_ms=1089.459 pct=40.8
+q36: Vulkan kernel GPU time total_ms=2670.930
+
+Reading: the pair spv total line counts only single-projection dispatches
+(510 -> 322 = exactly 188 removed = 94 paired layer-instances x2), and the
+pair kernel's own 94 dispatches/728.0 ms are ALSO folded into the
+5120x17408 shape line, so that shape line double-counts in arm B.
+Consistent arithmetic:
+  gate/up 937.6 ms (A) -> 130.9 ms leftover singles + 728.0 ms pair = 858.9 ms (B) = -8.4%
+  mmq spv total 1892.9 -> 1089.5 ms, plus pair 728.0 = 1817.5 ms (-4.0%)
+  whole-run kernel total 2792.7 -> 2670.9 ms (-4.36%)
+  unpaired = 16 of 110 layer-instances per pass (32 single dispatches);
+  mixed-type gate/up (IQ3_XXS gate with a non-XXS up) and il 63 IQ3_S/IQ4_XS.

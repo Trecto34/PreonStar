@@ -8114,6 +8114,26 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
                 Q36_N_EMBD, Q36_N_FF_SHARED, inp) != 0;
         }
 #endif
+#ifndef Q36_METAL
+        /* Vulkan prefill pair: one dispatch decodes the gate and up tiles
+         * against a single staged activation tile.  n_tok == 1 keeps the
+         * per-row decode kernels, and any refusal falls through to the two
+         * single-projection dispatches below. */
+        {
+            const char *iq3_pair = getenv("Q36_VK_DENSE_IQ3_PAIR");
+            if (!pair_projected && n_tok > 1u &&
+                (!iq3_pair || iq3_pair[0] != '0') &&
+                l->ffn_gate_shexp->type == Q36_TENSOR_IQ3_XXS &&
+                l->ffn_up_shexp->type == Q36_TENSOR_IQ3_XXS) {
+                pair_projected = q36_gpu_matmul_iq3_xxs_pair_mmq_tensor(
+                    rt->ffn_shared_gate, rt->ffn_shared_up,
+                    m->map, m->size,
+                    l->ffn_gate_shexp->abs_offset,
+                    l->ffn_up_shexp->abs_offset,
+                    Q36_N_EMBD, Q36_N_FF_SHARED, ffn_q8, n_tok, 1.0f) != 0;
+            }
+        }
+#endif
         if (!pair_projected &&
             (!q36_gpu_tensor_matmul_q8_or_float_scaled(
                  m, l->ffn_gate_shexp, ffn_in, ffn_q8,

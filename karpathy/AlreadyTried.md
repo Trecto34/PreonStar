@@ -624,3 +624,49 @@ Full write-up: `karpathy/evidence/raw/W5-VERDICT.md`.
 
 
 
+
+## W6 — merged Vulkan dense gate_up (one dispatch for the gate/up pair) — ACCEPTED (2026-09-21)
+
+Branch `trackB-ptq1_0`, base `6b74da5`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`
+(dense, 5120 embed dim). Full write-up: `karpathy/evidence/raw/W6-VERDICT.md`.
+
+- **Hypothesis**: the dense FFN prefill spends its per-workgroup activation
+  staging (`b16`) and LUT setup twice — once for `gate` (5120x17408) and again
+  for `up` (same shape, same activation). One workgroup serving both matrices
+  amortizes that over 64 weight rows instead of 32.
+- **Probe before building**: temporarily dropping the b16 staging loads from
+  `dense_iq3_xxs_mmq.comp` moved mmq 1893.6 -> 1625.1 ms (-14.2%) and prefill
+  178.56 -> 197.42 t/s (+10.6%) — the ceiling, and the reason to implement
+  rather than reject. Probe reverted; `dense_iq3_xxs_mmq.spv` md5 unchanged.
+- **Implemented**: new `vulkan/dense_iq3_xxs_mmq_pair.comp` (bindings: gate w,
+  up w, gate out, up out, tables, b16) + `q36_gpu_matmul_iq3_xxs_pair_mmq_tensor()`
+  in `q36_vulkan.c`, called from `q36_forward_ffn_vulkan_model` (`q36.c`).
+  BM/BN/BK, per-matrix accumulation order and store mapping are the unfused
+  kernel's, so each element is bit-identical. `sum[32]` costs 16 VGPRs, +2176 B LDS.
+- **Coverage 94/110 layer-instances (85.5%)**: the 16 that stay on the single path
+  are genuinely mixed-type (IQ3_XXS gate with a non-XXS up) or IQ3_S/IQ4_XS, which
+  one decoder cannot serve.
+- **Parity is bit-exact**: frontier 513 on Swift-27B, pair off vs on, single
+  binary — `max_abs_diff = 0` over all 248,320 logits, argmax 5316 (19.820942)
+  both arms, top-64 overlap 64/64.
+- **7-rep interleaved A/B on Swift 27B (ctx 1024, gen 16, chunk 256)**, one
+  binary, wrappers differing only in `Q36_VK_DENSE_IQ3_PAIR`:
+  - Arm A (pair off): prefill **169.25 tok/s** (MAD 0.140), decode **18.12 tok/s** (MAD 0.100).
+  - Arm B (pair on): prefill **173.01 tok/s** (MAD 0.440), decode **18.22 tok/s** (MAD 0.080).
+  - Delta: prefill **+2.22%** (PASSES the dense ≥ +0.70% gate, 3.2x it), decode
+    **+0.55%** (inside the 9.4% decode spread — neutral). Arms do not overlap:
+    max A 170.48 < min B 171.90.
+- **Attribution** (ctx 512, gen 0, `Q36_VK_PROF_*`): gate/up 937.6 -> 858.9 ms
+  (**-8.4%**), mmq 1892.9 -> 1089.5 + 728.0 = 1817.5 ms (-4.0%), whole-run kernel
+  total 2792.7 -> 2670.9 ms (-4.36%). The spv dispatch drop 510 -> 322 is exactly
+  the 188 removed singles (94 pairs x 2).
+- **Verdict: ACCEPTED, default ON** (`Q36_VK_DENSE_IQ3_PAIR=0` disables).
+  The earlier "staging/barrier/LDS is CLOSED for this kernel" note (item 3b,
+  codex double-buffered restructure, -0.11%) still holds *within one projection*;
+  what pays is sharing the stage **across the gate/up pair**, not restaging it
+  faster. `reconsider_if`: the 16 mixed-type instances become same-type
+  (measured +2.22% at 85.5% coverage implies ~+2.6% at full), or a future part
+  where the second A tile costs occupancy.
+- Raw evidence: `karpathy/evidence/raw/ab-w6-pair.csv`,
+  `ab-w6-pair-summary.txt`, `ab-w6-pair-parity.txt`, `ab-w6-pair-profile.txt`,
+  `W6-VERDICT.md`.

@@ -244,6 +244,19 @@ int q36_gpu_matmul_iq3_s_pair_tensor(
         uint64_t                out_dim,
         const q36_gpu_tensor *x);
 
+int q36_gpu_matmul_iq3_xxs_pair_mmq_tensor(
+        q36_gpu_tensor       *out_a,
+        q36_gpu_tensor       *out_b,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                weight_a_offset,
+        uint64_t                weight_b_offset,
+        uint64_t                in_dim,
+        uint64_t                out_dim,
+        const q36_gpu_tensor *q8,
+        uint64_t                n_tok,
+        float                   scale);
+
 int q36_gpu_matmul_iq3_xxs_pair_tensor(
         q36_gpu_tensor       *out_a,
         q36_gpu_tensor       *out_b,

@@ -1,0 +1,15 @@
+Frontier 513 oracle parity on Swift-Qwen3.8-27B-IQ3_XXS.gguf.
+One binary, env-gated: arm A Q36_VK_DENSE_IQ3_PAIR=0, arm B =1.
+
+  env Q36_VK_DENSE_IQ3_PAIR=<0|1> ./q36-bench --vulkan \
+    -m /home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf \
+    --prompt-file tests/long_context_story_prompt.txt \
+    --ctx-start 513 --ctx-max 513 --ctx-alloc 642 --prefill-chunk 256 \
+    --gen-tokens 16 --dump-frontier-logits-dir <DIR>
+
+dumps: /tmp/w6par1789962889/ref (pair off)  /tmp/w6par1789962889/cand (pair on)
+
+frontier_000513.logits.json len=248320 max_abs_diff=0 argmax 5316(19.820942) vs 5316(19.820942) top64 64/64
+
+files=1 bad=0 worst_max_abs_diff=0 at idx -1 top1_same=1/1 top64_overlap=64/64
+VERDICT: BIT-EXACT
