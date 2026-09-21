@@ -579,3 +579,28 @@ Branch `trackB-ptq1_0`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`. Full write-up:
   `ab-w3-deltacol-summary.txt`, `ab-w3-deltacol-parity.txt`,
   `ab-w3-deltacol-w32-parity.txt`, `ab-w3-ctx512-diagnostic.txt`.
 
+## W4 — Wave32 clean-scan shaders A/B — REJECTED, NEUTRAL/NO WIN (2026-09-20)
+
+Branch `trackB-ptq1_0`, models `Qwen3.8-35B-A3B-IQ2_M.gguf` and Guard MoE.
+Full write-up: `karpathy/evidence/raw/W4-VERDICT.md`.
+
+- **Tested via `Q36_VK_WAVE32_CLEAN=1`**: forcing wave32 across the clean-scan
+  shader set (`karpathy/evidence/wave32-eligibility.md` §3b: `moe_matvec.spv`,
+  `moe_matvec_fast.spv`, `matmul_q8_0_decode*.spv`, `add_rms_norm.spv`,
+  `rms_norm*.spv`, `kv_store_quant.spv`).
+- **Parity is bit-exact**: `max_abs_diff = 0` across all 248,320 logits on both
+  IQ2_M and the Guard model.
+- **7-rep interleaved A/B on IQ2_M (ctx 512, gen 128)**: prefill **242.43
+  (MAD 0.500) → 240.00 (MAD 1.270) = -1.00%** (inside the 3.4% MoE prefill noise
+  floor; fails the ≥+3.4% gate); decode **46.62 → 46.62 = +0.00%** (exact tie).
+  Single-run diagnostic on Guard MoE: **669.86 → 640.90 (-4.32%)**, showing no
+  positive signal.
+- **Verdict: REJECTED & CLOSED.** The unrun test from the wave32 audit is now
+  measured: native wave64 remains optimal for these non-mmq shaders on GFX1013.
+  `reconsider_if`: A future compiler or hardware revision where wave32 enables
+  double active waves without doubling scheduling overhead.
+- Raw evidence: `karpathy/evidence/raw/ab-w4-wave32-iq2m.csv`,
+  `ab-w4-wave32-iq2m-summary.txt`, `ab-w4-wave32-parity.txt`,
+  `ab-w4-wave32-guard.txt`.
+
+

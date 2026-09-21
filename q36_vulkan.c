@@ -1646,6 +1646,24 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
     for (size_t i = 0; !force_wave32 && i < sizeof(q36_vk_force_wave32) / sizeof(*q36_vk_force_wave32); i++) {
         force_wave32 = strstr(k->path, q36_vk_force_wave32[i]) != NULL;
     }
+    static const char *const q36_vk_clean_scan_wave32[] = {
+        "moe_matvec.spv",
+        "moe_matvec_fast.spv",
+        "matmul_q8_0_decode.spv",
+        "matmul_q8_0_decode_b64.spv",
+        "matmul_q8_0_decode_q36.spv",
+        "add_rms_norm.spv",
+        "rms_norm.spv",
+        "rms_norm_rope_qwen.spv",
+        "rms_norm_rope_kv_qwen.spv",
+        "kv_store_quant.spv",
+    };
+    const char *clean_env = getenv("Q36_VK_WAVE32_CLEAN");
+    if (clean_env && clean_env[0] && clean_env[0] != '0') {
+        for (size_t i = 0; !force_wave32 && i < sizeof(q36_vk_clean_scan_wave32) / sizeof(*q36_vk_clean_scan_wave32); i++) {
+            force_wave32 = strstr(k->path, q36_vk_clean_scan_wave32[i]) != NULL;
+        }
+    }
     /* dense_extra_decode_ptq1_0 is the mirror-image trap: it partitions all
      * 128 weights of a PTQ1_0 block across every lane of the 64-wide
      * workgroup (b_start = lid>>3) and recovers the true dot product with
@@ -1666,6 +1684,7 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
         stage.pNext = &subgroup_size64;
         stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
+
     VkComputePipelineCreateInfo cpci = {
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage = stage,
@@ -1674,7 +1693,7 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
     /* Q36_VK_SHADER_TRACE=1 names each pipeline as it is built, so an
      * RADV_DEBUG=shaderstats dump (which prints VGPR/LDS with no shader
      * name) can be attributed to a shader. */
-    if (getenv("Q36_VK_SHADER_TRACE")) fprintf(stderr, "q36: building pipeline %s\n", k->path);
+    if (getenv("Q36_VK_SHADER_TRACE")) fprintf(stderr, "q36: building pipeline %s%s\n", k->path, force_wave32 ? " [wave32]" : "");
     rc = vkCreateComputePipelines(q36_vk.device, VK_NULL_HANDLE, 1, &cpci, NULL, &k->pipeline);
     if (rc != VK_SUCCESS) {
         fprintf(stderr, "q36: vkCreateComputePipelines failed for %s (%d)\n", k->path, rc);

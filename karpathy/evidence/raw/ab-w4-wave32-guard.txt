@@ -1,0 +1,11 @@
+Frontier 512 parity & throughput on Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf:
+Reference (stock): prefill 669.86 tps, gen 87.50 tps
+Candidate (Q36_VK_WAVE32_CLEAN=1): prefill 640.90 tps, gen 88.24 tps
+Delta prefill: -4.32%
+
+Parity:
+len 248320 248320
+max_abs_diff=0 at -1  ref=-2.388482 new=-2.388482
+top1 ref=13 (22.492279)  new=13 (22.492279)  same=True
+argmax_id field: 13 13
+top64 overlap: 64 /64

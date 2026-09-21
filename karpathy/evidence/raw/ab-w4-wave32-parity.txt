@@ -1,0 +1,6 @@
+Frontier 512 parity on Qwen3.8-35B-A3B-IQ2_M.gguf (Q36_VK_WAVE32_CLEAN=0 vs 1):
+len 248320 248320
+max_abs_diff=0 at -1  ref=-3.524223 new=-3.524223
+top1 ref=13 (22.079449)  new=13 (22.079449)  same=True
+argmax_id field: 13 13
+top64 overlap: 64 /64
