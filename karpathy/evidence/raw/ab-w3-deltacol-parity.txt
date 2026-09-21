@@ -1,0 +1,7 @@
+Frontier 512 logits parity (Swift-Qwen3.8-27B-IQ3_XXS.gguf):
+Ref: Q36_VK_DELTA_COL_PREFILL=0 (delta_net_decode_reg_f16)
+Cand: Q36_VK_DELTA_COL_PREFILL=1 (delta_net_cols)
+max_abs_diff=19.1229 at 1973  ref=18.055586 new=-1.067274
+top1 ref=13 (21.107763)  new=29 (10.115843)  same=False
+argmax_id field: 13 29
+top64 overlap: 3 /64

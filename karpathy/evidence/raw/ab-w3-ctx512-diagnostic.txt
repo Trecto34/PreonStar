@@ -1,0 +1,14 @@
+Model: Swift-Qwen3.8-27B-IQ3_XXS.gguf
+Prompt: tests/long_context_story_prompt.txt
+Configuration: ctx-start 512, ctx-max 512, ctx-alloc 641, prefill-chunk 256, gen-tokens 16
+
+1. Stock Reference (delta_net_decode_reg_f16, Q36_VK_DELTA_COL_PREFILL=0):
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+512,512,184.32,16,21.78,2060
+
+2. Wave32-forced delta_net_cols (Q36_VK_DELTA_COL_PREFILL=1 with wave32 fix):
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+512,512,171.04,16,21.53,2060
+
+Delta at ctx 512: 184.32 -> 171.04 tok/s (-7.20% prefill).
+Matches the ctx 1024 7-rep A/B regression trend (170.77 -> 166.54 tok/s, -2.48%).

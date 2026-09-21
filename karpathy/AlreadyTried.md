@@ -551,3 +551,31 @@ Branch `trackB-ptq1_0`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`. Full write-up:
   (373.5 GB/s). ALU optimizations cannot exceed this floor.
 - Raw evidence: `karpathy/evidence/raw/iq3xxs-isa/` (`base_gen*.txt`,
   `ablate_gen*.txt`, `*.stats.txt`, `*.isa.txt`, `W2-VERDICT.md`).
+
+## W3 — delta_net_cols prefill on BC-250 — REJECTED, FREEZE; WAVE32 BUG FIXED (2026-09-20)
+
+Branch `trackB-ptq1_0`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`. Full write-up:
+`karpathy/evidence/raw/W3-VERDICT.md`.
+
+- **Tested via `Q36_VK_DELTA_COL_PREFILL=1`**: 7-rep interleaved A/B at ctx 1024,
+  gen 16. Prefill **170.77 (MAD 0.500) → 166.54 (MAD 0.500) = -2.48%** (FAIL vs
+  ≥+1.5% gate, negative in all 7 pairs), decode **18.06 → 17.93 = -0.72%**.
+  Ctx 512 diagnostic corroborates: **184.32 → 171.04 = -7.20%**.
+- **Latent correctness bug found and fixed:** `delta_net_cols` hard-assumes
+  wave32 (`gl_SubgroupID` 0..3 for 4 columns, `gl_SubgroupInvocationID` 0..31 for
+  rows), but `q36_vk_force_wave32` previously matched `"delta_net_cols.spv"`.
+  When Swift runs f16 recurrent state, the dispatched pipeline is
+  `delta_net_cols_f16.spv`, which missed the pattern and ran at BC-250's native
+  wave64 (only 2 subgroups), skipping half the state columns and writing OOB up
+  to row 159 (row size 128), producing catastrophic parity failure (`max_abs`
+  19.12, top-1 flip 13 vs 29, top-64 overlap 3/64). Widening the pattern in
+  `q36_vulkan.c` to `"delta_net_cols"` restored parity (`max_abs` 0.767, top-1
+  identical 13/13, top-64 61/64).
+- **Verdict: REJECTED & FROZEN.** `delta_net_cols` is slower on BC-250 than the
+  native wave64 register recurrence (`delta_net_decode_reg_f16`). The default
+  guard `!q36_vk.bc250` at `q36_vulkan.c:1225` is verified correct and remains
+  frozen. The wave32 force fix is committed as a latent correctness fix.
+- Raw evidence: `karpathy/evidence/raw/ab-w3-deltacol.csv`,
+  `ab-w3-deltacol-summary.txt`, `ab-w3-deltacol-parity.txt`,
+  `ab-w3-deltacol-w32-parity.txt`, `ab-w3-ctx512-diagnostic.txt`.
+

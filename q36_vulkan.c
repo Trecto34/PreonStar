@@ -1630,7 +1630,7 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
      * only 2 subgroups exist and the tail of every tile is written by
      * nobody.  That is why the whole dense `_mmq` family is forced here. */
     static const char *const q36_vk_force_wave32[] = {
-        "delta_net_cols.spv",
+        "delta_net_cols",
         "rope_qwen.spv",
         "rope_qwen_mrope.spv",
         "quantize_q8_0.spv",

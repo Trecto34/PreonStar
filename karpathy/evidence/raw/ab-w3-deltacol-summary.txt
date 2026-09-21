@@ -1,0 +1,7 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    7     170.77         0.500     18.06          0.010     /tmp/wrap_stock.sh
+B    7     166.54         0.500     17.93          0.070     /tmp/wrap_deltacol.sh
+
+B vs A prefill: -2.48%   decode: -0.72%   (gate: +1.50%)
+verdict: FAIL (prefill)
