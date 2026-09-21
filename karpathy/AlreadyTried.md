@@ -438,3 +438,50 @@ IQ2_M under q36 is 4.5×/3.1× slower than upstream on the identical file
   decode on this box" thesis **does not transfer to q36** until that dispatch
   exists. Ranking the loader fix as a *speed* item was this campaign's error.
 
+
+## IQ2_M experts land on the fused IQ2_S path (2026-09-20, accepted)
+
+Closes the 2026-09-17 dispatch item above: the per-quant prefill GEMM family now
+has IQ2_S members, so `Qwen3.8-35B-A3B-IQ2_M` stops falling into `moe_matvec`.
+
+- **What changed.** `moe_gate_up.comp` (q8_K activations), `moe_gate_up_gemm.comp`
+  and `moe_down_gemm.comp` gain an IQ2_S decode, built from the *same* sources with
+  `-DQ36_MOE_IQ2S` into `moe_gate_up_iq2s.spv` / `moe_gate_up_gemm_iq2s.spv` /
+  `moe_down_gemm_iq2s.spv`. Host side: `q36_vk_moe_gate_up_iq2_swiglu` accepts
+  IQ2_S pairs at 82 bytes/block, and `q36_gpu_moe_ffn_f32_tensor` accepts IQ2_S
+  gate/up/down with 82-byte `gu_stride`/`down_stride` plus a sixth `tables`
+  binding for the down GEMM. The IQ2_XXS/Q2_K builds are **byte-identical** to the
+  pre-change binaries (`b46fa81a…` gate/up GEMM, `93a38508…` down GEMM,
+  `601d56a9…` q8 gate/up), so the guard is untouched *by construction*, not by
+  measurement.
+- **Measured (7-rep interleaved, soak-gated entry ≤55 °C, actual 52-56 °C, sclk
+  500 MHz, ctx 512, gen 128, `Q36_VK_MOE_GEMM=0 Q36_VK_MOE_GATE_UP=0` as arm A):**
+  prefill **108.21 → 241.20 t/s = 2.23×** (paired per-pair 2.188-2.254, MAD
+  0.49 → 1.40), decode **29.52 → 34.81 t/s = 1.18×** (MAD 0.87 → 0.07).
+- **Profile at ctx 512:** `moe_matvec` 6355 ms (arm A) → `moe_iq2s_gate_up_gemm`
+  637 ms + `moe_iq2s_down_gemm` 253 ms (arm B). Decode still runs
+  `moe_iq2s_gate_up` 276 ms + a 218 ms matvec for the down.
+- **Parity.** Against the matvec arm at a 512-token frontier: top-1 identical,
+  top-64 64/64, max_abs 0.82. Calibration for "is that small enough": the *shipped*
+  IQ2_XXS+Q2_K GEMM, toggled the same way on the guard, is 64/64 with max_abs 0.42 —
+  same class, and IQ2_S carries 25% more bits per weight.
+- **The calibration caught a real bug, which is why it was run.** The first port
+  folded the 32-element group's low nibble scale into the wrong kk half for rows
+  whose LDS swizzle has bit 2 set — 50% of rows, silently. It read as top-64 59/64 /
+  max_abs 1.89, not as garbage; the fix is `h == (swz_ry >> 2u)` in the fold.
+  Compare `iq2s-gemm-parity-prefix.txt` against `iq2s-gemm-parity.txt`.
+- **Do not trust `--vulkan-fusion-parity` as the gate here.** Its env list toggles
+  `Q36_VK_MOE_GEMM` but **not** `Q36_VK_MOE_GATE_UP`, so it can pass while comparing
+  the new kernel against itself; with a 6-token prompt `gemm` is off anyway. The
+  gate used was the frontier logits dump with `Q36_VK_MOE_GEMM=0
+  Q36_VK_MOE_GATE_UP=0`.
+- Raw: `evidence/raw/iq2s-gemm-ab-iq2m.csv`, `iq2s-gemm-ab.sh`,
+  `iq2s-gemm-matvec-ref.txt`, `iq2s-gemm-new-prof.txt`, `iq2s-gemm-parity.txt`,
+  `iq2s-gemm-parity-prefix.txt`, `iq2s-gemm-guard-calibration.txt`,
+  `iq2s-gemm-xxs-identical.txt`.
+- **Accepted because** it is a 2.2× prefill / 1.18× decode gain on a file the engine
+  could load but not schedule, with zero risk to the guard. **Reconsider_if:** the
+  decode-side f32 kernels (`moe_gate_up_decode`, `moe_down_q2k_sum_decode`) are
+  still IQ2_XXS-only — porting them should beat the current 1.18× decode, since the
+  guard's decode runs exactly those. Upstream's 91.5 t/s decode stays out of reach
+  while 10.06 GB of IQ2_S experts stream per token.

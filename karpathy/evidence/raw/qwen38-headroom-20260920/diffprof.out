@@ -1,0 +1,52 @@
+  27.438 ms/tok  56.6%  SPV:vulkan/dense_iq3_xxs_decode_r4
+  27.438 ms/tok  56.6%  dense_iq3_xxs_decode
+   5.813 ms/tok  12.0%  SPV:vulkan/dense_q5k_decode
+   5.813 ms/tok  12.0%  dense_q5k_decode
+   4.160 ms/tok   8.6%  dense_iq4_xs_decode
+   4.160 ms/tok   8.6%  SPV:vulkan/dense_iq4_xs_decode
+   2.866 ms/tok   5.9%  dense_q4k_decode
+   2.866 ms/tok   5.9%  SPV:vulkan/dense_q4k_decode
+   1.828 ms/tok   3.8%  dense_iq3_mmq
+   1.828 ms/tok   3.8%  SPV:vulkan/dense_iq3_xxs_mmq
+   1.468 ms/tok   3.0%  attn_decode_split
+   1.468 ms/tok   3.0%  SPV:vulkan/attn_decode_split
+   1.113 ms/tok   2.3%  add_rms_norm
+   1.113 ms/tok   2.3%  SPV:vulkan/add_rms_norm
+   0.946 ms/tok   2.0%  SPV:vulkan/matmul_f32_fast
+   0.930 ms/tok   1.9%  dense_f32f_d_other
+   0.774 ms/tok   1.6%  SPV:vulkan/delta_net_decode_reg_f16
+   0.774 ms/tok   1.6%  delta_net_decode
+   0.678 ms/tok   1.4%  dense_q6k_decode
+   0.678 ms/tok   1.4%  SPV:vulkan/dense_kquant_decode
+   0.340 ms/tok   0.7%  SPV:vulkan/quantize_q8_k
+   0.340 ms/tok   0.7%  q8_k_quant
+   0.238 ms/tok   0.5%  SPV:vulkan/dense_kquant_mmq
+   0.238 ms/tok   0.5%  dense_kquant_mmq
+   0.235 ms/tok   0.5%  recurrent_norm_gate_q8_k
+   0.235 ms/tok   0.5%  SPV:vulkan/recur_norm_gate_q8_k
+   0.178 ms/tok   0.4%  swiglu_q8_k
+   0.178 ms/tok   0.4%  SPV:vulkan/swiglu_q8_k
+   0.136 ms/tok   0.3%  norm_rope_kv_quant
+   0.136 ms/tok   0.3%  SPV:vulkan/rms_norm_rope_kv_qwen_quant
+   0.129 ms/tok   0.3%  recurrent_conv_silu_decode
+   0.129 ms/tok   0.3%  SPV:vulkan/recur_conv_silu_decode
+   0.119 ms/tok   0.2%  SPV:vulkan/delta_qkv
+   0.119 ms/tok   0.2%  delta_qkv_l2
+   0.050 ms/tok   0.1%  attn_prefill_qtile2_gqa6
+   0.050 ms/tok   0.1%  SPV:vulkan/attn_prefill_qtile2_gqa6
+   0.048 ms/tok   0.1%  SPV:vulkan/rms_norm_rope_qwen
+   0.048 ms/tok   0.1%  norm_rope
+   0.044 ms/tok   0.1%  delta_gates
+   0.044 ms/tok   0.1%  SPV:vulkan/delta_gates
+   0.028 ms/tok   0.1%  attn_combine
+   0.028 ms/tok   0.1%  SPV:vulkan/attn_combine
+   0.022 ms/tok   0.0%  SPV:vulkan/rms_norm
+   0.022 ms/tok   0.0%  norm
+   0.016 ms/tok   0.0%  dense_f32f_p_other
+   0.013 ms/tok   0.0%  SPV:vulkan/top2
+   0.008 ms/tok   0.0%  top2_stage1
+TOTAL GPU 48.49 ms/tok
+qwen38-diff1.txt ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+qwen38-diff1.txt 512,512,176.71,1,20.37,2060
+qwen38-diff65.txt ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+qwen38-diff65.txt 512,512,178.04,65,20.23,2060

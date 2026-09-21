@@ -27,6 +27,17 @@ const uint TILE_WORDS = 1u + PAIR_TILE;
 const uint INVALID_PAIR = 0xffffffffu;
 const uint Q8K_WORDS = 74u;
 
+#ifdef Q36_MOE_IQ2S
+/* IQ2_S superblock: [d f16][64 qs][8 qh][8 scales] = 82 bytes, 1024-entry
+ * int8 grid, one 4-bit scale per 32-weight sub-block.  Same activation
+ * layout (Q8_K) and the same ls = 2*nibble+1 / *0.125 folding as the
+ * IQ2_XXS path, so only the weight decode differs. */
+const uint BLOCK_BYTES = 82u;
+const uint TAB_IQ2S = 544u;
+#else
+const uint BLOCK_BYTES = 66u;
+#endif
+
 shared uint sh_q8[Q8K_WORDS * PAIR_TILE];
 shared float sh_gate[64u * PAIR_TILE];
 shared float sh_up[64u * PAIR_TILE];
@@ -77,6 +88,19 @@ int signed_grid4(uint grid_word, uint signs, uint bit0, uint q8_word) {
     return sumi;
 }
 
+#ifdef Q36_MOE_IQ2S
+/* IQ2_S grid entries are signed int8, unlike the unsigned IQ2_XXS codebook. */
+int signed_grid4_i8(uint grid_word, uint signs, uint bit0, uint q8_word) {
+    int sumi = 0;
+    for (uint j = 0u; j < 4u; j++) {
+        uint shift = 8u * j;
+        int prod = i8((grid_word >> shift) & 255u) * i8((q8_word >> shift) & 255u);
+        sumi += ((signs >> (bit0 + j)) & 1u) != 0u ? -prod : prod;
+    }
+    return sumi;
+}
+#endif
+
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
     uint row = gl_WorkGroupID.x * 8u + (lid >> 3u);
@@ -119,8 +143,8 @@ void main(void) {
             float yd[PAIR_TILE];
             int gate_lk[PAIR_TILE];
             int up_lk[PAIR_TILE];
-            uint gate_base = gate_row_base + b * 66u;
-            uint up_base = up_row_base + b * 66u;
+            uint gate_base = gate_row_base + b * BLOCK_BYTES;
+            uint up_base = up_row_base + b * BLOCK_BYTES;
             float gate_wd = gate_f16(gate_base);
             float up_wd = up_f16(up_base);
 
@@ -130,6 +154,35 @@ void main(void) {
                 up_lk[u] = 0;
             }
 
+#ifdef Q36_MOE_IQ2S
+            for (uint ib = 0u; ib < 8u; ib++) {
+                uint g_qh = gate_u8(gate_base + 66u + ib);
+                uint g_sc = gate_u8(gate_base + 74u + ib);
+                uint u_qh = up_u8(up_base + 66u + ib);
+                uint u_sc = up_u8(up_base + 74u + ib);
+                uint l = lane >> 1u;
+                uint side = lane & 1u;
+                uint bit0 = side * 4u;
+                uint g_ls = 1u + 2u * (l < 2u ? (g_sc & 15u) : (g_sc >> 4u));
+                uint u_ls = 1u + 2u * (l < 2u ? (u_sc & 15u) : (u_sc >> 4u));
+                uint g_entry = gate_u8(gate_base + 2u + 4u * ib + l) |
+                               ((g_qh << (8u - 2u * l)) & 0x300u);
+                uint u_entry = up_u8(up_base + 2u + 4u * ib + l) |
+                               ((u_qh << (8u - 2u * l)) & 0x300u);
+                uint g_sgn = gate_u8(gate_base + 34u + 4u * ib + l);
+                uint u_sgn = up_u8(up_base + 34u + 4u * ib + l);
+                uint gate_word = tables[TAB_IQ2S + g_entry * 2u + side];
+                uint up_word = tables[TAB_IQ2S + u_entry * 2u + side];
+                uint q8_word_off = 2u + ib * 8u + lane;
+
+                for (uint u = 0u; u < PAIR_TILE; u++) {
+                    if (!pair_live[u]) continue;
+                    uint q8_word = sh_q8[u * Q8K_WORDS + q8_word_off];
+                    gate_lk[u] += int(g_ls) * signed_grid4_i8(gate_word, g_sgn, bit0, q8_word);
+                    up_lk[u] += int(u_ls) * signed_grid4_i8(up_word, u_sgn, bit0, q8_word);
+                }
+            }
+#else
             for (uint ib = 0u; ib < 8u; ib++) {
                 uint gate_q2 = gate_base + 2u + ib * 8u;
                 uint gate_aux0 = gate_u16(gate_q2) | (gate_u16(gate_q2 + 2u) << 16);
@@ -159,6 +212,7 @@ void main(void) {
                     up_lk[u] += up_ls * signed_grid4(up_word, up_sgn, bit0, q8_word);
                 }
             }
+#endif
 
             for (uint u = 0u; u < PAIR_TILE; u++) {
                 if (!pair_live[u]) continue;

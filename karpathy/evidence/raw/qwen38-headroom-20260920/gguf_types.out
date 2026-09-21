@@ -1,0 +1,8 @@
+IQ3_XXS    7.263 GB   58.0%  tensors=255
+Q5_K       1.642 GB   13.1%  tensors=43
+IQ4_XS     1.498 GB   12.0%  tensors=44
+Q4_K       1.402 GB   11.2%  tensors=38
+Q8_0       0.451 GB    3.6%  tensors=8
+Q6_K       0.159 GB    1.3%  tensors=22
+F32        0.105 GB    0.8%  tensors=456
+total 12.522 GB

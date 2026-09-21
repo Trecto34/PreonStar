@@ -112,6 +112,7 @@ VULKAN_SHADERS := \
 	vulkan/attn_prefill_qtile2_gqa6.spv \
 	vulkan/attn_combine.spv \
 	vulkan/moe_gate_up.spv \
+	vulkan/moe_gate_up_iq2s.spv \
 	vulkan/router_topk.spv \
 	vulkan/moe_tiles.spv \
 	vulkan/kv_store.spv \
@@ -126,6 +127,8 @@ VULKAN_SHADERS := \
 	vulkan/moe_gate_up_q4k_f32b.spv \
 	vulkan/moe_down_q4k_sum_decode.spv \
 	vulkan/moe_gate_up_gemm.spv \
+	vulkan/moe_gate_up_gemm_iq2s.spv \
+	vulkan/moe_down_gemm_iq2s.spv \
 	vulkan/moe_down_gemm.spv \
 	vulkan/moe_matvec.spv \
 	vulkan/moe_matvec_fast.spv \
@@ -284,6 +287,11 @@ vulkan/matmul_q8_0_f32b_nx.spv: vulkan/matmul_q8_0_f32b_nx.comp
 vulkan/moe_gate_up_f32b.spv: vulkan/moe_gate_up_f32b.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
+# Same source as moe_gate_up.comp with IQ2_S weight decode (Qwen3.8-35B-A3B-IQ2_M
+# and other IQ2_S expert files).  The IQ2_XXS build stays byte-identical.
+vulkan/moe_gate_up_iq2s.spv: vulkan/moe_gate_up.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
+
 vulkan/moe_gate_up_decode.spv: vulkan/moe_gate_up_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
@@ -301,6 +309,14 @@ vulkan/moe_down_q4k_sum_decode.spv: vulkan/moe_down_q4k_sum_decode.comp
 
 vulkan/moe_gate_up_gemm.spv: vulkan/moe_gate_up_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+# IQ2_S expert variants (Qwen3.8-35B-A3B-IQ2_M prefill).  Same sources as the
+# IQ2_XXS/Q2_K kernels; the base builds stay byte-identical.
+vulkan/moe_gate_up_gemm_iq2s.spv: vulkan/moe_gate_up_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
+
+vulkan/moe_down_gemm_iq2s.spv: vulkan/moe_down_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
 
 vulkan/moe_down_gemm.spv: vulkan/moe_down_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<

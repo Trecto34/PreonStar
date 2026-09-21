@@ -1,0 +1,6 @@
+keys: ['source', 'model', 'backend', 'quality', 'quant_bits', 'prompt_tokens', 'frontier_tokens', 'prefill_tokens', 'ctx', 'vocab', 'argmax_id', 'argmax_logit']
+len 248320 248320
+max_abs_diff=1.88576 at 247881  ref=-4.426865 new=-2.541100
+top1 ref=13 (22.233467)  new=13 (22.269037)  same=True
+argmax_id field: 13 13
+top64 overlap: 59 /64

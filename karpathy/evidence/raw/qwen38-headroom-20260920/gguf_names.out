@@ -1,0 +1,35 @@
+== IQ3_XXS 7.263 GB  n=255
+         34.1 MB blk.9.ffn_gate.weight (5120, 17408)
+         34.1 MB blk.9.ffn_down.weight (17408, 5120)
+         34.1 MB blk.8.ffn_gate.weight (5120, 17408)
+         34.1 MB blk.8.ffn_down.weight (17408, 5120)
+== Q5_K 1.642 GB  n=43
+        874.1 MB output.weight (5120, 248320)
+         61.3 MB blk.63.ffn_up.weight (5120, 17408)
+         61.3 MB blk.63.ffn_down.weight (17408, 5120)
+         36.0 MB blk.0.attn_qkv.weight (5120, 10240)
+== IQ4_XS 1.498 GB  n=44
+         47.3 MB blk.9.ffn_up.weight (5120, 17408)
+         47.3 MB blk.8.ffn_up.weight (5120, 17408)
+         47.3 MB blk.7.ffn_up.weight (5120, 17408)
+         47.3 MB blk.6.ffn_up.weight (5120, 17408)
+== Q4_K 1.402 GB  n=38
+        715.2 MB token_embd.weight (5120, 248320)
+         50.1 MB blk.63.ffn_gate.weight (5120, 17408)
+         17.7 MB blk.62.ssm_out.weight (6144, 5120)
+         17.7 MB blk.61.ssm_out.weight (6144, 5120)
+== Q8_0 0.451 GB  n=8
+         94.7 MB blk.64.ffn_up.weight (5120, 17408)
+         94.7 MB blk.64.ffn_gate.weight (5120, 17408)
+         94.7 MB blk.64.ffn_down.weight (17408, 5120)
+         66.8 MB blk.64.attn_q.weight (5120, 12288)
+== Q6_K 0.159 GB  n=22
+         25.8 MB blk.63.attn_output.weight (6144, 5120)
+         25.8 MB blk.0.ssm_out.weight (6144, 5120)
+         25.8 MB blk.0.attn_gate.weight (5120, 6144)
+          4.3 MB blk.7.attn_v.weight (5120, 1024)
+== F32 0.105 GB  n=456
+          1.0 MB blk.9.ssm_beta.weight (5120, 48)
+          1.0 MB blk.9.ssm_alpha.weight (5120, 48)
+          1.0 MB blk.8.ssm_beta.weight (5120, 48)
+          1.0 MB blk.8.ssm_alpha.weight (5120, 48)

@@ -21,6 +21,9 @@ layout(set = 0, binding = 1) readonly buffer Mid { vec4 mid[]; };
 layout(set = 0, binding = 2) readonly buffer Tiles { uint tiles[]; };
 layout(set = 0, binding = 3) readonly buffer Scales { float scales[]; };
 layout(set = 0, binding = 4) writeonly buffer Output { float y[]; };
+#ifdef Q36_MOE_IQ2S
+layout(set = 0, binding = 5) readonly buffer Tables { uint tables[]; };
+#endif
 
 layout(push_constant) uniform Push {
     uint out_dim;
@@ -34,6 +37,15 @@ layout(push_constant) uniform Push {
 /* One Q2_K superblock is 42 uint16 words:
  * [8 x scales][32 x qs][dm.x f16][dm.y f16]. */
 const uint Q2K_U16 = 42u;
+#ifdef Q36_MOE_IQ2S
+/* IQ2_S: [d f16][64 qs][8 qh][8 scales] = 82 bytes, int8-magnitude codebook. */
+const uint IQ2S_BYTES = 82u;
+const uint TAB_IQ2S = 544u;
+
+uint b_u8(uint off) {
+    return (uint(wb[off >> 1u]) >> (8u * (off & 1u))) & 255u;
+}
+#endif
 const uint SLOT_TILE = 32u;
 const uint TILE_WORDS = 1u + SLOT_TILE;
 const uint INVALID = 0xffffffffu;
@@ -62,11 +74,19 @@ void main(void) {
 
     if (tid < SLOT_TILE) sh_slot[tid] = tiles[tile_base + 1u + tid];
 
+#ifdef Q36_MOE_IQ2S
+    uint row_bytes = pc.blocks * IQ2S_BYTES;
+#else
     uint row_u16 = pc.blocks * Q2K_U16;
+#endif
     uint ar = tid >> 2u;      /* staged row 0..63 */
     uint sub = tid & 3u;      /* 8-element group within the 32-block */
     uint row = row0 + ar;
+#ifdef Q36_MOE_IQ2S
+    uint base_bytes = (expert * pc.out_dim + (row < pc.out_dim ? row : 0u)) * row_bytes;
+#else
     uint base_u16 = (expert * pc.out_dim + (row < pc.out_dim ? row : 0u)) * row_u16;
+#endif
     uint bc = tid >> 3u;
     uint bkk = tid & 7u;
     uint sl = tid & 15u;      /* output slot lane: slots sl + 16*j */
@@ -106,6 +126,26 @@ void main(void) {
         uint j = kb & 3u;               /* 2-bit shift within the half */
         /* Stage A: dequantize 8 elements. Element n = 128*half + 32*j + l
          * uses qs byte l of the half at shift 2j, scale group n >> 4. */
+#ifdef Q36_MOE_IQ2S
+        {
+            /* Same element slotting as Q2_K: this thread owns the 8 elements
+             * 32*ib32 + 8*sub .. +7 of the 256-block, one grid word split
+             * over the two As entries. */
+            uint bb = base_bytes + sb * IQ2S_BYTES;
+            uint sc = b_u8(bb + 74u + (kb & 7u));
+            uint nib = sub < 2u ? (sc & 15u) : (sc >> 4u);
+            float dscale = unpackHalf2x16(uint(wb[bb >> 1u])).x * 0.25 * (0.5 + float(nib));
+            uint entry = b_u8(bb + 2u + 4u * (kb & 7u) + sub) |
+                         ((b_u8(bb + 66u + (kb & 7u)) << (8u - 2u * sub)) & 0x300u);
+            uint signs = b_u8(bb + 34u + 4u * (kb & 7u) + sub);
+            vec4 g0 = vec4(unpack8(tables[TAB_IQ2S + entry * 2u]));
+            vec4 g1 = vec4(unpack8(tables[TAB_IQ2S + entry * 2u + 1u]));
+            g0 = mix(g0, -g0, bvec4((signs & 1u) != 0u, (signs & 2u) != 0u, (signs & 4u) != 0u, (signs & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((signs & 16u) != 0u, (signs & 32u) != 0u, (signs & 64u) != 0u, (signs & 128u) != 0u));
+            As[ar][a_k0] = f16vec4(g0 * dscale);
+            As[ar][a_k1] = f16vec4(g1 * dscale);
+        }
+#else
         {
             uint bb = base_u16 + sb * Q2K_U16;
             vec2 dm = unpackHalf2x16(uint(wb[bb + 40u]) | (uint(wb[bb + 41u]) << 16u));
@@ -121,6 +161,7 @@ void main(void) {
             As[ar][a_k0] = f16vec4(q0 * sc1 - sc2);
             As[ar][a_k1] = f16vec4(q1 * sc1 - sc2);
         }
+#endif
         /* Stage B: 32 slots x 32 mid elements, rounded once to f16. */
         if (bc < SLOT_TILE) {
             Bs[bc][b_k] = slot_valid ? f16vec4(mid[b_base + kb * 8u]) : f16vec4(0.0hf);
