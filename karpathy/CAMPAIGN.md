@@ -217,6 +217,22 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    `Q36_VK_DENSE_IQ3_PAIR=0` disables. `reconsider_if`: the 16 mixed-type
    instances become same-type (~+2.6% implied at full coverage). Evidence:
    `evidence/raw/W6-VERDICT.md`, `ab-w6-pair-{csv,summary.txt,parity.txt,profile.txt}`.
+4c. **Stream-K geometry audit (W7) — AUDITED & REJECTED (2026-09-21).** Evaluated
+   wave quantization and partial-wave tail across all MMQ shapes on AMD BC-250
+   (40 CUs, GFX1013) at chunk 256. Primary shapes divide cleanly: down-projection
+   (5120x17408, 320 WGs) is exactly 4.00 waves (R=2) / 2.00 waves (R=4) with 0.0%
+   tail loss; QKV-projection (5120x10240, 640 WGs) is exactly 8.00 waves (R=2) /
+   4.00 waves (R=4) with 0.0% tail loss; gate/up (5120x17408, 1088 WGs) has 2.86%
+   tail loss. De-homogenizing the 88 IQ4_XS dispatches into their 5 actual tensor
+   shapes reveals that 84.1% of IQ4_XS work has <= 2.86% tail (blended 2.23% at R=2,
+   4.39% at R=4). Aggregate weighted tail is **1.93%** of MMQ time (**1.78%** of
+   prefill kernel time) at measured hardware residency ($R=2$, 80 slots), and
+   **3.61%** of MMQ time (**3.32%** of kernel time) at theoretical upper bound ($R=4$,
+   160 slots). Timeline analysis confirms 0.5% idle across dispatches; latency is
+   per-workgroup barrier/LDS latency, not scheduling tail. Stream-K introduces
+   atomic K-reductions and split-K barriers for < 1.8% theoretical headroom. Gate
+   was > 3.0% of kernel time -> **REJECTED (NOT A LEVER)**. Closed without code churn.
+   Evidence: `evidence/raw/W7-VERDICT.md`, `evidence/raw/w7_streamk_audit.py`.
 5. **Where the time actually goes** (Swift IQ3_XXS profile): prefill
    `dense_iq3_xxs_mmq` = **68.1%** of prefill GPU and is *instruction/latency*
    bound (~39% of packed-f16 peak); decode `dense_iq3_xxs_decode_r4` = 57.8% and

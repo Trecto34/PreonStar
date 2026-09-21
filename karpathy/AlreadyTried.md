@@ -670,3 +670,24 @@ Branch `trackB-ptq1_0`, base `6b74da5`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`
 - Raw evidence: `karpathy/evidence/raw/ab-w6-pair.csv`,
   `ab-w6-pair-summary.txt`, `ab-w6-pair-parity.txt`, `ab-w6-pair-profile.txt`,
   `W6-VERDICT.md`.
+
+
+## W7 — Stream-K geometry audit — REJECTED (NOT A LEVER) (2026-09-21)
+
+Plan: `karpathy/PLAN-implementation-2026-09-20.md` §W7.
+Hardware: AMD BC-250 (40 CUs, RADV GFX1013). Model: `Swift-Qwen3.8-27B-IQ3_XXS.gguf` (prefill chunk 256).
+Full audit report: `karpathy/evidence/raw/W7-VERDICT.md`, audit tool `karpathy/evidence/raw/w7_streamk_audit.py`.
+
+- **Hypothesis**: Stream-K dynamically partitions workgroup grids across compute units to eliminate wave-quantization tail waste in GEMM/MMQ kernels.
+- **Audit Steps**: For every MMQ shape executed in Swift-27B prefill, computed `grid / (40 CU * resident WGs/CU)` across 40 CUs for both realistic occupancy models ($R=2$, 80 GPU slots; $R=4$, 160 GPU slots). Measured actual GPU time per shape via `Q36_VK_PROF_SHAPE`.
+- **Findings**:
+  1. Down-projection (`17408x5120`, 575 ms, 23.4% MMQ share): Grid is exactly 320 WGs. $320/80 = 4.00$ waves ($R=2$), $320/160 = 2.00$ waves ($R=4$). **Tail loss is exactly 0.00%**.
+  2. QKV-projection (`5120x10240`, 176 ms, 7.1% MMQ share): Grid is exactly 640 WGs. $640/80 = 8.00$ waves ($R=2$), $640/160 = 4.00$ waves ($R=4$). **Tail loss is exactly 0.00%**.
+  3. Gate/Up-projection (`5120x17408`, 859 ms, 34.9% MMQ share): Grid is 1088 WGs. 13.60 waves ($R=2$, 0.40 wave tail = 2.86%), 6.80 waves ($R=4$, 0.20 wave tail = 2.86%). **Tail loss is 2.86%**.
+  4. IQ4_XS de-homogenization: Deconstructing the 88 dispatches into their 5 actual tensor geometries (ffn_up, ffn_down, attn_qkv, attn_gate, attn_q) reveals that 84.1% of IQ4_XS work has <= 2.86% tail (0.0% on down and qkv), resulting in a true blended tail of 2.23% ($R=2$) and 4.39% ($R=4$), disproving the 11.0% artifact from averaging heterogeneous grids.
+  5. Aggregate whole-model wave tail: Weighted across all shapes, partial wave tail accounts for **1.93%** of MMQ time (**1.78%** of prefill kernel time) under the measured hardware occupancy model ($R=2$, 80 slots), and **3.61%** of MMQ time (**3.32%** of prefill kernel time) under theoretical upper-bound concurrency ($R=4$, 160 slots).
+  6. Timeline analysis (`timeline-analysis.md`) confirms 0.5% GPU idle across prefill dispatches; shapes execute at uniform per-MAC throughput, proving the bottleneck is per-workgroup LDS/barrier latency, not scheduling tail.
+- **Decision**: Gate required tail > 3.0% of kernel time for primary compute paths. Hardware occupancy measures 8 subgroups/SIMD (pair, 128 VGPRs) to 10 subgroups/SIMD (stock, 96 VGPRs), bracketing active residency between $R=2$ (80 slots, tail 1.78% < 3.0%) and $R=4$ (160 slots, tail 3.32%). Even under the upper-bound $R=4$ model (3.32%), the primary compute paths (>80% of MMQ work) have tail <= 2.86% (0.0% on down/qkv). Stream-K introduces atomic K-reduction across CUs, partial-sum buffers, split-K barriers, and extra synchronization overhead for < 1.8% theoretical headroom.
+- **Verdict**: **REJECTED (NOT A LEVER)**. Closed without code churn.
+- `reconsider_if`: Batch size or token chunk changes to an irregular dimension that produces small grids (< 80 workgroups) with severe partial-wave cliffs, or targeting a GPU with a non-divisible CU count (e.g. 36 or 68 CUs).
+
