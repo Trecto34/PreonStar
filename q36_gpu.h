@@ -438,6 +438,21 @@ int q36_gpu_add_rms_norm_tensor(
         uint32_t                rows,
         float                   eps);
 
+/* out_sum = a + b, out_norm = rmsnorm(out_sum) * weight, out_q8 = q8_K(out_norm), fused per row.
+ * out_sum may alias a or b. */
+int q36_gpu_add_rms_norm_q8_k_tensor(
+        q36_gpu_tensor       *out_norm,
+        q36_gpu_tensor       *out_q8,
+        q36_gpu_tensor       *out_sum,
+        const q36_gpu_tensor *a,
+        const q36_gpu_tensor *b,
+        const void            *model_map,
+        uint64_t                model_size,
+        uint64_t                weight_offset,
+        uint32_t                n,
+        uint32_t                rows,
+        float                   eps);
+
 /* =========================================================================
  * Qwen3.6 Decode Kernels.
  * =========================================================================

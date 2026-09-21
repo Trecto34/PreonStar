@@ -2415,6 +2415,19 @@ int q36_gpu_add_rms_norm_tensor(q36_gpu_tensor *out_norm,
                out_norm, out_sum, map, size, weight_offset, width, rows, eps);
 }
 
+int q36_gpu_add_rms_norm_q8_k_tensor(q36_gpu_tensor *out_norm,
+                                     q36_gpu_tensor *out_q8,
+                                     q36_gpu_tensor *out_sum,
+                                     const q36_gpu_tensor *a,
+                                     const q36_gpu_tensor *b,
+                                     const void *map, uint64_t size,
+                                     uint64_t weight_offset,
+                                     uint32_t width, uint32_t rows, float eps) {
+    (void)out_norm; (void)out_q8; (void)out_sum; (void)a; (void)b;
+    (void)map; (void)size; (void)weight_offset; (void)width; (void)rows; (void)eps;
+    return 0;
+}
+
 static int q36_delta_qkv_dispatch(q36_gpu_tensor *q,
                                    q36_gpu_tensor *k,
                                    q36_gpu_tensor *v,

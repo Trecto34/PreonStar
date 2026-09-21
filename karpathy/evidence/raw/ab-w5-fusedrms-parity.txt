@@ -1,0 +1,26 @@
+Frontier 513 parity on Swift-Qwen3.8-27B-IQ3_XXS.gguf (Q36_VK_FUSED_RMS_Q8=0 vs Q36_VK_FUSED_RMS_Q8=1):
+
+Reference invocation (Arm A, stock baseline):
+  env Q36_VK_FUSED_RMS_Q8=0 ./q36-bench --vulkan -m /home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf \
+    --prompt-file tests/long_context_story_prompt.txt \
+    --ctx-start 513 --ctx-max 513 --ctx-alloc 642 --prefill-chunk 256 --gen-tokens 16 \
+    --dump-frontier-logits-dir /tmp/ref_w5
+
+Candidate invocation (Arm B, fused RMSNorm+Q8_K):
+  env Q36_VK_FUSED_RMS_Q8=1 ./q36-bench --vulkan -m /home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf \
+    --prompt-file tests/long_context_story_prompt.txt \
+    --ctx-start 513 --ctx-max 513 --ctx-alloc 642 --prefill-chunk 256 --gen-tokens 16 \
+    --dump-frontier-logits-dir /tmp/cand_w5
+
+Dispatched pipelines confirmed via Q36_VK_PROF_KERNEL=1 / Q36_VK_SHADER_TRACE=1 under candidate:
+  q36: building pipeline vulkan/add_rms_norm_q8_k.spv
+  op add_rms_norm_q8_k: dispatches=889 groups=130429 gpu_ms=53.806
+  op q8_k_quant: dispatches=122 (down from >1000)
+
+Comparison:
+keys: ['source', 'model', 'backend', 'quality', 'quant_bits', 'prompt_tokens', 'frontier_tokens', 'prefill_tokens', 'ctx', 'vocab', 'argmax_id', 'argmax_logit']
+len 248320 248320
+max_abs_diff=0 at -1  ref=-4.576600 new=-4.576600
+top1 ref=5316 (19.820942)  new=5316 (19.820942)  same=True
+argmax_id field: 5316 5316
+top64 overlap: 64 /64

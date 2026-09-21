@@ -603,4 +603,24 @@ Full write-up: `karpathy/evidence/raw/W4-VERDICT.md`.
   `ab-w4-wave32-iq2m-summary.txt`, `ab-w4-wave32-parity.txt`,
   `ab-w4-wave32-guard.txt`.
 
+## W5 — RMSNorm → q8_K producer fusion — REJECTED, GATE NOT MET (2026-09-21)
+
+Branch `trackB-ptq1_0`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf` (dense model, 5120 embedding dimension).
+Full write-up: `karpathy/evidence/raw/W5-VERDICT.md`.
+
+- **Hypothesis**: Fusing activation quantization (`quantize_q8_k`) directly into residual add + RMSNorm (`add_rms_norm`) removes an activation write/read round-trip and improves prefill/decode throughput.
+- **Parity is bit-exact**: `max_abs_diff = 0` across all 248,320 vocabulary logits at frontier 513 on Swift-27B (`top-1` identical 5316 vs 5316, `top-64` overlap 64/64).
+- **7-rep interleaved A/B on Swift 27B (ctx 1024, gen 16, chunk 256)**:
+  - Arm A (stock baseline, separate dispatches): prefill **170.38 tok/s** (MAD 0.610), decode **18.10 tok/s** (MAD 0.050).
+  - Arm B (candidate, fused `add_rms_norm_q8_k` kernel): prefill **169.83 tok/s** (MAD 0.140), decode **17.95 tok/s** (MAD 0.070).
+  - Delta: prefill **-0.32%** (fails the dense prefill ≥+0.70% gate), decode **-0.83%** (neutral; well within the documented 9.4% decode noise floor).
+- **Architectural Reason**:
+  - `add_rms_norm` operates row-wide with 1024 threads (1 workgroup per token row).
+  - `quantize_q8_k` operates on 256-element blocks with 64 threads (20 workgroups per token row, distributed as 5,120 independent workgroups across 40 CUs with 1,536 B LDS and 40 subgroups/SIMD).
+  - Fusing them inside a 1024-thread workgroup serializes the 20 blocks across 2 rounds with 10 workgroup-wide barriers per round (20 barriers total), requires 25,600 B LDS (vs 8,192 B for stock norm), and drops subgroup occupancy from 40 to 32.
+  - On BC-250, the 20 KB activation sits in L2 cache between separate dispatches; avoiding the L2 round-trip is outweighed by the 20-barrier serialization cost and occupancy drop.
+- **Verdict: REJECTED & FROZEN.** Default remains separate dispatches (`Q36_VK_FUSED_RMS_Q8=0`, gated on `env && env[0] == '1'`). Scaffolding retained behind opt-in flag.
+- Raw evidence: `karpathy/evidence/raw/ab-w5-fusedrms.csv`, `ab-w5-fusedrms-summary.txt`, `ab-w5-fusedrms-parity.txt`, `ab-w5-isa-properties.txt`.
+
+
 

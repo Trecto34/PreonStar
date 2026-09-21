@@ -795,6 +795,7 @@ typedef struct {
     q36_gpu_tensor *norm;
     q36_gpu_tensor *last_h;
     q36_gpu_tensor *inp_q8;
+    bool inp_q8_valid;
     q36_gpu_tensor *had_q8;     /* q8_K of the transformed activation */
     q36_gpu_tensor *had_signs;  /* concatenated per-width sign vectors */
     q36_gpu_tensor *attn_qg;
@@ -6406,6 +6407,7 @@ static bool q36_vulkan_runtime_reset(q36_vulkan_runtime *rt) {
     uint64_t state_dim = (uint64_t)Q36_N_SSM_STATE * Q36_N_SSM_STATE * Q36_N_SSM_DT_RANK;
     uint64_t state_bytes;
     if (!rt) return false;
+    rt->inp_q8_valid = false;
     state_bytes = state_dim * (rt->recur_state_f16 ? sizeof(uint16_t) : sizeof(float));
     if (!q36_gpu_tensor_zero(rt->hidden) || !q36_gpu_tensor_zero(rt->next_hidden)) return false;
     if (rt->last_h && !q36_gpu_tensor_zero(rt->last_h)) return false;
@@ -8085,9 +8087,10 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
              * ponytail: a folded f32/f16/q8_0 weight would need the prepare
              * kernel to also emit the f32 activation. */
             ffn_q8 = rt->had_q8;
-        } else if (!q36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, Q36_N_EMBD, n_tok)) {
+        } else if (!rt->inp_q8_valid && !q36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, Q36_N_EMBD, n_tok)) {
             return false;
         }
+        rt->inp_q8_valid = false;
         bool pair_projected = false;
 #ifdef Q36_METAL
         const char *iq3_pair = getenv("Q36_METAL_IQ3_PAIR");
@@ -8247,9 +8250,11 @@ static bool q36_forward_ffn_vulkan_model(q36_vulkan_runtime *rt,
     if ((!routed_done ||
          l->ffn_gate_shexp->type != Q36_TENSOR_Q8_0 ||
          l->ffn_up_shexp->type != Q36_TENSOR_Q8_0) &&
+        !rt->inp_q8_valid &&
         !q36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, Q36_N_EMBD, n_tok)) {
         return false;
     }
+    rt->inp_q8_valid = false;
     if (!q36_gpu_tensor_matmul_q8_or_float_scaled(m, l->ffn_gate_shexp, inp, rt->inp_q8, rt->ffn_shared_gate,
                                                   Q36_N_EMBD, Q36_N_FF_SHARED, n_tok,
                                                   q36_tensor_scalar_or(m, l->ffn_gate_shexp_scale, 1.0f))) {
@@ -8387,9 +8392,11 @@ static bool q36_forward_full_attn_vulkan_model(q36_vulkan_runtime *rt,
         qkv_q8 = rt->had_q8;
     } else if ((l->attn_q->type != Q36_TENSOR_Q8_0 || l->attn_k->type != Q36_TENSOR_Q8_0 ||
                 l->attn_v->type != Q36_TENSOR_Q8_0) &&
+               !rt->inp_q8_valid &&
                !q36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, Q36_N_EMBD, n_tok)) {
         return false;
     }
+    rt->inp_q8_valid = false;
     if (!q36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_q, qkv_in, qkv_q8, rt->attn_qg,
                                                   Q36_N_EMBD, Q36_N_HEAD * Q36_N_HEAD_DIM * 2u, n_tok,
                                                   q36_tensor_scalar_or(m, l->attn_q_scale, 1.0f))) {
@@ -8534,9 +8541,11 @@ static bool q36_forward_recurrent_vulkan(q36_session *s,
     rt = (q36_vulkan_runtime *)s->runtime;
     cache = &rt->recurrent[il];
     if ((l->attn_qkv->type != Q36_TENSOR_Q8_0 || l->attn_gate->type != Q36_TENSOR_Q8_0) &&
+        !rt->inp_q8_valid &&
         !q36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, Q36_N_EMBD, n_tok)) {
         return false;
     }
+    rt->inp_q8_valid = false;
     const q36_gpu_tensor *qkv_in = inp;
     const q36_gpu_tensor *qkv_q8 = rt->inp_q8;
     if (q36_hadamard_rotate_enabled(l->attn_qkv) ||
@@ -8791,11 +8800,17 @@ static bool q36_forward_tokens_vulkan_into(q36_session *s,
                     pos0, il, l->kind == Q36_LAYER_FULL_ATTN ? "full" : "recurrent");
             return false;
         }
-        if (!q36_gpu_add_rms_norm_tensor(rt->norm, rt->next_hidden, rt->next_hidden, rt->hidden,
-                                         e->model.map, e->model.size, l->post_attention_norm->abs_offset,
-                                         Q36_N_EMBD, n_tok, Q36_RMS_EPS)) {
+        bool fused_norm = q36_gpu_add_rms_norm_q8_k_tensor(
+            rt->norm, rt->inp_q8, rt->next_hidden, rt->next_hidden, rt->hidden,
+            e->model.map, e->model.size, l->post_attention_norm->abs_offset,
+            Q36_N_EMBD, n_tok, Q36_RMS_EPS);
+        if (!fused_norm && !q36_gpu_add_rms_norm_tensor(
+                rt->norm, rt->next_hidden, rt->next_hidden, rt->hidden,
+                e->model.map, e->model.size, l->post_attention_norm->abs_offset,
+                Q36_N_EMBD, n_tok, Q36_RMS_EPS)) {
             return false;
         }
+        if (fused_norm) rt->inp_q8_valid = true;
         if (!q36_forward_ffn_vulkan(s, l, il, n_tok, rt->norm, rt->hidden)) {
             fprintf(stderr, "q36: ffn block failed at pos=%u layer=%u\n", pos0, il);
             return false;
@@ -8817,11 +8832,18 @@ static bool q36_forward_tokens_vulkan_into(q36_session *s,
         {
             const q36_tensor *next_norm = il + 1u < Q36_N_LAYER ?
                 e->weights.layer[il + 1u].attn_norm : e->weights.output_norm;
-            if (!q36_gpu_add_rms_norm_tensor(rt->norm, rt->hidden, rt->next_hidden, rt->hidden,
-                                             e->model.map, e->model.size, next_norm->abs_offset,
-                                             Q36_N_EMBD, n_tok, Q36_RMS_EPS)) {
+            q36_gpu_tensor *target_q8 = (il + 1u < Q36_N_LAYER) ? rt->inp_q8 : NULL;
+            bool fused_next = target_q8 && q36_gpu_add_rms_norm_q8_k_tensor(
+                rt->norm, target_q8, rt->hidden, rt->next_hidden, rt->hidden,
+                e->model.map, e->model.size, next_norm->abs_offset,
+                Q36_N_EMBD, n_tok, Q36_RMS_EPS);
+            if (!fused_next && !q36_gpu_add_rms_norm_tensor(
+                    rt->norm, rt->hidden, rt->next_hidden, rt->hidden,
+                    e->model.map, e->model.size, next_norm->abs_offset,
+                    Q36_N_EMBD, n_tok, Q36_RMS_EPS)) {
                 return false;
             }
+            if (fused_next) rt->inp_q8_valid = true;
         }
         if (e->quality && !q36_gpu_tensor_all_finite(rt->hidden, n_tok * Q36_N_EMBD)) {
             fprintf(stderr, "q36: non-finite hidden state at pos=%u layer=%u\n", pos0, il);
@@ -8897,9 +8919,11 @@ static bool q36_sessions_full_attn_vulkan(q36_decode_item *items, int count,
     if ((l->attn_q->type != Q36_TENSOR_Q8_0 ||
          l->attn_k->type != Q36_TENSOR_Q8_0 ||
          l->attn_v->type != Q36_TENSOR_Q8_0) &&
+        !batch->inp_q8_valid &&
         !q36_gpu_quantize_q8_k_tensor(batch->inp_q8, inp, Q36_N_EMBD, rows)) {
         return false;
     }
+    batch->inp_q8_valid = false;
     if (!q36_gpu_tensor_matmul_q8_or_float_scaled(
             &e->model, l->attn_q, inp, batch->inp_q8, batch->attn_qg,
             Q36_N_EMBD, Q36_N_HEAD * Q36_N_HEAD_DIM * 2u, rows,
@@ -8991,9 +9015,11 @@ static bool q36_sessions_recurrent_vulkan(q36_decode_item *items, int count,
 
     if ((l->attn_qkv->type != Q36_TENSOR_Q8_0 ||
          l->attn_gate->type != Q36_TENSOR_Q8_0) &&
+        !batch->inp_q8_valid &&
         !q36_gpu_quantize_q8_k_tensor(batch->inp_q8, inp, Q36_N_EMBD, rows)) {
         return false;
     }
+    batch->inp_q8_valid = false;
     if (!q36_gpu_tensor_matmul_q8_or_float_scaled(
             &e->model, l->attn_qkv, inp, batch->inp_q8, batch->recur_qkv,
             Q36_N_EMBD, Q36_N_SSM_CONV_DIM, rows,
@@ -9130,11 +9156,20 @@ static bool q36_sessions_eval_batch_vulkan(q36_decode_item *items, int count) {
                     e->directional_steering_attn_scale) != 0;
         }
         if (ok) {
-            ok = q36_gpu_add_rms_norm_tensor(
-                    rt->norm, rt->next_hidden, rt->next_hidden, rt->hidden,
+            bool fused_norm = q36_gpu_add_rms_norm_q8_k_tensor(
+                    rt->norm, rt->inp_q8, rt->next_hidden, rt->next_hidden, rt->hidden,
                     e->model.map, e->model.size,
                     l->post_attention_norm->abs_offset,
                     Q36_N_EMBD, rows, Q36_RMS_EPS) != 0;
+            if (fused_norm) {
+                rt->inp_q8_valid = true;
+            } else {
+                ok = q36_gpu_add_rms_norm_tensor(
+                        rt->norm, rt->next_hidden, rt->next_hidden, rt->hidden,
+                        e->model.map, e->model.size,
+                        l->post_attention_norm->abs_offset,
+                        Q36_N_EMBD, rows, Q36_RMS_EPS) != 0;
+            }
         }
         if (ok) {
             ok = q36_forward_ffn_vulkan_model(
@@ -9150,10 +9185,19 @@ static bool q36_sessions_eval_batch_vulkan(q36_decode_item *items, int count) {
         if (ok) {
             const q36_tensor *next_norm = il + 1u < Q36_N_LAYER
                 ? e->weights.layer[il + 1u].attn_norm : e->weights.output_norm;
-            ok = q36_gpu_add_rms_norm_tensor(
-                    rt->norm, rt->hidden, rt->next_hidden, rt->hidden,
+            q36_gpu_tensor *target_q8 = (il + 1u < Q36_N_LAYER) ? rt->inp_q8 : NULL;
+            bool fused_next = target_q8 && q36_gpu_add_rms_norm_q8_k_tensor(
+                    rt->norm, target_q8, rt->hidden, rt->next_hidden, rt->hidden,
                     e->model.map, e->model.size, next_norm->abs_offset,
                     Q36_N_EMBD, rows, Q36_RMS_EPS) != 0;
+            if (fused_next) {
+                rt->inp_q8_valid = true;
+            } else {
+                ok = q36_gpu_add_rms_norm_tensor(
+                        rt->norm, rt->hidden, rt->next_hidden, rt->hidden,
+                        e->model.map, e->model.size, next_norm->abs_offset,
+                        Q36_N_EMBD, rows, Q36_RMS_EPS) != 0;
+            }
         }
         if (!ok) {
             q36_gpu_set_micro_batch(false);

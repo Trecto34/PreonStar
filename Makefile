@@ -57,6 +57,7 @@ VULKAN_SHADERS := \
 	vulkan/hadamard_prepare.spv \
 	vulkan/directional_steering.spv \
 	vulkan/add_rms_norm.spv \
+	vulkan/add_rms_norm_q8_k.spv \
 	vulkan/rms_norm.spv \
 	vulkan/swiglu.spv \
 	vulkan/swiglu_q8_k.spv \
