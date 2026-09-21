@@ -8637,6 +8637,27 @@ static bool q36_forward_recurrent_vulkan(q36_session *s,
                          Q36_N_EMBD, Q36_N_SSM_DT_RANK, Q36_N_SSM_DT_RANK, inp,
                          q36_tensor_scalar_or(&e->model, l->ssm_beta_scale, 1.0f),
                          q36_tensor_scalar_or(&e->model, l->ssm_alpha_scale, 1.0f));
+    /* Both IQ2_S (this file's shape): one shared Q8_K quantize instead of
+     * the two the individual calls below would each do internally, plus
+     * one dispatch instead of two -- ssm_alpha/beta are tiny (2048x32) so
+     * dispatch/quantize overhead dominates their cost, not DRAM bandwidth
+     * (see karpathy/evidence/raw/iq2m-reprofile-2026-09-21.md). */
+    if (!pair_projected && n_tok == 1u &&
+        l->ssm_beta->type == Q36_TENSOR_IQ2_S &&
+        l->ssm_alpha->type == Q36_TENSOR_IQ2_S) {
+        if (!rt->inp_q8_valid &&
+            !q36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, Q36_N_EMBD, n_tok)) {
+            return false;
+        }
+        rt->inp_q8_valid = false;
+        pair_projected = q36_gpu_matmul_iq2s_pair_scaled_tensor(
+            rt->recur_beta, rt->recur_alpha,
+            e->model.map, e->model.size,
+            l->ssm_beta->abs_offset, l->ssm_alpha->abs_offset,
+            Q36_N_EMBD, Q36_N_SSM_DT_RANK, Q36_N_SSM_DT_RANK, rt->inp_q8,
+            q36_tensor_scalar_or(&e->model, l->ssm_beta_scale, 1.0f),
+            q36_tensor_scalar_or(&e->model, l->ssm_alpha_scale, 1.0f));
+    }
     if (!pair_projected) {
         if (!q36_gpu_tensor_matmul_dense_q8_scaled(
                 &e->model, l->ssm_beta, inp, rt->inp_q8, rt->recur_beta,

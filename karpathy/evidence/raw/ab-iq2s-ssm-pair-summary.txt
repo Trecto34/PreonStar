@@ -1,0 +1,7 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    21    555.39         15.740    78.15          0.190     /home/server/q36-wt/iq2s-ssm-pair-base/q36-bench
+B    21    544.20         12.350    79.26          0.270     /home/server/q36-wt/iq2s-ssm-pair/q36-bench
+
+B vs A prefill: -2.01%   decode: +1.42%   (gate: +1.50%)
+verdict: FAIL (prefill)

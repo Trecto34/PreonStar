@@ -219,9 +219,33 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    same pattern as 1b/1c. Evidence: `evidence/raw/iq2m-reprofile-2026-09-21.md`
    (full ranked tables + method), `evidence/raw/iq2m-reprof-*.txt`,
    `evidence/raw/iq2m-route-debug.txt`.
+   **1e. `ssm_alpha`/`ssm_beta` IQ2_S pair-fusion — ACCEPTED, small win
+   (2026-09-21).** First of 1d's two-part plan (the small, overhead-bound
+   half; the tuned-kernel half for `attn_gate`/`ssm_out`/shared-expert is
+   unstarted). New `dense_extra_decode_iq2s_pair.comp` +
+   `q36_gpu_matmul_iq2s_pair_scaled_tensor()` fuse `ssm_alpha`+`ssm_beta`
+   (2048x32 each, tiny) into one dispatch sharing one Q8_K read instead of
+   two, mirroring the existing `q36_gpu_matmul_q8_0_pair_scaled_tensor`.
+   Parity bit-exact (`max_abs_diff=0.0`, 248,320 logits, top-1/top-64
+   identical) — the dequant math is copied verbatim, just evaluated twice
+   per block instead of once per dispatch. 21-rep interleaved A/B (ctx 512,
+   gen 128; 7-rep was inconclusive, overlapping ranges): decode **78.15 ->
+   79.26 = +1.42%** (MAD 0.190/0.270, right at the formal gate, 19/21 reps
+   per arm in disjoint bands), prefill -2.01% (noise — fix is
+   `n_tok==1`-gated, never touches prefill; well inside the 3.4% MoE floor).
+   Gated on both tensors being exactly IQ2_S, inert by construction
+   elsewhere (not separately A/B'd on the guard for that reason). A/B'd in
+   isolated worktrees (`q36-wt/iq2s-ssm-pair{,-base}`) built from clean
+   `b738610`, since a second instance had unrelated uncommitted work in the
+   shared main worktree. Honest framing: real but modest, accepted on
+   parity + mechanism + 21-rep separation rather than a clean gate pass.
+   Evidence: `evidence/raw/ab-iq2s-ssm-pair{,-7rep}.csv`,
+   `ab-iq2s-ssm-pair-summary.txt`, `iq2s-ssm-pair-parity.txt`.
    Remaining open levers for IQ2_M: (1) small-batch 2..31 token f32 kernels
-   (HANDOFF §5 item 2); (2) the shared-expert IQ2_S fast path from 1d, now
-   the largest unclaimed lever at ~17% of both prefill and decode. Evidence:
+   (HANDOFF §5 item 2); (2) the tuned IQ2_S decode/mmq kernel for
+   `attn_gate`/`ssm_out`/shared-expert from 1d/1e, now the largest unclaimed
+   lever (~79% of the 194.6 MB/tok this residue reads, most of the ~17% of
+   prefill/decode it costs). Evidence:
    `karpathy/HANDOFF-iq2s-20260920.md`, `evidence/raw/iq2s-*`,
    `evidence/raw/kquant-moe-*`, `evidence/raw/ab-kquant-moe-decode*`,
    `AlreadyTried.md`.

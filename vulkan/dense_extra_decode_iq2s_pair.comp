@@ -1,0 +1,130 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* IQ2_S decode pair projection, same shape as matmul_q8_0_f32b_pair.comp:
+ * two independently-scaled weight matrices sharing one activation read,
+ * one dispatch instead of two. Targets small paired decode projections
+ * (e.g. ssm_alpha/ssm_beta) where per-dispatch overhead, not DRAM
+ * bandwidth, dominates at this size. Dequant math is copied verbatim from
+ * dense_extra_decode.comp's IQ2_S branch of block_dot() -- same block
+ * layout (82 B/256-block), same grid/sign tables, same accumulation
+ * order -- so a row's value here must match the single-tensor kernel's
+ * value on the same row bit-for-bit. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer WeightsA { uint8_t wa[]; };
+layout(set = 0, binding = 1) readonly buffer WeightsB { uint8_t wb[]; };
+layout(set = 0, binding = 2) readonly buffer Q8K { uint q8[]; };
+layout(set = 0, binding = 3) readonly buffer Tables { uint tables[]; };
+layout(set = 0, binding = 4) writeonly buffer OutputA { float ya[]; };
+layout(set = 0, binding = 5) writeonly buffer OutputB { float yb[]; };
+
+layout(push_constant) uniform Push {
+    uint out_a;
+    uint out_b;
+    uint blocks;
+    uint row_bytes;
+    float scale_a;
+    float scale_b;
+} pc;
+
+const uint Q8K_WORDS = 74u;
+const uint TAB_KSIGNS_BYTES = 2048u;
+const uint TAB_IQ2S = 544u;
+
+uint load_u8a(uint off) { return uint(wa[off]); }
+uint load_u16a(uint off) { return uint(wa[off]) | (uint(wa[off + 1u]) << 8u); }
+uint load_u8b(uint off) { return uint(wb[off]); }
+uint load_u16b(uint off) { return uint(wb[off]) | (uint(wb[off + 1u]) << 8u); }
+
+uint table_u8(uint off) {
+    return (tables[off >> 2u] >> (8u * (off & 3u))) & 255u;
+}
+
+vec4 signed_grid(uint word, uint signs, uint bit0) {
+    vec4 v = vec4(float(bitfieldExtract(int(word), 0, 8)),
+                  float(bitfieldExtract(int(word), 8, 8)),
+                  float(bitfieldExtract(int(word), 16, 8)),
+                  float(bitfieldExtract(int(word), 24, 8)));
+    return v * vec4((signs & (1u << (bit0 + 0u))) != 0u ? -1.0 : 1.0,
+                    (signs & (1u << (bit0 + 1u))) != 0u ? -1.0 : 1.0,
+                    (signs & (1u << (bit0 + 2u))) != 0u ? -1.0 : 1.0,
+                    (signs & (1u << (bit0 + 3u))) != 0u ? -1.0 : 1.0);
+}
+
+/* Same IQ2_S block-dot as dense_extra_decode.comp, parameterized over which
+ * weight buffer's load_u8/u16 to use, inlined twice below (GLSL has no
+ * function-valued params over storage buffers). */
+float block_dot_a(uint row, uint qb, uint group, vec4 qv[8]) {
+    uint base = row * pc.row_bytes + qb * 82u;
+    float wd = unpackHalf2x16(load_u16a(base)).x * 0.25;
+    uint qh = load_u8a(base + 66u + group);
+    uint sc = load_u8a(base + 74u + group);
+    float sum = 0.0;
+    for (uint l = 0u; l < 4u; l++) {
+        uint entry = load_u8a(base + 2u + 4u * group + l) |
+                     ((qh << (8u - 2u * l)) & 0x300u);
+        uint signs = load_u8a(base + 34u + 4u * group + l);
+        float d = wd * (0.5 + float(l < 2u ? sc & 15u : sc >> 4u));
+        sum += d * dot(signed_grid(tables[TAB_IQ2S + entry * 2u], signs, 0u), qv[2u * l]);
+        sum += d * dot(signed_grid(tables[TAB_IQ2S + entry * 2u + 1u], signs, 4u), qv[2u * l + 1u]);
+    }
+    return sum;
+}
+
+float block_dot_b(uint row, uint qb, uint group, vec4 qv[8]) {
+    uint base = row * pc.row_bytes + qb * 82u;
+    float wd = unpackHalf2x16(load_u16b(base)).x * 0.25;
+    uint qh = load_u8b(base + 66u + group);
+    uint sc = load_u8b(base + 74u + group);
+    float sum = 0.0;
+    for (uint l = 0u; l < 4u; l++) {
+        uint entry = load_u8b(base + 2u + 4u * group + l) |
+                     ((qh << (8u - 2u * l)) & 0x300u);
+        uint signs = load_u8b(base + 34u + 4u * group + l);
+        float d = wd * (0.5 + float(l < 2u ? sc & 15u : sc >> 4u));
+        sum += d * dot(signed_grid(tables[TAB_IQ2S + entry * 2u], signs, 0u), qv[2u * l]);
+        sum += d * dot(signed_grid(tables[TAB_IQ2S + entry * 2u + 1u], signs, 4u), qv[2u * l + 1u]);
+    }
+    return sum;
+}
+
+vec4 unpack_i8(uint v) {
+    return vec4(float(bitfieldExtract(int(v), 0, 8)),
+                float(bitfieldExtract(int(v), 8, 8)),
+                float(bitfieldExtract(int(v), 16, 8)),
+                float(bitfieldExtract(int(v), 24, 8)));
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint lane8 = lid & 7u;
+    uint row = gl_WorkGroupID.x;
+    bool live_a = row < pc.out_a;
+    bool live_b = row < pc.out_b;
+    if (!live_a && !live_b) return;
+    float acc_a = 0.0;
+    float acc_b = 0.0;
+
+    for (uint b = lid >> 3u; b < pc.blocks; b += 8u) {
+        uint qbase = b * Q8K_WORDS + 2u + 8u * lane8;
+        float yd = uintBitsToFloat(q8[b * Q8K_WORDS]);
+        vec4 qv[8];
+        for (uint i = 0u; i < 8u; i++) qv[i] = unpack_i8(q8[qbase + i]);
+        if (live_a) acc_a = fma(yd, block_dot_a(row, b, lane8, qv), acc_a);
+        if (live_b) acc_b = fma(yd, block_dot_b(row, b, lane8, qv), acc_b);
+    }
+
+    float total_a = subgroupAdd(acc_a);
+    float total_b = subgroupAdd(acc_b);
+    if (lid == 0u) {
+        if (live_a) ya[row] = total_a * pc.scale_a;
+        if (live_b) yb[row] = total_b * pc.scale_b;
+    }
+}

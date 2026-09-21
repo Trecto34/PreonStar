@@ -875,3 +875,64 @@ Closes `HANDOFF-iq2s-20260920.md` §5 item 3 for this file. Full write-up:
 - Raw evidence: `karpathy/evidence/raw/ab-iq3s-down.csv`,
   `ab-iq3s-down-summary.txt`, `iq3s-down-parity.txt`,
   `iq3s-down-parity-stats.txt`, `iq2m-prof-postkquant-{decode,prefill}.txt`.
+
+## IQ2_S `ssm_alpha`/`ssm_beta` pair-fusion — ACCEPTED, small win (2026-09-21)
+
+Branch `trackB-ptq1_0`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Full diagnosis:
+`karpathy/evidence/raw/iq2m-reprofile-2026-09-21.md` (item 1d in
+`CAMPAIGN.md`). First of the two-part plan from that diagnosis (pair-fusion
+for the overhead-bound small tensors; a tuned decode/mmq kernel for the
+ALU-bound big tensors — `attn_gate`/`ssm_out`/shared-expert — is separate,
+unstarted work).
+
+- **What it is**: `ssm_alpha`/`ssm_beta` (recurrent-layer projections,
+  2048x32, ~20.5 KB each) are IQ2_S on this file and fall through the
+  generic `dense_extra_decode` path individually — 2 dispatches, 2
+  independent Q8_K quantizations of the same activation. New
+  `vulkan/dense_extra_decode_iq2s_pair.comp` +
+  `q36_gpu_matmul_iq2s_pair_scaled_tensor()` (`q36_vulkan.c`) fuse both into
+  one dispatch sharing one Q8_K read, mirroring the existing
+  `q36_gpu_matmul_q8_0_pair_scaled_tensor` pattern (same shape, IQ2_S
+  instead of Q8_0). Wired into `q36_forward_recurrent_vulkan`'s existing
+  `pair_projected` fallback chain (`q36.c`), gated on both tensors being
+  exactly `IQ2_S` — inert by construction for any model where that's not
+  the type (e.g. the guard, which is IQ2_XXS-based; not separately
+  A/B'd for that reason). Default on, `Q36_VK_IQ2S_PAIR=0` disables.
+- **Parity: bit-exact.** Frontier-512 first-decode-token logits,
+  `Q36_VK_IQ2S_PAIR=1` vs `=0`, same binary: `max_abs_diff = 0.0` across all
+  248,320 logits, argmax and top-64 identical. Expected — the dequant math
+  is copied verbatim from `dense_extra_decode.comp`'s IQ2_S branch of
+  `block_dot()`, just evaluated twice per Q8_K block instead of once per
+  dispatch; same accumulation order per weight matrix.
+- **7-rep interleaved A/B (ctx 512, gen 128) was inconclusive on its own**:
+  prefill +0.66%, decode +1.11%, overlapping rep ranges. **21-rep re-run
+  clarified it**: prefill 555.39→544.20 = -2.01% (noise — this fix is
+  `n_tok==1`-gated, never touches prefill, so A and B run identical prefill
+  code; -2.01% is well inside the campaign's documented 3.4% MoE prefill
+  floor), decode **78.15→79.26 = +1.42%** (MAD 0.190/0.270, right at the
+  formal ≥1.50% gate — 19 of 21 reps per arm fall in disjoint bands
+  [77.75-78.45] vs [78.62-79.88], only the extreme tails touch).
+  `bench_ab.sh`'s auto-verdict says `FAIL (prefill)`; that's the harness's
+  generic prefill-gain semantics and doesn't apply to a decode-only fix —
+  read the medians, not the label, same as prior sessions' notes on this
+  harness.
+- **Binaries built in isolated worktrees** (`/home/server/q36-wt/
+  iq2s-ssm-pair{,-base}`) from a clean `b738610` checkout, not the shared
+  main worktree — a second instance had uncommitted, unrelated changes
+  (small-batch IQ2_S kernels, HANDOFF §5 item 2) mid-flight in the same
+  working directory at the time; A/B'd only this change.
+- **Honest framing**: this is a smaller, noisier result than 1b/1c/1d — the
+  win is real (bit-exact, mechanistically sound, ~1.2 MB / 60-of-258
+  dispatches is a small slice of the 11.9 ms/tok decode budget so a ~1%
+  decode gain is the expected order of magnitude, not a surprise) but sits
+  at the edge of the formal gate rather than clearing it by a wide margin.
+  Accepted on the strength of the parity + mechanism + 21-rep separation,
+  not a single clean A/B pass.
+- `reconsider_if`: the bigger, unstarted half of the plan (tuned IQ2_S
+  decode/mmq kernel for `attn_gate`/`ssm_out`/shared-expert, ~79% of the
+  194.6 MB/tok this residue reads) is where the real remaining win is —
+  revisit this pairing approach if that kernel's shape makes fusing
+  `attn_gate` with something else attractive too.
+- Raw evidence: `karpathy/evidence/raw/ab-iq2s-ssm-pair.csv` (21 reps),
+  `ab-iq2s-ssm-pair-7rep.csv`, `ab-iq2s-ssm-pair-summary.txt`,
+  `iq2s-ssm-pair-parity.txt`.

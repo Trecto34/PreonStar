@@ -254,6 +254,7 @@ typedef struct {
     q36_vk_kernel dense_extra_decode_q2_0;
     q36_vk_kernel dense_extra_decode_pq2_0;
     q36_vk_kernel dense_extra_decode_ptq1_0;
+    q36_vk_kernel dense_extra_decode_iq2s_pair;
     q36_vk_kernel dense_extra_mmq;
     q36_vk_kernel dense_extra_mmq_q2_0;
     q36_vk_kernel dense_extra_mmq_pq2_0;
@@ -3321,6 +3322,8 @@ int q36_gpu_init(void) {
     q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode_pq2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_pq2_0.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode_ptq1_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_ptq1_0.spv", 4, 20, 1u << 2);
+    q36_vk.dense_extra_decode_iq2s_pair = Q36_VK_KERNEL(
+        "vulkan/dense_extra_decode_iq2s_pair.spv", 6, 24, (1u << 4) | (1u << 5));
     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
     q36_vk.dense_extra_mmq_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
     q36_vk.dense_extra_mmq_pq2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_pq2_0.spv", 4, 24, 1u << 2);
@@ -3722,6 +3725,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_pq2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode);
+    q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_iq2s_pair);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_mmq);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs);
@@ -8303,6 +8307,73 @@ static int q36_vk_moe_matvec(q36_gpu_tensor *out,
     q36_gpu_tensor_free(packed_scales);
     q36_gpu_tensor_free(packed_weights);
     q36_gpu_tensor_free(tiles);
+    return ok;
+}
+
+/* IQ2_S sibling of q36_gpu_matmul_q8_0_pair_scaled_tensor: two
+ * independently-scaled IQ2_S rows sharing one Q8_K activation read, one
+ * dispatch. q8 must already be a valid Q8_K quantization of x at in_dim;
+ * the caller owns quantizing it once and reusing it for both legs, which
+ * is itself part of the win over two separate calls each re-quantizing. */
+int q36_gpu_matmul_iq2s_pair_scaled_tensor(q36_gpu_tensor *out_a,
+                                           q36_gpu_tensor *out_b,
+                                           const void *model_map,
+                                           uint64_t model_size,
+                                           uint64_t weight_a_offset,
+                                           uint64_t weight_b_offset,
+                                           uint64_t in_dim,
+                                           uint64_t out_a_dim,
+                                           uint64_t out_b_dim,
+                                           const q36_gpu_tensor *q8,
+                                           float scale_a,
+                                           float scale_b) {
+    if (q36_gpu_quality || !q36_vk_env_default_on("Q36_VK_IQ2S_PAIR") ||
+        in_dim == 0 || (in_dim % Q36_VK_QK_K) != 0 ||
+        out_a_dim == 0 || out_b_dim == 0 ||
+        in_dim > UINT32_MAX || out_a_dim > UINT32_MAX || out_b_dim > UINT32_MAX) return 0;
+    uint64_t blocks = in_dim / Q36_VK_QK_K;
+    uint64_t block_bytes = q36_vk_iq_block_bytes(Q36_VK_TENSOR_IQ2_S);
+    uint64_t row_bytes, weight_a_bytes, weight_b_bytes, out_a_bytes, out_b_bytes, q8_bytes;
+    if (!q36_u64_mul_ok(blocks, block_bytes, &row_bytes) ||
+        !q36_u64_mul_ok(row_bytes, out_a_dim, &weight_a_bytes) ||
+        !q36_u64_mul_ok(row_bytes, out_b_dim, &weight_b_bytes) ||
+        !q36_u64_mul_ok(out_a_dim, sizeof(float), &out_a_bytes) ||
+        !q36_u64_mul_ok(out_b_dim, sizeof(float), &out_b_bytes) ||
+        !q36_u64_mul_ok(blocks, sizeof(q36_vk_block_q8_K), &q8_bytes) ||
+        row_bytes > UINT32_MAX) return 0;
+    if (!q36_gpu_tensor_range_ok(q8, 0, q8_bytes) ||
+        !q36_gpu_tensor_range_ok(out_a, 0, out_a_bytes) ||
+        !q36_gpu_tensor_range_ok(out_b, 0, out_b_bytes)) return 0;
+    const unsigned char *wa = q36_gpu_weight_bytes(model_map, model_size,
+                                                   weight_a_offset, weight_a_bytes);
+    const unsigned char *wb = q36_gpu_weight_bytes(model_map, model_size,
+                                                   weight_b_offset, weight_b_bytes);
+    if (!wa || !wb) return 0;
+
+    struct {
+        uint32_t out_a;
+        uint32_t out_b;
+        uint32_t blocks;
+        uint32_t row_bytes;
+        float scale_a;
+        float scale_b;
+    } push = { (uint32_t)out_a_dim, (uint32_t)out_b_dim, (uint32_t)blocks,
+               (uint32_t)row_bytes, scale_a, scale_b };
+
+    pthread_mutex_lock(&q36_vk_mu);
+    q36_gpu_tensor *tables = q36_vk_iq_tables_unlocked();
+    q36_gpu_tensor *weights_a = tables ? q36_vk_weight_get_unlocked(wa, weight_a_bytes) : NULL;
+    q36_gpu_tensor *weights_b = weights_a ?
+        q36_vk_weight_get_unlocked(wb, weight_b_bytes) : NULL;
+    int ok = weights_a != NULL && weights_b != NULL;
+    if (ok) {
+        const q36_gpu_tensor *bindings[6] = { weights_a, weights_b, q8, tables, out_a, out_b };
+        uint32_t groups = (uint32_t)(out_a_dim > out_b_dim ? out_a_dim : out_b_dim);
+        ok = q36_vk_run_unlocked("dense_extra_decode_iq2s_pair",
+                                 &q36_vk.dense_extra_decode_iq2s_pair,
+                                 bindings, &push, sizeof(push), groups, 1, 1);
+    }
+    pthread_mutex_unlock(&q36_vk_mu);
     return ok;
 }
 

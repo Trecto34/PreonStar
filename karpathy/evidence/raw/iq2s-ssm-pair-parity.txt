@@ -1,0 +1,9 @@
+IQ2_S ssm_alpha/ssm_beta pair-fusion parity check
+Qwen3.8-35B-A3B-IQ2_M.gguf, ctx 512, first decode-frontier logits (Q36_VK_IQ2S_PAIR=1 vs =0)
+
+n = 248320
+max_abs_diff = 0.0 at index 248319
+mean_abs_diff = 0.0
+argmax on:  13 22.0850296
+argmax off: 13 22.0850296
+top64 overlap: 64/64
