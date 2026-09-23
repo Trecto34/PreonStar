@@ -4,7 +4,9 @@
 `## Pick up in 5 minutes` and `## The rules that decide a verdict`, then go
 straight to `## Open items, ranked`.
 
-Last updated: 2026-09-21 (continuation session) · repo `/home/server/q36-opt-27b` ·
+Last updated: 2026-09-23 (BC-250 session) · repo `/home/server/q36` + worktree
+`/home/server/q36-wt/pq2-persist`, branch `experiment/pq2-smallbatch`
+(uncommitted) · the 2026-09-21 notes below are from `/home/server/q36-opt-27b` ·
 branch `trackB-ptq1_0`. PLAN items W2–W7 (`karpathy/PLAN-implementation-2026-09-20.md`)
 are all closed; see the entries in this section and the matching
 `AlreadyTried.md` rows. HANDOFF's ranked item #1
@@ -25,6 +27,20 @@ takes IQ2_S at `n_tok` 2..127, route misses at `--prefill-chunk 16` fell
 1280 -> 96, and prefill at that chunk rose 72.92 -> 116.21 t/s (+59.37%, see 1g
 and `evidence/raw/iq2s-smallbatch-VERDICT.md`). Remaining open work: the W8
 scratch-cache mechanism, plus PLAN's W9.
+
+**2026-09-23 session (this worktree).** Two new things. (1) A new loadable file,
+`TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` — the DERISKED re-release of the
+ternary model §6.6 could not open; it runs at 211.08 / 32.97 t/s at ctx 512
+(§8). (2) The campaign's **first accepted kernel change on this file**: a
+PQ2_0/Q2_0 **small-batch matmul** that is bit-exact against one-token decode and
+takes `--prefill-chunk 2` from 2.95 to 54.60 t/s and a prompt tail by +45-72%
+(§6.7). Two decode-side attempts were measured and **rejected** and are now
+closed lines: PQ2_0 matvec dispatch shapes (§7) and GQA-grouped split-K decode
+attention (§7) — plus a decode-variance pitfall that made the first sweeps of the
+latter look like wins (§9). The `ssm_alpha`/`ssm_beta` fusion was not attempted:
+the IQ2_S precedent for that fusion measured +1.42% on a MoE file, and this dense
+file's ceiling for it is under 1%. Everything is uncommitted in this worktree per
+the session's instruction; the ledger, this map and `evidence/raw/` are the record.
 
 ---
 
@@ -522,6 +538,34 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    (mask-and-add), which is exactly the axis where IQ3_XXS's decode sits at an
    instruction-bound 59%. Evidence: `evidence/raw/ternary-bonsai-probe.txt`,
    `evidence/raw/ternary-bonsai-layout.txt`.
+   **6b. UPDATE (2026-09-23): the DERISKED re-release loads and runs.** See §6.7
+   and the §8 model row — the codebook/Hadamard/`qwen35`-graph blockers above are
+   resolved in that file (type-142 PQ2_0, which this engine has kernels for).
+
+7. **Ternary-Bonsai-2-27B DERISKED PQ2_0 — runs; PQ2_0/Q2_0 small-batch kernel
+   ACCEPTED (2026-09-23).** First non-Qwen-mix file in the campaign that is a live
+   decode target: 211.08 / 32.97 t/s at ctx 512 (§8). The landed change is
+   `vulkan/dense_extra_small_q2.comp` plus its host dispatch — PQ2_0/Q2_0 batches
+   of 2..16 tokens, and the ragged tail past a whole 128-token mmq tile, now
+   stream each weight row once instead of paying a full tile for 2 tokens:
+   `--prefill-chunk 2` **2.95 -> 54.60 t/s (18.5x)**, prompt tails **pp130
+   +71.7%**, **pp140 +45.4%**, pp256 unchanged, and a 2-token batch costs
+   1.38-1.6x a one-token decode (the MTP-verify regime). **Bit-exact** against n
+   one-token decode calls (`tests/test_pq2_small`, 27/27 cases, 0 mismatching
+   bits); no regression where it is inert (7-rep interleaved ctx 1024 A/B:
+   prefill -0.03%, decode +0.00%). Default on, `Q36_VK_Q2_SMALL_MAX=0` disables;
+   threshold 16 is the conservative middle of the shape crossover. Uncommitted in
+   `q36-wt/pq2-persist` (branch `experiment/pq2-smallbatch`). Evidence:
+   `evidence/raw/pq2-smallbatch-{parity,chunk-sweep}.txt`,
+   `evidence/raw/ab-pq2-smallbatch-ctx1024*`, `AlreadyTried.md`.
+   **Not attempted, ranked:** (a) the PQ2_0 decode matvec reads at ~318 GB/s of
+   the measured 437 GB/s ceiling and every dispatch-shape rewrite of it was
+   neutral or worse (§7) — the remaining headroom is a load layout that needs no
+   offline repack, not another dispatch shape; (b) the in-file MTP head (15
+   `blk.64` tensors) — the head-swap speculative scheme was parked, not rejected:
+   it needs a rework of the speculative core, and the algebra of the two schemes
+   (not a measurement) only breaks even near 0.7 acceptance, so draft=1 MTP stays
+   the only speculative configuration. Draft depth 2+ remains rejected (ledger).
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 
@@ -557,6 +601,23 @@ Authoritative detail and per-item "reconsider_if" live in
   — recorded in the ledger so they are not reopened here.
 - **Host-cached readback and shader-core-count levers are already implemented /
   not applicable** in this engine.
+- **PQ2_0/Q2_0 decode-matvec workgroup shapes — closed (2026-09-23).** The
+  streaming ceiling on this board is **~437 GB/s** (standalone probe,
+  `evidence/raw/probe.c` + `stream.comp`); the PQ2_0 decode matvec runs at
+  **~318 GB/s**, and the gap is that kernel's own access pattern, not dispatch
+  shape: fewer workgroups (caps 320/640/1280/2560), 2/8/16 rows per workgroup,
+  and four 4-row wave64s packed into one 256-thread workgroup were all **neutral
+  or worse** (best -1.8%, worst +43%; 1385 -> 1381 ms on the packing test). Do
+  not retry without a wide-aligned load layout that needs no offline repack.
+- **GQA-grouped split-K decode attention — rejected (2026-09-23).** One
+  workgroup per (kv head, token, span) sharing each K/V read across the heads
+  that share a kv head: **bit-exact** (18/18 cases, 600..65535 keys) but
+  **0.3-0.7x at 600-4k keys** and only ~1.0-1.17x at 16k-64k, net negative end to
+  end. Its first sweeps read **+11% at ctx 8k** and **+23.6% at ctx 2k**
+  (`evidence/raw/ab-attn-decode-gqa-ctx{2k,8k}*`) and neither survived
+  re-measurement: at ctx 1k/1.5k/2k/4k the same change measures **-2..-9%**, and
+  the wins were the decode-variance pitfall below (§9). Shader, harness and the
+  rejected patch are archived under `evidence/raw/attn-decode-gqa-rejected*`.
 
 ## 8. Model set — what loads and what does not
 
@@ -567,6 +628,7 @@ Authoritative detail and per-item "reconsider_if" live in
 | `Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf` | 11194M | qwen35moe 40 blk | **909.49 / 87.37** | 615.08 / 78.72 |
 | `RavenX-35B-Q36-IQ2XXS.gguf` | 11194M | qwen35moe 40 blk | 717.36 / 89.47 | 545.46 / 77.96 |
 | `Qwen3.8-35B-A3B-IQ2_M.gguf` | 11977M | qwen35moe **41 blk** | 116.51 / 29.29 | 529.90 / 91.53 |
+| `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` | 6873M | qwen35 dense 27B + MTP head | **211.08 / 32.97** at ctx 512 | not measured |
 
 - The guard is the no-regression reference; `Qwen3.6-35B-A3B-AntirezExperts-
   …gguf` is a **symlink** to it, and `q36moe.gguf` points at the *dense* 27B.
@@ -578,6 +640,14 @@ Authoritative detail and per-item "reconsider_if" live in
 - IQ2_M **loads** since `f9d537d` but its quant mix (375× `IQ2_S` trunk) misses the
   fast prefill dispatch, so it is the one file where q36 is far *behind* upstream.
   Never quote it as a q36 win; see §6.1.
+- `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` is the **DERISKED re-release** of the
+  file §6.6 could not load: same `qwen35` dense 27B layout, now carrying type-142
+  **PQ2_0** tensors this engine has kernels for (402 PQ2_0 tensors + BF16
+  `ssm_alpha`/`ssm_beta`). 6873M, published md5 matches. Numbers above are the
+  standard Bonsai workload (ctx 512, 128 greedy tokens, `--prefill-chunk 256`);
+  the older `Q2_0-g64` file measured ~200 / ~33.3 on it. Raw:
+  `evidence/raw/pq2-bonsai-workload.txt`. Unlike the models above it, its decode
+  matvec is a *dense* PQ2_0 kernel (`dense_extra_decode_pq2_0`) — see §6.7.
 
 ## 9. Known pitfalls (each of these has cost real time)
 
@@ -631,6 +701,13 @@ Authoritative detail and per-item "reconsider_if" live in
   kernel changed. Judge those on the decode median **with its spread** — the
   decode spread on Swift 27B is up to 9.4% and a cold first rep can move the
   whole median.
+- **Decode t/s measured right after a >=1.5k-token prefill does not repeat
+  (2026-09-23).** Same binary, same settings, ctx 4096: 30.9 / 21.8 / 25.2 t/s.
+  Per-kernel `gpu_ms` moves too (one prefill mmq kernel time changed 12% between
+  two runs with identical prefill t/s). Decode at ctx <= 1024 is stable to MAD
+  0.02. Judge decode changes at short context, in a kernel harness, or with >=7
+  interleaved reps that agree on direction — a single sweep at long context is
+  not evidence.
 
 ## 10. Handoff checklist for the next agent
 

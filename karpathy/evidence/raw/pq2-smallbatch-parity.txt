@@ -1,0 +1,43 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+PASS in= 5120 out=17408 n_tok=  1  mismatches=0 max_abs=0  batched 0.240 ms  one-token 0.240 ms  ratio 1.00x
+PASS in= 5120 out=17408 n_tok=  2  mismatches=0 max_abs=0  batched 0.394 ms  one-token 0.241 ms  ratio 1.63x
+PASS in= 5120 out=17408 n_tok=  3  mismatches=0 max_abs=0  batched 0.542 ms  one-token 0.240 ms  ratio 2.25x
+PASS in= 5120 out=17408 n_tok=  4  mismatches=0 max_abs=0  batched 0.690 ms  one-token 0.246 ms  ratio 2.80x
+PASS in= 5120 out=17408 n_tok=  7  mismatches=0 max_abs=0  batched 1.129 ms  one-token 0.243 ms  ratio 4.65x
+PASS in= 5120 out=17408 n_tok=  8  mismatches=0 max_abs=0  batched 1.275 ms  one-token 0.244 ms  ratio 5.23x
+PASS in= 5120 out=17408 n_tok=  9  mismatches=0 max_abs=0  batched 1.522 ms  one-token 0.246 ms  ratio 6.20x
+PASS in= 5120 out=17408 n_tok= 13  mismatches=0 max_abs=0  batched 2.105 ms  one-token 0.243 ms  ratio 8.65x
+PASS in= 5120 out=17408 n_tok= 16  mismatches=0 max_abs=0  batched 0.645 ms  one-token 0.077 ms  ratio 8.39x
+mmq  in= 5120 out=17408 n_tok= 24  mismatches=417792 max_abs=0.0332  batched 1.768 ms  one-token 0.081 ms  ratio 21.85x
+mmq  in= 5120 out=17408 n_tok= 32  mismatches=557056 max_abs=0.0392  batched 1.768 ms  one-token 0.082 ms  ratio 21.47x
+mmq  in= 5120 out=17408 n_tok= 48  mismatches=835584 max_abs=0.035  batched 1.807 ms  one-token 0.081 ms  ratio 22.33x
+mmq  in= 5120 out=17408 n_tok= 64  mismatches=1114112 max_abs=0.0371  batched 1.815 ms  one-token 0.081 ms  ratio 22.34x
+PASS in=17408 out= 5120 n_tok=  1  mismatches=0 max_abs=0  batched 0.074 ms  one-token 0.073 ms  ratio 1.00x
+PASS in=17408 out= 5120 n_tok=  2  mismatches=0 max_abs=0  batched 0.101 ms  one-token 0.073 ms  ratio 1.38x
+PASS in=17408 out= 5120 n_tok=  3  mismatches=0 max_abs=0  batched 0.134 ms  one-token 0.073 ms  ratio 1.84x
+PASS in=17408 out= 5120 n_tok=  4  mismatches=0 max_abs=0  batched 0.170 ms  one-token 0.073 ms  ratio 2.34x
+PASS in=17408 out= 5120 n_tok=  7  mismatches=0 max_abs=0  batched 0.275 ms  one-token 0.073 ms  ratio 3.76x
+PASS in=17408 out= 5120 n_tok=  8  mismatches=0 max_abs=0  batched 0.311 ms  one-token 0.073 ms  ratio 4.23x
+PASS in=17408 out= 5120 n_tok=  9  mismatches=0 max_abs=0  batched 0.382 ms  one-token 0.073 ms  ratio 5.20x
+PASS in=17408 out= 5120 n_tok= 13  mismatches=0 max_abs=0  batched 0.511 ms  one-token 0.073 ms  ratio 6.96x
+PASS in=17408 out= 5120 n_tok= 16  mismatches=0 max_abs=0  batched 0.617 ms  one-token 0.074 ms  ratio 8.38x
+mmq  in=17408 out= 5120 n_tok= 24  mismatches=122880 max_abs=0.16  batched 2.161 ms  one-token 0.078 ms  ratio 27.85x
+mmq  in=17408 out= 5120 n_tok= 32  mismatches=163840 max_abs=0.152  batched 2.162 ms  one-token 0.077 ms  ratio 27.93x
+mmq  in=17408 out= 5120 n_tok= 48  mismatches=245760 max_abs=0.12  batched 2.231 ms  one-token 0.077 ms  ratio 28.91x
+mmq  in=17408 out= 5120 n_tok= 64  mismatches=327680 max_abs=0.13  batched 2.253 ms  one-token 0.077 ms  ratio 29.11x
+PASS in= 5120 out= 1001 n_tok=  1  mismatches=0 max_abs=0  batched 0.066 ms  one-token 0.067 ms  ratio 1.00x
+PASS in= 5120 out= 1001 n_tok=  2  mismatches=0 max_abs=0  batched 0.067 ms  one-token 0.065 ms  ratio 1.03x
+PASS in= 5120 out= 1001 n_tok=  3  mismatches=0 max_abs=0  batched 0.067 ms  one-token 0.064 ms  ratio 1.05x
+PASS in= 5120 out= 1001 n_tok=  4  mismatches=0 max_abs=0  batched 0.069 ms  one-token 0.065 ms  ratio 1.06x
+PASS in= 5120 out= 1001 n_tok=  7  mismatches=0 max_abs=0  batched 0.073 ms  one-token 0.064 ms  ratio 1.14x
+PASS in= 5120 out= 1001 n_tok=  8  mismatches=0 max_abs=0  batched 0.073 ms  one-token 0.063 ms  ratio 1.16x
+PASS in= 5120 out= 1001 n_tok=  9  mismatches=0 max_abs=0  batched 0.135 ms  one-token 0.065 ms  ratio 2.09x
+PASS in= 5120 out= 1001 n_tok= 13  mismatches=0 max_abs=0  batched 0.132 ms  one-token 0.050 ms  ratio 2.65x
+PASS in= 5120 out= 1001 n_tok= 16  mismatches=0 max_abs=0  batched 0.129 ms  one-token 0.054 ms  ratio 2.39x
+mmq  in= 5120 out= 1001 n_tok= 24  mismatches=24024 max_abs=0.0353  batched 0.485 ms  one-token 0.050 ms  ratio 9.67x
+mmq  in= 5120 out= 1001 n_tok= 32  mismatches=32032 max_abs=0.036  batched 0.483 ms  one-token 0.040 ms  ratio 11.98x
+mmq  in= 5120 out= 1001 n_tok= 48  mismatches=48048 max_abs=0.038  batched 0.492 ms  one-token 0.038 ms  ratio 12.87x
+mmq  in= 5120 out= 1001 n_tok= 64  mismatches=64064 max_abs=0.0397  batched 0.491 ms  one-token 0.027 ms  ratio 17.91x
+ALL PASS

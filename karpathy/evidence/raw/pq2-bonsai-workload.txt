@@ -1,0 +1,21 @@
+TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf — standard Bonsai workload, re-archived 2026-09-23.
+Binary: q36-wt/pq2-persist/q36-bench (small-batch kernel in). 3 reps, no cooldown, sequential.
+md5: 28ef8d6d7d73df601fbc36a7f135f319
+
+# /home/server/q36-wt/pq2-persist/q36-bench --vulkan -m TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf --prompt-file tests/long_context_story_prompt.txt
+# --ctx-start 512 --ctx-max 512 --ctx-alloc 1296 --prefill-chunk 256 --gen-tokens 128
+### rep 1
+q36-bench: context buffers 275.99 MiB (scratch=93.46 MiB, raw=32.91 MiB, compressed=149.62 MiB, ctx=1296, backend=vulkan, prefill_chunk=256, raw_kv_rows=1296, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+512,512,208.32,128,33.52,2060
+### rep 2
+q36-bench: context buffers 275.99 MiB (scratch=93.46 MiB, raw=32.91 MiB, compressed=149.62 MiB, ctx=1296, backend=vulkan, prefill_chunk=256, raw_kv_rows=1296, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+512,512,211.32,128,32.97,2060
+### rep 3
+q36-bench: context buffers 275.99 MiB (scratch=93.46 MiB, raw=32.91 MiB, compressed=149.62 MiB, ctx=1296, backend=vulkan, prefill_chunk=256, raw_kv_rows=1296, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+512,512,211.08,128,32.93,2060
+### done
+
+medians: prefill 211.08 t/s, decode 32.97 t/s (earlier in-session run of the same workload: 206.95/210.17/211.04 and 35.99/34.94/34.42).

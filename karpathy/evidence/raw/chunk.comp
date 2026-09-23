@@ -1,0 +1,13 @@
+#version 450
+/* Each WG reads exactly CHUNK contiguous bytes (uvec4 per lane per step) and exits. */
+layout(local_size_x = WG) in;
+layout(set=0, binding=0) readonly buffer A { uvec4 a[]; };
+layout(set=0, binding=1) writeonly buffer O { uint o[]; };
+layout(push_constant) uniform P { uint out_dim; uint blocks; } pc;
+void main() {
+    uint base = gl_WorkGroupID.x * (CHUNK / 16u);
+    uvec4 acc = uvec4(0);
+    for (uint i = gl_LocalInvocationID.x; i < CHUNK / 16u; i += WG) acc ^= a[base + i];
+    uint r = acc.x ^ acc.y ^ acc.z ^ acc.w;
+    if (r == 0x12345678u) o[0] = r;
+}

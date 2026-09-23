@@ -1,0 +1,194 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* GQA-grouped split-K decode attention for the resident q8_0-K / q4_0-V
+ * cache with head_dim 256.  attn_decode_split.comp runs one workgroup per
+ * query head, so the HQ heads sharing a KV head each stream that head's
+ * K/V from DRAM; past ~2k keys a layer's KV no longer fits in L2 and the
+ * redundancy is real traffic.  Here one workgroup per (kv head, token,
+ * span) loads every K word and V value once and applies it to all HQ query
+ * heads.
+ *
+ * Each head's arithmetic -- the k_q8_dot_pair term order, the quad
+ * clustered add, the tile max, the rescale and the 4-way unrolled V
+ * accumulation -- is the per-head sequence of attn_decode_split.comp's
+ * q8_0/q4_0 branch, and the partial layout is identical, so attn_combine
+ * is shared and the result is bit-identical to the per-head kernel. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Qbuf { float q[]; };
+layout(set = 0, binding = 1) readonly buffer Kcache { uint kc[]; };
+layout(set = 0, binding = 2) readonly buffer Vcache { uint vc[]; };
+layout(set = 0, binding = 3) readonly buffer Sinks { float sinks[]; };
+layout(set = 0, binding = 4) writeonly buffer Partials { float part[]; };
+
+layout(push_constant) uniform Push {
+    uint pos0;
+    uint n_head;
+    uint n_head_kv;
+    uint head_dim;
+    uint n_spans;
+    uint has_sinks;
+    uint k_type;
+    uint v_type;
+    uint k_row_bytes;
+    uint v_row_bytes;
+    uint span_keys;
+} pc;
+
+#ifndef HQ
+#define HQ 6u
+#endif
+#define TILE 64u
+#define HEAD_DIM 256u
+#define PAIRS (HEAD_DIM / 64u)
+
+#define Q36_QCHUNK 68u                       /* 64 floats + 4 pad */
+#define Q36_QIDX(d) (((d) >> 6u) * Q36_QCHUNK + ((d) & 63u))
+#define Q36_QHEAD (4u * Q36_QCHUNK)
+shared float sh_q[HQ * Q36_QHEAD];
+shared float sh_w[HQ * TILE];
+
+float v_q4(uint t, uint vblk, uint vqo, uint vsh) {
+    uint b = t * pc.v_row_bytes + vblk;
+    uint dw = vc[b >> 2u];
+    float d = unpackHalf2x16((b & 2u) == 0u ? dw : (dw >> 16u)).x;
+    uint qb = b + vqo;
+    uint qv = (vc[qb >> 2u] >> (((qb & 3u) * 8u) + vsh)) & 15u;
+    return d * float(int(qv) - 8);
+}
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint kvh = gl_WorkGroupID.x;
+    uint tok = gl_WorkGroupID.y;
+    uint span = gl_WorkGroupID.z;
+    uint n_kv = pc.pos0 + tok + 1u;
+    uint span0 = span * pc.span_keys;
+    uint span_end = min(span0 + pc.span_keys, n_kv);
+    if (span0 >= n_kv) return;
+
+    uint h0 = kvh * HQ;
+    const float scale = 1.0 / sqrt(float(HEAD_DIM));
+
+    [[unroll]] for (uint j = 0u; j < HQ; j++)
+        sh_q[j * Q36_QHEAD + Q36_QIDX(tid)] = q[(tok * pc.n_head + h0 + j) * HEAD_DIM + tid];
+    barrier();
+
+    float m[HQ], l[HQ], acc[HQ];
+    [[unroll]] for (uint j = 0u; j < HQ; j++) {
+        m[j] = span == 0u && pc.has_sinks != 0u ? sinks[h0 + j] : -3.402823466e38;
+        l[j] = 0.0;
+        acc[j] = 0.0;
+    }
+
+    const uint k_head_bytes = (HEAD_DIM >> 5u) * 34u;
+    const uint v_head_bytes = (HEAD_DIM >> 5u) * 18u;
+    uint vblk = kvh * v_head_bytes + (tid >> 5u) * 18u;
+    uint vqo = 2u + (tid & 15u);
+    uint vsh = (tid & 31u) < 16u ? 0u : 4u;
+    /* PAIRS == 4: each quad lane owns exactly one 64-dim pair of a key. */
+    uint quad = tid & 3u;
+
+    for (uint base = span0; base < span_end; base += TILE) {
+        uint tile_n = min(TILE, span_end - base);
+        uint key = base + (tid >> 2);
+        float kdot[HQ];
+        [[unroll]] for (uint j = 0u; j < HQ; j++) kdot[j] = 0.0;
+        if ((tid >> 2) < tile_n) {
+            /* k_q8_dot_pair(kb + quad * 68, quad), with the 17 words loaded
+             * once for all heads. */
+            uint wi = (key * pc.k_row_bytes + kvh * k_head_bytes + quad * 68u) >> 2u;
+            uint kw[17];
+            [[unroll]] for (uint k = 0u; k < 17u; k++) kw[k] = kc[wi + k];
+            float d0 = unpackHalf2x16(kw[0]).x;
+            float d1 = unpackHalf2x16(kw[8]).y;
+            uint q_base = quad * Q36_QCHUNK;
+            [[unroll]] for (uint j = 0u; j < HQ; j++) {
+                uint qh = j * Q36_QHEAD + q_base;
+                float s0 = 0.0;
+                uint prev = kw[0];
+                [[unroll]] for (uint k = 0u; k < 8u; k++) {
+                    uint next = kw[1u + k];
+                    uint sw = (prev >> 16u) | (next << 16u);
+                    prev = next;
+                    uint qb = qh + 4u * k;
+                    s0 += dot(vec4(unpack8(int(sw))),
+                              vec4(sh_q[qb], sh_q[qb + 1u], sh_q[qb + 2u], sh_q[qb + 3u]));
+                }
+                float s1 = 0.0;
+                [[unroll]] for (uint k = 0u; k < 8u; k++) {
+                    uint qb = qh + 32u + 4u * k;
+                    s1 += dot(vec4(unpack8(int(kw[9u + k]))),
+                              vec4(sh_q[qb], sh_q[qb + 1u], sh_q[qb + 2u], sh_q[qb + 3u]));
+                }
+                /* The per-head kernel's `dot += k_q8_dot_pair(...)` starts
+                 * from 0.0, so this add is exact too. */
+                kdot[j] += d0 * s0 + d1 * s1;
+            }
+        }
+        [[unroll]] for (uint j = 0u; j < HQ; j++) {
+            float s = subgroupClusteredAdd(kdot[j], 4u);
+            if (quad == 0u && (tid >> 2) < tile_n) sh_w[j * TILE + (tid >> 2)] = s * scale;
+        }
+        barrier();
+
+        float nm[HQ];
+        [[unroll]] for (uint j = 0u; j < HQ; j++) {
+            float tmax = -3.402823466e38;
+            for (uint t = 0u; t < tile_n; t++) tmax = max(tmax, sh_w[j * TILE + t]);
+            nm[j] = max(m[j], tmax);
+            float r = exp(m[j] - nm[j]);
+            l[j] *= r;
+            acc[j] *= r;
+        }
+        barrier();
+        if (tid < tile_n) {
+            [[unroll]] for (uint j = 0u; j < HQ; j++)
+                sh_w[j * TILE + tid] = exp(sh_w[j * TILE + tid] - nm[j]);
+        }
+        barrier();
+
+        uint t = 0u;
+        for (; t + 4u <= tile_n; t += 4u) {
+            float v0 = v_q4(base + t, vblk, vqo, vsh);
+            float v1 = v_q4(base + t + 1u, vblk, vqo, vsh);
+            float v2 = v_q4(base + t + 2u, vblk, vqo, vsh);
+            float v3 = v_q4(base + t + 3u, vblk, vqo, vsh);
+            [[unroll]] for (uint j = 0u; j < HQ; j++) {
+                float w0 = sh_w[j * TILE + t];
+                float w1 = sh_w[j * TILE + t + 1u];
+                float w2 = sh_w[j * TILE + t + 2u];
+                float w3 = sh_w[j * TILE + t + 3u];
+                l[j] += w0; acc[j] += w0 * v0;
+                l[j] += w1; acc[j] += w1 * v1;
+                l[j] += w2; acc[j] += w2 * v2;
+                l[j] += w3; acc[j] += w3 * v3;
+            }
+        }
+        for (; t < tile_n; t++) {
+            float v = v_q4(base + t, vblk, vqo, vsh);
+            [[unroll]] for (uint j = 0u; j < HQ; j++) {
+                float w = sh_w[j * TILE + t];
+                l[j] += w;
+                acc[j] += w * v;
+            }
+        }
+        [[unroll]] for (uint j = 0u; j < HQ; j++) m[j] = nm[j];
+        barrier();
+    }
+
+    [[unroll]] for (uint j = 0u; j < HQ; j++) {
+        uint pbase = ((tok * pc.n_head + h0 + j) * pc.n_spans + span) * (HEAD_DIM + 2u);
+        part[pbase + tid] = acc[j];
+        if (tid == 0u) {
+            part[pbase + HEAD_DIM] = m[j];
+            part[pbase + HEAD_DIM + 1u] = l[j];
+        }
+    }
+}

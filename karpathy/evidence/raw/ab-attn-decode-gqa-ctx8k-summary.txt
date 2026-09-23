@@ -1,0 +1,7 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    5     114.52         0.040     27.66          3.080     /tmp/claude-1000/-home-server-q36/ab69dcf0-a3f0-42be-a524-8851a3a67fa3/scratchpad/bench_gqa_off.sh
+B    5     114.53         0.030     30.74          0.670     /tmp/claude-1000/-home-server-q36/ab69dcf0-a3f0-42be-a524-8851a3a67fa3/scratchpad/bench_gqa_on.sh
+
+B vs A prefill: +0.01%   decode: +11.14%   (gate: +1.50%)
+verdict: FAIL (prefill)

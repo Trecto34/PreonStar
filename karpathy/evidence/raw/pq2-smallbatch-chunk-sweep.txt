@@ -1,0 +1,66 @@
+PQ2_0 small-batch chunk/tail sweep — regenerated 2026-09-23 (original raw was not archived).
+A = /home/server/q36/q36-bench (main, no small-batch kernel); B = q36-wt/pq2-persist/q36-bench (with it).
+All runs: --prompt-file tests/long_context_story_prompt.txt --ctx-start=ctx-max=N --ctx-alloc 1400 --prefill-chunk=C --gen-tokens 0
+Pre-CSV lines are the engine's own context/backend banner; the last numeric line is ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes.
+
+### A-chunk2  bin=q36/q36-bench  ctx=64 chunk=2
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 186.86 MiB (scratch=1.69 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=2, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+64,64,2.95,0,0.00,0
+### B-chunk2  bin=pq2-persist/q36-bench  ctx=64 chunk=2
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 186.86 MiB (scratch=1.69 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=2, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+64,64,54.60,0,0.00,0
+### A-chunk4  bin=q36/q36-bench  ctx=64 chunk=4
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 187.58 MiB (scratch=2.41 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=4, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+64,64,6.07,0,0.00,0
+### B-chunk4  bin=pq2-persist/q36-bench  ctx=64 chunk=4
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 187.58 MiB (scratch=2.41 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=4, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+64,64,70.41,0,0.00,0
+### B-chunk8  bin=pq2-persist/q36-bench  ctx=64 chunk=8
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 189.03 MiB (scratch=3.86 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=8, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+64,64,79.74,0,0.00,0
+### B-chunk16  bin=pq2-persist/q36-bench  ctx=64 chunk=16
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 191.92 MiB (scratch=6.75 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=16, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+64,64,82.03,0,0.00,0
+### A-pp130  bin=q36/q36-bench  ctx=130 chunk=128
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 232.38 MiB (scratch=47.21 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=128, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+130,130,110.35,0,0.00,0
+### B-pp130  bin=pq2-persist/q36-bench  ctx=130 chunk=128
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 232.38 MiB (scratch=47.21 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=128, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+130,130,189.51,0,0.00,0
+### A-pp140  bin=q36/q36-bench  ctx=140 chunk=128
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 232.38 MiB (scratch=47.21 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=128, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+140,140,118.74,0,0.00,0
+### B-pp140  bin=pq2-persist/q36-bench  ctx=140 chunk=128
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 232.38 MiB (scratch=47.21 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=128, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+140,140,172.69,0,0.00,0
+### A-pp256  bin=q36/q36-bench  ctx=256 chunk=256
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 278.63 MiB (scratch=93.46 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=256, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+256,256,211.51,0,0.00,0
+### B-pp256  bin=pq2-persist/q36-bench  ctx=256 chunk=256
+q36: prism.hadamard: block=1024 widths=3 values=28672
+q36-bench: context buffers 278.63 MiB (scratch=93.46 MiB, raw=35.55 MiB, compressed=149.62 MiB, ctx=1400, backend=vulkan, prefill_chunk=256, raw_kv_rows=1400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+256,256,214.78,0,0.00,0
+### done

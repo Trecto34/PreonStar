@@ -1,0 +1,82 @@
+PROBE RE-RUN — PQ2_0/Q2_0 decode-matvec shape audit (2026-09-23, evening)
+=======================================================================
+The original probe outputs of this audit were never archived (they lived in the
+session scratchpad).  The probe sources and shaders WERE archived
+(../probe.c, ../stream.comp, ../chunk.comp, ../mv.comp, and here mv2.comp,
+probe_mv*.c, probe_chunk.c).  This file is a re-run of those archived sources on
+the same board (BC-250, RADV GFX1013, device-local memory type 3) with the
+command lines spelled out, so the numbers below are reproducible.
+
+What reproduces
+---------------
+1. Streaming-read ceiling.  `probe` (stream.comp, 512 MiB buffer, contiguous
+   uvec4 per lane), memory types 0 / 3 / 5, 320..5120 workgroups:
+
+   type 0 flags 0x01 groups   640: best 2.456 ms  437.1 GB/s
+   type 0 flags 0x01 groups  1280: best 2.458 ms  436.8 GB/s
+   type 0 flags 0x01 groups  2560: best 2.455 ms  437.4 GB/s
+   type 0 flags 0x01 groups  5120: best 2.452 ms  438.0 GB/s
+   type 3 flags 0x07 groups   320: best 2.443 ms  439.6 GB/s
+   type 3 flags 0x07 groups   640: best 2.460 ms  436.4 GB/s
+   type 3 flags 0x07 groups  1280: best 2.457 ms  437.1 GB/s
+   type 3 flags 0x07 groups  2560: best 2.457 ms  436.9 GB/s
+   type 3 flags 0x07 groups  5120: best 2.451 ms  438.0 GB/s
+   type 5 flags 0x0e groups   320: best 2.446 ms  439.0 GB/s
+   type 5 flags 0x0e groups   640: best 2.455 ms  437.3 GB/s
+   type 5 flags 0x0e groups  1280: best 2.466 ms  435.4 GB/s
+   type 5 flags 0x0e groups  2560: best 2.454 ms  437.5 GB/s
+   type 5 flags 0x0e groups  5120: best 2.451 ms  438.2 GB/s
+
+   => the **~437 GB/s** ceiling stands, identical across memory types.
+
+2. The matvec's own access pattern.  `probe_mv2 mv2.spv` (4 rows x 544 B per
+   wave, 20 blocks, the PQ2_0 row layout):
+
+   type 3 flags 0x07 groups 0: best 3.935 ms  272.9 GB/s
+
+   => inside the ledger's "~230-280 GB/s" band, i.e. the row-granular access
+   pattern itself is what caps this kernel, not the number of waves.
+
+What did NOT reproduce
+----------------------
+3. The audited claim "a 64-thread one-wave workgroup reading 4 KB and exiting
+   streams at ~251 GB/s, while the same 4 KB in 256-thread workgroups reaches
+   ~443 GB/s" does not reproduce from the archived chunk probe.  Command:
+
+     glslc --target-env=vulkan1.1 -fshader-stage=comp -DWG=<WG> -DCHUNK=4096 \
+           ../chunk.comp -o /tmp/chunk<WG>.spv
+     ./probe_chunk /tmp/chunk<WG>.spv 4096      # 512 MiB buffer, 4096 B per WG
+
+   type 3 flags 0x07 groups 0: best 3.597 ms  298.5 GB/s   (WG=64)
+   type 3 flags 0x07 groups 0: best 3.601 ms  298.2 GB/s   (WG=256)
+
+   Both workgroup sizes land at ~298 GB/s, so the launch-limit / wave-packing
+   story that motivated the 256-thread packing experiment is UNCONFIRMED at the
+   probe level.  The verdict on that experiment does not rest on it: the packing
+   change was measured in the real kernel (1385 -> 1381 ms, neutral) and
+   rejected on that measurement — whose own raw output, like the rest of the
+   in-engine shape sweep (workgroup caps 320/640/1280/2560, ROWS 1/2/8/16), was
+   never archived and cannot be re-derived without rebuilding the reverted
+   variants.
+
+   For completeness, the same harness with its other archived shader (c.spv)
+   gives 12.1 / 24.2 / 48.4 GB/s at 2048 / 4096 / 8192 B per workgroup — that is
+   shader/harness mismatch, not a memory number, and is archived only so nobody
+   reads those figures as throughput.
+
+4. `probe_chunk` dispatched with the plain stream shader core-dumps (its own
+   shader/driver mismatch); `probe_mv` with the mv0..mv4/m cores gives
+   295.6-404.4 GB/s, i.e. a different dispatch geometry than probe_mv2's, which
+   is why only the probe_mv2 figure above is quoted.
+
+How to rebuild and re-run (no binaries are committed; the repo ignores *.spv)
+---------------------------------------------------------------------------
+  glslc --target-env=vulkan1.1 -fshader-stage=comp stream.comp -o stream.spv
+  glslc --target-env=vulkan1.1 -fshader-stage=comp -DWG=64  -DCHUNK=4096 \
+        ../chunk.comp -o chunk64.spv        # and -DWG=256 for the other
+  glslc --target-env=vulkan1.1 -fshader-stage=comp mv2.comp -o mv2.spv
+  cc -O2 -o probe probe.c -lvulkan
+  cc -O2 -o probe_chunk probe_chunk.c -lvulkan
+  cc -O2 -o probe_mv2 probe_mv2.c -lvulkan
+  ./probe   ; ./probe_chunk chunk64.spv 4096 ; ./probe_mv2 mv2.spv
+(the probes resolve their shader paths relative to the cwd — run them here)

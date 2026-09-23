@@ -1147,3 +1147,104 @@ file outside the GEMM range. Full write-up:
   build sits at 256 VGPRs / 4 subgroups vs GQA-8's 128 / 8 — occupancy.
 - Evidence: `karpathy/evidence/attn-fa-prefill.md`, `raw/ab-fa-*`, `raw/fa-*`,
   `tests/test_attn_fa.c`, `karpathy/tools/{cmp_logits,frontier_nll}.py`.
+
+## PQ2_0/Q2_0 small-batch matmul (`dense_extra_small_q2.comp`) — ACCEPTED (2026-09-23)
+
+Model `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` (402 PQ2_0 tensors, dense 27B).
+
+- **Problem.** Any PQ2_0 batch of 2..127 tokens went to `dense_extra_mmq_pq2_0`,
+  whose 128-token tile costs the same for 2 tokens as for 128: `--prefill-chunk 2`
+  measured 2.96 t/s (a 2-token step = 26x a decode step). Hit by MTP verify, the
+  ragged tail of every prompt, short incremental (KV-reuse) prefills and batched
+  server decode.
+- **Change.** New kernel: one wave64 per 2 rows streams each row once, expands
+  it through the decode kernel's LUT once, and dots it against up to 8 tokens.
+  Host takes it for `n_tok <= Q36_VK_Q2_SMALL_MAX` (default 16), and for a
+  ragged tail (`n_tok % 128 <= 16`) after an mmq over the aligned head.
+- **Parity: bit-exact** against n one-token decode calls — per token the integer
+  sums, fma order and subgroupAdd are the decode kernel's.
+  `tests/test_pq2_small`: 27/27 PASS (5120x17408, 17408x5120, 5120x1001;
+  n_tok 1..16), 0 mismatching bits; the 24/32/48/64-token rows print `mmq` and
+  are timed only, since above the threshold they take the f16-accumulating tile.
+  Greedy CLI output identical to main. Raw: `raw/pq2-smallbatch-parity.txt`.
+- **Measured** (re-run and archived; the first in-session sweep was not saved and
+  read 2.96/6.0/13.8 -> 55.6/71.1/79.2, same direction and verdict):
+  ctx-64 prefill by chunk, A=main vs B=this kernel:
+  2 → **2.95 → 54.60 t/s (18.5x)**, 4 → 6.07 → 70.41, 8 → B 79.74,
+  16 → B 82.03. Prompt tails (mmq head + small ragged tail):
+  pp130 **110.35 → 189.51 (+71.7%)**, pp140 **118.74 → 172.69 (+45.4%)**,
+  pp256 211.51 → 214.78 (+1.5%, control — no small batch there).
+  A 2-token batch costs 1.38-1.6x a one-token call.
+  No regression where it is inert: 7-rep interleaved ctx 1024 A/B, prefill
+  -0.03%, decode +0.00% (`raw/ab-pq2-smallbatch-ctx1024*`).
+  Raw: `raw/pq2-smallbatch-chunk-sweep.txt`.
+- `reconsider_if`: a ragged tail of 17..127 tokens matters (raise the threshold
+  per shape: the 17408-in shapes still win vs mmq to ~48 tokens, the 5120-in
+  ones cross over near 16).
+- Evidence: `evidence/pq2-smallbatch.md` (running record),
+  `raw/pq2-smallbatch-{parity,chunk-sweep}.txt`, `raw/pq2-bonsai-workload.txt`,
+  `raw/ab-pq2-smallbatch-ctx1024.{csv,summary.txt}`, `tests/test_pq2_small.c`,
+  `vulkan/dense_extra_small_q2.comp`. Campaign map: §6.7, §8.
+
+## PQ2_0 decode matvec workgroup shape — REJECTED (2026-09-23)
+
+- **GPU streaming ceiling measured: ~437 GB/s** (standalone Vulkan probe,
+  `raw/probe.c` + `raw/stream.comp`, identical for memory types 0/3/5), re-run
+  and archived: `raw/pq2-shape-rejected/probe-rerun-20260923.txt`. The PQ2_0
+  decode matvec runs at ~318 GB/s, so the kernel is ~27% under the bus.
+- **RETRACTED sub-claim:** "a 64-thread one-wave workgroup reading 4 KB exits at
+  ~251 GB/s while the same 4 KB in 256-thread workgroups reaches ~443 GB/s". The
+  archived chunk probe re-run gives **~298 GB/s for both WG=64 and WG=256**
+  (same file, command lines spelled out), so the launch-limit story that motivated
+  the wave-packing experiment is unconfirmed. The experiment's verdict does not
+  rest on it — it was rejected on its own in-kernel measurement (below). Do not
+  cite the 251/443 pair again.
+- Probes were a dead end for the matvec. What the kernel actually did, all
+  in-engine, all neutral-or-worse, and **no raw output archived** (the variants
+  were reverted; re-deriving them means rebuilding them):
+  - grid-stride LUT amortization (fewer workgroups): cap 320/640/1280/2560 →
+    kernel +43/+11/+5/+2% slower;
+  - ROWS 1/2/8/16 vs 4: +7.5% / -1.8% / +11.5% / +31% kernel time;
+  - four 4-row wave64s per 256-thread workgroup: 1385 → 1381 ms, neutral.
+  The matvec's own access pattern (4 rows x 544 B per wave, `mv2.comp`) still
+  caps at ~273 GB/s with aligned code-only loads, no scale and no q8 loads
+  (`raw/pq2-shape-rejected/probe-rerun-20260923.txt`), i.e. the ceiling is the
+  row-granular layout, not the dispatch shape.
+- Artifacts: `raw/pq2-shape-rejected/` (probe sources + `probe-rerun-20260923.txt`
+  with the exact rebuild/run lines, the two 2k/4k decode logs, `prof*.txt`,
+  `span8k.txt`). The ROWS variants were a one-line `#define ROWS` change in
+  `vulkan/dense_extra_decode.comp` (committed in its ROWS=4 form); their SPIR-V
+  exists only in the worktree because the repo ignores `*.spv`, so re-deriving
+  them means re-applying that one-line edit.
+- `reconsider_if`: a load layout with wide aligned per-lane loads that does not
+  need an offline repack (rows are 16 B aligned at 1360 B, blocks are not).
+
+## GQA-grouped split-K decode attention — REJECTED (2026-09-23)
+
+- **Change tried.** `attn_decode_split_gqa{6,8}`: one workgroup per (kv head,
+  token, span) loads each K word / V value once for all HQ heads. **Bit-exact**
+  vs `attn_decode_split` (18/18 cases, 0 mismatching bits, 600..65535 keys).
+- **Measured.** Kernel alone: 0.3-0.7x at 600-4k keys (fewer workgroups),
+  ~1.0-1.17x at 16k-64k. End to end (same binary, env toggle, gen 64): 1k
+  -8.45% (MAD 0.02); 1.5k/2k/4k -2..-9% in a single sweep. Two 5-rep A/Bs showed
+  "+11% at 8k" and "+23% at 2k", both artifacts — see next entry.
+- End-to-end numbers: `raw/ab-attn-decode-gqa-ctx{1k,2k,8k}.{csv,summary}`.
+  Kernel parity/timing is `tests/test_attn_decode_gqa.c` (the per-call env gate
+  was `Q36_VK_ATTN_DECODE_GQA`; only `n_tok == 1` reaches the split-K path, so
+  batches of 2+ would have tested nothing).
+- Patch (shader + host wiring + test, unapplied), shader and test source:
+  `raw/attn-decode-gqa-rejected.patch` and `raw/attn-decode-gqa-rejected/`.
+  The host wiring was reverted out of the worktree; nothing in the tree depends
+  on these files.
+- `reconsider_if`: contexts well past 32k become the target workload; then add
+  a narrower span for the grouped kernel only (not bit-exact vs span 512).
+
+## Pitfall: decode t/s after a long prefill is thermal noise (2026-09-23)
+
+- On this board, decode measured right after a >=1.5k-token prefill swings
+  20-32 t/s run to run with identical binary and settings (ctx 4096: 30.9, 21.8,
+  25.2). Per-kernel `gpu_ms` is not comparable across runs either (the prefill
+  mmq moved 12% between two runs with identical prefill t/s). Short-prefill
+  decode (ctx <= 1024) is stable to MAD 0.02.
+- Judge decode-only changes at ctx <= 1024, or in a kernel harness, or with
+  >=7 interleaved reps and all pairs in one direction.
