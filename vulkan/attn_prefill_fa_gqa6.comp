@@ -1,0 +1,230 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_control_flow_attributes : enable
+
+/* Flash-attention prefill for dense Qwen3.8 GQA 24/4=6, head_dim 256,
+ * Q8_0 K cache / Q4_0 V cache.  Replaces attn_prefill_qtile2_gqa6 when
+ * Q36_VK_ATTN_FA is on; writes the same per-4096-key-group (acc, m, l)
+ * partials, so attn_combine is unchanged.
+ *
+ * Why a new shape: qtile2 serves 2 tokens per workgroup and re-reads six Q rows
+ * from LDS for every K vector (~1 FMA per LDS float), so every 2-token
+ * workgroup re-dequantizes the whole causal K/V prefix and the kernel ran at
+ * ~4% of the chip's f32 rate (~0.8 TFLOP/s at ctx 8192).  Here one workgroup
+ * serves QT=8 tokens x 6 heads = 48 rows:
+ *
+ *  - K/V are dequantized once per BK-key tile into LDS as f32.  Q8_0/Q4_0
+ *    dequant (f16 scale x small int) is exact in f32, so only summation order
+ *    differs from qtile2.
+ *  - Q lives in registers.  A 16-lane "rowset" owns RS=3 rows of one token;
+ *    lane j holds dims {64i + 4j .. +3 : i < 4}, so for a given i the 16 lanes
+ *    read 256 contiguous bytes (conflict-free) and the 16 rowsets of the
+ *    workgroup read the same K/V address (LDS broadcast).  QK partial dots are
+ *    finished with a 16-lane clustered add, which leaves the full score on
+ *    every lane of the rowset -- exactly where PV needs it.
+ *  - The output accumulator uses the same lane/dim mapping, so PV is
+ *    48 FMAs per key per lane from 4 vec4 LDS reads.
+ *
+ * The score order for a row depends only on absolute key index (tiles are
+ * aligned to the group start), so results stay invariant to n_tok/chunking
+ * like the kernel it replaces. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Qbuf { float q[]; };
+layout(set = 0, binding = 1) readonly buffer Kcache { uint kc[]; };
+layout(set = 0, binding = 2) readonly buffer Vcache { uint vc[]; };
+layout(set = 0, binding = 3) readonly buffer Sinks { float sinks[]; };
+layout(set = 0, binding = 4) buffer Partials { float part[]; };
+
+layout(push_constant) uniform Push {
+    uint pos0;
+    uint n_head;
+    uint n_head_kv;
+    uint head_dim;
+    uint n_spans;       /* number of 4096-key groups (partials per row) */
+    uint n_tok;
+    uint has_sinks;
+    uint k_type;
+    uint v_type;
+    uint k_row_bytes;
+    uint v_row_bytes;
+    uint tok_base;
+} pc;
+
+#define HQ 6u
+#define HD 256u
+#define QT 8u               /* tokens per workgroup */
+#define RS 3u               /* rows (heads) per 16-lane rowset; 2 rowsets per token */
+#define BK 16u              /* keys staged in LDS per tile */
+#define SUB 8u              /* keys per online-softmax step */
+#define GROUP_KEYS 4096u    /* SPAN(512) x SPAN_GROUP(8): the partial layout attn_combine folds */
+#define K_HEAD_BYTES 272u   /* 8 x Q8_0 block (2 B f16 + 32 x i8) */
+#define V_HEAD_BYTES 144u   /* 8 x Q4_0 block (2 B f16 + 16 B nibbles) */
+#define NEG_BIG -3.402823466e38
+
+shared vec4 sh_k[BK * (HD / 4u)];
+shared vec4 sh_v[BK * (HD / 4u)];
+
+/* Four dwords starting at an even (2-byte aligned) byte offset. */
+uvec4 load16_k(uint off) {
+    uint w = off >> 2u;
+    uint a = kc[w], b = kc[w + 1u], c = kc[w + 2u], d = kc[w + 3u];
+    if ((off & 2u) == 0u) return uvec4(a, b, c, d);
+    uint e = kc[w + 4u];
+    return uvec4((a >> 16u) | (b << 16u), (b >> 16u) | (c << 16u),
+                 (c >> 16u) | (d << 16u), (d >> 16u) | (e << 16u));
+}
+
+uvec4 load16_v(uint off) {
+    uint w = off >> 2u;
+    uint a = vc[w], b = vc[w + 1u], c = vc[w + 2u], d = vc[w + 3u];
+    if ((off & 2u) == 0u) return uvec4(a, b, c, d);
+    uint e = vc[w + 4u];
+    return uvec4((a >> 16u) | (b << 16u), (b >> 16u) | (c << 16u),
+                 (c >> 16u) | (d << 16u), (d >> 16u) | (e << 16u));
+}
+
+float half_k(uint off) { return unpackHalf2x16(kc[off >> 2u] >> ((off & 2u) * 8u)).x; }
+float half_v(uint off) { return unpackHalf2x16(vc[off >> 2u] >> ((off & 2u) * 8u)).x; }
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint j = tid & 15u;                 /* lane within rowset */
+    uint rowset = tid >> 4u;            /* 0..15 */
+    uint t = rowset >> 1u;              /* token within tile */
+    uint hbase = gl_WorkGroupID.x * HQ + (rowset & 1u) * RS;
+    uint kvh = gl_WorkGroupID.x;
+    uint local0 = gl_WorkGroupID.y * QT;
+    uint tok0 = pc.tok_base + local0;
+    uint tn = min(QT, pc.n_tok - local0);
+    uint group = gl_WorkGroupID.z;
+    uint g0 = group * GROUP_KEYS;
+    uint g_end = min(g0 + GROUP_KEYS, pc.pos0 + tok0 + tn);
+    if (g0 >= g_end) return;            /* uniform: before any barrier */
+
+    bool tok_live = t < tn;
+    uint tok = tok0 + t;
+    uint n_kv_row = pc.pos0 + tok + 1u;
+
+    /* 1/sqrt(256) = 1/16 is a power of two, so pre-scaling Q is exact. */
+    vec4 qr[RS][4];
+    [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+        uint qb = ((tok * pc.n_head) + hbase + rr) * HD;
+        [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            uint d = 64u * i + 4u * j;
+            qr[rr][i] = tok_live ?
+                vec4(q[qb + d], q[qb + d + 1u], q[qb + d + 2u], q[qb + d + 3u]) * 0.0625 :
+                vec4(0.0);
+        }
+    }
+
+    float m[RS];
+    float l[RS];
+    vec4 acc[RS][4];
+    [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+        m[rr] = group == 0u && pc.has_sinks != 0u ? sinks[hbase + rr] : NEG_BIG;
+        l[rr] = 0.0;
+        [[unroll]] for (uint i = 0u; i < 4u; i++) acc[rr][i] = vec4(0.0);
+    }
+
+    /* Staging assignment: thread -> (key, 16-dim segment).  Segment s covers
+     * block s/2; for K it is bytes [16*(s&1), +16) of that block's int8 codes,
+     * for V it is the low (s even) or high (s odd) nibbles of the block's 16
+     * bytes, matching Q4_0's j<16 low / j>=16 high layout. */
+    uint st_key = tid >> 4u;
+    uint st_seg = tid & 15u;
+    uint st_blk = st_seg >> 1u;
+    uint st_half = st_seg & 1u;
+
+    for (uint base = g0; base < g_end; base += BK) {
+        uint key = base + st_key;
+        uint sidx = st_key * (HD / 4u) + st_seg * 4u;
+        if (key < g_end) {
+            uint kb = key * pc.k_row_bytes + kvh * K_HEAD_BYTES + st_blk * 34u;
+            float kd = half_k(kb);
+            uvec4 kw = load16_k(kb + 2u + st_half * 16u);
+            [[unroll]] for (uint c = 0u; c < 4u; c++)
+                sh_k[sidx + c] = vec4(unpack8(int(kw[c]))) * kd;
+
+            uint vb = key * pc.v_row_bytes + kvh * V_HEAD_BYTES + st_blk * 18u;
+            float vd = half_v(vb);
+            uvec4 vw = load16_v(vb + 2u);
+            [[unroll]] for (uint c = 0u; c < 4u; c++) {
+                uint nib = st_half != 0u ? (vw[c] >> 4u) & 0x0f0f0f0fu : vw[c] & 0x0f0f0f0fu;
+                sh_v[sidx + c] = (vec4(unpack8(int(nib))) - 8.0) * vd;
+            }
+        } else {
+            [[unroll]] for (uint c = 0u; c < 4u; c++) {
+                sh_k[sidx + c] = vec4(0.0);
+                sh_v[sidx + c] = vec4(0.0);
+            }
+        }
+        barrier();
+
+        [[unroll]] for (uint sub = 0u; sub < BK; sub += SUB) {
+            float s[RS][SUB];
+            [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                uint kr = (sub + kk) * (HD / 4u) + j;
+                vec4 k0 = sh_k[kr], k1 = sh_k[kr + 16u], k2 = sh_k[kr + 32u], k3 = sh_k[kr + 48u];
+                [[unroll]] for (uint rr = 0u; rr < RS; rr++)
+                    s[rr][kk] = dot(qr[rr][0], k0) + dot(qr[rr][1], k1) +
+                                dot(qr[rr][2], k2) + dot(qr[rr][3], k3);
+            }
+            [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                bool valid = base + sub + kk < n_kv_row;
+                [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+                    float v = subgroupClusteredAdd(s[rr][kk], 16u);
+                    s[rr][kk] = valid ? v : NEG_BIG;
+                }
+            }
+            [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+                float tmax = s[rr][0];
+                [[unroll]] for (uint kk = 1u; kk < SUB; kk++) tmax = max(tmax, s[rr][kk]);
+                float n = max(m[rr], tmax);
+                float r = exp(m[rr] - n);
+                m[rr] = n;
+                float ps = 0.0;
+                [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                    s[rr][kk] = exp(s[rr][kk] - n);
+                    ps += s[rr][kk];
+                }
+                l[rr] = l[rr] * r + ps;
+                [[unroll]] for (uint i = 0u; i < 4u; i++) acc[rr][i] *= r;
+            }
+            [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                uint vr = (sub + kk) * (HD / 4u) + j;
+                vec4 v0 = sh_v[vr], v1 = sh_v[vr + 16u], v2 = sh_v[vr + 32u], v3 = sh_v[vr + 48u];
+                [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+                    float p = s[rr][kk];
+                    acc[rr][0] += p * v0;
+                    acc[rr][1] += p * v1;
+                    acc[rr][2] += p * v2;
+                    acc[rr][3] += p * v3;
+                }
+            }
+        }
+        barrier();
+    }
+
+    /* A row whose causal range ends before this group has no partial; the
+     * combine only folds groups < ceil(n_kv / 4096). */
+    if (!tok_live || g0 >= n_kv_row) return;
+    [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+        uint pbase = (((local0 + t) * pc.n_head + hbase + rr) * pc.n_spans + group) * (HD + 2u);
+        [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            uint d = pbase + 64u * i + 4u * j;
+            part[d] = acc[rr][i].x;
+            part[d + 1u] = acc[rr][i].y;
+            part[d + 2u] = acc[rr][i].z;
+            part[d + 3u] = acc[rr][i].w;
+        }
+        if (j == 0u) {
+            part[pbase + HD] = m[rr];
+            part[pbase + HD + 1u] = l[rr];
+        }
+    }
+}
