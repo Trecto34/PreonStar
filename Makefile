@@ -112,6 +112,7 @@ VULKAN_SHADERS := \
 	vulkan/attn_prefill_qtile2.spv \
 	vulkan/attn_prefill_qtile2_gqa6.spv \
 	vulkan/attn_prefill_fa_gqa6.spv \
+	vulkan/attn_prefill_fa_gqa8.spv \
 	vulkan/attn_combine.spv \
 	vulkan/moe_gate_up.spv \
 	vulkan/moe_gate_up_iq2s.spv \
@@ -397,8 +398,11 @@ vulkan/attn_prefill_qtile2.spv: vulkan/attn_prefill_qtile2.comp
 vulkan/attn_prefill_qtile2_gqa6.spv: vulkan/attn_prefill_qtile2_gqa6.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
-vulkan/attn_prefill_fa_gqa6.spv: vulkan/attn_prefill_fa_gqa6.comp
-	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+vulkan/attn_prefill_fa_gqa6.spv: vulkan/attn_prefill_fa.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=6 -o $@ $<
+
+vulkan/attn_prefill_fa_gqa8.spv: vulkan/attn_prefill_fa.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=8 -o $@ $<
 
 # Vulkan is the default backend. CORE_OBJS holds the GPU engine; CPU_CORE_OBJS
 # is the -DQ36_NO_GPU reference build selected by `make cpu`.
@@ -496,12 +500,12 @@ tests/test_attn_prefill_qtile2.o: tests/test_attn_prefill_qtile2.c q36_gpu.h
 $(ATTN_PREFILL_QTILE2_TEST): tests/test_attn_prefill_qtile2.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
-ATTN_FA_GQA6_TEST := tests/test_attn_fa_gqa6
+ATTN_FA_TEST := tests/test_attn_fa
 
-tests/test_attn_fa_gqa6.o: tests/test_attn_fa_gqa6.c q36_gpu.h
+tests/test_attn_fa.o: tests/test_attn_fa.c q36_gpu.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
-$(ATTN_FA_GQA6_TEST): tests/test_attn_fa_gqa6.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+$(ATTN_FA_TEST): tests/test_attn_fa.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
 NORM_ROPE_KV_TEST := tests/test_norm_rope_kv

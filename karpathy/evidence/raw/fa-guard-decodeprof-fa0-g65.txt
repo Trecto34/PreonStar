@@ -1,0 +1,86 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-bench: context buffers 189.83 MiB (scratch=59.99 MiB, raw=67.03 MiB, compressed=62.81 MiB, ctx=8448, backend=vulkan, prefill_chunk=256, raw_kv_rows=8448, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+8192,8192,379.81,65,60.50,32780
+q36: Vulkan prof dispatches=104948 record_ms=4553.4 flushes=125 submit_wait_ms=4764.9
+q36: Vulkan op profile
+q36:   op embed_stage_copy             dispatches=129 flushes=0 groups=131592 record_ms=16.109 submit_wait_ms=0.000 gpu_ms=2.385 wall_ms=0.000
+q36:   op norm                         dispatches=129 flushes=0 groups=16449 record_ms=1.578 submit_wait_ms=0.000 gpu_ms=2.257 wall_ms=0.000
+q36:   op dense_q8_0_p_8192x2048       dispatches=2560 flushes=0 groups=655360 record_ms=175.141 submit_wait_ms=0.000 gpu_ms=3870.572 wall_ms=0.000
+q36:   op dense_q8_0_p_4096x2048       dispatches=1920 flushes=0 groups=245760 record_ms=3.488 submit_wait_ms=0.000 gpu_ms=1672.864 wall_ms=0.000
+q36:   op recurrent_conv_silu_decode   dispatches=3870 flushes=0 groups=123840 record_ms=339.330 submit_wait_ms=0.000 gpu_ms=441.714 wall_ms=0.000
+q36:   op dense_q8_0_p_32x2048         dispatches=3840 flushes=0 groups=15360 record_ms=326.894 submit_wait_ms=0.000 gpu_ms=847.486 wall_ms=0.000
+q36:   op delta_qkv_l2                 dispatches=3870 flushes=0 groups=15791040 record_ms=6.759 submit_wait_ms=0.000 gpu_ms=121.980 wall_ms=0.000
+q36:   op delta_gates                  dispatches=3870 flushes=0 groups=493470 record_ms=144.615 submit_wait_ms=0.000 gpu_ms=6.129 wall_ms=0.000
+q36:   op delta_net_decode             dispatches=3870 flushes=0 groups=495360 record_ms=7.403 submit_wait_ms=0.000 gpu_ms=742.042 wall_ms=0.000
+q36:   op recurrent_norm_gate          dispatches=1920 flushes=0 groups=15728640 record_ms=320.204 submit_wait_ms=0.000 gpu_ms=313.750 wall_ms=0.000
+q36:   op dense_q8_0_p_2048x4096       dispatches=2560 flushes=0 groups=163840 record_ms=5.595 submit_wait_ms=0.000 gpu_ms=2313.404 wall_ms=0.000
+q36:   op add_rms_norm                 dispatches=10320 flushes=0 groups=1315920 record_ms=486.782 submit_wait_ms=0.000 gpu_ms=207.648 wall_ms=0.000
+q36:   op dense_f32f_p_256x2048        dispatches=2560 flushes=0 groups=167772160 record_ms=6.257 submit_wait_ms=0.000 gpu_ms=1128.199 wall_ms=0.000
+q36:   op router_topk                  dispatches=5160 flushes=0 groups=657960 record_ms=189.983 submit_wait_ms=0.000 gpu_ms=74.125 wall_ms=0.000
+q36:   op dense_f32f_p_1xN             dispatches=2560 flushes=0 groups=655360 record_ms=4.621 submit_wait_ms=0.000 gpu_ms=27.742 wall_ms=0.000
+q36:   op moe_tiles                    dispatches=2560 flushes=0 groups=2560 record_ms=493.850 submit_wait_ms=0.000 gpu_ms=121.759 wall_ms=0.000
+q36:   op moe_iq2_gate_up_gemm         dispatches=2560 flushes=0 groups=6553600 record_ms=8.587 submit_wait_ms=0.000 gpu_ms=11126.472 wall_ms=0.000
+q36:   op moe_q2k_down_gemm            dispatches=2560 flushes=0 groups=26214400 record_ms=488.060 submit_wait_ms=0.000 gpu_ms=5634.043 wall_ms=0.000
+q36:   op moe_reduce                   dispatches=2560 flushes=0 groups=5242880 record_ms=5.795 submit_wait_ms=0.000 gpu_ms=264.360 wall_ms=0.000
+q36:   op dense_q8_0_p_512x2048        dispatches=6400 flushes=0 groups=102400 record_ms=312.941 submit_wait_ms=0.000 gpu_ms=1959.280 wall_ms=0.000
+q36:   op swiglu                       dispatches=2560 flushes=0 groups=1310720 record_ms=435.668 submit_wait_ms=0.000 gpu_ms=9.673 wall_ms=0.000
+q36:   op dense_q8_0_p_2048x512        dispatches=2560 flushes=0 groups=163840 record_ms=5.562 submit_wait_ms=0.000 gpu_ms=322.869 wall_ms=0.000
+q36:   op moe_tail                     dispatches=2560 flushes=0 groups=5242880 record_ms=571.870 submit_wait_ms=0.000 gpu_ms=34.596 wall_ms=0.000
+q36:   op submit_eager                 dispatches=0 flushes=3249 groups=0 record_ms=0.000 submit_wait_ms=41766.844 gpu_ms=0.000 wall_ms=0.000
+q36:   op norm_rope                    dispatches=1290 flushes=0 groups=2631840 record_ms=2.851 submit_wait_ms=0.000 gpu_ms=45.325 wall_ms=0.000
+q36:   op norm_rope_kv_quant           dispatches=1290 flushes=0 groups=328980 record_ms=2.927 submit_wait_ms=0.000 gpu_ms=40.196 wall_ms=0.000
+q36:   op attn_prefill_qtile2          dispatches=640 flushes=0 groups=245760 record_ms=2.447 submit_wait_ms=0.000 gpu_ms=14602.478 wall_ms=0.000
+q36:   op attn_combine                 dispatches=1290 flushes=0 groups=2631840 record_ms=157.899 submit_wait_ms=0.000 gpu_ms=35.669 wall_ms=0.000
+q36:   op tensor_copy                  dispatches=129 flushes=0 groups=129 record_ms=0.000 submit_wait_ms=0.000 gpu_ms=0.000 wall_ms=0.000
+q36:   op submit_wait_query_pool       dispatches=0 flushes=58 groups=0 record_ms=0.000 submit_wait_ms=4322.847 gpu_ms=0.000 wall_ms=0.000
+q36:   op dense_q8_0_d_vocabx2048      dispatches=67 flushes=0 groups=17563648 record_ms=1.055 submit_wait_ms=0.000 gpu_ms=97.450 wall_ms=0.000
+q36:   op top2_stage1                  dispatches=67 flushes=0 groups=8576 record_ms=0.913 submit_wait_ms=0.000 gpu_ms=0.675 wall_ms=0.000
+q36:   op top2_stage2                  dispatches=67 flushes=0 groups=67 record_ms=0.056 submit_wait_ms=0.000 gpu_ms=0.343 wall_ms=0.000
+q36:   op submit_wait_tensor_read      dispatches=0 flushes=67 groups=0 record_ms=0.000 submit_wait_ms=442.068 gpu_ms=0.000 wall_ms=0.000
+q36:   op dense_q8_0_d_pair            dispatches=3900 flushes=0 groups=16036800 record_ms=4.283 submit_wait_ms=0.000 gpu_ms=148.927 wall_ms=0.000
+q36:   op recurrent_norm_gate_q8_k     dispatches=1950 flushes=0 groups=31200 record_ms=2.394 submit_wait_ms=0.000 gpu_ms=11.066 wall_ms=0.000
+q36:   op dense_q8_0_d_2048x4096       dispatches=2600 flushes=0 groups=5324800 record_ms=2.193 submit_wait_ms=0.000 gpu_ms=70.336 wall_ms=0.000
+q36:   op dense_f32f_d_256x2048        dispatches=2600 flushes=0 groups=665600 record_ms=2.181 submit_wait_ms=0.000 gpu_ms=28.069 wall_ms=0.000
+q36:   op dense_f32f_d_1xN             dispatches=2600 flushes=0 groups=2600 record_ms=1.833 submit_wait_ms=0.000 gpu_ms=11.793 wall_ms=0.000
+q36:   op moe_iq2_gate_up_decode       dispatches=2600 flushes=0 groups=10649600 record_ms=3.482 submit_wait_ms=0.000 gpu_ms=91.650 wall_ms=0.000
+q36:   op moe_q2k_down_sum_decode      dispatches=2600 flushes=0 groups=5324800 record_ms=3.396 submit_wait_ms=0.000 gpu_ms=105.691 wall_ms=0.000
+q36:   op shared_gate_up_decode        dispatches=2600 flushes=0 groups=1331200 record_ms=2.362 submit_wait_ms=0.000 gpu_ms=20.199 wall_ms=0.000
+q36:   op shared_down_tail_decode      dispatches=2600 flushes=0 groups=5324800 record_ms=3.050 submit_wait_ms=0.000 gpu_ms=14.623 wall_ms=0.000
+q36:   op dense_q8_0_d_8192x2048       dispatches=650 flushes=0 groups=5324800 record_ms=0.517 submit_wait_ms=0.000 gpu_ms=32.613 wall_ms=0.000
+q36:   op dense_q8_0_d_512x2048        dispatches=1300 flushes=0 groups=665600 record_ms=0.801 submit_wait_ms=0.000 gpu_ms=5.866 wall_ms=0.000
+q36:   op attn_decode_split            dispatches=650 flushes=0 groups=176800 record_ms=1.658 submit_wait_ms=0.000 gpu_ms=180.288 wall_ms=0.000
+q36: Vulkan kernel GPU time total_ms=46788.604
+q36:   vulkan/copy_rows.spv             dispatches=129 groups=131592 gpu_ms=2.385 pct=0.0
+q36:   vulkan/rms_norm.spv              dispatches=129 groups=16449 gpu_ms=2.257 pct=0.0
+q36:   vulkan/matmul_q8_0_mm_f16.spv    dispatches=16000 groups=1331200 gpu_ms=10138.990 pct=21.7
+q36:   vulkan/recur_conv_silu_decode.spv dispatches=3870 groups=123840 gpu_ms=441.714 pct=0.9
+q36:   vulkan/matmul_q8_0_mm_f16_out32.spv dispatches=3840 groups=15360 gpu_ms=847.486 pct=1.8
+q36:   vulkan/delta_qkv.spv             dispatches=3870 groups=15791040 gpu_ms=121.980 pct=0.3
+q36:   vulkan/delta_gates.spv           dispatches=3870 groups=493470 gpu_ms=6.129 pct=0.0
+q36:   vulkan/delta_net_decode_reg_f16.spv dispatches=3870 groups=495360 gpu_ms=742.042 pct=1.6
+q36:   vulkan/recur_norm_gate.spv       dispatches=1920 groups=15728640 gpu_ms=313.750 pct=0.7
+q36:   vulkan/add_rms_norm.spv          dispatches=10320 groups=1315920 gpu_ms=207.648 pct=0.4
+q36:   vulkan/matmul_f32_fast.spv       dispatches=10320 groups=169095720 gpu_ms=1195.803 pct=2.6
+q36:   vulkan/router_topk.spv           dispatches=5160 groups=657960 gpu_ms=74.125 pct=0.2
+q36:   vulkan/moe_tiles.spv             dispatches=2560 groups=2560 gpu_ms=121.759 pct=0.3
+q36:   vulkan/moe_gate_up_gemm.spv      dispatches=2560 groups=6553600 gpu_ms=11126.472 pct=23.8
+q36:   vulkan/moe_down_gemm.spv         dispatches=2560 groups=26214400 gpu_ms=5634.043 pct=12.0
+q36:   vulkan/moe_reduce.spv            dispatches=2560 groups=5242880 gpu_ms=264.360 pct=0.6
+q36:   vulkan/swiglu.spv                dispatches=2560 groups=1310720 gpu_ms=9.673 pct=0.0
+q36:   vulkan/ffn_tail.spv              dispatches=2560 groups=5242880 gpu_ms=34.596 pct=0.1
+q36:   vulkan/rms_norm_rope_qwen.spv    dispatches=1290 groups=2631840 gpu_ms=45.325 pct=0.1
+q36:   vulkan/rms_norm_rope_kv_qwen_quant.spv dispatches=1290 groups=328980 gpu_ms=40.196 pct=0.1
+q36:   vulkan/attn_prefill_qtile2.spv   dispatches=640 groups=245760 gpu_ms=14602.478 pct=31.2
+q36:   vulkan/attn_combine.spv          dispatches=1290 groups=2631840 gpu_ms=35.669 pct=0.1
+q36:   vulkan/matmul_q8_0_f32b.spv      dispatches=4617 groups=28878848 gpu_ms=206.264 pct=0.4
+q36:   vulkan/top2.spv                  dispatches=134 groups=8643 gpu_ms=1.018 pct=0.0
+q36:   vulkan/matmul_q8_0_f32b_pair.spv dispatches=3900 groups=16036800 gpu_ms=148.927 pct=0.3
+q36:   vulkan/recur_norm_gate_q8_k.spv  dispatches=1950 groups=31200 gpu_ms=11.066 pct=0.0
+q36:   vulkan/moe_gate_up_decode.spv    dispatches=2600 groups=10649600 gpu_ms=91.650 pct=0.2
+q36:   vulkan/moe_down_q2k_sum_decode.spv dispatches=2600 groups=5324800 gpu_ms=105.691 pct=0.2
+q36:   vulkan/shared_gate_up_decode.spv dispatches=2600 groups=1331200 gpu_ms=20.199 pct=0.0
+q36:   vulkan/shared_down_tail_decode.spv dispatches=2600 groups=5324800 gpu_ms=14.623 pct=0.0
+q36:   vulkan/attn_decode_split.spv     dispatches=650 groups=176800 gpu_ms=180.288 pct=0.4

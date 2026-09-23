@@ -50,7 +50,7 @@ Raw: `raw/fa-base-swift-prof-ctx{2048,8192}.txt`. Same shape on the MoE files
 - `tests/benchmark_prompt.sh` (untracked) forced `--ssd-streaming` on resident-
   sized MoE files: 3.49/1.64 t/s vs 175.94/80.08 resident. Removed.
 
-## 3. Kernel: `attn_prefill_fa_gqa6.comp`
+## 3. Kernel: `attn_prefill_fa.comp` (built as `_gqa6` and `_gqa8`)
 
 Flash-attention shape: one workgroup (256 threads) = one KV head × 8 tokens × 6
 heads = 48 rows. K/V dequantized once per 16-key tile into LDS as f32 (Q8_0 /
@@ -63,12 +63,12 @@ Same per-4096-key-group partials, so `attn_combine` is untouched. Gate:
 ISA (`./mmq_info`): VGPRs 256 (no spills), LDS 32768 B, 4 subgroups/SIMD —
 vs qtile2 128 VGPRs / 16384 B / 8 subgroups.
 
-Parity/timing harness: `tests/test_attn_fa_gqa6.c` (both kernels through the real
+Parity/timing harness: `tests/test_attn_fa.c` (both kernels through the real
 dispatch, cases n_tok 2..256, pos0 0..16128, sinks on/off, group-edge straddle).
 
 ## 4. v1 result — kernel level (independent review: no bugs, "safe to GPU-test")
 
-`tests/test_attn_fa_gqa6` (best of N, includes readback; raw `raw/fa-v1-kernel-test.txt`):
+`tests/test_attn_fa` (best of N, includes readback; raw `raw/fa-v1-kernel-test.txt`):
 
 | n_tok | pos0 | qtile2 ms | fa ms | speedup | max_abs |
 |---|---|---|---|---|---|
@@ -81,3 +81,64 @@ dispatch, cases n_tok 2..256, pos0 0..16128, sinks on/off, group-edge straddle).
 max_abs is f32 reassociation size (outputs ~1.0). Review-driven test fixes: a
 multi-slice case (tok_base != 0), clearing the QTILE/FUSED env overrides that
 would make both arms identical, one sinks buffer for the run.
+
+## 5. Whole-model verdicts (ctx 8192, 5 interleaved reps, gen 16, chunk 256)
+
+Same binary both arms, wrappers differ only in `Q36_VK_ATTN_FA` (rule 5: flag ON in B).
+
+| model | A qtile2 prefill (MAD) | B FA prefill (MAD) | delta | reps disjoint? |
+|---|---|---|---|---|
+| Swift 27B dense (GQA 6) | 97.98 (0.550) | **107.28** (1.880) | **+9.49%** | yes (min B 102.94 > max A 100.34) |
+| Qwen3.6-35B-A3B guard (GQA 8) | 386.47 (1.650) | **491.38** (3.090) | **+27.15%** | yes (min B 486.94 > max A 417.35) |
+
+Raw: `raw/ab-fa-ctx8192.{csv,summary}`, `raw/ab-fa-guard-ctx8192.{csv,summary}`.
+
+Guard decode read −4.92% in the A/B with matching temperatures, so it was checked:
+differential decode profile (gen 65 − gen 1, /64) gives GPU decode time **15.572 vs
+15.580 ms/tok (+0.05%)** and no FA dispatch in decode (n_tok = 1 takes
+`attn_decode_split`). No GPU mechanism; treated as clock/power state after a much
+denser prefill. Raw: `raw/fa-guard-decodeprof-fa{0,1}-g{1,65}.txt`. Kernel test also
+covers 2- and 16-token steps at pos0 ~8190 (MTP verify, tiny chunks): FA 2.4x
+(GQA 6) / 3.4x (GQA 8) faster, parity ok.
+
+## 6. GQA-8 variant (MoE)
+
+Same source, `-DHQ=8`: 4 tokens x 8 heads, 2 rows per rowset (HQ=6's 3-row
+shape already sits at 256 VGPRs). ISA: **128 VGPRs, 8 subgroups/SIMD**, LDS 32768 B.
+Kernel test 3.0–3.5x vs `attn_prefill_qtile2` at pos0 >= 3968
+(`raw/fa-v2-kernel-test.txt`, 18/18 PASS). The lower-VGPR shape is faster per
+row than the GQA-6 build, which points at the next tuning step for the dense
+kernel (occupancy, not math).
+
+## 7. Quality
+
+Frontier logits at ctx 8192 are chaotic on the dense model under **any** f32
+reordering, so single-frontier max_abs is not a usable gate there:
+
+| comparison (Swift) | 2k max_abs / top64 | 8k max_abs / top-1 / top64 |
+|---|---|---|
+| qtile2 vs qtile2 rerun | – | 0 / same / 64 (deterministic) |
+| FA vs qtile2 | 1.38 / 63 | 13.48 / same / 38 |
+| qtile2 chunk 256 vs 128 (legit reorder) | 2.21 / 59 | 8.07 / **flipped** / 40 |
+
+So the gate used is teacher-forced NLL of the true next token at 16 frontiers
+7952..8192 (`karpathy/tools/frontier_nll.py`, tokens from `q36 --dump-tokens`),
+with a chunk-128 baseline as the noise reference:
+
+| model | arm | mean NLL | top-1 | mean \|dNLL\| vs baseline |
+|---|---|---|---|---|
+| Swift | qtile2 | 15.35 | 3/16 | 0 |
+| Swift | **FA** | 13.27 | 5/16 | **3.08** |
+| Swift | qtile2 chunk 128 | 14.15 | 4/16 | 3.58 |
+| guard | qtile2 | 1.87 | 12/16 | 0 |
+| guard | **FA** | 2.91 | 12/16 | **2.01** |
+| guard | qtile2 chunk 128 | 3.80 | 11/16 | 2.60 |
+
+FA moves NLL less than a plain chunk-size change does on both models: inside
+the envelope of legitimate f32 reassociation, not a defect. (Swift's high NLL
+is the prompt — literal `<|im_start|>` text tokenized as characters — and is
+identical across arms.) Guard frontier-8192: max_abs 1.79, top-1 same, top64
+59/64. Raw: `raw/fa-parity.txt`.
+
+`reconsider_if` (for anyone reverting): a real-task eval shows long-context
+regression that the chunk-size reference does not also show.

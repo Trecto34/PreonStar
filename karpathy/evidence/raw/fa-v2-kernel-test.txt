@@ -1,0 +1,19 @@
+gqa6 n_tok=   2 pos0=    0 sinks=0  qtile2     0.11 ms  fa     0.10 ms  (1.16x)  max_abs=3.87e-07 max_ref=0.999 ok
+gqa6 n_tok=   7 pos0= 1024 sinks=1  qtile2     4.87 ms  fa     2.23 ms  (2.19x)  max_abs=1.31e-06 max_ref=0.782 ok
+gqa6 n_tok= 256 pos0=    0 sinks=0  qtile2     3.28 ms  fa     1.68 ms  (1.96x)  max_abs=1.36e-06 max_ref=1.04 ok
+gqa6 n_tok= 256 pos0= 3968 sinks=1  qtile2    21.73 ms  fa     9.05 ms  (2.40x)  max_abs=5.72e-06 max_ref=1 ok
+gqa6 n_tok= 256 pos0= 7936 sinks=0  qtile2    37.38 ms  fa    15.18 ms  (2.46x)  max_abs=4.17e-06 max_ref=0.988 ok
+gqa6 n_tok= 256 pos0=16128 sinks=1  qtile2    73.30 ms  fa    28.07 ms  (2.61x)  max_abs=3.64e-06 max_ref=0.959 ok
+gqa6 n_tok=1024 pos0= 7936 sinks=1  qtile2   152.04 ms  fa    60.41 ms  (2.52x)  max_abs=6.08e-06 max_ref=1.02 ok
+gqa6 n_tok=   2 pos0= 8190 sinks=0  qtile2     5.31 ms  fa     2.20 ms  (2.41x)  max_abs=2.03e-06 max_ref=0.807 ok
+gqa6 n_tok=  16 pos0= 8176 sinks=0  qtile2     5.37 ms  fa     2.24 ms  (2.40x)  max_abs=3.76e-06 max_ref=0.953 ok
+gqa8 n_tok=   2 pos0=    0 sinks=0  qtile2     0.06 ms  fa     0.05 ms  (1.31x)  max_abs=3.58e-07 max_ref=0.915 ok
+gqa8 n_tok=   7 pos0= 1024 sinks=1  qtile2     1.58 ms  fa     0.49 ms  (3.24x)  max_abs=1.73e-06 max_ref=0.876 ok
+gqa8 n_tok= 256 pos0=    0 sinks=0  qtile2     0.95 ms  fa     0.56 ms  (1.69x)  max_abs=1.16e-06 max_ref=1.03 ok
+gqa8 n_tok= 256 pos0= 3968 sinks=1  qtile2    19.11 ms  fa     5.99 ms  (3.19x)  max_abs=3.99e-06 max_ref=0.953 ok
+gqa8 n_tok= 256 pos0= 7936 sinks=0  qtile2    30.44 ms  fa     9.85 ms  (3.09x)  max_abs=4.41e-06 max_ref=0.951 ok
+gqa8 n_tok= 256 pos0=16128 sinks=1  qtile2    55.43 ms  fa    18.07 ms  (3.07x)  max_abs=3.64e-06 max_ref=0.944 ok
+gqa8 n_tok=1024 pos0= 7936 sinks=1  qtile2   114.88 ms  fa    38.40 ms  (2.99x)  max_abs=5.19e-06 max_ref=1.02 ok
+gqa8 n_tok=   2 pos0= 8190 sinks=0  qtile2     6.15 ms  fa     1.77 ms  (3.47x)  max_abs=2.15e-06 max_ref=0.718 ok
+gqa8 n_tok=  16 pos0= 8176 sinks=0  qtile2     6.17 ms  fa     1.79 ms  (3.45x)  max_abs=3.16e-06 max_ref=0.883 ok
+PASS

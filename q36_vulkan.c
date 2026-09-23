@@ -210,6 +210,7 @@ typedef struct {
     q36_vk_kernel attn_prefill_qtile2;
     q36_vk_kernel attn_prefill_qtile2_gqa6;
     q36_vk_kernel attn_prefill_fa_gqa6;
+    q36_vk_kernel attn_prefill_fa_gqa8;
     q36_vk_kernel attn_combine;
     q36_vk_kernel moe_gate_up;
     q36_vk_kernel moe_gate_up_iq2s;
@@ -1204,8 +1205,8 @@ static bool q36_vk_use_attn_qtile2(void) {
     return q36_vk_have_subgroups(true) && q36_vk_env_default_on("Q36_VK_ATTN_QTILE2");
 }
 
-/* Flash-attention replacement for attn_prefill_qtile2_gqa6 (dense GQA 6).
- * Q36_VK_ATTN_FA=0 falls back to qtile2 for parity A/B. */
+/* Flash-attention replacement for attn_prefill_qtile2{_gqa6} (GQA 6 dense,
+ * GQA 8 MoE).  Q36_VK_ATTN_FA=0 falls back to qtile2 for parity A/B. */
 static bool q36_vk_use_attn_fa(void) {
     return q36_vk_have_subgroups(true) && q36_vk_env_default_on("Q36_VK_ATTN_FA");
 }
@@ -3289,6 +3290,7 @@ int q36_gpu_init(void) {
     q36_vk.attn_prefill_qtile2 = Q36_VK_KERNEL("vulkan/attn_prefill_qtile2.spv", 5, 48, 1u << 4);
     q36_vk.attn_prefill_qtile2_gqa6 = Q36_VK_KERNEL("vulkan/attn_prefill_qtile2_gqa6.spv", 5, 48, 1u << 4);
     q36_vk.attn_prefill_fa_gqa6 = Q36_VK_KERNEL("vulkan/attn_prefill_fa_gqa6.spv", 5, 48, 1u << 4);
+    q36_vk.attn_prefill_fa_gqa8 = Q36_VK_KERNEL("vulkan/attn_prefill_fa_gqa8.spv", 5, 48, 1u << 4);
     q36_vk.attn_combine = Q36_VK_KERNEL("vulkan/attn_combine.spv", 4, 32, 1u << 3);
     q36_vk.moe_gate_up = Q36_VK_KERNEL("vulkan/moe_gate_up.spv", 8, 28, 1u << 6);
     q36_vk.moe_gate_up_iq2s = Q36_VK_KERNEL("vulkan/moe_gate_up_iq2s.spv", 8, 28, 1u << 6);
@@ -3792,6 +3794,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.attn_prefill_qtile2);
     q36_vk_kernel_destroy(&q36_vk.attn_prefill_qtile2_gqa6);
     q36_vk_kernel_destroy(&q36_vk.attn_prefill_fa_gqa6);
+    q36_vk_kernel_destroy(&q36_vk.attn_prefill_fa_gqa8);
     q36_vk_kernel_destroy(&q36_vk.attn_combine);
     q36_vk_kernel_destroy(&q36_vk.attn_reduce);
     q36_vk_kernel_destroy(&q36_vk.attn_post);
@@ -7383,13 +7386,16 @@ int q36_gpu_attn_decode_tensor(q36_gpu_tensor *out,
                            head_dim == 256u &&
                            (ratio == 8u || ratio == 6u) &&
                            k_cache_type == 1u && v_cache_type == 2u;
-                /* The FA kernel writes the same per-group partials, 8 tokens
-                 * per workgroup instead of 2. */
-                bool fa = qt2 && ratio == 6u && q36_vk_use_attn_fa();
+                /* The FA kernels write the same per-group partials, 8 (GQA 6)
+                 * or 4 (GQA 8) tokens per workgroup instead of 2. */
+                bool fa = qt2 && q36_vk_use_attn_fa();
                 if (fa) {
-                    ok = q36_vk_run_unlocked("attn_prefill_fa_gqa6", &q36_vk.attn_prefill_fa_gqa6,
+                    uint32_t fa_qt = ratio == 6u ? 8u : 4u;
+                    ok = q36_vk_run_unlocked(ratio == 6u ? "attn_prefill_fa_gqa6" : "attn_prefill_fa_gqa8",
+                                             ratio == 6u ? &q36_vk.attn_prefill_fa_gqa6
+                                                         : &q36_vk.attn_prefill_fa_gqa8,
                                              qbind, &qpush, sizeof(qpush),
-                                             n_head_kv, (chunk + 7u) / 8u, n_groups);
+                                             n_head_kv, (chunk + fa_qt - 1u) / fa_qt, n_groups);
                 } else {
                     ok = q36_vk_run_unlocked(qt2 ? (ratio == 6u ? "attn_prefill_qtile2_gqa6"
                                                                  : "attn_prefill_qtile2")

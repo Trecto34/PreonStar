@@ -1118,3 +1118,32 @@ file outside the GEMM range. Full write-up:
   `ab-iq2s-smallbatch-chunk{16,256}.{csv,summary}`,
   `iq2s-smallbatch-parity.txt`, `route-miss-A.txt`, `route-miss-B.txt`,
   `iq2s-smallbatch-ab3.sh`.
+
+## Flash-attention prefill (`attn_prefill_fa.comp`, GQA 6 + GQA 8) — ACCEPTED (2026-09-22)
+
+- **What changed.** `attn_prefill_qtile2{,_gqa6}` (2 tokens per workgroup, six Q
+  rows re-read from LDS per K vector, ~1 FMA per LDS float, ~0.8 TFLOP/s at ctx
+  8192) replaced by one parametric flash-attention kernel: 8 tokens x 6 heads
+  (dense) or 4 tokens x 8 heads (MoE) per workgroup, K/V dequantized once per
+  16-key tile into LDS as f32 (exact for Q8_0/Q4_0), Q in registers, 16-lane
+  clustered score reduction. Same per-4096-key-group partials, `attn_combine`
+  untouched. `Q36_VK_ATTN_FA=0` falls back. Branch `perf/attn-prefill-fa`.
+- **Measured.** Kernel: 2.4–2.6x (GQA 6), 3.0–3.5x (GQA 8) at pos0 >= 3968,
+  18/18 parity cases PASS (max_abs <= 8e-5 even with very peaked softmax).
+  Whole model, ctx 8192, 5 interleaved reps: Swift 27B prefill **97.98 ->
+  107.28 t/s (+9.49%)**, Qwen3.6-35B-A3B guard **386.47 -> 491.38 t/s
+  (+27.15%)**, reps disjoint on both. Grows with context (attention is the
+  quadratic term); ctx 1024 impact is small by construction.
+- **Quality gate used, and why.** Long-context frontier logits are chaotic under
+  any f32 reorder (baseline chunk 256 vs 128 flips top-1 at 8k), so max_abs is
+  not a gate there. Teacher-forced NLL over 16 frontiers (7952..8192): FA's mean
+  |dNLL| vs baseline is 3.08 (Swift) / 2.01 (guard), below the chunk-128
+  reference's 3.58 / 2.60. Guard frontier-8192 top-1 same, top64 59/64. Guard
+  is no longer byte-identical: this is an intentional f32 reassociation.
+- **Not a regression:** guard A/B decode −4.92% with no GPU mechanism —
+  differential decode profile 15.572 vs 15.580 ms/tok, no FA dispatch at n_tok=1.
+- `reconsider_if`: a real long-context task eval regresses beyond what the
+  chunk-size reference also shows. Next lever on the same kernel: the GQA-6
+  build sits at 256 VGPRs / 4 subgroups vs GQA-8's 128 / 8 — occupancy.
+- Evidence: `karpathy/evidence/attn-fa-prefill.md`, `raw/ab-fa-*`, `raw/fa-*`,
+  `tests/test_attn_fa.c`, `karpathy/tools/{cmp_logits,frontier_nll}.py`.

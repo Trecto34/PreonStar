@@ -44,7 +44,7 @@ TODO.md
 /tests/test_topk8
 /tests/test_attn_decode
 /tests/test_norm_rope_kv
-/tests/test_attn_fa_gqa6
+/tests/test_attn_fa
 /tests/test_matmul_q8
 /tests/test_moe_gate_up
 /tests/test_moe_down

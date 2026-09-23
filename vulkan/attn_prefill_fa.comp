@@ -5,28 +5,31 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_EXT_control_flow_attributes : enable
 
-/* Flash-attention prefill for dense Qwen3.8 GQA 24/4=6, head_dim 256,
- * Q8_0 K cache / Q4_0 V cache.  Replaces attn_prefill_qtile2_gqa6 when
- * Q36_VK_ATTN_FA is on; writes the same per-4096-key-group (acc, m, l)
- * partials, so attn_combine is unchanged.
+/* Flash-attention prefill, head_dim 256, Q8_0 K cache / Q4_0 V cache.  Built
+ * twice: HQ=6 (dense Qwen3.8 GQA 24/4, 8 tokens x 3 rows per rowset) replaces
+ * attn_prefill_qtile2_gqa6, HQ=8 (Qwen3.6/3.8 35B-A3B MoE GQA 16/2, 4 tokens x
+ * 2 rows) replaces attn_prefill_qtile2, when Q36_VK_ATTN_FA is on.  Both write
+ * the same per-4096-key-group (acc, m, l) partials, so attn_combine is
+ * unchanged.  The HQ=6 shape already sits at the 256-VGPR ceiling, which is
+ * why HQ=8 trades tokens per workgroup for fewer rows per lane.
  *
  * Why a new shape: qtile2 serves 2 tokens per workgroup and re-reads six Q rows
  * from LDS for every K vector (~1 FMA per LDS float), so every 2-token
  * workgroup re-dequantizes the whole causal K/V prefix and the kernel ran at
  * ~4% of the chip's f32 rate (~0.8 TFLOP/s at ctx 8192).  Here one workgroup
- * serves QT=8 tokens x 6 heads = 48 rows:
+ * serves QT tokens x HQ heads (48 or 32 rows):
  *
  *  - K/V are dequantized once per BK-key tile into LDS as f32.  Q8_0/Q4_0
  *    dequant (f16 scale x small int) is exact in f32, so only summation order
  *    differs from qtile2.
- *  - Q lives in registers.  A 16-lane "rowset" owns RS=3 rows of one token;
+ *  - Q lives in registers.  A 16-lane "rowset" owns RS rows of one token;
  *    lane j holds dims {64i + 4j .. +3 : i < 4}, so for a given i the 16 lanes
  *    read 256 contiguous bytes (conflict-free) and the 16 rowsets of the
  *    workgroup read the same K/V address (LDS broadcast).  QK partial dots are
  *    finished with a 16-lane clustered add, which leaves the full score on
  *    every lane of the rowset -- exactly where PV needs it.
  *  - The output accumulator uses the same lane/dim mapping, so PV is
- *    48 FMAs per key per lane from 4 vec4 LDS reads.
+ *    16*RS FMAs per key per lane from 4 vec4 LDS reads.
  *
  * The score order for a row depends only on absolute key index (tiles are
  * aligned to the group start), so results stay invariant to n_tok/chunking
@@ -55,10 +58,17 @@ layout(push_constant) uniform Push {
     uint tok_base;
 } pc;
 
-#define HQ 6u
+#ifndef HQ
+#define HQ 6                /* query heads per KV head (plain int: used in #if) */
+#endif
+#if HQ == 6
+#define RS 3u               /* rows (heads) per 16-lane rowset */
+#else
+#define RS 2u
+#endif
+#define RPT (HQ / RS)       /* rowsets per token */
+#define QT (16u / RPT)      /* tokens per workgroup: 16 rowsets */
 #define HD 256u
-#define QT 8u               /* tokens per workgroup */
-#define RS 3u               /* rows (heads) per 16-lane rowset; 2 rowsets per token */
 #define BK 16u              /* keys staged in LDS per tile */
 #define SUB 8u              /* keys per online-softmax step */
 #define GROUP_KEYS 4096u    /* SPAN(512) x SPAN_GROUP(8): the partial layout attn_combine folds */
@@ -95,8 +105,8 @@ void main(void) {
     uint tid = gl_LocalInvocationID.x;
     uint j = tid & 15u;                 /* lane within rowset */
     uint rowset = tid >> 4u;            /* 0..15 */
-    uint t = rowset >> 1u;              /* token within tile */
-    uint hbase = gl_WorkGroupID.x * HQ + (rowset & 1u) * RS;
+    uint t = rowset / RPT;              /* token within tile */
+    uint hbase = gl_WorkGroupID.x * HQ + (rowset % RPT) * RS;
     uint kvh = gl_WorkGroupID.x;
     uint local0 = gl_WorkGroupID.y * QT;
     uint tok0 = pc.tok_base + local0;

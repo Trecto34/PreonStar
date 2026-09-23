@@ -1,0 +1,18 @@
+# Frontier logits + teacher-forced NLL, ctx 7952..8192 step 16, chunk 256 (c128 = baseline at chunk 128, noise reference)
+## swift
+nll-fa0: frontiers=16 mean_nll=15.3530 top1=3/16 mean|dNLL| vs ref=0.0000
+nll-fa1: frontiers=16 mean_nll=13.2658 top1=5/16 mean|dNLL| vs ref=3.0754
+nll-c128: frontiers=16 mean_nll=14.1548 top1=4/16 mean|dNLL| vs ref=3.5845
+## guardg
+gnll-fa0: frontiers=16 mean_nll=1.8740 top1=12/16 mean|dNLL| vs ref=0.0000
+gnll-fa1: frontiers=16 mean_nll=2.9091 top1=12/16 mean|dNLL| vs ref=2.0149
+gnll-c128: frontiers=16 mean_nll=3.7953 top1=11/16 mean|dNLL| vs ref=2.6014
+## swift frontier 8192 (single-shot dumps)
+fa0 vs fa1: frontier_008192.logits.json: max_abs_diff=13.4765 at 32313  top1 ref=1312 (22.999569) new=1312 (23.383686) same=True  top64 overlap=38/64
+fa0 vs fa0 rerun: frontier_008192.logits.json: max_abs_diff=0 at 0  top1 ref=1312 (22.999569) new=1312 (22.999569) same=True  top64 overlap=64/64
+fa0 vs chunk128: frontier_008192.logits.json: max_abs_diff=8.06514 at 32313  top1 ref=1312 (22.999569) new=27 (24.366106) same=False  top64 overlap=40/64
+## swift frontier 2048
+fa0 vs fa1: frontier_002048.logits.json: max_abs_diff=1.38059 at 98202  top1 ref=264 (25.558599) new=264 (25.535845) same=True  top64 overlap=63/64
+fa0 vs chunk128: frontier_002048.logits.json: max_abs_diff=2.2086 at 96699  top1 ref=264 (25.558599) new=264 (24.563862) same=True  top64 overlap=59/64
+## guard frontier 8192
+frontier_008192.logits.json: max_abs_diff=1.79312 at 37693  top1 ref=11 (24.229980) new=11 (23.925587) same=True  top64 overlap=59/64
