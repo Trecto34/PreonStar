@@ -45,7 +45,7 @@ Raw: `raw/fa-base-swift-prof-ctx{2048,8192}.txt`. Same shape on the MoE files
   system prompt + tools, `raw/kvreuse-agent_turns.py`): cold turn 46.07 s;
   following turns 1.33 s / 1.92 s (29 new tokens each, `memory-token` hit);
   after a server restart, disk hit (5839 tokens, 410 ms load) → 2.24 s.
-  Raw: `raw/kvreuse-srv{1,2}.log`. So in a steady agent loop only the suffix pays
+  Raw: `raw/kvreuse-srv{1,2}.txt`. So in a steady agent loop only the suffix pays
   prefill; the kernel work below targets cold prompts and prefix breaks.
 - `tests/benchmark_prompt.sh` (untracked) forced `--ssd-streaming` on resident-
   sized MoE files: 3.49/1.64 t/s vs 175.94/80.08 resident. Removed.

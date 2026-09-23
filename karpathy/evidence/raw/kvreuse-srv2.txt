@@ -1,0 +1,18 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: in-file MTP head bound (blk.64 nextn), draft=1
+q36: clamping prefill chunk 1024 -> 256 on GFX1013 (GQA 6); a larger chunk can exceed the 10 s amdgpu watchdog and destroy the GPU context. Set Q36_VK_PREFILL_CHUNK_UNSAFE=1 to override.
+0922 22:28:53 q36-server: context buffers 665.13 MiB (ctx=16384, backend=vulkan, prefill_chunk=256, raw_kv_rows=16384, compressed_kv_rows=0)
+0922 22:28:53 q36-server: KV disk cache /tmp/claude-1000/-home-server-q36-opt-27b/d741a5e9-1860-4354-879d-f336c5d6bc5a/scratchpad/kv (budget=8192 MiB, cross-quant=accept, min=512, cold_max=30000, continued=10000, trim=32, align=2048)
+0922 22:28:54 q36-server: tracing session to /tmp/claude-1000/-home-server-q36-opt-27b/d741a5e9-1860-4354-879d-f336c5d6bc5a/scratchpad/trace2.txt
+0922 22:28:54 q36-server: listening on http://127.0.0.1:8011
+0922 22:28:55 q36-server: kv cache hit text tokens=5839 text=26299 quant=3 load=410.1 ms file=/tmp/claude-1000/-home-server-q36-opt-27b/d741a5e9-1860-4354-879d-f336c5d6bc5a/scratchpad/kv/50980967b650a19522143d12925d09d05d34b55b.kv
+0922 22:28:55 q36-server: chat ctx=5839..5868:29 TOOLS prompt start
+0922 22:28:56 q36-server: chat ctx=5839..5868:29 TOOLS prefill chunk 29/29 (100.0%) chunk=0.00 t/s avg=41.00 t/s 0.707s
+0922 22:28:56 q36-server: chat ctx=5839..5868:29 TOOLS prompt done 0.707s
+0922 22:28:57 q36-server: chat ctx=5839..5868:29 gen=24 TOOLS decoding chunk=22.02 t/s avg=22.02 t/s 1.090s
+0922 22:28:57 q36-server: chat ctx=5839..5868:29 gen=24 TOOLS finish=length 1.798s
+0922 22:29:09 q36-server: shutdown requested, draining requests
+0922 22:29:09 q36-server: persisting resident KV cache slot=0 tokens=5892
+0922 22:29:09 q36-server: kv cache stored tokens=5892 trimmed=0 reason=shutdown size=300.22 MiB save=237.3 ms

@@ -1,0 +1,50 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: in-file MTP head bound (blk.64 nextn), draft=1
+q36: clamping prefill chunk 1024 -> 256 on GFX1013 (GQA 6); a larger chunk can exceed the 10 s amdgpu watchdog and destroy the GPU context. Set Q36_VK_PREFILL_CHUNK_UNSAFE=1 to override.
+0922 22:27:36 q36-server: context buffers 665.13 MiB (ctx=16384, backend=vulkan, prefill_chunk=256, raw_kv_rows=16384, compressed_kv_rows=0)
+0922 22:27:36 q36-server: KV disk cache /tmp/claude-1000/-home-server-q36-opt-27b/d741a5e9-1860-4354-879d-f336c5d6bc5a/scratchpad/kv (budget=8192 MiB, cross-quant=accept, min=512, cold_max=30000, continued=10000, trim=32, align=2048)
+0922 22:27:36 q36-server: tracing session to /tmp/claude-1000/-home-server-q36-opt-27b/d741a5e9-1860-4354-879d-f336c5d6bc5a/scratchpad/trace1.txt
+0922 22:27:36 q36-server: listening on http://127.0.0.1:8011
+0922 22:27:38 q36-server: chat ctx=0..5719:5719 TOOLS prompt start
+0922 22:27:39 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 256/5719 (4.5%) chunk=0.00 t/s avg=204.46 t/s 1.252s
+0922 22:27:40 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 512/5719 (9.0%) chunk=188.98 t/s avg=196.41 t/s 2.607s
+0922 22:27:42 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 768/5719 (13.4%) chunk=177.11 t/s avg=189.53 t/s 4.052s
+0922 22:27:44 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 1024/5719 (17.9%) chunk=156.65 t/s avg=180.08 t/s 5.686s
+0922 22:27:45 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 1280/5719 (22.4%) chunk=139.71 t/s avg=170.24 t/s 7.519s
+0922 22:27:47 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 1536/5719 (26.9%) chunk=138.29 t/s avg=163.93 t/s 9.370s
+0922 22:27:49 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 1792/5719 (31.3%) chunk=133.36 t/s avg=158.73 t/s 11.290s
+0922 22:27:51 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 2048/5719 (35.8%) chunk=129.49 t/s avg=154.37 t/s 13.266s
+0922 22:27:53 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 2304/5719 (40.3%) chunk=129.21 t/s avg=151.10 t/s 15.248s
+0922 22:27:55 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 2560/5719 (44.8%) chunk=123.43 t/s avg=147.79 t/s 17.322s
+0922 22:27:57 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 2816/5719 (49.2%) chunk=120.43 t/s avg=144.80 t/s 19.447s
+0922 22:27:59 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 3072/5719 (53.7%) chunk=121.37 t/s avg=142.51 t/s 21.557s
+0922 22:28:02 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 3328/5719 (58.2%) chunk=117.04 t/s avg=140.16 t/s 23.744s
+0922 22:28:04 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 3584/5719 (62.7%) chunk=114.14 t/s avg=137.92 t/s 25.987s
+0922 22:28:06 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 3840/5719 (67.1%) chunk=113.09 t/s avg=135.93 t/s 28.251s
+0922 22:28:09 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 4096/5719 (71.6%) chunk=99.57 t/s avg=132.89 t/s 30.822s
+0922 22:28:09 q36-server: kv cache stored tokens=4096 trimmed=1623 reason=cold size=254.61 MiB save=229.0 ms
+0922 22:28:10 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 4352/5719 (76.1%) chunk=150.07 t/s avg=133.79 t/s 32.528s
+0922 22:28:12 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 4608/5719 (80.6%) chunk=147.00 t/s avg=134.46 t/s 34.269s
+0922 22:28:14 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 4864/5719 (85.0%) chunk=136.04 t/s avg=134.55 t/s 36.151s
+0922 22:28:16 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 5120/5719 (89.5%) chunk=117.61 t/s avg=133.59 t/s 38.328s
+0922 22:28:19 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 5376/5719 (94.0%) chunk=103.09 t/s avg=131.73 t/s 40.811s
+0922 22:28:21 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 5632/5719 (98.5%) chunk=101.70 t/s avg=129.98 t/s 43.328s
+0922 22:28:23 q36-server: chat ctx=0..5719:5719 TOOLS prefill chunk 5719/5719 (100.0%) chunk=57.88 t/s avg=127.57 t/s 44.831s
+0922 22:28:23 q36-server: chat ctx=0..5719:5719 TOOLS prompt done 44.831s
+0922 22:28:24 q36-server: chat ctx=0..5719:5719 gen=24 TOOLS decoding chunk=20.17 t/s avg=20.17 t/s 1.190s
+0922 22:28:24 q36-server: chat ctx=0..5719:5719 gen=24 TOOLS finish=length 46.022s
+0922 22:28:24 q36-server: chat ctx=5743..5772:29 TOOLS prompt start
+0922 22:28:25 q36-server: chat ctx=5743..5772:29 TOOLS prefill chunk 29/29 (100.0%) chunk=0.00 t/s avg=43.02 t/s 0.674s
+0922 22:28:25 q36-server: chat ctx=5743..5772:29 TOOLS prompt done 0.674s
+0922 22:28:25 q36-server: chat ctx=5743..5772:29 gen=14 TOOLS decoding chunk=21.62 t/s avg=21.62 t/s 0.648s
+0922 22:28:25 q36-server: chat ctx=5743..5772:29 gen=14 TOOLS finish=stop 1.322s
+0922 22:28:25 q36-server: chat ctx=5786..5815:29 TOOLS prompt start
+0922 22:28:26 q36-server: chat ctx=5786..5815:29 TOOLS prefill chunk 29/29 (100.0%) chunk=0.00 t/s avg=40.07 t/s 0.724s
+0922 22:28:26 q36-server: chat ctx=5786..5815:29 TOOLS prompt done 0.724s
+0922 22:28:27 q36-server: chat ctx=5786..5815:29 gen=24 TOOLS decoding chunk=20.13 t/s avg=20.13 t/s 1.193s
+0922 22:28:27 q36-server: chat ctx=5786..5815:29 gen=24 TOOLS finish=length 1.916s
+0922 22:28:34 q36-server: shutdown requested, draining requests
+0922 22:28:34 q36-server: persisting resident KV cache slot=0 tokens=5839
+0922 22:28:35 q36-server: kv cache stored tokens=5839 trimmed=0 reason=shutdown size=298.88 MiB save=247.2 ms
