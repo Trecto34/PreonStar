@@ -289,6 +289,24 @@ PreonStar's prefill throughput is 53-59% higher than mainline at every
 context size tested; generation throughput is close, with a modest edge for
 PreonStar at 8k+ context.
 
+### Long-context prefill: flash-attention
+
+Attention is the only prefill cost that grows with context, so it decides how
+fast long agent prompts start. `attn_prefill_fa.comp` serves 8 tokens × 6
+heads (dense Qwen3.8-27B) or 4 tokens × 8 heads (Qwen3.6/3.8-35B-A3B) per
+workgroup, dequantizes each K/V tile into LDS once, and keeps Q in registers.
+It is 2.4-3.5x faster than the previous kernel at 4k-16k context. Measured on
+one BC-250 at 8192 ctx, 5 interleaved reps per arm:
+
+| Model | Before | Flash-attention | Delta |
+| --- | ---: | ---: | ---: |
+| Swift-Qwen3.8-27B-IQ3_XXS (dense) | 97.98 t/s | 107.28 t/s | +9.49% |
+| Qwen3.6-35B-A3B IQ2_XXS (MoE) | 386.47 t/s | 491.38 t/s | +27.15% |
+
+Decode is unchanged. The gain grows with context and is small at 1-2k. It is
+on by default; `Q36_VK_ATTN_FA=0` restores the previous kernel. Numbers,
+parity and quality checks: `karpathy/evidence/attn-fa-prefill.md`.
+
 Metal benchmark numbers (M2 Pro) were dropped from this README since the
 primary tested/tuned device is the BC-250; the Metal backend is still fully
 supported (see Requirements above), just not benchmarked here.
@@ -995,6 +1013,13 @@ experts a token selects; on one BC-250 it caused a degenerate failure in long
 tool-calling chat (sampled distribution collapsed, generation ran to the token
 budget). A short-context logits diff will not catch this. Enable it only for
 measurement runs, never for a served endpoint.
+
+Prefill attention uses the flash-attention kernel by default (see
+[Speed](#long-context-prefill-flash-attention)). It is **not bit-exact** with
+the previous `attn_prefill_qtile2` kernel: f32 sums are added in a different
+order. On a teacher-forced next-token check at 8k it moved scores less than
+changing `--prefill-chunk` from 256 to 128 does. Set `Q36_VK_ATTN_FA=0` to go
+back for A/B comparisons.
 
 `--attn-span` trades sequential `attn_combine` rescale cost against split-K
 occupancy: narrower spans help at short context and can hurt at long context
