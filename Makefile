@@ -159,6 +159,8 @@ VULKAN_SHADERS := \
 	vulkan/dense_extra_decode.spv \
 	vulkan/dense_extra_decode_q2_0.spv \
 	vulkan/dense_extra_decode_pq2_0.spv \
+	vulkan/dense_extra_small_q2_0.spv \
+	vulkan/dense_extra_small_pq2_0.spv \
 	vulkan/dense_extra_mmq_pq2_0.spv \
 	vulkan/dense_extra_decode_ptq1_0.spv \
 	vulkan/dense_extra_mmq_ptq1_0.spv \
@@ -245,6 +247,12 @@ vulkan/dense_extra_decode_q2_0.spv: vulkan/dense_extra_decode.comp
 
 vulkan/dense_extra_decode_pq2_0.spv: vulkan/dense_extra_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -DQ36_PQ2_0=1 -o $@ $<
+
+vulkan/dense_extra_small_q2_0.spv: vulkan/dense_extra_small_q2.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/dense_extra_small_pq2_0.spv: vulkan/dense_extra_small_q2.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_PQ2_0=1 -o $@ $<
 
 vulkan/dense_extra_mmq_pq2_0.spv: vulkan/dense_extra_mmq.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -DQ36_PQ2_0=1 -o $@ $<
@@ -498,6 +506,14 @@ tests/test_attn_prefill_qtile2.o: tests/test_attn_prefill_qtile2.c q36_gpu.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(ATTN_PREFILL_QTILE2_TEST): tests/test_attn_prefill_qtile2.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
+PQ2_SMALL_TEST := tests/test_pq2_small
+
+tests/test_pq2_small.o: tests/test_pq2_small.c q36_gpu.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(PQ2_SMALL_TEST): tests/test_pq2_small.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
 ATTN_FA_TEST := tests/test_attn_fa

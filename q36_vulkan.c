@@ -257,6 +257,8 @@ typedef struct {
     q36_vk_kernel dense_extra_decode;
     q36_vk_kernel dense_extra_decode_q2_0;
     q36_vk_kernel dense_extra_decode_pq2_0;
+    q36_vk_kernel dense_extra_small_q2_0;
+    q36_vk_kernel dense_extra_small_pq2_0;
     q36_vk_kernel dense_extra_decode_ptq1_0;
     q36_vk_kernel dense_extra_decode_iq2s_pair;
     q36_vk_kernel dense_extra_decode_iq2s;
@@ -1165,6 +1167,18 @@ static bool q36_vk_use_mmq_fast(void) {
     return env && env[0] && env[0] != '0';
 }
 
+/* Largest batch the Q2_0/PQ2_0 small-batch kernel takes before falling back
+ * to the 128-token mmq tile.  0 disables it. */
+static uint32_t q36_vk_q2_small_max(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("Q36_VK_Q2_SMALL_MAX");
+        long v = env && env[0] ? strtol(env, NULL, 10) : 16;
+        cached = v < 0 ? 0 : (v > 4096 ? 4096 : (int)v);
+    }
+    return (uint32_t)cached;
+}
+
 static bool q36_vk_env_default_on(const char *name) {
     const char *env = getenv(name);
     return !env || !env[0] || env[0] != '0';
@@ -1697,7 +1711,7 @@ static int q36_vk_kernel_init(q36_vk_kernel *k) {
     if (q36_vk.subgroup_size_control && force_wave32) {
         stage.pNext = &subgroup_size;
         stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
-    } else if (q36_vk.subgroup_size_control && q36_vk.subgroup_size == 64u && (force_wave64 || strstr(k->path,"dense_extra_decode_q2_0") != NULL || strstr(k->path,"dense_extra_decode_pq2_0") != NULL)) {
+    } else if (q36_vk.subgroup_size_control && q36_vk.subgroup_size == 64u && (force_wave64 || strstr(k->path,"dense_extra_decode_q2_0") != NULL || strstr(k->path,"dense_extra_decode_pq2_0") != NULL || strstr(k->path,"dense_extra_small_") != NULL)) {
         stage.pNext = &subgroup_size64;
         stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
@@ -3337,6 +3351,8 @@ int q36_gpu_init(void) {
     q36_vk.dense_extra_decode = Q36_VK_KERNEL("vulkan/dense_extra_decode.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode_pq2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_pq2_0.spv", 4, 20, 1u << 2);
+    q36_vk.dense_extra_small_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_small_q2_0.spv", 4, 24, 1u << 2);
+    q36_vk.dense_extra_small_pq2_0 = Q36_VK_KERNEL("vulkan/dense_extra_small_pq2_0.spv", 4, 24, 1u << 2);
     q36_vk.dense_extra_decode_ptq1_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_ptq1_0.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode_iq2s_pair = Q36_VK_KERNEL(
         "vulkan/dense_extra_decode_iq2s_pair.spv", 6, 24, (1u << 4) | (1u << 5));
@@ -3742,6 +3758,8 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_iq2s);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_pq2_0);
+    q36_vk_kernel_destroy(&q36_vk.dense_extra_small_q2_0);
+    q36_vk_kernel_destroy(&q36_vk.dense_extra_small_pq2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_iq2s_pair);
@@ -8544,6 +8562,51 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                 bool is_pq2_0 = weight_type == Q36_VK_TENSOR_PQ2_0;
                 bool is_ptq1_0 = weight_type == Q36_VK_TENSOR_PTQ1_0;
                 bool is_q2_0 = weight_type == Q36_VK_TENSOR_Q2_0 || is_pq2_0;
+                /* Small batches (MTP verify, prompt tails, short incremental
+                 * prefills) would pay a whole 128-token mmq tile.  Stream the
+                 * weights once per 8-token group instead; each row is
+                 * bit-identical to the one-token decode kernel. */
+                bool small_ok = is_q2_0 && q36_vk.have_int_dot &&
+                                q36_vk.subgroup_size == 64u && q36_vk.subgroup_arithmetic;
+                /* A ragged tail past whole 128-token tiles (the end of any
+                 * prompt) would cost another full tile; hand it to the small
+                 * kernel and let mmq take only the aligned head. */
+                uint32_t small_first = 0;
+                if (small_ok && n_tok > q36_vk_q2_small_max()) {
+                    uint32_t rem = (uint32_t)n_tok % 128u;
+                    if (rem == 0u || rem > q36_vk_q2_small_max()) small_ok = false;
+                    else small_first = (uint32_t)n_tok - rem;
+                }
+                if (small_ok && small_first) {
+                    push.n_tok = small_first;
+                    ok = q36_vk_run_unlocked(
+                        op, is_pq2_0 ? &q36_vk.dense_extra_mmq_pq2_0 : &q36_vk.dense_extra_mmq_q2_0,
+                        bindings, &push, sizeof(push),
+                        ((uint32_t)out_dim + 63u) / 64u, small_first / 128u, 1);
+                }
+                if (small_ok) {
+                    q36_vk_kernel *small = is_pq2_0 ? &q36_vk.dense_extra_small_pq2_0 :
+                                                      &q36_vk.dense_extra_small_q2_0;
+                    for (uint32_t tok0 = small_first; ok && tok0 < (uint32_t)n_tok; tok0 += 8u) {
+                        uint32_t group = (uint32_t)n_tok - tok0;
+                        if (group > 8u) group = 8u;
+                        struct {
+                            uint32_t out_dim;
+                            uint32_t n_tok;
+                            uint32_t tok0;
+                            uint32_t blocks;
+                            uint32_t row_bytes;
+                            float scale;
+                        } spush = {
+                            (uint32_t)out_dim, group, tok0,
+                            (uint32_t)blocks, (uint32_t)row_bytes, scale,
+                        };
+                        ok = q36_vk_run_unlocked(op, small, bindings, &spush, sizeof(spush),
+                                                 ((uint32_t)out_dim + 1u) / 2u, 1, 1);
+                    }
+                    pthread_mutex_unlock(&q36_vk_mu);
+                    return ok;
+                }
                 bool is_iq2s_fast = weight_type == Q36_VK_TENSOR_IQ2_S &&
                                     q36_vk_env_default_on("Q36_VK_IQ2S_EXTRA");
                 q36_vk_kernel *mmq_kernel = is_ptq1_0 ?

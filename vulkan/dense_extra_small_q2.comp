@@ -1,0 +1,130 @@
+#version 460
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Small-batch (2..NT tokens) Q2_0/PQ2_0 matmul for MTP verify, prompt tails
+ * and short incremental prefills.  The 128-token mmq tile costs the same for
+ * 2 tokens as for 128 (a 2-token batch measured 26x a decode step), while
+ * this kernel streams each weight row once, expands it through the LUT once,
+ * and dots it against every token in the group.
+ *
+ * Per token, the integer sums, the fma order across q8_K blocks and the
+ * final subgroupAdd are exactly those of dense_extra_decode.comp's Q2 path,
+ * so each output row is bit-identical to running that decode kernel once
+ * per token.  Pinned to one wave64 per workgroup by the host. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint wb[]; };
+layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 3) readonly buffer Tables { uint tables[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint n_tok;     /* tokens in this group, 1..NT */
+    uint tok0;      /* first token of the group */
+    uint blocks;
+    uint row_bytes;
+    float scale;
+} pc;
+
+#ifdef Q36_PQ2_0
+#define Q2_BLK_BYTES   34u
+#define Q2_BLK_PER_Q8K 2u
+#define Q2_LANE_SHIFT  2u
+#define Q2_LANE_MASK   3u
+#else
+#define Q2_BLK_BYTES   18u
+#define Q2_BLK_PER_Q8K 4u
+#define Q2_LANE_SHIFT  1u
+#define Q2_LANE_MASK   1u
+#endif
+
+/* ROWS x NT accumulators plus ROWS x 8 expanded weight words must stay in
+ * VGPRs; 2 x 8 keeps the wave at a decode-like register budget. */
+const uint ROWS = 2u;
+const uint NT = 8u;
+const uint Q8K_WORDS = 74u;
+
+uint load_u16(uint off) {
+    uint word = wb[off >> 2u];
+    return (word >> (8u * (off & 3u))) & 0xffffu;
+}
+
+uint load_u32(uint off) {
+    uint shift = 8u * (off & 3u);
+    uint i = off >> 2u;
+    uint lo = wb[i];
+    return shift == 0u ? lo : (lo >> shift) | (wb[i + 1u] << (32u - shift));
+}
+
+uint q2_i8x4(uint codes) {
+    uint expanded = (codes & 0x03u) |
+                    ((codes & 0x0cu) << 6u) |
+                    ((codes & 0x30u) << 12u) |
+                    ((codes & 0xc0u) << 18u);
+    return ((expanded | 0x80808080u) - 0x01010101u) ^ 0x80808080u;
+}
+
+shared uint q2tab[256];
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint lane8 = lid & 7u;
+    for (uint i = lid; i < 256u; i += 64u) q2tab[i] = q2_i8x4(i);
+    barrier();
+    uint first_row = gl_WorkGroupID.x * ROWS;
+    float acc[ROWS][NT];
+    [[unroll]] for (uint r = 0u; r < ROWS; r++)
+        [[unroll]] for (uint t = 0u; t < NT; t++) acc[r][t] = 0.0;
+
+    for (uint b = lid >> 3u; b < pc.blocks; b += 8u) {
+        uint w[ROWS][8];
+        float wd[ROWS];
+        [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+            /* Rows past out_dim read row out_dim-1 and are never stored. */
+            uint row = min(first_row + r, pc.out_dim - 1u);
+            uint qblock = Q2_BLK_PER_Q8K * b + (lane8 >> Q2_LANE_SHIFT);
+            uint base = row * pc.row_bytes + qblock * Q2_BLK_BYTES;
+            uint code_base = base + 2u + (lane8 & Q2_LANE_MASK) * 8u;
+            uint codes0 = load_u32(code_base);
+            uint codes1 = load_u32(code_base + 4u);
+            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                w[r][i] = q2tab[(codes0 >> (8u * i)) & 0xffu];
+                w[r][i + 4u] = q2tab[(codes1 >> (8u * i)) & 0xffu];
+            }
+            wd[r] = unpackHalf2x16(load_u16(base)).x;
+        }
+
+        [[unroll]] for (uint t = 0u; t < NT; t++) {
+            if (t >= pc.n_tok) break;
+            uint qb0 = ((pc.tok0 + t) * pc.blocks + b) * Q8K_WORDS;
+            uint qbase = qb0 + 2u + 8u * lane8;
+            uint qv[8];
+            [[unroll]] for (uint i = 0u; i < 8u; i++) qv[i] = q8[qbase + i];
+            float yd = uintBitsToFloat(q8[qb0]);
+            [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+                /* Same term order as the decode kernel's interleaved sum. */
+                int sum = 0;
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    sum += dotPacked4x8EXT(int(w[r][i]), int(qv[i]));
+                    sum += dotPacked4x8EXT(int(w[r][i + 4u]), int(qv[i + 4u]));
+                }
+                acc[r][t] = fma(wd[r] * yd, float(sum), acc[r][t]);
+            }
+        }
+    }
+
+    [[unroll]] for (uint t = 0u; t < NT; t++) {
+        if (t >= pc.n_tok) break;
+        [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+            float total = subgroupAdd(acc[r][t]);
+            uint row = first_row + r;
+            if (lid == 0u && row < pc.out_dim)
+                y[(pc.tok0 + t) * pc.out_dim + row] = total * pc.scale;
+        }
+    }
+}
