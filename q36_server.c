@@ -33,9 +33,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#ifdef Q36_SERVER_TEST
 #include <sys/wait.h>
-#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -709,6 +707,12 @@ static void random_tool_id(char *dst, size_t dstlen, api_style api) {
 }
 
 typedef struct server server;
+
+/* One --models-dir entry: the API id is the file name without ".gguf". */
+typedef struct {
+    char *id;
+    char *path;
+} server_model;
 static void server_inference_lock(server *s);
 static void server_inference_unlock(server *s);
 static bool server_encode_image(server *s, const server_image_input *input,
@@ -929,6 +933,9 @@ static void request_init(request *r, req_kind kind, int max_tokens) {
     r->think_mode = Q36_THINK_HIGH;
     r->preserve_thinking = true;
 }
+
+/* Defined after struct server is complete; dereferences s->default_*_penalty*. */
+static void request_apply_default_penalties(request *r, server *s);
 
 static void request_set_model_profile(request *r, q36_engine *e) {
     free(r->model);
@@ -1551,10 +1558,88 @@ done:
     tool_schema_order_free(&order);
 }
 
+static char *json_minify(const char *in) {
+    if (!in) return NULL;
+    size_t len = strlen(in);
+    char *out = xmalloc(len + 1);
+    char *dst = out;
+    const char *src = in;
+    bool in_string = false;
+    bool escaped = false;
+    while (*src) {
+        char c = *src++;
+        if (in_string) {
+            *dst++ = c;
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+        } else {
+            if (c == '"') {
+                in_string = true;
+                *dst++ = c;
+            } else if ((unsigned char)c > ' ') {
+                *dst++ = c;
+            }
+        }
+    }
+    *dst = '\0';
+    return out;
+}
+
+static char *tool_schema_extract_name(const char *json) {
+    if (!json) return NULL;
+    const char *p = json;
+    json_ws(&p);
+    if (*p != '{') return NULL;
+    p++;
+    json_ws(&p);
+    while (*p && *p != '}') {
+        char *key = NULL;
+        if (!json_string(&p, &key)) return NULL;
+        json_ws(&p);
+        if (*p != ':') {
+            free(key);
+            return NULL;
+        }
+        p++;
+        if (!strcmp(key, "name")) {
+            free(key);
+            char *name = NULL;
+            if (json_string(&p, &name)) return name;
+            return NULL;
+        }
+        free(key);
+        if (!json_skip_value(&p)) return NULL;
+        json_ws(&p);
+        if (*p == ',') p++;
+        json_ws(&p);
+    }
+    return NULL;
+}
+
+typedef struct {
+    char *name;
+    char *schema;
+} parsed_tool_entry;
+
+static int compare_tool_entries(const void *a, const void *b) {
+    const parsed_tool_entry *ta = a;
+    const parsed_tool_entry *tb = b;
+    if (!ta->name && !tb->name) return 0;
+    if (!ta->name) return 1;
+    if (!tb->name) return -1;
+    return strcmp(ta->name, tb->name);
+}
+
 /* OpenAI wraps tools as {"type":"function","function":{...}}. Anthropic sends
  * the function schema directly as {"name":...,"input_schema":...}. The Q36
- * prompt wants one raw function schema per line, so unwrap OpenAI tools and keep
- * already-direct schemas unchanged. */
+ * prompt wants one raw function schema per line, so unwrap OpenAI tools, minify
+ * each schema into compact single-line JSON, and sort deterministically by tool
+ * name to maximize server-side KV cache prefix reuse across turns. */
 static bool parse_tools_value(const char **p, char **out, tool_schema_orders *orders) {
     json_ws(p);
     if (json_lit(p, "null")) {
@@ -1563,6 +1648,9 @@ static bool parse_tools_value(const char **p, char **out, tool_schema_orders *or
     }
     if (**p != '[') return false;
     (*p)++;
+
+    parsed_tool_entry *entries = NULL;
+    int entry_count = 0, entry_cap = 0;
     buf schemas = {0};
 
     json_ws(p);
@@ -1571,8 +1659,19 @@ static bool parse_tools_value(const char **p, char **out, tool_schema_orders *or
         if (!json_raw_value(p, &raw)) goto bad;
         char *function = openai_function_schema_from_tool(raw);
         const char *schema = function ? function : raw;
-        append_raw_json_line(&schemas, schema);
-        tool_schema_orders_add_json(orders, schema);
+        char *minified = json_minify(schema);
+        char *name = tool_schema_extract_name(minified ? minified : schema);
+
+        tool_schema_orders_add_json(orders, minified ? minified : schema);
+
+        if (entry_count == entry_cap) {
+            entry_cap = entry_cap ? entry_cap * 2 : 8;
+            entries = xrealloc(entries, (size_t)entry_cap * sizeof(entries[0]));
+        }
+        entries[entry_count].name = name ? name : xstrdup("");
+        entries[entry_count].schema = minified ? minified : xstrdup(schema);
+        entry_count++;
+
         free(function);
         free(raw);
         json_ws(p);
@@ -1581,9 +1680,27 @@ static bool parse_tools_value(const char **p, char **out, tool_schema_orders *or
     }
     if (**p != ']') goto bad;
     (*p)++;
+
+    if (entry_count > 1) {
+        qsort(entries, (size_t)entry_count, sizeof(entries[0]), compare_tool_entries);
+    }
+
+    for (int i = 0; i < entry_count; i++) {
+        append_raw_json_line(&schemas, entries[i].schema);
+        free(entries[i].name);
+        free(entries[i].schema);
+    }
+    free(entries);
+
     *out = buf_take(&schemas);
     return true;
+
 bad:
+    for (int i = 0; i < entry_count; i++) {
+        free(entries[i].name);
+        free(entries[i].schema);
+    }
+    free(entries);
     buf_free(&schemas);
     return false;
 }
@@ -3046,6 +3163,7 @@ static bool parse_chat_request(q36_engine *e, server *s, const char *body, int d
                                int ctx_size, request *r, char *err, size_t errlen) {
     request_init(r, REQ_CHAT, def_tokens);
     request_set_model_profile(r, e);
+    request_apply_default_penalties(r, s);
     const char *p = body;
     bool got_messages = false;
     bool tool_choice_none = false;
@@ -3456,6 +3574,7 @@ static bool parse_responses_request(q36_engine *e, server *s, const char *body,
                                     char *err, size_t errlen) {
     request_init(r, REQ_CHAT, def_tokens);
     request_set_model_profile(r, e);
+    request_apply_default_penalties(r, s);
     r->api = API_RESPONSES;
     const char *p = body;
     bool got_input = false;
@@ -3654,6 +3773,7 @@ static bool parse_anthropic_request(q36_engine *e, server *s, const char *body, 
                                     int ctx_size, request *r, char *err, size_t errlen) {
     request_init(r, REQ_CHAT, def_tokens);
     request_set_model_profile(r, e);
+    request_apply_default_penalties(r, s);
     r->api = API_ANTHROPIC;
     const char *p = body;
     bool got_messages = false;
@@ -3940,10 +4060,11 @@ static bool parse_prompt(const char **p, char **out) {
     return true;
 }
 
-static bool parse_completion_request(q36_engine *e, const char *body, int def_tokens,
+static bool parse_completion_request(q36_engine *e, server *s, const char *body, int def_tokens,
                                      int ctx_size, request *r, char *err, size_t errlen) {
     request_init(r, REQ_COMPLETION, def_tokens);
     request_set_model_profile(r, e);
+    request_apply_default_penalties(r, s);
     const char *p = body;
     char *prompt = NULL;
     bool got_thinking = false;
@@ -6445,6 +6566,10 @@ struct server {
     pthread_t *slot_threads;
     pthread_t decode_thread;
     int default_tokens;
+    float default_presence_penalty;
+    float default_frequency_penalty;
+    bool default_presence_penalty_set;
+    bool default_frequency_penalty_set;
     kv_disk_cache kv;
     tool_memory tool_mem;
     bool disable_exact_tool_replay;
@@ -6468,7 +6593,28 @@ struct server {
     FILE *trace;
     pthread_mutex_t trace_mu;
     uint64_t trace_seq;
+    /* --models-dir catalog.  One model is resident at a time; a request that
+     * names another catalog entry swaps it in under swap_lock (write side),
+     * while every other request holds the read side from parse to completion
+     * because parsing already tokenizes with s->engine. */
+    server_model *models;
+    int model_count;
+    int model_current;
+    int model_initial;
+    pthread_rwlock_t swap_lock;
+    q36_engine_options engine_opt;
+    int ctx_size;
+    char *kv_root;
+    uint64_t kv_budget_mb;
+    bool kv_reject_different_quant;
+    kv_cache_options kv_opt;
 };
+
+static void request_apply_default_penalties(request *r, server *s) {
+    if (!s) return;
+    if (s->default_presence_penalty_set) r->presence_penalty = s->default_presence_penalty;
+    if (s->default_frequency_penalty_set) r->frequency_penalty = s->default_frequency_penalty;
+}
 
 static void server_inference_lock(server *s) {
     pthread_mutex_lock(&s->inference_mu);
@@ -10384,10 +10530,267 @@ static bool send_model(server *s, int fd) {
 static bool send_models(server *s, int fd) {
     buf b = {0};
     buf_puts(&b, "{\"object\":\"list\",\"data\":[");
-    append_model_json(&b, s);
+    if (s->model_count == 0) {
+        append_model_json(&b, s);
+    } else {
+        /* The resident model first, then the rest of the catalog. */
+        const int ctx = q36_session_ctx(s->session);
+        append_model_json_profile(&b, ctx, s->default_tokens,
+                                  s->models[s->model_current].id,
+                                  s->models[s->model_current].id);
+        for (int i = 0; i < s->model_count; i++) {
+            if (i == s->model_current) continue;
+            buf_putc(&b, ',');
+            append_model_json_profile(&b, ctx, s->default_tokens,
+                                      s->models[i].id, s->models[i].id);
+        }
+    }
     buf_puts(&b, "]}\n");
     bool ok = http_response(fd, 200, "application/json", b.ptr);
     buf_free(&b);
+    return ok;
+}
+
+static int server_model_find(const server *s, const char *id) {
+    if (!id) return -1;
+    for (int i = 0; i < s->model_count; i++)
+        if (!strcmp(s->models[i].id, id)) return i;
+    return -1;
+}
+
+/* The top-level "model" string of a request body, or NULL.  A real scan, not
+ * strstr: tool schemas can carry nested "model" keys. */
+static char *request_peek_model(const char *body) {
+    const char *p = body;
+    if (!p) return NULL;
+    json_ws(&p);
+    if (*p != '{') return NULL;
+    p++;
+    json_ws(&p);
+    if (*p == '}') return NULL;
+    for (;;) {
+        char *key = NULL;
+        if (!json_string(&p, &key)) return NULL;
+        json_ws(&p);
+        if (*p != ':') {
+            free(key);
+            return NULL;
+        }
+        p++;
+        json_ws(&p);
+        if (!strcmp(key, "model") && *p == '"') {
+            char *val = NULL;
+            free(key);
+            return json_string(&p, &val) ? val : NULL;
+        }
+        free(key);
+        if (!json_skip_value(&p)) return NULL;
+        json_ws(&p);
+        if (*p != ',') return NULL;
+        p++;
+    }
+}
+
+/* Validate a GGUF without risking the server: the engine's model checks
+ * exit() on a mismatched shape, so they run in a child process. */
+static bool server_model_probe(const char *path) {
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        int nul = open("/dev/null", O_WRONLY);
+        if (nul >= 0) {
+            dup2(nul, STDOUT_FILENO);
+            dup2(nul, STDERR_FILENO);
+        }
+        _exit(q36_inspect_model(path) == 0 ? 0 : 1);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int server_model_cmp(const void *a, const void *b) {
+    return strcmp(((const server_model *)a)->id, ((const server_model *)b)->id);
+}
+
+/* Build the catalog from dir plus the startup model; returns the startup
+ * model's index, or -1.  Files that resolve to the same inode appear once. */
+static int server_models_scan(server *s, const char *dir, const char *initial_path) {
+    char initial_real[PATH_MAX];
+    if (!realpath(initial_path, initial_real)) return -1;
+    DIR *d = opendir(dir);
+    if (!d) {
+        server_log(Q36_LOG_DEFAULT, "q36-server: cannot open --models-dir %s: %s",
+                   dir, strerror(errno));
+        return -1;
+    }
+    int cap = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        size_t n = strlen(de->d_name);
+        if (n <= 5 || strcmp(de->d_name + n - 5, ".gguf") != 0) continue;
+        buf pb = {0};
+        buf_printf(&pb, "%s/%s", dir, de->d_name);
+        if (s->model_count == cap) {
+            cap = cap ? cap * 2 : 16;
+            s->models = realloc(s->models, (size_t)cap * sizeof(*s->models));
+            if (!s->models) die("out of memory");
+        }
+        s->models[s->model_count].path = buf_take(&pb);
+        s->models[s->model_count].id = xstrndup(de->d_name, n - 5);
+        s->model_count++;
+    }
+    closedir(d);
+    qsort(s->models, (size_t)s->model_count, sizeof(*s->models), server_model_cmp);
+
+    /* Several names for one file (symlinks): list it once, under the name of
+     * the regular file when there is one. */
+    int uniq = 0;
+    for (int i = 0; i < s->model_count; i++) {
+        char real[PATH_MAX];
+        struct stat st;
+        bool link = lstat(s->models[i].path, &st) == 0 && S_ISLNK(st.st_mode);
+        int same = -1;
+        if (realpath(s->models[i].path, real)) {
+            for (int j = 0; j < uniq && same < 0; j++) {
+                char other[PATH_MAX];
+                if (realpath(s->models[j].path, other) && !strcmp(other, real)) same = j;
+            }
+        } else {
+            link = true;  /* dangling: drop it */
+            same = uniq;
+        }
+        if (same < 0) {
+            s->models[uniq++] = s->models[i];
+            continue;
+        }
+        struct stat kept;
+        bool kept_link = same < uniq && lstat(s->models[same].path, &kept) == 0 &&
+                         S_ISLNK(kept.st_mode);
+        if (same < uniq && kept_link && !link) {
+            server_model dropped = s->models[same];
+            s->models[same] = s->models[i];
+            s->models[i] = dropped;
+        }
+        free(s->models[i].id);
+        free(s->models[i].path);
+    }
+    s->model_count = uniq;
+
+    /* Probe everything except the startup model, which the real open checks. */
+    int initial = -1;
+    int kept = 0;
+    for (int i = 0; i < s->model_count; i++) {
+        char real[PATH_MAX];
+        bool is_initial = realpath(s->models[i].path, real) && !strcmp(real, initial_real);
+        if (!is_initial && !server_model_probe(s->models[i].path)) {
+            server_log(Q36_LOG_DEFAULT, "q36-server: models: skipping %s (not loadable)",
+                       s->models[i].id);
+            free(s->models[i].id);
+            free(s->models[i].path);
+            continue;
+        }
+        if (is_initial) initial = kept;
+        s->models[kept++] = s->models[i];
+    }
+    s->model_count = kept;
+    if (initial < 0) {
+        /* -m lives outside the directory: add it under its own file name. */
+        const char *base = strrchr(initial_path, '/');
+        base = base ? base + 1 : initial_path;
+        size_t n = strlen(base);
+        if (n > 5 && !strcmp(base + n - 5, ".gguf")) n -= 5;
+        s->models = realloc(s->models, (size_t)(s->model_count + 1) * sizeof(*s->models));
+        if (!s->models) die("out of memory");
+        s->models[s->model_count].id = xstrndup(base, n);
+        s->models[s->model_count].path = xstrdup(initial_path);
+        initial = s->model_count++;
+    }
+    for (int i = 0; i < s->model_count; i++)
+        server_log(Q36_LOG_DEFAULT, "q36-server: models: %s%s", s->models[i].id,
+                   i == initial ? " (loaded)" : "");
+    return initial;
+}
+
+static void server_models_free(server *s) {
+    for (int i = 0; i < s->model_count; i++) {
+        free(s->models[i].id);
+        free(s->models[i].path);
+    }
+    free(s->models);
+    s->models = NULL;
+    s->model_count = 0;
+    free(s->kv_root);
+    s->kv_root = NULL;
+}
+
+static void server_kv_open_for_model(server *s, int idx) {
+    if (!s->kv_root) return;
+    buf db = {0};
+    buf_printf(&db, "%s/%s", s->kv_root, s->models[idx].id);
+    char *dir = buf_take(&db);
+    kv_cache_open(&s->kv, dir, s->kv_budget_mb, s->kv_reject_different_quant, s->kv_opt);
+    free(dir);
+}
+
+static bool server_model_open_engine(server *s, int idx) {
+    q36_engine_options opt = s->engine_opt;
+    opt.model_path = s->models[idx].path;
+    if (idx != s->model_initial) {
+        /* Sidecars are built for one model; only the startup model gets them. */
+        opt.mtp_path = NULL;
+        opt.vision_path = NULL;
+        opt.directional_steering_file = NULL;
+    }
+    q36_engine *engine = NULL;
+    if (q36_engine_open(&engine, &opt) != 0) return false;
+    q36_session *session = NULL;
+    if (q36_session_create(&session, engine, s->ctx_size) != 0) {
+        q36_engine_close(engine);
+        return false;
+    }
+    s->engine = engine;
+    s->slots[0].session = session;
+    s->session = session;
+    s->model_current = idx;
+    return true;
+}
+
+/* Swap the resident model.  Caller holds swap_lock for writing, so no request
+ * is parsing, queued or generating and the worker is idle. */
+static bool server_model_swap(server *s, int idx) {
+    if (idx == s->model_current) return true;
+    const int prev = s->model_current;
+    const double t0 = now_sec();
+    server_log(Q36_LOG_DEFAULT, "q36-server: models: switching %s -> %s",
+               s->models[prev].id, s->models[idx].id);
+
+    server_slot *slot = &s->slots[0];
+    const q36_tokens *live = q36_session_tokens(slot->session);
+    if (s->kv.enabled && live && live->len >= s->kv.opt.min_tokens)
+        server_kv_store_current(s, slot, "evict");
+    kv_cache_close(&s->kv);
+    const int tool_max = s->tool_mem.max_entries;
+    tool_memory_free(&s->tool_mem);
+    s->tool_mem.max_entries = tool_max;
+    server_image_cache_clear(&s->image_cache);
+    slot_pending_clear(slot);
+    q36_session_free(slot->session);
+    slot->session = NULL;
+    s->session = NULL;
+    q36_engine_close(s->engine);
+    s->engine = NULL;
+
+    bool ok = server_model_open_engine(s, idx);
+    if (!ok) {
+        server_log(Q36_LOG_DEFAULT, "q36-server: models: failed to load %s; restoring %s",
+                   s->models[idx].id, s->models[prev].id);
+        if (!server_model_open_engine(s, prev))
+            die("q36-server: could not restore the previous model");
+    }
+    server_kv_open_for_model(s, s->model_current);
+    server_log(Q36_LOG_DEFAULT, "q36-server: models: %s resident after %.1f s",
+               s->models[s->model_current].id, now_sec() - t0);
     return ok;
 }
 
@@ -10405,6 +10808,7 @@ static void *client_main(void *arg) {
     server *s = ca->srv;
     int fd = ca->fd;
     free(ca);
+    bool model_locked = false;
 
     http_request hr = {0};
     if (!read_http_request(fd, &hr)) {
@@ -10418,8 +10822,49 @@ static void *client_main(void *arg) {
         goto done;
     }
 
+    /* With a catalog, hold the resident model (read side) from here until the
+     * job completes; a request naming another catalog model swaps it in first. */
+    if (s->model_count > 0) {
+        int want = -1;
+        if (!strcmp(hr.method, "POST")) {
+            char *name = request_peek_model(hr.body);
+            want = server_model_find(s, name);
+            free(name);
+        }
+        for (int tries = 0;; tries++) {
+            pthread_rwlock_rdlock(&s->swap_lock);
+            if (want < 0 || want == s->model_current || tries >= 3) break;
+            pthread_rwlock_unlock(&s->swap_lock);
+            pthread_rwlock_wrlock(&s->swap_lock);
+            bool swapped = server_model_swap(s, want);
+            pthread_rwlock_unlock(&s->swap_lock);
+            if (!swapped) {
+                http_error(fd, 503, "requested model failed to load");
+                http_request_free(&hr);
+                goto done;
+            }
+        }
+        model_locked = true;
+    }
+
     if (!strcmp(hr.method, "GET") && !strcmp(hr.path, "/v1/models")) {
         send_models(s, fd);
+        http_request_free(&hr);
+        goto done;
+    }
+    if (!strcmp(hr.method, "GET") && !strncmp(hr.path, "/v1/models/", 11) &&
+        s->model_count > 0) {
+        int idx = server_model_find(s, hr.path + 11);
+        if (idx < 0) {
+            http_error(fd, 404, "unknown model");
+        } else {
+            buf b = {0};
+            append_model_json_profile(&b, q36_session_ctx(s->session), s->default_tokens,
+                                      s->models[idx].id, s->models[idx].id);
+            buf_putc(&b, '\n');
+            http_response(fd, 200, "application/json", b.ptr);
+            buf_free(&b);
+        }
         http_request_free(&hr);
         goto done;
     }
@@ -10446,7 +10891,7 @@ static void *client_main(void *arg) {
         ok = parse_chat_request(s->engine, s, hr.body, s->default_tokens,
                                 ctx_size, &req, err, sizeof(err));
     } else if (!strcmp(hr.method, "POST") && !strcmp(hr.path, "/v1/completions")) {
-        ok = parse_completion_request(s->engine, hr.body, s->default_tokens,
+        ok = parse_completion_request(s->engine, s, hr.body, s->default_tokens,
                                       ctx_size, &req, err, sizeof(err));
     } else {
         http_error(fd, 404, "unknown endpoint");
@@ -10490,6 +10935,7 @@ static void *client_main(void *arg) {
     pthread_mutex_destroy(&j.mu);
     request_free(&j.req);
 done:
+    if (model_locked) pthread_rwlock_unlock(&s->swap_lock);
     close(fd);
     client_done(s);
     return NULL;
@@ -10544,8 +10990,13 @@ typedef struct {
     int port;
     int ctx_size;
     int default_tokens;
+    float default_presence_penalty;
+    float default_frequency_penalty;
+    bool default_presence_penalty_set;
+    bool default_frequency_penalty_set;
     const char *trace_path;
     const char *kv_disk_dir;
+    const char *models_dir;
     uint64_t kv_disk_space_mb;
     kv_cache_options kv_cache;
     bool kv_cache_reject_different_quant;
@@ -10637,6 +11088,8 @@ static void server_close_resources(server *s) {
     pthread_mutex_destroy(&s->model_mu);
     pthread_mutex_destroy(&s->trace_mu);
     pthread_cond_destroy(&s->model_cv);
+    pthread_rwlock_destroy(&s->swap_lock);
+    server_models_free(s);
     pthread_cond_destroy(&s->clients_cv);
     pthread_cond_destroy(&s->cv);
     pthread_mutex_destroy(&s->mu);
@@ -10665,6 +11118,11 @@ static void usage(FILE *fp) {
         "      KV cache V type: f16, q8_0, or q4_0. Default: Vulkan/Metal resident q4_0, otherwise f16\n"
         "  -n, --tokens N          (alias: --default-tokens)\n"
         "      Default max output tokens when the client omits a limit. Default: 262144 (256K)\n"
+        "  --presence-penalty F    (alias: --default-presence-penalty)\n"
+        "      Default presence_penalty when the client omits one. Range -2..2. Default: 0 (1.5 for KAT-Coder).\n"
+        "      Guards against a request degenerating into verbatim repetition. Explicit client values win.\n"
+        "  --frequency-penalty F   (alias: --default-frequency-penalty)\n"
+        "      Default frequency_penalty when the client omits one. Range -2..2. Default: 0. Explicit client values win.\n"
         "  -t, --threads N\n"
         "      CPU helper threads for lightweight host-side work.\n"
         "  --prefill-chunk N\n"
@@ -10713,6 +11171,10 @@ static void usage(FILE *fp) {
         "      Keep N resident sessions and batch decode-ready GPU requests.\n"
         "  --mixed-prefill-quantum N\n"
         "      Prefill tokens per scheduling turn while generation is active. Default: 128\n"
+        "  --models-dir DIR\n"
+        "      Expose every loadable *.gguf in DIR on /v1/models. A request whose \"model\" names\n"
+        "      one of them swaps it in (one model resident at a time; -m is loaded first).\n"
+        "      Unknown model names use the resident model. Not with --batched-session.\n"
         "  --cors\n"
         "      Add Access-Control-Allow-* headers and answer browser preflight requests.\n"
         "\n"
@@ -10841,6 +11303,12 @@ static server_config parse_options(int argc, char **argv) {
             cache_type_v_set = true;
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens") || !strcmp(arg, "--default-tokens")) {
             c.default_tokens = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--presence-penalty") || !strcmp(arg, "--default-presence-penalty")) {
+            c.default_presence_penalty = parse_float_arg(need_arg(&i, argc, argv, arg), arg, -2.0f, 2.0f);
+            c.default_presence_penalty_set = true;
+        } else if (!strcmp(arg, "--frequency-penalty") || !strcmp(arg, "--default-frequency-penalty")) {
+            c.default_frequency_penalty = parse_float_arg(need_arg(&i, argc, argv, arg), arg, -2.0f, 2.0f);
+            c.default_frequency_penalty_set = true;
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--f32-fast-wide")) {
@@ -10866,6 +11334,8 @@ static server_config parse_options(int argc, char **argv) {
             g_force_nothink = true;
         } else if (!strcmp(arg, "--kv-disk-dir")) {
             c.kv_disk_dir = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--models-dir")) {
+            c.models_dir = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--kv-disk-space-mb")) {
             c.kv_disk_space_mb = (uint64_t)parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-cache-min-tokens")) {
@@ -10977,6 +11447,23 @@ int main(int argc, char **argv) {
 
     server_config cfg = parse_options(argc, argv);
     g_enable_cors = cfg.enable_cors;
+    if (cfg.models_dir && cfg.batched_sessions > 0) {
+        server_log(Q36_LOG_DEFAULT, "q36-server: --models-dir cannot be combined with --batched-session");
+        return 2;
+    }
+    /* Probe the catalog before any GPU state exists: probes fork. */
+    server s;
+    memset(&s, 0, sizeof(s));
+    if (cfg.models_dir) {
+        s.model_initial = server_models_scan(&s, cfg.models_dir, cfg.engine.model_path);
+        if (s.model_initial < 0) {
+            server_log(Q36_LOG_DEFAULT, "q36-server: cannot resolve startup model %s",
+                       cfg.engine.model_path);
+            server_models_free(&s);
+            return 1;
+        }
+        s.model_current = s.model_initial;
+    }
     bool mtp_requested = cfg.engine.mtp_path != NULL || cfg.engine.mtp_draft_tokens > 1;
     if (cfg.batched_sessions > 0) {
         cfg.engine.mtp_path = NULL;
@@ -10993,9 +11480,9 @@ int main(int argc, char **argv) {
                        cfg.engine.prefill_chunk, slot_count,
                        cfg.engine.cache_type_k, cfg.engine.cache_type_v);
 
-    server s;
-    memset(&s, 0, sizeof(s));
     s.engine = engine;
+    s.engine_opt = cfg.engine;
+    s.ctx_size = cfg.ctx_size;
     s.slot_count = slot_count;
     s.batched_mode = cfg.batched_sessions > 0;
     s.mixed_prefill_quantum = cfg.mixed_prefill_quantum;
@@ -11007,9 +11494,20 @@ int main(int argc, char **argv) {
         memset(s.slot_threads, 0, (size_t)slot_count * sizeof(*s.slot_threads));
     }
     s.default_tokens = cfg.default_tokens;
+    s.default_presence_penalty = cfg.default_presence_penalty;
+    s.default_frequency_penalty = cfg.default_frequency_penalty;
+    s.default_presence_penalty_set = cfg.default_presence_penalty_set;
+    s.default_frequency_penalty_set = cfg.default_frequency_penalty_set;
     s.disable_exact_tool_replay = cfg.disable_exact_tool_replay;
     s.tool_mem.max_entries = cfg.tool_memory_max_ids;
-    if (cfg.kv_disk_dir) {
+    if (cfg.kv_disk_dir && s.model_count > 0) {
+        /* One cache directory per model: checkpoints never cross models. */
+        s.kv_root = xstrdup(cfg.kv_disk_dir);
+        s.kv_budget_mb = cfg.kv_disk_space_mb;
+        s.kv_reject_different_quant = cfg.kv_cache_reject_different_quant;
+        s.kv_opt = cfg.kv_cache;
+        server_kv_open_for_model(&s, s.model_current);
+    } else if (cfg.kv_disk_dir) {
         kv_cache_open(&s.kv, cfg.kv_disk_dir, cfg.kv_disk_space_mb,
                       cfg.kv_cache_reject_different_quant, cfg.kv_cache);
     }
@@ -11029,6 +11527,16 @@ int main(int argc, char **argv) {
     pthread_mutexattr_destroy(&recursive_attr);
     pthread_mutex_init(&s.model_mu, NULL);
     pthread_cond_init(&s.model_cv, NULL);
+    {
+        pthread_rwlockattr_t rwa;
+        pthread_rwlockattr_init(&rwa);
+#ifdef __GLIBC__
+        /* A queued swap must not starve behind a steady stream of readers. */
+        pthread_rwlockattr_setkind_np(&rwa, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+#endif
+        pthread_rwlock_init(&s.swap_lock, &rwa);
+        pthread_rwlockattr_destroy(&rwa);
+    }
     pthread_mutex_init(&s.trace_mu, NULL);
     for (int i = 0; i < slot_count; i++) {
         server_slot *slot = &s.slots[i];
@@ -11221,6 +11729,48 @@ static void test_tool_schema_order_from_openai_tools(void) {
     TEST_ASSERT(order && !strcmp(order->prop[0], "filePath"));
     TEST_ASSERT(order && !strcmp(order->prop[1], "oldString"));
     TEST_ASSERT(order && !strcmp(order->prop[2], "newString"));
+    free(schemas);
+    tool_schema_orders_free(&orders);
+}
+
+static void test_tool_schemas_minified_and_sorted(void) {
+    const char *json =
+        "[\n"
+        "  {\n"
+        "    \"type\": \"function\",\n"
+        "    \"function\": {\n"
+        "      \"name\": \"write\",\n"
+        "      \"description\": \"Write file\",\n"
+        "      \"parameters\": {\n"
+        "        \"type\": \"object\",\n"
+        "        \"properties\": {\n"
+        "          \"path\": {\"type\": \"string\"}\n"
+        "        }\n"
+        "      }\n"
+        "    }\n"
+        "  },\n"
+        "  {\n"
+        "    \"name\": \"bash\",\n"
+        "    \"input_schema\": {\n"
+        "      \"type\": \"object\",\n"
+        "      \"properties\": {\n"
+        "        \"command\": {\"type\": \"string\"}\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "]";
+    const char *p = json;
+    char *schemas = NULL;
+    tool_schema_orders orders = {0};
+    TEST_ASSERT(parse_tools_value(&p, &schemas, &orders));
+    TEST_ASSERT(schemas != NULL);
+    char *bash_pos = strstr(schemas, "\"name\":\"bash\"");
+    char *write_pos = strstr(schemas, "\"name\":\"write\"");
+    TEST_ASSERT(bash_pos != NULL);
+    TEST_ASSERT(write_pos != NULL);
+    TEST_ASSERT(bash_pos < write_pos);
+    TEST_ASSERT(strstr(schemas, "    ") == NULL);
+    TEST_ASSERT(strstr(schemas, "  ") == NULL);
     free(schemas);
     tool_schema_orders_free(&orders);
 }
@@ -11925,6 +12475,26 @@ static void test_explicit_sampling_wins_in_thinking_mode(void) {
     TEST_ASSERT(top_k == 17);
     TEST_ASSERT(min_p == 0.01f);
     request_free(&r);
+}
+
+static void test_request_peek_model(void) {
+    char *m = request_peek_model("{\"model\":\"RavenX\",\"messages\":[]}");
+    TEST_ASSERT(m && !strcmp(m, "RavenX"));
+    free(m);
+    /* A nested "model" key (tool schema) must not win over the top level. */
+    m = request_peek_model("{\"tools\":[{\"function\":{\"parameters\":{\"model\":\"x\"}}}],"
+                           "\"messages\":[{\"content\":\"say \\\"model\\\"\"}],\"model\":\"B\"}");
+    TEST_ASSERT(m && !strcmp(m, "B"));
+    free(m);
+    m = request_peek_model("{\"tools\":[{\"model\":\"x\"}]}");
+    TEST_ASSERT(m == NULL);
+    m = request_peek_model(" { \"stream\" : true , \"model\" : \"C\" } ");
+    TEST_ASSERT(m && !strcmp(m, "C"));
+    free(m);
+    TEST_ASSERT(request_peek_model("{\"model\":42}") == NULL);
+    TEST_ASSERT(request_peek_model("not json") == NULL);
+    TEST_ASSERT(request_peek_model("{\"model\":") == NULL);
+    TEST_ASSERT(request_peek_model(NULL) == NULL);
 }
 
 static void test_reasoning_effort_mapping(void) {
@@ -12973,7 +13543,7 @@ static void test_api_parsers_reject_nonfinite_numbers(void) {
     TEST_ASSERT(!parse_anthropic_request(NULL, NULL,
         "{\"messages\":[],\"presence_penalty\":-Infinity}", 128, 4096,
         &r, err, sizeof(err)));
-    TEST_ASSERT(!parse_completion_request(NULL,
+    TEST_ASSERT(!parse_completion_request(NULL, NULL,
         "{\"prompt\":\"hello\",\"frequency_penalty\":1e9999}", 128, 4096,
         &r, err, sizeof(err)));
 }
@@ -12991,7 +13561,7 @@ static void test_api_parsers_reject_malformed_duplicate_strings(void) {
     TEST_ASSERT(!parse_anthropic_request(NULL, NULL,
         "{\"messages\":[],\"system\":\"first\",\"system\":\"unterminated}",
         128, 4096, &r, err, sizeof(err)));
-    TEST_ASSERT(!parse_completion_request(NULL,
+    TEST_ASSERT(!parse_completion_request(NULL, NULL,
         "{\"prompt\":\"hello\",\"model\":\"first\",\"model\":\"unterminated}",
         128, 4096, &r, err, sizeof(err)));
 }
@@ -14706,6 +15276,7 @@ static void q36_server_unit_tests_run(void) {
     test_batched_decode_cancellation();
     test_request_defaults_match_qwen_api();
     test_explicit_sampling_wins_in_thinking_mode();
+    test_request_peek_model();
     test_reasoning_effort_mapping();
     test_qwen38_effort_prompt();
     test_api_thinking_controls_parse();
@@ -14715,6 +15286,7 @@ static void q36_server_unit_tests_run(void) {
     test_render_preserves_reasoning_with_tools();
     test_tool_schema_order_from_anthropic_schema();
     test_tool_schema_order_from_openai_tools();
+    test_tool_schemas_minified_and_sorted();
     test_responses_input_parses_qwen_tool_continuation();
     test_responses_output_is_protocol_native();
     test_responses_stream_uses_responses_events();

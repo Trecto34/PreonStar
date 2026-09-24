@@ -97,3 +97,8 @@ logs/bc250-sustained-20260918/swiglu_hadamard_parity
 # other local launcher scripts above.
 /run_sustained_rerun.sh
 /mmq_info
+/tui.py
+/scripts/q36_tui.py
+/logs/sustained_2min_thermal_log.csv
+scripts/__pycache__/
+__pycache__/

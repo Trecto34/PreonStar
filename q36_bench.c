@@ -53,6 +53,7 @@ typedef struct {
     bool ssd_streaming_full_layers_set;
     bool warm_weights;
     bool quality;
+    q36_think_mode think_mode;
     const char *dump_frontier_logits_dir;
 } bench_config;
 
@@ -75,7 +76,11 @@ static void usage(FILE *fp) {
         "  --prompt-file FILE\n"
         "      Raw benchmark text. The fixed token sequence is sliced at each frontier.\n"
         "  --chat-prompt-file FILE\n"
-        "      Render FILE as one no-thinking chat user message, then slice that sequence.\n"
+        "      Render FILE as one chat user message, then slice that sequence.\n"
+        "  --think\n"
+        "      Enable thinking mode (default).\n"
+        "  --nothink\n"
+        "      Disable thinking mode (direct replies).\n"
         "  -sys, --system TEXT\n"
         "      System prompt used only with --chat-prompt-file.\n"
         "\n"
@@ -234,6 +239,7 @@ static bench_config parse_options(int argc, char **argv) {
         .step_mul = 1.0,
         .mtp_draft_tokens = 1,
         .mtp_margin = 3.0f,
+        .think_mode = Q36_THINK_HIGH,
     };
 
     bool cache_type_k_set = false;
@@ -249,6 +255,10 @@ static bench_config parse_options(int argc, char **argv) {
             c.prompt_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--chat-prompt-file")) {
             c.chat_prompt_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--think")) {
+            c.think_mode = Q36_THINK_HIGH;
+        } else if (!strcmp(arg, "--nothink")) {
+            c.think_mode = Q36_THINK_NONE;
         } else if (!strcmp(arg, "-sys") || !strcmp(arg, "--system")) {
             c.system = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--ctx-start")) {
@@ -547,7 +557,7 @@ int main(int argc, char **argv) {
     char *text = read_file(cfg.prompt_path ? cfg.prompt_path : cfg.chat_prompt_path);
     q36_tokens prompt = {0};
     if (cfg.chat_prompt_path) {
-        q36_encode_chat_prompt(engine, cfg.system, text, Q36_THINK_NONE, &prompt);
+        q36_encode_chat_prompt(engine, cfg.system, text, cfg.think_mode, &prompt);
     } else {
         q36_tokenize_text(engine, text, &prompt);
     }
