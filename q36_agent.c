@@ -43,6 +43,7 @@ int linenoiseEditInsert(struct linenoiseState *l, const char *c, size_t clen);
 
 #define AGENT_RESIDENT_CTX 100000
 #define AGENT_STREAMING_CTX 100000
+#define AGENT_THINKING_BUDGET_DEFAULT 50000
 
 static int set_nonblock(int fd, bool on, int *old_flags);
 static int agent_replace_file(const char *path, const char *data, size_t len,
@@ -74,6 +75,7 @@ typedef struct {
     float min_p;
     uint64_t seed;
     q36_think_mode think_mode;
+    bool think_mode_set;
     bool temperature_set;
     bool top_k_set;
     bool top_p_set;
@@ -110,6 +112,9 @@ typedef struct {
     int ctx_used;
     int ctx_size;
     int power_percent;
+    q36_think_mode think_mode;
+    int thinking_budget;
+    bool qwen38;
     char error[256];
 } agent_status;
 
@@ -658,7 +663,7 @@ static agent_config parse_options(int argc, char **argv) {
         .gen = {
             .system = "You are a helpful coding assistant running inside q36-agent.",
             .n_predict = 100000,
-            .thinking_budget = 50000,
+            .thinking_budget = AGENT_THINKING_BUDGET_DEFAULT,
             .ctx_size = AGENT_RESIDENT_CTX,
             .temperature = Q36_DEFAULT_TEMPERATURE,
             .top_k = 0,
@@ -746,10 +751,22 @@ static agent_config parse_options(int argc, char **argv) {
             c.gen.seed = parse_u64(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--think")) {
             c.gen.think_mode = Q36_THINK_HIGH;
+            c.gen.think_mode_set = true;
+        } else if (!strcmp(arg, "--think-low")) {
+            c.gen.think_mode = Q36_THINK_LOW;
+            c.gen.think_mode_set = true;
+        } else if (!strcmp(arg, "--think-medium")) {
+            c.gen.think_mode = Q36_THINK_MEDIUM;
+            c.gen.think_mode_set = true;
+        } else if (!strcmp(arg, "--think-xhigh")) {
+            c.gen.think_mode = Q36_THINK_XHIGH;
+            c.gen.think_mode_set = true;
         } else if (!strcmp(arg, "--think-max")) {
             c.gen.think_mode = Q36_THINK_MAX;
+            c.gen.think_mode_set = true;
         } else if (!strcmp(arg, "--nothink")) {
             c.gen.think_mode = Q36_THINK_NONE;
+            c.gen.think_mode_set = true;
         } else if (!strcmp(arg, "--backend")) {
             c.engine.backend = parse_backend(need_arg(&i, argc, argv, arg));
         } else if (!strcmp(arg, "--vulkan")) {
@@ -897,6 +914,27 @@ static void log_context_memory(q36_backend backend,
             m.comp_cap,
             q36_backend_name(backend),
             reset);
+}
+
+static void agent_resolve_thinking_config(agent_config *cfg, bool qwen38) {
+    if (qwen38 && !cfg->gen.think_mode_set)
+        cfg->gen.think_mode = q36_qwen38_mode_for_budget(cfg->gen.thinking_budget);
+}
+
+static q36_think_mode agent_next_think_mode(q36_think_mode mode, bool qwen38) {
+    if (!qwen38) return mode == Q36_THINK_NONE ? Q36_THINK_HIGH : Q36_THINK_NONE;
+    switch (mode) {
+    case Q36_THINK_NONE: return Q36_THINK_LOW;
+    case Q36_THINK_LOW: return Q36_THINK_MEDIUM;
+    case Q36_THINK_MEDIUM: return Q36_THINK_HIGH;
+    case Q36_THINK_HIGH: return Q36_THINK_XHIGH;
+    default: return Q36_THINK_LOW;
+    }
+}
+
+static void agent_cycle_think_mode(agent_config *cfg, bool qwen38) {
+    cfg->gen.think_mode = agent_next_think_mode(cfg->gen.think_mode, qwen38);
+    cfg->gen.think_mode_set = true;
 }
 
 static q36_think_mode effective_think_mode(const agent_config *cfg) {
@@ -6025,17 +6063,7 @@ static bool agent_context_should_compact(int ctx, int used) {
 }
 
 static int agent_think_close_rank_limit(int think_tokens, int start_tokens) {
-    if (think_tokens < start_tokens || start_tokens <= 0) return 0;
-    int64_t elapsed = (int64_t)think_tokens - start_tokens;
-    if (elapsed * 100 >= (int64_t)start_tokens * 98) return 64;
-    if (elapsed * 100 >= (int64_t)start_tokens * 95) return 32;
-    if (elapsed * 100 >= (int64_t)start_tokens * 90) return 16;
-    if (elapsed * 100 >= (int64_t)start_tokens * 80) return 8;
-    if (elapsed >= 4096) return 5;
-    if (elapsed >= 2048) return 4;
-    if (elapsed >= 1024) return 3;
-    if (elapsed >= 512) return 2;
-    return 1;
+    return q36_think_close_rank_limit(think_tokens, start_tokens);
 }
 
 typedef struct {
@@ -7163,24 +7191,92 @@ static void test_agent_streaming_defaults(void) {
     AGENT_TEST_ASSERT(override.gen.min_p_set);
 }
 
+static void test_agent_thinking_budget_modes(void) {
+    char *defv[] = {"q36-agent"};
+    char *lowv[] = {"q36-agent", "--thinking-budget", "8000"};
+    char *mediumv[] = {"q36-agent", "--thinking-budget", "16000"};
+    char *highv[] = {"q36-agent", "--thinking-budget", "24000"};
+    char *xhighv[] = {"q36-agent", "--thinking-budget", "24001"};
+    char *explicitv[] = {"q36-agent", "--think-medium"};
+    agent_config cfg = parse_options(1, defv);
+    agent_resolve_thinking_config(&cfg, true);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_XHIGH);
+    AGENT_TEST_ASSERT(cfg.gen.thinking_budget == 50000);
+
+    cfg = parse_options(3, lowv);
+    agent_resolve_thinking_config(&cfg, true);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_LOW);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(7999, cfg.gen.thinking_budget) == 0);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(8000, cfg.gen.thinking_budget) == 1);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(8000, 50000) == 0);
+
+    cfg = parse_options(3, mediumv);
+    agent_resolve_thinking_config(&cfg, true);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_MEDIUM);
+    cfg = parse_options(3, highv);
+    agent_resolve_thinking_config(&cfg, true);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_HIGH);
+    AGENT_TEST_ASSERT(strstr(q36_qwen38_effort_instruction(cfg.gen.think_mode),
+                             "xhigh") != NULL);
+    cfg = parse_options(3, xhighv);
+    agent_resolve_thinking_config(&cfg, true);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_XHIGH);
+    cfg = parse_options(2, explicitv);
+    agent_resolve_thinking_config(&cfg, true);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_MEDIUM);
+    AGENT_TEST_ASSERT(cfg.gen.thinking_budget == 50000);
+
+    q36_think_mode mode = Q36_THINK_NONE;
+    mode = agent_next_think_mode(mode, true);
+    AGENT_TEST_ASSERT(mode == Q36_THINK_LOW);
+    mode = agent_next_think_mode(mode, true);
+    AGENT_TEST_ASSERT(mode == Q36_THINK_MEDIUM);
+    mode = agent_next_think_mode(mode, true);
+    AGENT_TEST_ASSERT(mode == Q36_THINK_HIGH);
+    mode = agent_next_think_mode(mode, true);
+    AGENT_TEST_ASSERT(mode == Q36_THINK_XHIGH);
+    mode = agent_next_think_mode(mode, true);
+    AGENT_TEST_ASSERT(mode == Q36_THINK_LOW);
+    AGENT_TEST_ASSERT(agent_next_think_mode(Q36_THINK_NONE, false) == Q36_THINK_HIGH);
+    AGENT_TEST_ASSERT(agent_next_think_mode(Q36_THINK_HIGH, false) == Q36_THINK_NONE);
+
+    cfg = parse_options(1, defv);
+    agent_resolve_thinking_config(&cfg, true);
+    agent_cycle_think_mode(&cfg, true);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_LOW);
+    AGENT_TEST_ASSERT(cfg.gen.thinking_budget == 50000);
+    agent_cycle_think_mode(&cfg, true);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_MEDIUM);
+    AGENT_TEST_ASSERT(cfg.gen.thinking_budget == 50000);
+
+    cfg = parse_options(3, lowv);
+    agent_resolve_thinking_config(&cfg, true);
+    agent_cycle_think_mode(&cfg, true);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_MEDIUM);
+    AGENT_TEST_ASSERT(cfg.gen.thinking_budget == 8000);
+}
+
 static void test_agent_context_pressure_helpers(void) {
     AGENT_TEST_ASSERT(!agent_context_should_compact(100000, 69999));
     AGENT_TEST_ASSERT(agent_context_should_compact(100000, 70000));
     AGENT_TEST_ASSERT(!agent_context_should_compact(64000, 44799));
     AGENT_TEST_ASSERT(agent_context_should_compact(64000, 44800));
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(49999, 50000) == 0);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(50000, 50000) == 1);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(50512, 50000) == 2);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(51024, 50000) == 3);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(52048, 50000) == 4);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(54096, 50000) == 5);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(90000, 50000) == 8);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(95000, 50000) == 16);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(97500, 50000) == 32);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(99000, 50000) == 64);
     AGENT_TEST_ASSERT(agent_think_close_rank_limit(31999, 32000) == 0);
     AGENT_TEST_ASSERT(agent_think_close_rank_limit(32000, 32000) == 1);
     AGENT_TEST_ASSERT(agent_think_close_rank_limit(32512, 32000) == 2);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(33024, 32000) == 3);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(34048, 32000) == 4);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(36096, 32000) == 5);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(38144, 32000) == 8);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(39168, 32000) == 16);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(39680, 32000) == 32);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(40192, 32000) == 64);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(41216, 32000) == 128);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(42240, 32000) == 256);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(8000, 8000) == 1);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(12000, 8000) == 64);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(512, 512) == 1);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(1014, 512) == 64);
     AGENT_TEST_ASSERT(q36_kvstore_quant_bits_valid(1));
     AGENT_TEST_ASSERT(q36_kvstore_quant_bits_valid(3));
     AGENT_TEST_ASSERT(q36_kvstore_quant_bits_valid(8));
@@ -7277,6 +7373,7 @@ static void q36_agent_unit_tests_run(void) {
     test_agent_edit_upto_prompt_is_opt_in();
     test_agent_tool_error_recovery();
     test_agent_streaming_defaults();
+    test_agent_thinking_budget_modes();
     test_agent_context_pressure_helpers();
     test_agent_welcome_banner();
 }
@@ -9133,12 +9230,21 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
     agent_publish(w, "\x1b[0m\n", 5);
     q36_tokens_free(&prompt);
 
-    if (!summary.ptr || !summary.ptr[0]) {
-        snprintf(err, err_len, "compaction summary was empty");
-        q36_session_invalidate(w->session);
-        q36_tokens_free(&sys);
+    bool summary_empty = true;
+    for (size_t i = 0; i < summary.len; i++) {
+        if (!isspace((unsigned char)summary.ptr[i])) {
+            summary_empty = false;
+            break;
+        }
+    }
+    if (summary_empty) {
+        agent_trace(w, "compaction summary empty; retaining recent transcript without a summary");
+        agent_publishf(w, "COMPACTING summary unavailable; retaining recent conversation only\n");
         free(summary.ptr);
-        return false;
+        memset(&summary, 0, sizeof(summary));
+        agent_buf_puts(&summary,
+            "Automatic summary was unavailable. Earlier conversation may be missing; "
+            "use the recent transcript below and ask for missing details if needed.\n");
     }
 
     agent_trace_text(w, "compaction-summary", summary.ptr, summary.len);
@@ -9442,7 +9548,16 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
     char compact_err[160] = {0};
     bool next_thinking = w->thinking_enabled;
     char *user_content = agent_chat_control_text(user_text, &next_thinking);
+    const char *effort_note = NULL;
+    if (q36_engine_is_qwen38(w->engine) && next_thinking) {
+        q36_think_mode mode = enabled_think_mode(cfg);
+        effort_note = q36_qwen38_effort_instruction(mode);
+        if (mode == Q36_THINK_MEDIUM)
+            effort_note = "Reasoning effort is set to medium. Use your normal reasoning depth for this turn.";
+    }
     q36_tokens incoming = {0};
+    if (effort_note)
+        q36_chat_append_message(w->engine, &incoming, "system", effort_note);
     q36_chat_append_message(w->engine, &incoming, "user", user_content);
     bool fits = agent_worker_user_fits(w, &incoming, compact_err, sizeof(compact_err));
     q36_tokens_free(&incoming);
@@ -9466,6 +9581,10 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
     agent_worker_maybe_append_datetime_context(w);
     agent_worker_append_hints_context(w);
     w->thinking_enabled = next_thinking;
+    if (effort_note) {
+        q36_chat_append_message(w->engine, &w->transcript, "system", effort_note);
+        agent_trace_text(w, "reasoning-effort", effort_note, strlen(effort_note));
+    }
     agent_trace_text(w, "user", user_content, strlen(user_content));
     if (!agent_worker_append_user(w, user_content, compact_err, sizeof(compact_err))) {
         free(user_content);
@@ -9640,6 +9759,9 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             if (in_think) {
                 close_rank_limit = agent_think_close_rank_limit(carried_generation + generated,
                                                                 think_close_start);
+                if (close_rank_limit > 0 && carried_generation + generated == think_close_start)
+                    agent_trace(w, "thinking closure ranking starts at token=%d",
+                                think_close_start);
                 if (close_rank_limit > 0)
                     close_rank = q36_session_token_rank(
                         w->session, think_close_id, close_rank_limit);
@@ -9810,6 +9932,9 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             agent_tool_observation_puts(
                 &observation, qwen_tool.error[0] ? qwen_tool.error : "parse error");
             agent_tool_observation_puts(&observation, "\n");
+            if (stream.qwen_tool_in_think)
+                agent_tool_observation_puts(&observation,
+                    "Close thinking with </think> before retrying the tool call.\n");
             agent_tool_observation_puts(
                 &observation, agent_qwen_tool_syntax_reminder);
         } else {
@@ -10214,6 +10339,9 @@ static void worker_consume(agent_worker *w, char **out, size_t *out_len, agent_s
     w->status.ctx_used = w->transcript.len;
     w->status.ctx_size = w->cfg->gen.ctx_size;
     w->status.power_percent = worker_status_power_locked(w);
+    w->status.think_mode = w->cfg->gen.think_mode;
+    w->status.thinking_budget = w->cfg->gen.thinking_budget;
+    w->status.qwen38 = q36_engine_is_qwen38(w->engine);
     if (status) *status = w->status;
     w->wake_pending = false;
     pthread_mutex_unlock(&w->mu);
@@ -10224,6 +10352,9 @@ static void worker_get_status(agent_worker *w, agent_status *status) {
     w->status.ctx_used = w->transcript.len;
     w->status.ctx_size = w->cfg->gen.ctx_size;
     w->status.power_percent = worker_status_power_locked(w);
+    w->status.think_mode = w->cfg->gen.think_mode;
+    w->status.thinking_budget = w->cfg->gen.thinking_budget;
+    w->status.qwen38 = q36_engine_is_qwen38(w->engine);
     *status = w->status;
     pthread_mutex_unlock(&w->mu);
 }
@@ -10415,6 +10546,16 @@ static void build_status_text(const agent_status *st, char *buf, size_t len) {
     default:
         snprintf(buf, len, "ctx %s/%s | idle%s", used, total_ctx, power);
         break;
+    }
+    size_t n = strlen(buf);
+    const char *mode = st->think_mode == Q36_THINK_NONE ? "off" :
+                       st->qwen38 ? q36_think_mode_name(st->think_mode) : "on";
+    if (n < len) {
+        if (st->think_mode == Q36_THINK_NONE)
+            snprintf(buf + n, len - n, " | think %s (Tab)", mode);
+        else
+            snprintf(buf + n, len - n, " | think %s %dk (Tab)", mode,
+                     st->thinking_budget / 1000);
     }
 }
 
@@ -11467,6 +11608,7 @@ static void runtime_help(void) {
     puts("  /new         Start a fresh session from the system prompt.");
     puts("  /quit, /exit Exit.");
     puts("  Ctrl+C       Interrupt generation; clear edited text.");
+    puts("  Tab          Cycle thinking mode at an empty idle prompt; keep budget.");
     puts("  Enter        Queue text while the agent is busy.");
     puts("  Ctrl+X       Edit the first queued prompt.");
     puts("  ESC          Interrupt and send queued prompt immediately.");
@@ -12050,6 +12192,21 @@ resume_editor:
             }
         }
 
+        while (!editor.paste_open && !editor.paste_start_pending &&
+            editor.edit.len == 0 &&
+            editor.edit.queued_input_pos < editor.edit.queued_input_len &&
+            editor.edit.queued_input[editor.edit.queued_input_pos] == '\t' &&
+            worker_is_idle(&worker))
+        {
+            editor_take_queued_byte(&editor, '\t');
+            pthread_mutex_lock(&worker.mu);
+            bool qwen38 = q36_engine_is_qwen38(worker.engine);
+            agent_cycle_think_mode(cfg, qwen38);
+            worker.thinking_enabled = cfg->gen.think_mode != Q36_THINK_NONE;
+            agent_wake_locked(&worker);
+            pthread_mutex_unlock(&worker.mu);
+        }
+
         if (rc > 0 && (pfd[1].revents & POLLIN)) drain_wake_fd(worker.wake_fd[0]);
 
         char *out = NULL;
@@ -12462,6 +12619,7 @@ int main(int argc, char **argv) {
     q36_engine *engine = NULL;
     cfg.engine.context_size = cfg.gen.ctx_size;
     if (q36_engine_open(&engine, &cfg.engine) != 0) return 1;
+    agent_resolve_thinking_config(&cfg, q36_engine_is_qwen38(engine));
     if (cfg.chdir_path) {
         if (chdir(workdir) != 0) {
             fprintf(stderr, "q36-agent: failed to chdir to %s: %s\n",
