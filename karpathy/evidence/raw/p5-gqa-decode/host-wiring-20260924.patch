@@ -1,0 +1,102 @@
+diff --git a/Makefile b/Makefile
+index 2650f99..0598476 100644
+--- a/Makefile
++++ b/Makefile
+@@ -109,6 +109,8 @@ VULKAN_SHADERS := \
+ 	vulkan/attn_reduce.spv \
+ 	vulkan/attn_decode_fused.spv \
+ 	vulkan/attn_decode_split.spv \
++	vulkan/attn_decode_split_gqa6.spv \
++	vulkan/attn_decode_split_gqa8.spv \
+ 	vulkan/attn_prefill_qtile.spv \
+ 	vulkan/attn_prefill_qtile2.spv \
+ 	vulkan/attn_prefill_qtile2_gqa6.spv \
+@@ -398,6 +400,12 @@ vulkan/attn_decode_fused.spv: vulkan/attn_decode_fused.comp
+ vulkan/attn_decode_split.spv: vulkan/attn_decode_split.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+ 
++vulkan/attn_decode_split_gqa6.spv: vulkan/attn_decode_split_gqa.comp
++	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=6u -o $@ $<
++
++vulkan/attn_decode_split_gqa8.spv: vulkan/attn_decode_split_gqa.comp
++	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=8u -o $@ $<
++
+ vulkan/attn_prefill_qtile.spv: vulkan/attn_prefill_qtile.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+ 
+@@ -519,6 +527,14 @@ $(PQ2_SMALL_TEST): tests/test_pq2_small.o q36_ssd.o q36_prompt_prefix.o $(CORE_O
+ 
+ ATTN_FA_TEST := tests/test_attn_fa
+ 
++ATTN_DECODE_GQA_TEST := tests/test_attn_decode_gqa
++
++tests/test_attn_decode_gqa.o: tests/test_attn_decode_gqa.c q36_gpu.h
++	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
++
++$(ATTN_DECODE_GQA_TEST): tests/test_attn_decode_gqa.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
++	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
++
+ tests/test_attn_fa.o: tests/test_attn_fa.c q36_gpu.h
+ 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+ 
+diff --git a/q36_vulkan.c b/q36_vulkan.c
+index cfa06f2..6dd7b37 100644
+--- a/q36_vulkan.c
++++ b/q36_vulkan.c
+@@ -208,6 +208,8 @@ typedef struct {
+     q36_vk_kernel attn_reduce;
+     q36_vk_kernel attn_decode_fused;
+     q36_vk_kernel attn_decode_split;
++    q36_vk_kernel attn_decode_split_gqa6;
++    q36_vk_kernel attn_decode_split_gqa8;
+     q36_vk_kernel attn_prefill_qtile;
+     q36_vk_kernel attn_prefill_qtile2;
+     q36_vk_kernel attn_prefill_qtile2_gqa6;
+@@ -3305,6 +3307,8 @@ int q36_gpu_init(void) {
+     q36_vk.attn_reduce = Q36_VK_KERNEL("vulkan/attn_reduce.spv", 4, 28, 1u << 3);
+     q36_vk.attn_decode_fused = Q36_VK_KERNEL("vulkan/attn_decode_fused.spv", 6, 40, 1u << 5);
+     q36_vk.attn_decode_split = Q36_VK_KERNEL("vulkan/attn_decode_split.spv", 5, 44, 1u << 4);
++    q36_vk.attn_decode_split_gqa6 = Q36_VK_KERNEL("vulkan/attn_decode_split_gqa6.spv", 5, 44, 1u << 4);
++    q36_vk.attn_decode_split_gqa8 = Q36_VK_KERNEL("vulkan/attn_decode_split_gqa8.spv", 5, 44, 1u << 4);
+     q36_vk.attn_prefill_qtile = Q36_VK_KERNEL("vulkan/attn_prefill_qtile.spv", 5, 48, 1u << 4);
+     q36_vk.attn_prefill_qtile2 = Q36_VK_KERNEL("vulkan/attn_prefill_qtile2.spv", 5, 48, 1u << 4);
+     q36_vk.attn_prefill_qtile2_gqa6 = Q36_VK_KERNEL("vulkan/attn_prefill_qtile2_gqa6.spv", 5, 48, 1u << 4);
+@@ -3814,6 +3818,8 @@ void q36_gpu_cleanup(void) {
+     q36_vk_kernel_destroy(&q36_vk.moe_down_gemm_iq3s);
+     q36_vk_kernel_destroy(&q36_vk.attn_decode_fused);
+     q36_vk_kernel_destroy(&q36_vk.attn_decode_split);
++    q36_vk_kernel_destroy(&q36_vk.attn_decode_split_gqa6);
++    q36_vk_kernel_destroy(&q36_vk.attn_decode_split_gqa8);
+     q36_vk_kernel_destroy(&q36_vk.attn_prefill_qtile);
+     q36_vk_kernel_destroy(&q36_vk.attn_prefill_qtile2);
+     q36_vk_kernel_destroy(&q36_vk.attn_prefill_qtile2_gqa6);
+@@ -7537,9 +7543,26 @@ int q36_gpu_attn_decode_tensor(q36_gpu_tensor *out,
+             ok = part != NULL && sinks_t != NULL;
+             if (ok) {
+                 const q36_gpu_tensor *sbind[5] = { q, k_cache, v_cache, sinks_t, part };
+-                ok = q36_vk_run_unlocked("attn_decode_split", &q36_vk.attn_decode_split,
+-                                         sbind, &spush, sizeof(spush),
+-                                         n_head, n_tok, n_spans);
++                /* Resident q8_0/q4_0 cache at head_dim 256: one workgroup per
++                 * KV head reads each K/V row once for all of its query heads
++                 * instead of once per query head.  Same partials, same
++                 * combine, bit-identical. */
++                uint32_t ratio = n_head / n_head_kv;
++                bool gqa = n_head_kv != 0u && n_head % n_head_kv == 0u &&
++                           (ratio == 6u || ratio == 8u) &&
++                           head_dim == 256u && k_cache_type == 1u && v_cache_type == 2u &&
++                           q36_vk_env_default_on("Q36_VK_ATTN_DECODE_GQA");
++                if (gqa) {
++                    ok = q36_vk_run_unlocked(ratio == 6u ? "attn_decode_split_gqa6" : "attn_decode_split_gqa8",
++                                             ratio == 6u ? &q36_vk.attn_decode_split_gqa6
++                                                         : &q36_vk.attn_decode_split_gqa8,
++                                             sbind, &spush, sizeof(spush),
++                                             n_head_kv, n_tok, n_spans);
++                } else {
++                    ok = q36_vk_run_unlocked("attn_decode_split", &q36_vk.attn_decode_split,
++                                             sbind, &spush, sizeof(spush),
++                                             n_head, n_tok, n_spans);
++                }
+             }
+             if (ok) {
+                 const q36_gpu_tensor *cbind[4] = { part, qg, sinks_t, out };

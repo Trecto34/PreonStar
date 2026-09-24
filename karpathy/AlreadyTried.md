@@ -1436,3 +1436,58 @@ product would be bit-identical (`max_abs_diff = 0`).
   the 3.0 VALU/weight row reachable with no per-4-weight sign work; or for the
   Q4_K/Q5_K half, anyone who builds the one-lane-per-dword-row load mapping
   (lm_head Q5_K is 5.8 ms/tok at ~282 GB/s vs IQ4_XS 360).
+
+## Grouped-GQA decode attention re-probe — still REJECTED, the premise was bandwidth and the kernel is not bandwidth-bound (2026-09-24)
+
+Reopens **"GQA-grouped split-K decode attention — REJECTED (2026-09-23)"**.  The
+new case is the audit's P5 premise, and it is *bandwidth*, not occupancy: one
+workgroup per query head re-reads and re-dequantizes every KV row 6x (Swift) /
+8x (MoE), and the guard at ctx 8192 spends 3.0 ms/tok on ~68 MB of unique KV
+(~22 GB/s), so the kernel looked bandwidth-starved — something the 2026-09-23
+probe (1k/2k/8k end-to-end only) could not see.  The new evidence is a per-`pos0`
+kernel curve for both model shapes, from the harness the rejection stored: shader
+and test rebuilt from `evidence/raw/attn-decode-gqa-rejected/` and verified
+byte-identical to it (`diff`), rewired behind the same per-call env gate
+(`Q36_VK_ATTN_DECODE_GQA`), wiring reverted out of the tree again afterwards.
+
+- **Parity holds, exactly as before.**  18/18 cases bit-exact
+  (`mismatches=0 max_abs=0`): dense 24 q / 4 kv and MoE 16 q / 2 kv, head_dim
+  256, q8_0 K + q4_0 V, attention sinks on and off, pos 600..65535, ragged last
+  tile and the exact two-span boundary included.
+- **The curve is the new information, and it inverts the premise.**  Ratio is
+  per-head/grouped, so **< 1 means the grouped kernel is slower**:
+
+  | pos0 | dense 24/4 per-head | grouped | ratio | MoE 16/2 per-head | grouped | ratio |
+  |---|---|---|---|---|---|---|
+  | 1023 | 0.123 ms | 0.263 ms | 0.47x | 0.117 ms | 0.327 ms | 0.36x |
+  | 4095 | 0.184 | 0.257 | 0.72x | 0.164 | 0.330 | 0.50x |
+  | 8191 | 0.312 | 0.293 | **1.07x** | 0.248 | 0.336 | 0.74x |
+  | 16383 | 0.582 | 0.579 | 1.01x | 0.405 | 0.388 | 1.04x |
+  | 32767 | 1.076 | 1.032 | 1.04x | 0.746 | 0.735 | 1.02x |
+  | 65535 | 2.061 | 1.810 | 1.14x | 1.494 | 1.397 | 1.07x |
+
+  Grouping is a **2.1x (dense) / 2.8x (MoE) loss** at 1k keys, first wins at 8k
+  (dense) / 16k (MoE), and where it wins it is 1.01-1.14x of *one attention
+  dispatch*.
+- **Why the bandwidth premise does not cash.**  The re-read is real at L1/L2 but
+  not at DRAM: per-head at 32767 keys moves 54.5 MB of unique KV (32768 rows x
+  1664 B; 4 kv heads x 256 dims, q8_0 K + q4_0 V) in 1.076 ms = **50 GB/s, 11%
+  of the 454.4 GB/s roofline**.  One span is 512 x 1664 B = 852 KB and the 6
+  query-head workgroups sharing a kv head walk the same span, so the 6x re-read
+  is served inside L2: removing it saves L2 traffic and redundant dequant work,
+  not DRAM.  The kernel is latency/occupancy-bound at the contexts this board can
+  measure, which is why cutting the workgroup count 6x costs 2x at 1k.
+- End-to-end the 2026-09-23 numbers stand and were **not re-run** at 8k/16k/32k:
+  1k -8.45% (MAD 0.02 — the ledger's own "judge decode at ctx <= 1024" rule), and
+  the earlier "+11% at 8k" sits inside the 20-32 t/s run-to-run swing of *decode
+  after a long prefill* (entry above).  A 1.01-1.07x change in one dispatch of a
+  33-36 ms/token decode is not measurable under that pitfall, so the kernel curve
+  is the verdict, not another noisy A/B.
+- Raw: `evidence/raw/p5-gqa-decode/gqa-kernel-repro-20260924.txt` and
+  `host-wiring-20260924.patch` (this run), plus the pre-existing
+  `evidence/raw/attn-decode-gqa-rejected{,.patch}` and
+  `evidence/raw/ab-attn-decode-gqa-ctx{1k,2k,8k}.{csv,summary}`.
+- `reconsider_if`: unchanged, now with a shape attached — group only *past* 8k
+  and keep the workgroup count up by halving the grouped build's span
+  (512 -> 256), which gives up bit-exactness against span 512; or hardware where
+  the attention dispatch is genuinely DRAM-bound at ctx <= 4k.

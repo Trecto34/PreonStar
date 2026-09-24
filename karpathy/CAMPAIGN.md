@@ -623,6 +623,25 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    dword row, `dense_kquant_decode.comp:229-234`), left unbuilt.  Evidence:
    `evidence/raw/p4-iq3xxs/P4-VERDICT.md`, `dot4.comp`, `dot4.isa.txt`,
    `dot4.stats.txt`.
+   **P5. Grouped KV-head decode attention — still REJECTED; the premise was
+   bandwidth, the kernel is not bandwidth-bound (2026-09-24).**  Reopened the
+   2026-09-23 rejection with the audit's bandwidth case (KV rows read 6x/8x,
+   guard 3.0 ms/tok at ctx 8192 over ~68 MB = ~22 GB/s).  The shader + harness
+   the rejection stored were rebuilt byte-identical and rewired behind
+   `Q36_VK_ATTN_DECODE_GQA`, then measured per `pos0`: parity 18/18 bit-exact,
+   but the grouped build is **0.47x/0.36x at 1023 keys** (2.1x/2.8x slower),
+   0.72x/0.50x at 4095, **1.07x/0.74x at 8191**, 1.01x/1.04x at 16383, 1.04x/
+   1.02x at 32767, 1.14x/1.07x at 65535 — it wins only past 8k (dense) / 16k
+   (MoE) and by 1.01-1.14x of one attention dispatch.  The re-read is an L2
+   phenomenon, not DRAM: per-head at 32767 keys moves 54.5 MB of unique KV in
+   1.076 ms = 50 GB/s = 11% of roofline, and one span (852 KB) is walked by the
+   6 workgroups of a kv head, so dropping the re-read saves L2 + dequant work,
+   not bandwidth.  End-to-end numbers are unchanged from 2026-09-23 (1k -8.45%,
+   MAD 0.02); 8k/16k/32k were not re-run because decode-after-long-prefill
+   swings 20-32 t/s with an identical binary (§9), far more than a ~1.04x change
+   in one dispatch of a 33-36 ms/token decode.  Evidence:
+   `evidence/raw/p5-gqa-decode/{gqa-kernel-repro-20260924.txt,host-wiring-20260924.patch}`,
+   `evidence/raw/ab-attn-decode-gqa-ctx{1k,2k,8k}.*`.
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 

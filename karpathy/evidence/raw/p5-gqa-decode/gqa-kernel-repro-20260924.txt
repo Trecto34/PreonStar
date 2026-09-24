@@ -1,0 +1,22 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+gqa6 n_tok=   1 pos0=  600 sinks=0  per-head    0.138 ms  grouped    0.265 ms  (0.52x)  mismatches=0 max_abs=0 ok
+gqa6 n_tok=   1 pos0= 2047 sinks=1  per-head    0.139 ms  grouped    0.257 ms  (0.54x)  mismatches=0 max_abs=0 ok
+gqa6 n_tok=   1 pos0= 4095 sinks=0  per-head    0.184 ms  grouped    0.257 ms  (0.72x)  mismatches=0 max_abs=0 ok
+gqa6 n_tok=   1 pos0= 8191 sinks=1  per-head    0.312 ms  grouped    0.293 ms  (1.07x)  mismatches=0 max_abs=0 ok
+gqa6 n_tok=   1 pos0=16383 sinks=0  per-head    0.582 ms  grouped    0.579 ms  (1.01x)  mismatches=0 max_abs=0 ok
+gqa6 n_tok=   1 pos0=32767 sinks=1  per-head    1.076 ms  grouped    1.032 ms  (1.04x)  mismatches=0 max_abs=0 ok
+gqa6 n_tok=   1 pos0= 4099 sinks=1  per-head    0.193 ms  grouped    0.270 ms  (0.71x)  mismatches=0 max_abs=0 ok
+gqa6 n_tok=   1 pos0= 1023 sinks=1  per-head    0.123 ms  grouped    0.263 ms  (0.47x)  mismatches=0 max_abs=0 ok
+gqa6 n_tok=   1 pos0=65535 sinks=0  per-head    2.061 ms  grouped    1.810 ms  (1.14x)  mismatches=0 max_abs=0 ok
+gqa8 n_tok=   1 pos0=  600 sinks=0  per-head    0.132 ms  grouped    0.343 ms  (0.38x)  mismatches=0 max_abs=0 ok
+gqa8 n_tok=   1 pos0= 2047 sinks=1  per-head    0.124 ms  grouped    0.327 ms  (0.38x)  mismatches=0 max_abs=0 ok
+gqa8 n_tok=   1 pos0= 4095 sinks=0  per-head    0.164 ms  grouped    0.330 ms  (0.50x)  mismatches=0 max_abs=0 ok
+gqa8 n_tok=   1 pos0= 8191 sinks=1  per-head    0.248 ms  grouped    0.336 ms  (0.74x)  mismatches=0 max_abs=0 ok
+gqa8 n_tok=   1 pos0=16383 sinks=0  per-head    0.405 ms  grouped    0.388 ms  (1.04x)  mismatches=0 max_abs=0 ok
+gqa8 n_tok=   1 pos0=32767 sinks=1  per-head    0.746 ms  grouped    0.735 ms  (1.02x)  mismatches=0 max_abs=0 ok
+gqa8 n_tok=   1 pos0= 4099 sinks=1  per-head    0.164 ms  grouped    0.330 ms  (0.50x)  mismatches=0 max_abs=0 ok
+gqa8 n_tok=   1 pos0= 1023 sinks=1  per-head    0.117 ms  grouped    0.327 ms  (0.36x)  mismatches=0 max_abs=0 ok
+gqa8 n_tok=   1 pos0=65535 sinks=0  per-head    1.494 ms  grouped    1.397 ms  (1.07x)  mismatches=0 max_abs=0 ok
+PASS
