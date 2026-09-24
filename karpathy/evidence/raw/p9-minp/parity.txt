@@ -1,0 +1,5 @@
+swift        temp=0.8 min_p=0.05 IDENTICAL bytes=328/328 gen 24.13/23.75 t/s
+moe          temp=0.8 min_p=0.05 IDENTICAL bytes=299/299 gen 85.74/79.33 t/s
+moe-t1       temp=1.0 min_p=0.05 IDENTICAL bytes=333/333 gen 85.78/79.29 t/s
+swift-mp2    temp=0.8 min_p=0.2 IDENTICAL bytes=334/334 gen 24.10/23.57 t/s
+rc=0

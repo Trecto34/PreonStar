@@ -223,6 +223,7 @@ typedef struct {
     q36_vk_kernel rms_norm_rope_kv_quant;
     q36_vk_kernel top2;
     q36_vk_kernel topk8;
+    q36_vk_kernel logits_minp;
     q36_vk_kernel moe_gate_up_f32b;
     q36_vk_kernel moe_gate_up_f32b_iq2s;
     q36_vk_kernel moe_gate_up_decode;
@@ -3261,6 +3262,7 @@ int q36_gpu_init(void) {
                                             (1u << 2) | (1u << 4));
     q36_vk.top2 = Q36_VK_KERNEL("vulkan/top2.spv", 3, 12, (1u << 1) | (1u << 2));
     q36_vk.topk8 = Q36_VK_KERNEL("vulkan/topk8.spv", 3, 12, (1u << 1) | (1u << 2));
+    q36_vk.logits_minp = Q36_VK_KERNEL("vulkan/logits_minp_pack.spv", 2, 24, (1u << 1));
     q36_vk.copy_rows = Q36_VK_KERNEL("vulkan/copy_rows.spv", 2, 20, 1u << 1);
     q36_vk.recur_window = Q36_VK_KERNEL("vulkan/recur_window.spv", 3, 12, (1u << 0) | (1u << 2));
     q36_vk.conv_silu = Q36_VK_KERNEL("vulkan/conv_silu.spv", 3, 12, 1u << 2);
@@ -3754,6 +3756,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.ffn_tail);
     q36_vk_kernel_destroy(&q36_vk.top2);
     q36_vk_kernel_destroy(&q36_vk.topk8);
+    q36_vk_kernel_destroy(&q36_vk.logits_minp);
     q36_vk_kernel_destroy(&q36_gdn_front);
     q36_vk_kernel_destroy(&q36_vk.recur_norm_gate);
     q36_vk_kernel_destroy(&q36_vk.recur_norm_gate_q8_k);
@@ -7894,6 +7897,47 @@ int q36_gpu_top2_tensor(q36_gpu_tensor *out_ids,
         }
     } else {
         ok = 0;
+    }
+    pthread_mutex_unlock(&q36_vk_mu);
+    return ok;
+}
+
+int q36_gpu_logits_minp_pack(q36_gpu_tensor *out, const q36_gpu_tensor *logits,
+                             uint32_t count, float temperature,
+                             float reject_scaled) {
+    if (!q36_vk_env_default_on("Q36_VK_MINP_PACK")) return 0;
+    const uint32_t nb = Q36_GPU_MINP_NB(count);
+    const uint64_t bytes = Q36_GPU_MINP_BYTES(count);
+    int ok = count != 0u && nb != 0u && temperature > 0.0f &&
+             q36_gpu_tensor_range_ok(logits, 0, (uint64_t)count * sizeof(float)) &&
+             q36_gpu_tensor_range_ok(out, 0, bytes);
+    if (!ok) return 0;
+
+    pthread_mutex_lock(&q36_vk_mu);
+    {
+        /* One entry point, three passes: a block max, a global max over those,
+         * then the filter and the per-block compaction (see the shader). */
+        const q36_gpu_tensor *bindings[2] = { logits, out };
+        struct {
+            uint32_t count;
+            uint32_t nb;
+            uint32_t cap;
+            uint32_t pass;
+            float    temperature;
+            float    reject_scaled;
+        } push = { count, nb, Q36_GPU_MINP_CAP, 0u, temperature, reject_scaled };
+        ok = q36_vk_run_unlocked("logits_minp_max", &q36_vk.logits_minp,
+                                 bindings, &push, sizeof(push), nb, 1, 1);
+        if (ok) {
+            push.pass = 1u;
+            ok = q36_vk_run_unlocked("logits_minp_reduce", &q36_vk.logits_minp,
+                                     bindings, &push, sizeof(push), 1, 1, 1);
+        }
+        if (ok) {
+            push.pass = 2u;
+            ok = q36_vk_run_unlocked("logits_minp_pack", &q36_vk.logits_minp,
+                                     bindings, &push, sizeof(push), nb, 1, 1);
+        }
     }
     pthread_mutex_unlock(&q36_vk_mu);
     return ok;

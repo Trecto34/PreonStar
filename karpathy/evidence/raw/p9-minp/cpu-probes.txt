@@ -1,0 +1,18 @@
+# removable fraction of q36_sample_full_vocab (binary labels its own logits source: synthetic when /tmp/p36/logits.f32 is absent; timing depends on loop count, not values)
+(synthetic logits)
+synthetic temp=1.00 max=10.418 best=17 survivors=1 expf=1
+   full-vocab 2 loops    0.612 ms
+   survivor-only loops   0.000 ms
+   removable             0.612 ms  (100%)
+   CPU prefilter scan    0.022 ms  (this moves to the GPU)
+synthetic temp=0.80 max=10.418 best=17 survivors=1 expf=1
+   full-vocab 2 loops    0.611 ms
+   survivor-only loops   0.000 ms
+   removable             0.611 ms  (100%)
+   CPU prefilter scan    0.022 ms  (this moves to the GPU)
+
+# single-core streaming rate over the 608 KB logits vector
+sum     0.131 ms  4.6 GB/s
+max     0.175 ms  3.5 GB/s
+store   0.012 ms  50.4 GB/s
+read    0.131 ms  4.6 GB/s

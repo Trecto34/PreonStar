@@ -745,6 +745,34 @@ int q36_gpu_topk8_tensor(
         const q36_gpu_tensor *logits,
         uint32_t              count);
 
+/* GPU min-p prefilter for the default sampler (vulkan/logits_minp_pack.comp).
+ * Writes, per `Q36_GPU_MINP_BLOCK`-logit block, the ascending-index survivors
+ * of `(v - max)/temperature > reject_scaled` into a fixed-capacity bucket, so
+ * the host can run q36_sample_full_vocab's expf/sum/draw over the survivors
+ * only and stay bit-identical. `out` must hold Q36_GPU_MINP_BYTES(count).
+ * Layout, all uint32 words: w[0] = max as an order-preserving uint (only pass 2
+ * reads it), then nb block maxima, then nb per-block survivor counts (a count
+ * above Q36_GPU_MINP_CAP means overflow -- the caller must fall back), then
+ * nb*cap survivor indices, then nb*cap f32 bit patterns of the scaled logits.
+ * Returns zero when unsupported, so callers keep their scalar path. */
+#define Q36_GPU_MINP_BLOCK     256u  /* logits per workgroup */
+#define Q36_GPU_MINP_CAP       16u   /* survivors one block may record */
+#define Q36_GPU_MINP_HDR_WORDS 4u
+#define Q36_GPU_MINP_NB(count) \
+    (((count) + Q36_GPU_MINP_BLOCK - 1u) / Q36_GPU_MINP_BLOCK)
+#define Q36_GPU_MINP_WORDS(count) \
+    (Q36_GPU_MINP_HDR_WORDS + 2u * Q36_GPU_MINP_NB(count) + \
+     2u * Q36_GPU_MINP_NB(count) * Q36_GPU_MINP_CAP)
+#define Q36_GPU_MINP_BYTES(count) \
+    ((uint64_t)Q36_GPU_MINP_WORDS(count) * sizeof(uint32_t))
+
+int q36_gpu_logits_minp_pack(
+        q36_gpu_tensor       *out,
+        const q36_gpu_tensor *logits,
+        uint32_t              count,
+        float                 temperature,
+        float                 reject_scaled);
+
 /* One routed expert weight: GGUF offset/type of the 3D expert tensor plus the
  * optional per-expert ".scale" tensor (n_expert f32). */
 typedef struct {

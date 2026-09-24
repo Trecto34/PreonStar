@@ -1,0 +1,109 @@
+#version 460
+
+/* GPU min-p prefilter for the default sampler (min_p 0.05, top_k 0).
+ *
+ * q36_sample_full_vocab's two full-vocab loops are ~0.6 ms/token of pure
+ * single-core scalar work (151936 elements at ~4 cycles/element) and only a
+ * handful of tokens ever survive `(v - max)/T > log(min_p)`. This kernel walks
+ * the same vector on the GPU and hands the host nothing but the survivors, so
+ * the expf, the sum and the draw stay on the CPU and the token stream stays
+ * bit-identical. expf deliberately does NOT move: a GPU expf is not the CPU's
+ * expf, and one ulp in the sum can move the drawn token.
+ *
+ * Three passes in one pipeline, all 256 lanes:
+ *   pass 0  per-block max over 256 contiguous logits -> pack.part[wg]
+ *   pass 1  single workgroup reduces part[] -> pack.max_u
+ *   pass 2  filter + order-preserving compaction into per-block buckets
+ *
+ * The max travels as an order-preserving uint (Radeon's own float->uint trick)
+ * so pass 0 needs no shared-float dance and no reset between tokens: every
+ * array the host reads is fully rewritten every token.
+ *
+ * Buckets are fixed-capacity and indexed by block, so the packed list comes out
+ * in ascending token order without a global prefix sum. A block that overflows
+ * cap records its true count, and the host sees count > cap and falls back to
+ * the scalar path for that token -- correctness never depends on cap.
+ */
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Logits { float x[]; };
+layout(set = 0, binding = 1) buffer Pack { uint w[]; };
+
+layout(push_constant) uniform Push {
+    uint  count;            /* logits length */
+    uint  nb;               /* ceil(count / 256), one workgroup per block */
+    uint  cap;              /* survivors a block may record */
+    uint  pass;
+    float temperature;
+    float reject_scaled;    /* q36_sample_full_vocab's retreated logf(min_p) */
+} pc;
+
+shared uint sh[256];
+
+/* Order-preserving float -> uint, so max() on the uint is max() on the float. */
+uint ord(float v) {
+    uint k = floatBitsToUint(v);
+    return (k & 0x80000000u) != 0u ? ~k : (k | 0x80000000u);
+}
+
+float unord(uint u) {
+    return uintBitsToFloat((u & 0x80000000u) != 0u ? (u & 0x7fffffffu) : ~u);
+}
+
+void main(void) {
+    const uint lid = gl_LocalInvocationID.x;
+    const uint wg = gl_WorkGroupID.x;
+    const uint gid = wg * 256u + lid;
+    const uint cnt0 = 4u + pc.nb;
+    const uint idx0 = cnt0 + pc.nb;
+    const uint scl0 = idx0 + pc.nb * pc.cap;
+    const bool in_range = gid < pc.count;
+
+    if (pc.pass == 0u) {
+        float v = in_range ? x[gid] : 0.0f;
+        const bool fin = in_range && !(isnan(v) || isinf(v));
+        sh[lid] = fin ? ord(v) : 0u;   /* 0 orders below every finite logit */
+        barrier();
+        for (uint s = 128u; s != 0u; s >>= 1u) {
+            if (lid < s) sh[lid] = max(sh[lid], sh[lid + s]);
+            barrier();
+        }
+        if (lid == 0u) w[4u + wg] = sh[0];
+        return;
+    }
+
+    if (pc.pass == 1u) {
+        uint m = 0u;
+        for (uint i = lid; i < pc.nb; i += 256u) m = max(m, w[4u + i]);
+        sh[lid] = m;
+        barrier();
+        for (uint s = 128u; s != 0u; s >>= 1u) {
+            if (lid < s) sh[lid] = max(sh[lid], sh[lid + s]);
+            barrier();
+        }
+        if (lid == 0u) w[0] = sh[0];
+        return;
+    }
+
+    {
+        const float v = in_range ? x[gid] : 0.0f;
+        const bool fin = in_range && !(isnan(v) || isinf(v));
+        const float scaled = (v - unord(w[0])) / pc.temperature;
+        const uint alive = (fin && scaled > pc.reject_scaled) ? 1u : 0u;
+        sh[lid] = alive;
+        barrier();
+        for (uint s = 1u; s < 256u; s <<= 1u) {
+            const uint t = lid >= s ? sh[lid - s] : 0u;
+            barrier();
+            sh[lid] += t;
+            barrier();
+        }
+        if (lid == 0u) w[cnt0 + wg] = sh[255];
+        const uint rank = sh[lid] - alive;
+        if (alive != 0u && rank < pc.cap) {
+            const uint slot = wg * pc.cap + rank;
+            w[idx0 + slot] = gid;
+            w[scl0 + slot] = floatBitsToUint(scaled);
+        }
+    }
+}

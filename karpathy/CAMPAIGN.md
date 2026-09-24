@@ -719,6 +719,37 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    used for `ssm_beta`/`ssm_alpha` at `q36.c:8722`) is the identical call shape
    for the shexp gate/up, ~1%.  Guard unchanged by construction (Q5_K/Q6_K).
    Evidence: `evidence/raw/p8-shexp/{p8-shape.log,p8probe.py,p8probe.txt}`.
+   **P9(a). GPU min-p prefilter for the default sampler — BUILT and LANDED,
+   +2.04% Swift decode / +8.21% MoE decode (2026-09-24).**  The audit's premise
+   was "measure the per-token wall-vs-GPU gap before and after"; the first
+   reading was that there was no gap to close (the filter touches the same
+   608 KB as the logits readback, so same memory-traffic shape) and the item was
+   headed for a negative write-up.  Measured instead: `q36_sample_full_vocab`'s
+   two full-vocab loops are **0.612 ms/token and 100% removable** (survivor-only
+   loops 0.000 ms) while a bare add loop streams the same 608 KB in 0.131 ms
+   (4.6 GB/s), so the cost is the scalar loop body (`isfinite`, subtract, divide,
+   compare, `expf` x 151936), not DRAM.  New `vulkan/logits_minp_pack.comp`
+   (256 lanes, three passes in one entry point: order-preserving-uint block max,
+   single-workgroup reduce, filter + order-preserving compaction into
+   fixed-capacity per-block buckets), host `q36_session_sample_packed`
+   (`q36.c:11932`, hooked at `q36.c:12043`), 80.8 KB buffer, `Q36_VK_MINP_PACK`
+   default ON.  `expf`, the sum and the draw stay on the CPU and the packed list
+   is in ascending token order, which is exactly the reference scan order
+   (`q36.c:10481-10499`), so the output is **byte-identical** on all four parity
+   configurations (328/328, 299/299, 333/333, 334/334 bytes, seed 42, pack ON vs
+   OFF).  7 interleaved reps, decode-only change judged on the decode median,
+   all 28 arms rc=0: Swift OFF 23.070 t/s (MAD 0.070) -> ON **23.540** (MAD 0.100)
+   = **+2.04%** (43.346 -> 42.481 ms/token); MoE OFF 79.340 (MAD 0.190) -> ON
+   **85.850** (MAD 0.160) = **+8.21%** (12.604 -> 11.648 ms/token); every rep moves
+   the same way, delta 4-7x the MAD.  Correctness does not depend on the bucket
+   cap: `top_k != 0`, `top_p < 1.0`, non-Vulkan, no survivor or any block over
+   `Q36_GPU_MINP_CAP` (16) all return -1 to the scalar path, and measured
+   survivors are 1-3, so overflow can only cost a fallback, never a token.
+   `compat_gate.sh` PASS; `q36_test --vulkan-kernels` fails at
+   `tests/q36_test.c:4958` exactly as on unmodified HEAD (pre-existing, unchanged).
+   Evidence: `evidence/raw/p9-minp/`.  P9(b) is scope-only
+   (`evidence/raw/p9-host/P9B-SCOPE.md`), prototype not started.
+
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 

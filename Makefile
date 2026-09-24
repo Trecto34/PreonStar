@@ -124,6 +124,7 @@ VULKAN_SHADERS := \
 	vulkan/rms_norm_rope_kv_qwen_quant.spv \
 	vulkan/top2.spv \
 	vulkan/topk8.spv \
+	vulkan/logits_minp_pack.spv \
 	vulkan/moe_gate_up_f32b.spv \
 	vulkan/moe_gate_up_f32b_iq2s.spv \
 	vulkan/moe_down_q2k_f32b_iq2s.spv \
@@ -185,6 +186,9 @@ vulkan/top2.spv: vulkan/top2.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/topk8.spv: vulkan/topk8.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/logits_minp_pack.spv: vulkan/logits_minp_pack.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/recur_norm_gate.spv: vulkan/recur_norm_gate.comp

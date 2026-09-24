@@ -1,0 +1,10 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: in-file MTP head bound (blk.64 nextn), draft=1
+q36: clamping prefill chunk 1024 -> 256 on GFX1013 (GQA 6); a larger chunk can exceed the 10 s amdgpu watchdog and destroy the GPU context. Set Q36_VK_PREFILL_CHUNK_UNSAFE=1 to override.
+q36: memory: KV 0.18 GiB (raw 0.03 + compressed 0.15) + buffers 0.09 GiB = 0.27 GiB context
+q36: memory detail: ctx=1400 prefill_cap=256 raw_kv_rows=1400 compressed_kv_rows=0 backend=vulkan
+processing 35 input tokens: 35/35 (100.0%)
+The user is asking me to explain in detail how a rope bridge is built, step by step. This is a legitimate engineering/construction question. Rope bridges (also known as suspension bridges, rope suspension bridges, or vine bridges) are traditional and modern engineering structures used in many parts of the world. I'll provide a
+q36: prefill: 51.27 t/s, generation: 24.13 t/s

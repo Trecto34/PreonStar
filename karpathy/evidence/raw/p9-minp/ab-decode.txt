@@ -1,0 +1,8 @@
+# P9a sweep 15: pack ON vs OFF, 7 interleaved reps, ctx 1400 Swift / 1024 MoE, --temp 0.8 --min-p 0.05
+
+swift  off n=7 reps=['23.40', '23.12', '23.15', '23.00', '23.06', '23.07', '23.00'] median=23.070 t/s MAD=0.070 (43.346 ms/token)
+swift  on  n=7 reps=['23.72', '23.67', '23.60', '23.54', '23.46', '23.44', '23.42'] median=23.540 t/s MAD=0.100 (42.481 ms/token)
+swift  median delta ON vs OFF = +2.04%  (per-rep worst pairing +1.37%)
+moe    off n=7 reps=['78.72', '79.30', '79.55', '79.17', '79.61', '79.53', '79.34'] median=79.340 t/s MAD=0.190 (12.604 ms/token)
+moe    on  n=7 reps=['85.58', '85.69', '85.48', '85.90', '86.12', '85.99', '85.85'] median=85.850 t/s MAD=0.160 (11.648 ms/token)
+moe    median delta ON vs OFF = +8.21%  (per-rep worst pairing +7.45%)

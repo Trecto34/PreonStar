@@ -825,6 +825,7 @@ typedef struct {
     q36_gpu_tensor *logits;
     q36_gpu_tensor *top2;
     q36_gpu_tensor *topk8;
+    q36_gpu_tensor *minp_pack;
     q36_gpu_tensor *scores;
     q36_vulkan_full_attn_cache mtp_full;
     q36_vulkan_recurrent_cache spec_recurrent[Q36_MAX_LAYER];
@@ -6519,6 +6520,7 @@ static void q36_vulkan_runtime_free(q36_vulkan_runtime *rt) {
     q36_gpu_tensor_free(rt->logits);
     q36_gpu_tensor_free(rt->top2);
     q36_gpu_tensor_free(rt->topk8);
+    q36_gpu_tensor_free(rt->minp_pack);
     q36_gpu_tensor_free(rt->scores);
     q36_gpu_tensor_free(rt->mtp_full.k);
     q36_gpu_tensor_free(rt->mtp_full.v);
@@ -6845,7 +6847,8 @@ static q36_vulkan_runtime *q36_vulkan_runtime_create(int ctx_size,
     rt->logits = q36_gpu_tensor_alloc((uint64_t)Q36_N_VOCAB * sizeof(float));
     rt->top2 = q36_gpu_tensor_alloc(2u * sizeof(int32_t));
     rt->topk8 = q36_gpu_tensor_alloc(8u * (sizeof(int32_t) + sizeof(float)));
-    if (!rt->logits || !rt->top2 || !rt->topk8) goto fail;
+    rt->minp_pack = q36_gpu_tensor_alloc(Q36_GPU_MINP_BYTES(Q36_N_VOCAB));
+    if (!rt->logits || !rt->top2 || !rt->topk8 || !rt->minp_pack) goto fail;
     if (enable_mtp) {
         rt->mtp_full.cap = kv_cap;
         rt->mtp_full.type_k = cache_type_k;
@@ -11918,6 +11921,98 @@ int q36_session_argmax_excluding(q36_session *s, int excluded_id) {
     return best;
 }
 
+/* GPU min-p prefilter path for the default sampler: the same arithmetic as
+ * q36_sample_full_vocab's `top_p >= 1.0f` branch, except that the max and the
+ * `scaled > reject_scaled` cut are done on the GPU (vulkan/logits_minp_pack.comp)
+ * and the host walks only the survivors. The expf, the sum and the draw stay
+ * here so the token stream is bit-identical to the scalar path. Returns the
+ * token, or -1 when the packed list cannot reproduce that arithmetic exactly
+ * (a block over its cap, no survivor, a non-Vulkan backend), in which case the
+ * caller falls back to the scalar path. */
+static int q36_session_sample_packed(q36_session *s, float temperature,
+                                     int top_k, float top_p, float min_p,
+                                     uint64_t *rng) {
+#ifndef Q36_NO_GPU
+    q36_vulkan_runtime *rt;
+    const uint32_t nb = Q36_GPU_MINP_NB(Q36_N_VOCAB);
+    const uint32_t cap = Q36_GPU_MINP_CAP;
+    const uint32_t words = Q36_GPU_MINP_WORDS(Q36_N_VOCAB);
+    const uint32_t cnt0 = Q36_GPU_MINP_HDR_WORDS + nb;
+    const uint32_t idx0 = cnt0 + nb;
+    const uint32_t scl0 = idx0 + nb * cap;
+    uint32_t *w;
+    float reject_scaled = Q36_NEG_INF;
+    float sum = 0.0f, best_p = -1.0f, r;
+    int best = -1, n = 0;
+    bool have_reject = false;
+
+    if (top_k != 0 || !(top_p >= 1.0f)) return -1;
+    if (!(min_p > 0.0f) || !(min_p <= 1.0f) || !isfinite(min_p)) return -1;
+    if (!q36_engine_uses_vulkan_runtime(s->engine)) return -1;
+    rt = (q36_vulkan_runtime *)s->runtime;
+    if (!rt || !rt->logits || !rt->minp_pack) return -1;
+
+    /* Same retreated cutoff q36_sample_full_vocab derives. */
+    {
+        float cutoff = logf(min_p);
+        for (int i = 0; i < 8 && isfinite(cutoff); i++) {
+            cutoff = nextafterf(cutoff, -FLT_MAX);
+            if (expf(cutoff) < min_p) {
+                reject_scaled = cutoff;
+                have_reject = true;
+                break;
+            }
+        }
+    }
+    if (!have_reject) return -1;
+    if (!q36_gpu_logits_minp_pack(rt->minp_pack, rt->logits, Q36_N_VOCAB,
+                                  temperature, reject_scaled)) return -1;
+
+    w = xmalloc((size_t)words * sizeof(w[0]));
+    if (!q36_gpu_tensor_read(rt->minp_pack, 0, w, (uint64_t)words * sizeof(w[0]))) {
+        free(w);
+        return -1;
+    }
+    for (uint32_t b = 0; b < nb; b++) {
+        if (w[cnt0 + b] > cap) { free(w); return -1; }
+    }
+    for (uint32_t b = 0; b < nb; b++) {
+        const uint32_t n_b = w[cnt0 + b];
+        for (uint32_t k = 0; k < n_b; k++) {
+            const uint32_t slot = b * cap + k;
+            const uint32_t id = w[idx0 + slot];
+            float scaled, p;
+            memcpy(&scaled, &w[scl0 + slot], sizeof(scaled));
+            p = -1.0f;
+            if (scaled > reject_scaled) {
+                p = expf(scaled);
+                if (p < min_p) p = -1.0f;
+            }
+            s->sample_probs[id] = p;
+            if (p >= 0.0f) { sum += p; n++; }
+            if (p > best_p) { best_p = p; best = (int)id; }
+        }
+    }
+    if (n == 0 || sum <= 0.0f || !isfinite(sum)) { free(w); return -1; }
+    r = q36_sample_rng_f32(rng) * sum;
+    for (uint32_t b = 0; b < nb; b++) {
+        const uint32_t n_b = w[cnt0 + b];
+        for (uint32_t k = 0; k < n_b; k++) {
+            const uint32_t id = w[idx0 + b * cap + k];
+            const float p = s->sample_probs[id];
+            if (p < 0.0f) continue;
+            r -= p;
+            if (r <= 0.0f) { free(w); return (int)id; }
+        }
+    }
+    free(w);
+    return best;
+#else
+    (void)s; (void)temperature; (void)top_k; (void)top_p; (void)min_p; (void)rng;
+    return -1;
+#endif
+}
+
 int q36_session_sample(q36_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!s || !s->logits) return -1;
     if (!rng || temperature <= 0.0f) return q36_session_argmax(s);
@@ -11944,6 +12039,11 @@ int q36_session_sample(q36_session *s, float temperature, int top_k, float top_p
         }
     }
 #endif
+    {
+        const int packed = q36_session_sample_packed(s, temperature, top_k,
+                                                     top_p, min_p, rng);
+        if (packed >= 0) return packed;
+    }
     if (!q36_session_ensure_logits_host(s)) return -1;
     return q36_sample_top_p_min_p(s->logits, Q36_N_VOCAB, temperature,
                                   top_k, top_p, min_p, rng, s->sample_probs);

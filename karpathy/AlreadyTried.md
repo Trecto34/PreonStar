@@ -1692,3 +1692,87 @@ right and the cost model behind it is not.
   `dense_iq2_s_decode_*` shapes, and both shexp legs plus the delta/ssm
   projections ride on it — that lever is worth more than the fold); or a target
   where 2.5-3% of IQ2_M decode decides something.
+
+## GPU min-p prefilter for the default sampler — BUILT, +2.04% Swift decode, +8.21% MoE decode (2026-09-24)
+
+Audit §P9(a). Not a reopening of a closed line, but it does finally *price* a
+sentence that had been asserted for months: `AlreadyTried.md` "engine comparison"
+claims q36's 23.19 t/s "carries the full temp-0.6 / top-k / top-p / min-p sampling
+chain" against llama-bench's greedy `tg`, i.e. that the sampler costs something —
+never measured. The two closed-line entries that touch readback
+(`MOVNTDQA streaming loads`, `HOST_CACHED readback lever`) are about the readback
+*buffer type*, not about the two scalar full-vocab passes, and are untouched here.
+
+- **The premise was first read the other way and the reading was wrong.** The
+  first pass argued "the filter touches the same 608 KB as the existing readback,
+  same memory-traffic shape, nothing to win" and was headed for a negative
+  write-up. Measured instead, on the CPU, on both sides of the argument:
+  `sampler_bench3.c` reproduces `q36_sample_full_vocab`'s `top_p >= 1.0f` branch
+  on real Swift logits — **full-vocab two loops 0.612 ms/token, survivor-only
+  loops 0.000 ms, removable 0.612 ms (100%)**, of which the max+filter scan alone
+  is 0.022 ms. `bw_bench.c` then streams the same 608 KB single-core: `sum` 0.131
+  ms (4.6 GB/s), `max` 0.175 ms (3.5 GB/s), `store` 0.012 ms. So the two loops
+  run at ~1 GB/s over a vector that a bare add loop moves at 4.6 GB/s: the cost is
+  the scalar loop body (`isfinite`, subtract, divide, compare, `expf` per element
+  over 151936 elements), not DRAM. Only the handful of survivors need an `expf`;
+  everything else is a max and one comparison, which a GPU does in one pass.
+- **Build.** New `vulkan/logits_minp_pack.comp` (109 lines, 256 lanes, three
+  passes in one entry point): pass 0 per-block max over 256 contiguous logits
+  with the Radeon order-preserving float->uint trick, pass 1 single-workgroup
+  reduce, pass 2 filter `scaled > reject_scaled` + order-preserving compaction
+  into fixed-capacity per-block buckets. The order-preserving uint is what lets
+  the max travel without a shared-float reset between tokens, and the
+  block-indexed buckets are what remove the global prefix sum. Host:
+  `q36_session_sample_packed` (`q36.c:11932`) hooked into `q36_session_sample`
+  before `q36_session_ensure_logits_host` (`q36.c:12043`), buffer
+  `Q36_GPU_MINP_BYTES(Q36_N_VOCAB)` (80.8 KB at vocab 151936), gated by
+  `Q36_VK_MINP_PACK` (default ON).
+- **Bit-identity is structural, not lucky.** `expf`, the sum and the draw stay on
+  the CPU — a GPU `expf` is not the CPU's `expf` and one ulp in the sum moves the
+  drawn token — and the packed list is emitted in ascending token order (blocks
+  in index order, order-preserving compaction inside a block), which is exactly
+  `q36_sample_full_vocab`'s scan order at `q36.c:10481-10499`. Confirmed
+  byte-identical on four configurations, seed 42, 64 tokens each:
+  Swift temp 0.8 / min_p 0.05 328/328 bytes, MoE 0.8 / 0.05 299/299, MoE temp
+  1.0 / 0.05 333/333, Swift temp 0.8 / min_p 0.2 334/334, pack ON vs OFF.
+- **Fallback is the correctness boundary, not the bucket size.** The packed path
+  returns -1 — and the scalar path runs unchanged — on `top_k != 0`,
+  `top_p < 1.0`, `min_p` outside `(0, 1]`, a non-Vulkan runtime, `have_reject`
+  unfound, **any block whose recorded count exceeds `Q36_GPU_MINP_CAP` (16)**, or
+  zero survivors. Measured survivors on real logits: 1 at temp 0.8, 3 at temp
+  1.0, so cap 16 is ~5x headroom; the overflow check means a wrong cap can only
+  cost a fallback, never a wrong token.
+- **A/B, decode-only change, judged on the decode median.** 7 interleaved reps,
+  ctx 1400 Swift / 1024 MoE, `--temp 0.8 --min-p 0.05`, all 28 arms rc=0:
+  Swift OFF 23.070 t/s (MAD 0.070) -> ON **23.540** (MAD 0.100) = **+2.04%**
+  (43.346 -> 42.481 ms/token, worst rep pairing +1.37%);
+  MoE OFF 79.340 t/s (MAD 0.190) -> ON **85.850** (MAD 0.160) = **+8.21%**
+  (12.604 -> 11.648 ms/token, worst rep pairing +7.45%). Every rep moves the same
+  way and the delta is 4-7x the MAD. The MoE win is larger than the 0.61 ms/token
+  the CPU probe predicts because the packed path also skips the full 608 KB
+  logits readback (`q36_session_ensure_logits_host` is not reached) and the
+  sampler is on the critical path behind the last GPU flush.
+- **Ceiling cross-check.** Sweep 13, greedy vs sampled, same prompt and ctx:
+  Swift 23.74/23.45/23.50 greedy vs 23.21/23.02/23.13 sampled (-1.7%); MoE
+  86.65/86.68/86.66 vs 79.70/79.47/79.38 (-8.3%). With the pack ON the sampled
+  arms recover essentially the whole gap on Swift (23.54 vs greedy 23.5) and most
+  of it on MoE (85.85 vs 86.67), which bounds what any further sampler work can
+  still buy at ~0.2 ms/token Swift / ~0.8 ms/token MoE, `expf` and the draw
+  included.
+- **Prefill is not a gate here and is neutral:** medians 52.510 (OFF) / 51.710
+  (ON) Swift, 125.820 / 128.860 MoE, with per-rep spread of 117-150 t/s on MoE
+  (chunked prefilling). The change is downstream of the logits.
+- **Gates:** `./karpathy/compat_gate.sh` PASS (including the CPU/GPU logits parity
+  step, which never sees the sampler); `./q36_test --vulkan-kernels` still fails at
+  `tests/q36_test.c:4958` (`attn decode n_tok invariance` memcmp) exactly as it does
+  on unmodified HEAD — reproduced this pass, unchanged, out of scope. Dispatch
+  confirmed in the profile: `logits_minp_max` 16 disp / `logits_minp_reduce` 16 disp
+  for 16 generated tokens, 15520 groups, no extra flush.
+- Raw: `evidence/raw/p9-minp/` (`ab-decode.txt`, `ab-reps.csv`, `parity.txt`, the
+  8 parity logs, `prof-on.txt`, `cpu-probes.txt`, `sampler_bench3.c`, `bw_bench.c`,
+  `vulkan-kernels.txt`).
+- `reconsider_if`: someone wants the sampler off the host entirely (then the
+  precision argument above is the thing to beat, not the speed); `Q36_GPU_MINP_CAP`
+  overflows on a real prompt family (the fallback makes this a no-op, but the cap
+  is one line); or the top-k / top_p < 1 path is ever made the default, which this
+  path deliberately does not cover.
