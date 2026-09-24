@@ -1985,3 +1985,63 @@ the coalesced fetch and it measures".  Round-2 R2.  It measures, and it is a no-
   one lane 64 contiguous weights instead of 16 interleaved; or evidence that
   occupancy rather than issue is the limiter (then the fix is more rows or waves per
   workgroup, not fewer loads).
+
+## The P6 nx kernel's user-facing payoff: `--batched-session` is a throughput LOSS, and nx only covers 1 of 4 dense trunk types (2026-09-25)
+
+Reopens round-1 **P6** (`## Two-row dense IQ3_XXS decode kernel — BUILT and
+LANDED, +62.6% on MTP draft 3`) only to ask the question P6 never asked: the nx
+kernel has exactly one remaining multi-row user, `--batched-session N`, and it
+had never been measured.  Round-2 R3.  Measurement only, no source change.
+
+- **Setup.**  Swift (`IQ3_XXS`, 24/4 heads), `q36-server --batched-session N
+  --ctx 1024 --prefill-chunk 256`, 4 fixed greedy streaming clients (one prompt
+  each, ~430 tokens) with 64 generated tokens per stream, `Q36_VK_DENSE_IQ3_NX`
+  0 vs 1, 2 interleaved reps (arm order flipped in rep 2).  `aggregate_tps`
+  includes TTFT; `decode-only agg` excludes each stream's own TTFT.
+- **nx pays on aggregate, and shrinks as N grows.**  N=1 **11.779 -> 11.677
+  t/s = 0.991x** (inert, as expected: the kernel needs `n_tok >= 2`, and the nx1
+  rep spread is 0.39 t/s); N=2 2.492 -> 3.719 = **+49.2%**; N=4 4.187 -> 5.774 =
+  **+37.9%**; N=8 5.865 -> 7.569 = **+29.1%**.
+- **The headline is that batching loses.**  Same binary, same prompts, same ctx:
+  one stream decodes **23.22 t/s**; 8 concurrent streams aggregate **11.72 t/s**
+  (nx ON) = **0.50x**; N=2 is 0.19x, N=4 0.33x.  A `--batched-session 8` server
+  is a throughput loss against serialising the same eight requests.  nx moves
+  this from 0.39x to 0.50x, i.e. it does not change the sign.
+- **The batched step is a fixed 128-row-tile price, not a per-row cost.**  Server
+  `decode batch count=N elapsed=… ms`: count 1 = 43 ms either way; count 2 =
+  **725 -> 462 ms** with nx; 4 = 770 -> 511; 8 = 823 -> 617.  **Flat in the row
+  count from 2 to 8** while a single-row step is 43 ms.  nx removes ~260 ms of
+  that fixed price, not a per-row term.
+- **Attribution (identical prefill, nx toggled):** `dense_iq3_xxs_mmq`
+  `gpu_ms` **14192.131 -> 4517.989** and `dense_iq3_xxs_decode_nx` 0 ->
+  **1430.415**; every other dense row is unchanged within noise
+  (`dense_iq3_xxs_mmq_pair` 9811 -> 9729, `dense_kquant_mmq` 6312 -> 6273,
+  `dense_iq4_xs_mmq` 3806 -> 3787).  The audit's prefill-leak caveat is handled
+  by using only the differential: -8244 ms over the 32 decode steps of that arm
+  = **-258 ms/step**, which reproduces the server medians exactly.
+- **nx covers one of the four dense trunk types.**  In the nx-ON arm:
+  `dense_iq3_xxs_mmq_pair` 1927 disp / 9729 ms, `dense_kquant_mmq` 4174 / 6273,
+  `dense_iq4_xs_mmq` 1804 / 3787, residual `dense_iq3_xxs_mmq` 1288 / 4518,
+  `dense_iq3_xxs_decode_nx` 5313 / 1430.  Of the dense types still taking the
+  128-row tile at n_tok 2..8 no single one dominates (pair 27%, kquant 18%,
+  iq4xs 11%, residual iq3 13%) - the *class* does (69%).  This is the same
+  kernel set that makes R4's two-row MTP verify cost 391 ms.
+- **Probe: the tile is not a defect a naive fallback fixes.**
+  `Q36_VK_DENSE_KQUANT_MMQ=0` (the one switch that reroutes `n_tok > 1` K-quant
+  work to the generic 8x8 `matmul_kquant`) at N=4, nx ON: **4.228/4.201 t/s vs
+  5.743/5.744 = -26%**, TTFT 23.4/26.6 s vs 9.7 s (the flag also drops prefill
+  off its tile).  The only thing that ever beat the tile for this shape is a
+  purpose-built `n_tok 2..8` kernel (4.7x for IQ3_XXS).  So the deferred lever is
+  an nx-style variant for `dense_iq3_xxs_mmq_pair` (largest remaining tile,
+  27% of the batched step), `dense_kquant_mmq` and `dense_iq4_xs_mmq` -
+  **not built this round**, and R4 shows the MTP restructure is blocked on it.
+- Raw: `evidence/raw/r3-batched-nx/` (`R3-VERDICT.md`, `R3-ANALYSIS.txt`,
+  `results.jsonl`, `results-kmq.jsonl`, `results-prefillonly.jsonl`, `srv/`,
+  `prof/`, `scripts/` incl. `run-r3.s`, `run-r3b.s`, `batchbench.py`,
+  `analyze.py`).
+- `reconsider_if`: an nx-style kernel exists for the pair/K-quant/IQ4_XS tiles
+  (then re-run this sweep - the fixed 260 ms is only part of the 680-780 ms
+  fixed price); or a serving workload that must hold N sessions resident for
+  reasons other than throughput (latency spread, KV memory), in which case the
+  0.50x is a documented cost of that choice and not a defect.
+

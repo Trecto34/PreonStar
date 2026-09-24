@@ -1,0 +1,78 @@
+N nx  agg_tps(rep1,rep2) med | per-stream gen (excl TTFT) med | decode-only agg | TTFT med
+1  0   ['11.782', '11.777'] med=11.779 | 23.223 | 23.223 |  2.677
+1  1   ['11.873', '11.481'] med=11.677 | 22.687 | 22.687 |  2.660
+2  0   ['2.534', '2.450'] med= 2.492 |  1.410 |  2.820 |  5.916
+2  1   ['3.732', '3.706'] med= 3.719 |  2.237 |  4.474 |  5.754
+4  0   ['4.222', '4.152'] med= 4.187 |  1.261 |  5.090 | 10.128
+4  1   ['5.736', '5.812'] med= 5.774 |  1.864 |  7.611 | 10.567
+8  0   ['5.829', '5.902'] med= 5.865 |  1.202 |  9.144 | 26.177
+8  1   ['7.253', '7.884'] med= 7.569 |  1.489 | 11.719 | 20.344
+
+per-batched-step cost (server 'decode batch count=N elapsed')
+n1-nx0-r1    c1:n=64,med=43ms
+n1-nx1-r1    c1:n=64,med=43ms
+n2-nx0-r1    c1:n=2,med=51ms c2:n=63,med=725ms
+n2-nx1-r1    c1:n=2,med=52ms c2:n=63,med=462ms
+n4-nx0-r1    c1:n=2,med=53ms c2:n=3,med=767ms c4:n=62,med=770ms
+n4-nx1-r1    c2:n=2,med=481ms c4:n=62,med=511ms
+n8-nx0-r1    c1:n=5,med=49ms c2:n=12,med=736ms c3:n=4,med=818ms c6:n=14,med=815ms c7:n=6,med=819ms c8:n=42,med=823ms
+n8-nx1-r1    c1:n=7,med=51ms c2:n=7,med=468ms c3:n=9,med=442ms c4:n=2,med=534ms c5:n=15,med=557ms c8:n=46,med=617ms
+
+profiled arms: dense trunk kernels at n_tok 2..8 (gpu_ms over the run)
+-- prof-n1-nx0
+   dense_kquant_mmq                 disp=   202 gpu_ms=    362.8
+   recur_conv_silu_decode           disp=  1632 gpu_ms=     19.3
+   delta_net_decode_reg_f16         disp=  1632 gpu_ms=     54.2
+   dense_iq3_xxs_mmq                disp=   322 gpu_ms=   1057.9
+   dense_iq4_xs_mmq                 disp=    88 gpu_ms=    306.3
+   dense_iq3_xxs_mmq_pair           disp=    94 gpu_ms=    721.9
+   dense_q5k_decode                 disp=  1377 gpu_ms=    186.8
+   top2                             disp=    66 gpu_ms=      0.4
+   dense_kquant_decode              disp=   704 gpu_ms=     21.1
+   dense_iq3_xxs_decode_r4          disp=  8160 gpu_ms=    840.0
+   dense_iq4_xs_decode              disp=  1408 gpu_ms=    135.4
+   attn_decode_fused                disp=   512 gpu_ms=     39.6
+   dense_q4k_decode                 disp=  1184 gpu_ms=     89.7
+-- prof-n1-nx1
+   dense_kquant_mmq                 disp=   202 gpu_ms=    362.1
+   recur_conv_silu_decode           disp=  1632 gpu_ms=     19.2
+   delta_net_decode_reg_f16         disp=  1632 gpu_ms=     52.1
+   dense_iq3_xxs_mmq                disp=   322 gpu_ms=   1059.8
+   dense_iq4_xs_mmq                 disp=    88 gpu_ms=    306.8
+   dense_iq3_xxs_mmq_pair           disp=    94 gpu_ms=    722.9
+   dense_q5k_decode                 disp=  1377 gpu_ms=    179.7
+   top2                             disp=    66 gpu_ms=      0.4
+   dense_kquant_decode              disp=   704 gpu_ms=     20.1
+   dense_iq3_xxs_decode_r4          disp=  8160 gpu_ms=    790.5
+   dense_iq4_xs_decode              disp=  1408 gpu_ms=    132.5
+   attn_decode_fused                disp=   512 gpu_ms=     37.6
+   dense_q4k_decode                 disp=  1184 gpu_ms=     86.0
+-- prof-n4-nx0
+   dense_kquant_mmq                 disp=  4174 gpu_ms=   6311.9
+   recur_conv_silu_decode           disp=  6528 gpu_ms=     78.9
+   delta_net_decode_reg_f16         disp=  6528 gpu_ms=    229.2
+   dense_iq3_xxs_mmq                disp=  6601 gpu_ms=  14192.1
+   dense_iq4_xs_mmq                 disp=  1804 gpu_ms=   3807.0
+   dense_iq3_xxs_mmq_pair           disp=  1927 gpu_ms=   9811.2
+   dense_q5k_decode                 disp=    47 gpu_ms=     17.6
+   top2                             disp=    10 gpu_ms=      0.1
+   attn_decode_fused                disp=  2048 gpu_ms=    167.8
+   dense_kquant_decode              disp=    22 gpu_ms=      0.7
+   dense_iq3_xxs_decode_r4          disp=   255 gpu_ms=     29.5
+   dense_iq4_xs_decode              disp=    44 gpu_ms=      4.2
+   dense_q4k_decode                 disp=    37 gpu_ms=      3.0
+-- prof-n4-nx1
+   dense_kquant_mmq                 disp=  4174 gpu_ms=   6273.1
+   recur_conv_silu_decode           disp=  6528 gpu_ms=     77.7
+   delta_net_decode_reg_f16         disp=  6528 gpu_ms=    226.7
+   dense_iq3_xxs_mmq                disp=  1288 gpu_ms=   4518.0
+   dense_iq4_xs_mmq                 disp=  1804 gpu_ms=   3787.2
+   dense_iq3_xxs_mmq_pair           disp=  1927 gpu_ms=   9729.2
+   dense_q5k_decode                 disp=    90 gpu_ms=     24.2
+   top2                             disp=    12 gpu_ms=      0.1
+   dense_kquant_decode              disp=    44 gpu_ms=      1.5
+   dense_iq3_xxs_decode_r4          disp=   510 gpu_ms=     62.2
+   dense_iq4_xs_decode              disp=    88 gpu_ms=      8.5
+   attn_decode_fused                disp=  2048 gpu_ms=    168.5
+   dense_q4k_decode                 disp=    74 gpu_ms=      6.3
+   dense_iq3_xxs_decode_nx          disp=  5313 gpu_ms=   1430.4

@@ -1,0 +1,2 @@
+{"label": "prefill-nx1", "streams": 4, "max_tokens": 1, "total_tokens": 4, "wall_s": 12.406, "aggregate_tps": 0.322, "per_stream_tps_med": 0.104, "per_stream_tps": [0.08, 0.1, 0.1, 0.1], "ttft_s_med": 9.648, "ttft_s": [12.405, 9.676, 9.619, 9.619]}
+{"label": "prefill-nx0", "streams": 4, "max_tokens": 1, "total_tokens": 4, "wall_s": 12.521, "aggregate_tps": 0.319, "per_stream_tps_med": 0.103, "per_stream_tps": [0.1, 0.1, 0.1, 0.08], "ttft_s_med": 9.689, "ttft_s": [9.665, 9.712, 9.666, 12.52]}
