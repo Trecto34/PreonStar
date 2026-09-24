@@ -1,0 +1,16 @@
+## IQ2_M, IQ2_S down sum-decode blob old vs new, 2 reps each
+== rep1 moe
+frontier_000512.logits.json: max_abs_diff=0 at 0  top1 ref=13 (21.975023) new=13 (21.975023) same=True  top64 overlap=64/64
+frontier_000520.logits.json: max_abs_diff=0 at 0  top1 ref=11 (17.811916) new=11 (17.811916) same=True  top64 overlap=64/64
+== rep1 guard
+frontier_000512.logits.json: max_abs_diff=0 at 0  top1 ref=13 (22.437641) new=13 (22.437641) same=True  top64 overlap=64/64
+frontier_000520.logits.json: max_abs_diff=0 at 0  top1 ref=11 (17.632919) new=11 (17.632919) same=True  top64 overlap=64/64
+== rep2 moe
+frontier_000512.logits.json: max_abs_diff=0 at 0  top1 ref=13 (21.975023) new=13 (21.975023) same=True  top64 overlap=64/64
+frontier_000520.logits.json: max_abs_diff=0 at 0  top1 ref=11 (17.811916) new=11 (17.811916) same=True  top64 overlap=64/64
+== rep2 guard
+frontier_000512.logits.json: max_abs_diff=0 at 0  top1 ref=13 (22.437641) new=13 (22.437641) same=True  top64 overlap=64/64
+frontier_000520.logits.json: max_abs_diff=0 at 0  top1 ref=11 (17.632919) new=11 (17.632919) same=True  top64 overlap=64/64
+## determinism: old r1 vs old r2
+frontier_000512.logits.json: max_abs_diff=0 at 0  top1 ref=13 (21.975023) new=13 (21.975023) same=True  top64 overlap=64/64
+frontier_000520.logits.json: max_abs_diff=0 at 0  top1 ref=11 (17.811916) new=11 (17.811916) same=True  top64 overlap=64/64

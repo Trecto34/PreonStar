@@ -1,0 +1,97 @@
+diff --git a/vulkan/moe_down_q2k_sum_decode.comp b/vulkan/moe_down_q2k_sum_decode.comp
+index 718c245..f70cdf8 100644
+--- a/vulkan/moe_down_q2k_sum_decode.comp
++++ b/vulkan/moe_down_q2k_sum_decode.comp
+@@ -40,6 +40,13 @@ uint wb_u8(uint off) {
+ /* IQ2_S superblock: [d f16][32 qs][32 signs][8 qh][8 scales] = 82 bytes. */
+ const uint IQ2S_BYTES = 82u;
+ const uint TAB_IQ2S = 544u;
++/* Staged copy of one IQ2_S superblock per ix half (82 bytes = 41 u16, padded to
++ * 48 so the two halves land on different banks).  See the load comment in the
++ * IQ2_S branch below. */
++shared uint sb[2][48];
++uint sb_u8(uint ih, uint off) {
++    return (sb[ih][off >> 1u] >> (8u * (off & 1u))) & 255u;
++}
+ #endif
+ #ifdef Q36_MOE_IQ3S
+ /* IQ3_S superblock: [d f16][64 qs][8 qh][32 signs][4 scales] = 110 bytes.
+@@ -98,32 +105,53 @@ void main(void) {
+ #ifdef Q36_MOE_IQ2S
+         /* Same element slotting as the Q2_K path: this thread owns the two
+          * elements at y_off + 16*p for p = 0..7 and each 16-element group
+-         * carries one IQ2_S scale, one grid index and one sign byte. */
+-        for (uint i = ix; i < pc.blocks; i += 2u) {
+-            uint bb = base_bytes + i * IQ2S_BYTES;
+-            float d = unpackHalf2x16(uint(wb[bb >> 1u])).x;
+-            uint y2 = m2 + ((i * 256u + y_off) >> 1u);
+-            for (uint p = 0u; p < 8u; p++) {
+-                uint n = y_off + 16u * p;
+-                uint ib32 = n >> 5u;
+-                uint lg = (n >> 3u) & 3u;
+-                uint j = n & 7u;
+-                uint scb = wb_u8(bb + 74u + ib32);
+-                float wsc = d * 0.25 * (0.5 + float(lg < 2u ? (scb & 15u) : (scb >> 4u)));
+-                uint entry = wb_u8(bb + 2u + 4u * ib32 + lg) |
+-                             ((wb_u8(bb + 66u + ib32) << (8u - 2u * lg)) & 0x300u);
+-                uint signs = wb_u8(bb + 34u + 4u * ib32 + lg);
+-                uint word = tables[TAB_IQ2S + entry * 2u + (j >> 2u)];
+-                /* Both elements share the 8-group's scale, entry and sign byte,
+-                 * but each has its own magnitude byte and sign bit. */
+-                vec2 gv = vec2(float((word >> (8u * (j & 3u))) & 255u),
+-                               float((word >> (8u * ((j + 1u) & 3u))) & 255u));
+-                vec2 gsg = mix(vec2(1.0), vec2(-1.0),
+-                               bvec2(((signs >> j) & 1u) != 0u,
+-                                     ((signs >> (j + 1u)) & 1u) != 0u));
+-                vec2 bv = mid[y2 + 8u * p];
+-                acc = fma(wsc, dot(gv * gsg, bv), acc);
++         * carries one IQ2_S scale, one grid index and one sign byte.
++         *
++         * The fetch is staged through LDS.  Read straight from the SSBO this
++         * loop issued ~40 independent strided ushort loads per lane per
++         * superblock (five per p group) and left most of every 32 B sector
++         * unused: 40.6 GB/s of DRAM traffic for the 99.4 MB/token of unique
++         * weight bytes, 315 ms, against a 97 ms floor for the same bytes read
++         * coalesced (P1 probe D).  Here the 16 lanes of one ix half fetch the
++         * 41 words of the block in three consecutive rounds, so each round
++         * covers one contiguous 32 B span, and the field extraction below then
++         * reads the same bytes out of LDS.  Load addresses are unchanged
++         * relative to the block, so the values -- and therefore the f32 chain
++         * -- are bit-identical to the direct-load version. */
++        for (uint ib = 0u; ib < (pc.blocks + 1u) / 2u; ib++) {
++            uint i = ix + 2u * ib;
++            uint boff = base_bytes + i * IQ2S_BYTES;
++            for (uint k = itid; k < 41u; k += 16u)
++                sb[ix][k] = i < pc.blocks ? uint(wb[(boff >> 1u) + k]) : 0u;
++            barrier();
++            if (i < pc.blocks) {
++                float d = unpackHalf2x16(sb[ix][0]).x;
++                uint y2 = m2 + ((i * 256u + y_off) >> 1u);
++                for (uint p = 0u; p < 8u; p++) {
++                    uint n = y_off + 16u * p;
++                    uint ib32 = n >> 5u;
++                    uint lg = (n >> 3u) & 3u;
++                    uint j = n & 7u;
++                    uint scb = sb_u8(ix, 74u + ib32);
++                    float wsc = d * 0.25 * (0.5 + float(lg < 2u ? (scb & 15u) : (scb >> 4u)));
++                    uint entry = sb_u8(ix, 2u + 4u * ib32 + lg) |
++                                 ((sb_u8(ix, 66u + ib32) << (8u - 2u * lg)) & 0x300u);
++                    uint signs = sb_u8(ix, 34u + 4u * ib32 + lg);
++                    uint word = tables[TAB_IQ2S + entry * 2u + (j >> 2u)];
++                    /* Both elements share the 8-group's scale, entry and sign byte,
++                     * but each has its own magnitude byte and sign bit. */
++                    vec2 gv = vec2(float((word >> (8u * (j & 3u))) & 255u),
++                                   float((word >> (8u * ((j + 1u) & 3u))) & 255u));
++                    vec2 gsg = mix(vec2(1.0), vec2(-1.0),
++                                   bvec2(((signs >> j) & 1u) != 0u,
++                                         ((signs >> (j + 1u)) & 1u) != 0u));
++                    vec2 bv = mid[y2 + 8u * p];
++                    acc = fma(wsc, dot(gv * gsg, bv), acc);
++                }
+             }
++            /* Refill guard: the second half must not overwrite a block the
++             * other half is still reading, and the next expert reuses sb. */
++            barrier();
+         }
+ #elif defined(Q36_MOE_IQ3S)
+         /* Same element slotting: this thread owns the elements y_off + 16*p

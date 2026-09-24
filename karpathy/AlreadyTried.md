@@ -1922,3 +1922,66 @@ unchanged, out of scope").  Round-2 R1.
 - `reconsider_if`: the batch-vs-decode drift ever exceeds 4e-5 (then it is a
   reduction bug, not reassociation); or a real-task eval shows long-context
   regression that a prefill-chunk 256 -> 128 change does not also show.
+
+## IQ2_S MoE down sum-decode wide-load rewrite — built, bit-exact, NEGATIVE (2026-09-25)
+
+Reopens round-1 **P1** (`## MoE IQ2_S down sum-decode — audited levers NEGATIVE, load
+shape CONFIRMED as the lever, not built`), whose `reconsider_if` is "someone builds
+the coalesced fetch and it measures".  Round-2 R2.  It measures, and it is a no-op.
+
+- **What was built.**  `vulkan/moe_down_q2k_sum_decode.comp` `Q36_MOE_IQ2S` branch
+  only: the per-element `wb_u8()` field reads are replaced by a staged LDS copy of
+  the 82-byte superblock -- the 16 lanes of one `ix` half fetch its 41 words in three
+  consecutive rounds (`k = itid; k < 41; k += 16`, so each round covers one contiguous
+  32-byte span, third round lanes 0..8), `barrier()` around the refill, all field
+  reads (`d`, `scb`, `entry`, `signs`) via LDS.  Element slotting, per-element fma
+  order, the serial expert loop, `subgroupAdd(acc)` and the `tid == 0` weighted
+  `fma32` combine are untouched, so the output is bit-exact by construction.
+- **ISA confirms the intended change happened** (`isa-old.asm.txt` /
+  `isa-wideload.asm.txt`): `buffer_load_ushort` 33 -> **3** (staging only), total
+  `buffer_load_*` per workgroup-iteration 52 -> 22, `ds_read_b32` 0 -> 33,
+  `ds_write_b32` 0 -> 3, LDS 0 -> 384 B, VALU 478 -> 476, hot basic block 549 -> 529
+  instructions.
+- **It measures nothing.**  Kernel, same 4736 dispatches / 9699328 groups:
+  `gpu_ms` **316.383 -> 316.571** (+0.06%), 21.5% -> 21.6% of IQ2_M decode.  End to
+  end (`tests/bench_ab.sh`, 7 interleaved reps, same binary, only the `.spv` swapped
+  per run, IQ2_M ctx 1024 chunk 256 gen 128, plain decode): prefill median 617.06
+  (MAD 8.30) -> 615.01 (MAD 7.36) = **-0.33%**; decode median **82.15 t/s
+  (MAD 0.150) -> 82.32 t/s (MAD 0.290) = +0.21%** with overlapping MADs.  Parity is
+  clean: frontier 512/520 dumps on IQ2_M and the guard, 2 reps per arm,
+  `max_abs_diff = 0` / top-1 same / top64 64/64 in every pairing, and a shipped-vs-
+  shipped re-run also 0.  Bit-exact and useless -> **rejected, reverted**; the
+  variant survives only as `wideload-rejected.patch`.
+- **Why, and where P1's attribution went wrong.**  P1 decomposed the kernel as
+  `315.4 ms = 97.0 coalesced-load floor + 167.2 scattered field loads + 51.2 ALU` and
+  named the 167.2 ms component the lever.  Deleting that component entirely changes
+  the kernel by 0.06%, so it was miscounted: the field loads were never the stall.
+  There is also no overfetch to fix -- the loop already moves only 99.4 MB/token of
+  unique bytes (12.72 GB per 128-token run) in 316 ms = **40.6 GB/s**, the same bytes
+  at the same rate after staging.  P1 probe D's 131 GB/s floor is real but a load-only
+  kernel has no dependent consumers, so it does not follow that the shipped kernel
+  waits on memory.  The kernel is **instruction-issue bound**: the hot basic block is
+  549 instructions and runs once per expert per row (2048 rows x 8 experts = 16384
+  times per dispatch), i.e. **9.0M warp-instructions for 8.39M weights = 1.07
+  warp-instructions per weight**; against 40 CUs x 4 issue slots at ~1.5 GHz that is
+  ~37.5 us of pure issue against 66.8 us measured (~56% of peak issue).  Only ~89 of
+  the 549 instructions are arithmetic (24 cvt, 16 mul, 16 mac, 8 add, 16 cndmask,
+  16 cmp, 1 fma_mix); ~348 are index/address math for the 16 weights one lane owns
+  per block, i.e. **34 instructions per weight per lane, 63% index arithmetic**
+  (`opmix-main-loop.txt`).  The lever is instructions per weight, not load width.
+- **Not built, deliberately.**  The same restructure for the Q2_K branch (the guard's
+  `moe_q2k_down_sum_decode`, 62 GB/s) and for `moe_iq2s_gate_up_decode` (~150 GB/s,
+  and not a sum-decode kernel at all).  The premise is refuted on the kernel where it
+  was strongest, so porting it buys the same nothing for the same work.
+- **Gates:** `karpathy/compat_gate.sh` **PASS**; `./q36_test --vulkan-kernels` **OK**
+  (R1 fix, `e77871d`).  Shipped blob restored byte-identically (`md5 2603136d…`).
+- Raw: `evidence/raw/r2-iq2s-wideload/` (`R2-VERDICT.md`, `wideload-rejected.patch`,
+  `isa-{old,wideload}.asm.txt`, `opmix-main-loop.txt`,
+  `iq2s-down-{old,wideload}.spv`, `parity/` incl. `cmp.txt`, `ab/` incl.
+  `ab-iq2m.csv` + `ab-iq2m.summary` + `prof-{old,new}.log`, `run-ab.s`, `parity.s`,
+  `arm-{old,new}.sh`).
+- `reconsider_if`: a variant that changes the **instruction count per weight** (index
+  arithmetic or dequant extraction) rather than the load width; a mapping that gives
+  one lane 64 contiguous weights instead of 16 interleaved; or evidence that
+  occupancy rather than issue is the limiter (then the fix is more rows or waves per
+  workgroup, not fewer loads).

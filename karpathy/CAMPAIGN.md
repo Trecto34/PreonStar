@@ -822,7 +822,36 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    bound) and every other arm keeps the memcmp; coverage widened to the
    production KV pair at both FA ratios.  `--vulkan-kernels` **PASS** with FA on
    and with `Q36_VK_ATTN_FA=0`; `compat_gate.sh` **PASS**.  No performance delta
-   (test + comment only).  Evidence: `evidence/raw/r1-fa-gate/`.
+   (test + comment only).  Evidence: `evidence/raw/r1-fa-gate/`.  **R2. IQ2_S down sum-decode wide-load rewrite - built, bit-exact, NEGATIVE
+   (2026-09-25).**  Reopens P1 (whose `reconsider_if` is "someone builds the
+   coalesced fetch and it measures").  The `Q36_MOE_IQ2S` branch of
+   `vulkan/moe_down_q2k_sum_decode.comp` staged the 82-byte superblock through
+   LDS: the 16 lanes of each `ix` half fetch its 41 words in three consecutive
+   rounds (one contiguous 32 B span each, third round lanes 0..8), `barrier()`
+   around the refill, all field reads via LDS, element slotting and fma order
+   untouched.  ISA confirms it: `buffer_load_ushort` 33 -> **3**,
+   `buffer_load_*` per iteration 52 -> 22, `ds_read_b32` 0 -> 33, LDS 0 -> 384 B,
+   VALU 478 -> 476, hot block 549 -> 529 instructions.  It measures **nothing**:
+   kernel `gpu_ms` 316.383 -> 316.571 (+0.06%, same 4736 dispatches / 9699328
+   groups), 7 interleaved reps (same binary, only the `.spv` swapped per run,
+   IQ2_M ctx 1024 chunk 256 gen 128, plain decode) prefill median 617.06
+   (MAD 8.30) -> 615.01 (MAD 7.36) = -0.33%, decode median **82.15 t/s
+   (MAD 0.150) -> 82.32 t/s (MAD 0.290) = +0.21%** with overlapping MADs.
+   Bit-exact: frontier 512/520 on IQ2_M and the guard, 2 reps per arm,
+   `max_abs_diff = 0` / top-1 same / top64 64/64.  **Rejected and reverted**
+   (variant kept as `wideload-rejected.patch`).  P1's decomposition
+   (`315.4 = 97.0 loads + 167.2 scattered field loads + 51.2 ALU`) mis-attributed
+   the 167.2 ms: deleting that component changes the kernel by 0.06%, and there
+   was never any overfetch (99.4 MB/token unique, 12.72 GB per run, 40.6 GB/s
+   before and after).  The kernel is **instruction-issue bound**: the hot block
+   runs once per expert per row (2048 rows x 8 experts = 16384 times per
+   dispatch) = **9.0M warp-instructions for 8.39M weights = 1.07
+   warp-instructions/weight**, ~37.5 us of pure issue against 66.8 us measured
+   (~56% of peak issue at 40 CUs x 4 slots); only ~89 of the 549 instructions are
+   arithmetic, ~348 are index/address math for 16 weights per lane =
+   **34 instructions/weight/lane, 63% index**.  The lever is instructions per
+   weight, not load width - so the Q2_K and gate_up ports were **not built**.
+   Evidence: `evidence/raw/r2-iq2s-wideload/`.
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 

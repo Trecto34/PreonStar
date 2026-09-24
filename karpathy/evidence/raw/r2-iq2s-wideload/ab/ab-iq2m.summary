@@ -1,0 +1,7 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    7     617.06         8.300     82.15          0.150     /tmp/r2/arm-old.sh
+B    7     615.01         7.360     82.32          0.290     /tmp/r2/arm-new.sh
+
+B vs A prefill: -0.33%   decode: +0.21%   (gate: +1.50%)
+verdict: FAIL (prefill)
