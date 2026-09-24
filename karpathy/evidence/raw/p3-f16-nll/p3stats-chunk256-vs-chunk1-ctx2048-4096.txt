@@ -1,0 +1,36 @@
+p3h-i: n=33 mean_nll=13.1309 top1=12/33
+p3h-j: n=33 mean_nll=12.5390 top1=11/33
+   vs p3h-i: dNLL mean=-0.5919 med=+0.0005 MAD=0.4474 mean|d|=1.7924 worse=17 better=15 top1_same=32/33
+   frontier 2048: dNLL -0.050
+   frontier 2112: dNLL +1.217
+   frontier 2176: dNLL -2.486
+   frontier 2240: dNLL +1.405
+   frontier 2304: dNLL -0.150
+   frontier 2368: dNLL -1.917
+   frontier 2432: dNLL +0.001
+   frontier 2496: dNLL +0.232
+   frontier 2560: dNLL +0.003
+   frontier 2624: dNLL +0.047
+   frontier 2688: dNLL +0.355
+   frontier 2752: dNLL -5.293
+   frontier 2816: dNLL -0.004
+   frontier 2880: dNLL +1.570
+   frontier 2944: dNLL -4.470
+   frontier 3008: dNLL +1.643
+   frontier 3072: dNLL -0.014
+   frontier 3136: dNLL +0.328
+   frontier 3200: dNLL -0.780
+   frontier 3264: dNLL +0.008
+   frontier 3328: dNLL +0.000
+   frontier 3392: dNLL -10.925
+   frontier 3456: dNLL +0.174
+   frontier 3520: dNLL +6.353
+   frontier 3584: dNLL -4.703
+   frontier 3648: dNLL -0.056
+   frontier 3712: dNLL +0.448
+   frontier 3776: dNLL +2.671
+   frontier 3840: dNLL +2.939
+   frontier 3904: dNLL -0.000
+   frontier 3968: dNLL +0.413
+   frontier 4032: dNLL -7.192
+   frontier 4096: dNLL -1.302

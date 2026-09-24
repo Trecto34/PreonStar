@@ -1,13 +1,13 @@
 LEDGER_CHECK:
 source=AlreadyTried.md
 active=AlreadyTried.active.md
-source_sha256=0608b145dbcc3b2cfee38ac2d99edb7faf1a3aa5f699f8dd3103fdbbc57aa7f2
+source_sha256=04467f2be6b72ea1b9fa31266943dcd0b12ffd365820fe1df21f20d2139433fb
 priority=8
 entries=5
 
 # Active Optimization Ledger (Priority 8)
 
-> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `0608b145dbcc3b2c...`)  
+> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `04467f2be6b72ea1...`)  
 > **Filter:** Priority 8  
 > **Mandatory Policy:** Do not repeat rejected approaches without a stated new hardware/runtime reason. Preserve MoE routing parity for Qwen3.6 reference.
 

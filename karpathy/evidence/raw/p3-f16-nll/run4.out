@@ -1,0 +1,25 @@
+### tokens for frontier_nll.py
+--- tokens rc=0 lines=34398
+### A. P3 f16 prefill accumulation: chunk 256 vs chunk 1 (decode path), ctx 512..2048
+--- p3h-chunk256 rc=0 36s
+--- p3h-chunk1 rc=0 106s
+### B. P3b recurrent state f16 vs f32, ctx 2048..8192
+--- p3h-state-f16 rc=0 74s
+--- p3h-state-f32 rc=0 74s
+### B2. P3b at ctx 16384..32768
+--- p3h-state32-f16 rc=0 308s
+--- p3h-state32-f32 rc=0 308s
+### C. P2b exact acceptance per depth (margin 0 = confidence gate off)
+--- p2b-stats-d2 rc=0 34s
+--- p2b-stats-d3 rc=0 82s
+--- p2b-stats-d4 rc=0 81s
+### D. P6 per-kernel profile of a 1-, 2- and 3-token step
+--- p6-prof-off rc=0 24s
+--- p6-prof-d2 rc=0 23s
+--- p6-prof-d3 rc=0 27s
+### E. P8 IQ2_M per-kernel decode profile
+--- p8-iq2m-prof rc=0 19s
+### F. P9 sampler wall-vs-GPU gap
+--- p9-greedy rc=1 17s
+--- p9-sampled rc=1 18s
+### DONE total 1231s

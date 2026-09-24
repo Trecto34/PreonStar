@@ -1,0 +1,5 @@
+/tmp/p36/p3h-e: n=2 mean_nll=13.1553 top1=1/2
+/tmp/p36/p3h-f: n=2 mean_nll=11.7054 top1=1/2
+   vs /tmp/p36/p3h-e: dNLL mean=-1.4499 med=-1.4499 MAD=1.4502 mean|d|=1.4502 worse=1 better=1 top1_same=2/2
+   frontier 16384: dNLL -2.900
+   frontier 32768: dNLL +0.000

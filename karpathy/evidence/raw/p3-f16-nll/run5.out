@@ -1,0 +1,9 @@
+### 1. determinism control: chunk 256 twice, same settings
+--- p3h-chunk256-bis rc=0 38s
+### 2. P3 f16 accumulator, ctx 2048..4096 every 64 tokens
+--- p3h-chunk256-b rc=0 55s
+--- p3h-chunk1-b rc=0 202s
+### 3. P3b recurrent state f16 vs f32, ctx 8192..16384 every 256 tokens
+--- p3h-state2-f16 rc=0 143s
+--- p3h-state2-f32 rc=0 142s
+### 4. P9 sampler gap: same model, greedy vs the default min-p sampler, short prompt

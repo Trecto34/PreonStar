@@ -1491,3 +1491,59 @@ byte-identical to it (`diff`), rewired behind the same per-call env gate
   and keep the workgroup count up by halving the grouped build's span
   (512 -> 256), which gives up bit-exactness against span 512; or hardware where
   the attention dispatch is genuinely DRAM-bound at ctx <= 4k.
+
+## Prefill f16 accumulator and f16 DeltaNet state — NLL check, no measurable regression (2026-09-24)
+
+Audit §P3 ("measurement only").  Not a rejection of an earlier attempt: the
+ledger has no entry for either dtype, and `Q36_VK_RECURRENT_STATE_F16` was
+landed on throughput with no quality probe behind it.  Mechanism under test:
+`vulkan/dense_iq3_xxs_mmq.comp` accumulates the whole K dimension (up to 17408,
+68 blocks) in `f16vec2 sum[16]` while the decode path accumulates in f32, and
+the DeltaNet recurrent state can be stored f16 or f32.
+
+- **Method.** `q36-bench --gen-tokens 0 --dump-frontier-logits-dir` walks
+  `tests/long_context_story_prompt.txt` one frontier at a time (each frontier
+  teacher-forces one more token and dumps full-vocab logits); `p3stats.py`
+  computes per-frontier NLL of the actual next token and the *paired* signed
+  difference between arms, with top-1 agreement, sign split and MAD.  The
+  sequence is identical in both arms (same prompt, greedy, no sampling), so the
+  paired difference is meaningful without a sampler in the loop.
+- **Determinism control first.**  Chunk 256 run twice in two processes:
+  `mean_nll=8.6713` both, `dNLL mean=med=MAD=mean|d|=0.0000`, `top1_same=25/25`.
+  Nothing below is run-to-run noise.
+- **Arm A, prefill chunk 256 (f16 accumulator) vs chunk 1 (decode path, f32):**
+  ctx 512..2048 n=25 -> mean NLL 8.6713 vs 8.7357, **dNLL median -0.0000**,
+  MAD 0.2753, mean|d| 0.9698, worse/better 10/14, top-1 **25/25**; ctx
+  2048..4096 n=33 -> 13.1309 vs 12.5390, **median +0.0005**, MAD 0.4474,
+  mean|d| 1.7924, worse/better 17/15, top-1 **32/33**.  Median ~0 and a ~50/50
+  sign split at both windows: no systematic penalty.  The means (+0.06, -0.59)
+  are set by a handful of frontiers where the distribution is nearly flat
+  (frontier 832 +6.53, 1408 -3.00, 1664 +2.92; the 2048..4096 window sits at
+  NLL ~13 nats).
+- **Arm B, f16 vs f32 recurrent state (`Q36_VK_RECURRENT_STATE_F16=0`):** the
+  usable sample is ctx 8192..16384 n=33 -> mean NLL 15.0033 (f16) vs 15.3388
+  (f32), **median -0.0053**, MAD 1.3570, mean|d| 3.0220, worse/better 14/19,
+  top-1 **30/33**.  The two small windows agree in direction and add nothing:
+  ctx 2048..8192 n=4 median -1.1968 top-1 3/4; ctx 16384..32768 n=2 median
+  -1.4499 top-1 2/2.  Scatter is large at 15 nats of NLL because top-1 there is
+  a near-tie decision.
+- **Non-finite check.**  Every frontier dump in all six arms (25+33+4+33+2+2
+  files, full 248,320-logit vocab each) scanned: no NaN, no +-inf.  Largest
+  `max|dlogit|` seen anywhere was 28.3 (ctx 16384, state dtype arm).
+- **Verdict: no change.**  The audit made the f32 flush conditional on
+  "prefill NLL measurably worse"; it is not, so no flush was added and the f16
+  state default stays.
+- Honest limitation: chunk 256 vs chunk 1 are different *kernels* (MMQ +
+  `predequant_b16` vs `dense_iq3_xxs_decode_r4`), so arm A bounds the whole
+  "different prefill path" error rather than the accumulation dtype alone.
+  Isolating the dtype needs a diagnostic MMQ build with `vec2 sum[16]`, which
+  was not built because there is no signal to chase.
+- Raw: `evidence/raw/p3-f16-nll/` (`VERDICT.md`, `p3stats.py`, the five paired
+  statistic files, the eleven `q36-bench` logs, and the sweep scripts/outputs
+  `run4.s|out`, `run5.s|out`).
+- `reconsider_if`: a criterion that is sensitive to a *flat* distribution (an
+  exact-match rate over many short completions, paired per token, n >= 64)
+  rather than frontier NLL, or hardware whose f16 accumulate path rounds
+  differently (GFX11+).  Also relevant: if a future change makes the decode
+  path's reduction order match the MMQ tile's, arm A's reference disappears and
+  this check has to be re-based on an f32-accumulate MMQ build.

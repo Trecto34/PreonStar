@@ -642,6 +642,25 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    in one dispatch of a 33-36 ms/token decode.  Evidence:
    `evidence/raw/p5-gqa-decode/{gqa-kernel-repro-20260924.txt,host-wiring-20260924.patch}`,
    `evidence/raw/ab-attn-decode-gqa-ctx{1k,2k,8k}.*`.
+   **P3. Prefill f16 accumulator + f16 DeltaNet state — no measurable NLL penalty,
+   no change (2026-09-24).**  Teacher-forced frontier-NLL protocol (`--gen-tokens 0`,
+   `--dump-frontier-logits-dir`, paired signed dNLL + top-1 via
+   `evidence/raw/p3-f16-nll/p3stats.py`).  Determinism control first: chunk 256 run
+   twice is bit-identical (`dNLL mean=med=MAD=0.0000`, top-1 25/25), so the spreads
+   below are the numeric path, not noise.  **Arm A** (chunk 256 = MMQ `f16vec2
+   sum[16]` over K=17408 vs chunk 1 = decode path, f32): ctx 512..2048 n=25, mean
+   NLL 8.6713 vs 8.7357, **dNLL median -0.0000**, mean|d| 0.9698, sign split 10/14,
+   top-1 **25/25**; ctx 2048..4096 n=33, 13.1309 vs 12.5390, **median +0.0005**,
+   mean|d| 1.7924, 17/15, top-1 **32/33** — no systematic penalty (means are set by
+   flat-distribution frontiers: 832 +6.53, 1408 -3.00, 1664 +2.92).
+   **Arm B** (`Q36_VK_RECURRENT_STATE_F16=0`): ctx 8192..16384 n=33, mean NLL
+   15.0033 (f16) vs 15.3388 (f32), **median -0.0053**, mean|d| 3.0220, 14/19,
+   top-1 **30/33**; the n=4/n=2 windows agree in direction.  No NaN/inf in any of
+   the 219 frontier dumps (11 directories) - `nonfinite.py`, max|logit| 33.30.  The audit's f32-flush condition ("prefill NLL measurably
+   worse") does not fire, so nothing was built; the f16 state default stays.
+   Limitation recorded: arm A compares two different kernels, so it bounds the whole
+   prefill-path error, not the dtype alone.  Evidence:
+   `evidence/raw/p3-f16-nll/VERDICT.md` + stats files + sweep scripts.
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 

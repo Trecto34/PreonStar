@@ -1,0 +1,28 @@
+/tmp/p36/p3h-a: n=25 mean_nll=8.6713 top1=10/25
+/tmp/p36/p3h-b: n=25 mean_nll=8.7357 top1=10/25
+   vs /tmp/p36/p3h-a: dNLL mean=+0.0644 med=-0.0000 MAD=0.2753 mean|d|=0.9698 worse=10 better=14 top1_same=25/25
+   frontier 512: dNLL +0.075
+   frontier 576: dNLL +0.027
+   frontier 640: dNLL -0.093
+   frontier 704: dNLL +0.427
+   frontier 768: dNLL -0.554
+   frontier 832: dNLL +6.529
+   frontier 896: dNLL -1.861
+   frontier 960: dNLL -0.275
+   frontier 1024: dNLL -2.526
+   frontier 1088: dNLL -0.001
+   frontier 1152: dNLL +1.497
+   frontier 1216: dNLL -1.006
+   frontier 1280: dNLL +0.000
+   frontier 1344: dNLL +0.006
+   frontier 1408: dNLL -3.000
+   frontier 1472: dNLL -0.440
+   frontier 1536: dNLL -0.000
+   frontier 1600: dNLL +0.000
+   frontier 1664: dNLL +2.915
+   frontier 1728: dNLL -0.000
+   frontier 1792: dNLL -0.000
+   frontier 1856: dNLL +0.000
+   frontier 1920: dNLL -1.325
+   frontier 1984: dNLL +1.453
+   frontier 2048: dNLL -0.237
