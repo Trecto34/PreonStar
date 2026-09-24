@@ -1,0 +1,31 @@
+Karpathy compatibility gate
+root=/home/server/q36
+swift_model=Swift-Qwen3.8-27B-IQ3_XXS.gguf
+qwen35_model=Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf
+context=1024 generation=4 timeout=180s
+[1/2] Qwen3.5/Qwen3.6 MoE CPU/Vulkan parity
+gpu-cpu-parity:
+q36-test: gpu-cpu-parity reference = f16 dense-MMQ contract (compares against production arithmetic)
+q36-test: gpu-cpu-parity CPU capture short_reasoning_plain
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-test: gpu-cpu-parity GPU replay short_reasoning_plain
+q36-test: gpu-cpu-parity short_reasoning_plain step 0 top1 ref=16 cand=16 top5_overlap=5/5 top15_overlap=14/15 top20_overlap=18/20 top64_overlap=58/64 rms=0.302126 max_abs=1.69225 top15_max_abs=0.846034 top20_max_abs=0.846034
+q36-test: gpu-cpu-parity short_reasoning_plain step 0 elements=248320 nonfinite=0 worst_index=35634 ref=5.31602383 cand=3.62377834 abs=1.69224548
+q36-test: gpu-cpu-parity short_reasoning_plain step 1 top1 ref=21 cand=21 top5_overlap=5/5 top15_overlap=13/15 top20_overlap=19/20 top64_overlap=56/64 rms=0.245145 max_abs=1.99524 top15_max_abs=0.884393 top20_max_abs=1.50052
+q36-test: gpu-cpu-parity short_reasoning_plain step 1 elements=248320 nonfinite=0 worst_index=198 ref=6.70167637 cand=8.69691467 abs=1.9952383
+q36-test: gpu-cpu-parity short_reasoning_plain step 2 top1 ref=248046 cand=248046 top5_overlap=4/5 top15_overlap=14/15 top20_overlap=20/20 top64_overlap=58/64 rms=0.299774 max_abs=1.58327 top15_max_abs=1.39882 top20_max_abs=1.39882
+q36-test: gpu-cpu-parity short_reasoning_plain step 2 elements=248320 nonfinite=0 worst_index=56010 ref=-5.15016794 cand=-3.56689358 abs=1.58327436
+gpu-cpu-parity: OK
+q36 tests: ok
+[2/2] Swift IQ3_XXS Vulkan smoke benchmark
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: in-file MTP head bound (blk.64 nextn), draft=1
+q36: clamping prefill chunk 512 -> 256 on GFX1013 (GQA 6); a larger chunk can exceed the 10 s amdgpu watchdog and destroy the GPU context. Set Q36_VK_PREFILL_CHUNK_UNSAFE=1 to override.
+q36-bench: context buffers 269.21 MiB (scratch=93.46 MiB, raw=26.13 MiB, compressed=149.62 MiB, ctx=1029, backend=vulkan, prefill_chunk=256, raw_kv_rows=1029, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+1024,1024,177.96,4,19.43,4108
+COMPATIBILITY_GATE: PASS

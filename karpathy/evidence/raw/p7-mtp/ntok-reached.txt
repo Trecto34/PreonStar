@@ -1,0 +1,43 @@
+# IQ3_XXS n_tok reached by the MTP loop, env-gated diagnostic Q36_VK_DBG_IQ3N
+# (prints every dense_iq3_xxs dispatch: n_tok, in_dim, out_dim, branch)
+
+=== --mtp-draft 3 (Swift, ctx 512, --mtp-margin 0; token counts include the 512-token prefill) ===
+    660 n_tok=1 in=5120 out=17408 r
+    354 n_tok=1 in=17408 out=5120 r
+    236 n_tok=256 in=17408 out=5120 mmq
+    216 n_tok=1 in=5120 out=6144 r
+    210 n_tok=1 in=5120 out=10240 r
+    144 n_tok=256 in=5120 out=6144 mmq
+    140 n_tok=256 in=5120 out=10240 mmq
+     90 n_tok=1 in=5120 out=12288 r
+     64 n_tok=256 in=5120 out=17408 mmq
+     60 n_tok=256 in=5120 out=12288 mmq
+     59 n_tok=2 in=17408 out=5120 nx
+     36 n_tok=2 in=5120 out=6144 nx
+     35 n_tok=2 in=5120 out=10240 nx
+     16 n_tok=2 in=5120 out=17408 nx
+     15 n_tok=2 in=5120 out=12288 nx
+
+=== --mtp-draft 4 (Swift, ctx 512, --mtp-margin 0; token counts include the 512-token prefill) ===
+    440 n_tok=1 in=5120 out=17408 r
+    236 n_tok=256 in=17408 out=5120 mmq
+    236 n_tok=1 in=17408 out=5120 r
+    144 n_tok=256 in=5120 out=6144 mmq
+    144 n_tok=1 in=5120 out=6144 r
+    140 n_tok=256 in=5120 out=10240 mmq
+    140 n_tok=1 in=5120 out=10240 r
+     64 n_tok=256 in=5120 out=17408 mmq
+     60 n_tok=256 in=5120 out=12288 mmq
+     60 n_tok=1 in=5120 out=12288 r
+
+=== --mtp-draft 5 (Swift, ctx 512, --mtp-margin 0; token counts include the 512-token prefill) ===
+    440 n_tok=1 in=5120 out=17408 r
+    236 n_tok=256 in=17408 out=5120 mmq
+    236 n_tok=1 in=17408 out=5120 r
+    144 n_tok=256 in=5120 out=6144 mmq
+    144 n_tok=1 in=5120 out=6144 r
+    140 n_tok=256 in=5120 out=10240 mmq
+    140 n_tok=1 in=5120 out=10240 r
+     64 n_tok=256 in=5120 out=17408 mmq
+     60 n_tok=256 in=5120 out=12288 mmq
+     60 n_tok=1 in=5120 out=12288 r

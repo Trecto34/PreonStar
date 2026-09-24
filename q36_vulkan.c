@@ -8827,6 +8827,9 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                 };
                 bool rows1 = weight_type == Q36_VK_TENSOR_IQ3_S &&
                              out_dim == 48u;
+                if (getenv("Q36_VK_DBG_IQ3N"))
+                    fprintf(stderr, "IQ3F n_tok=%u in=%u out=%u r4/mv\n",
+                            (uint32_t)n_tok, (uint32_t)in_dim, (uint32_t)out_dim);
                 bool rows4 = weight_type == Q36_VK_TENSOR_IQ3_S &&
                              ((out_dim == 5120 && in_dim >= 6144) ||
                               out_dim == 6144 ||
@@ -8856,10 +8859,15 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                         ((uint32_t)out_dim + 4u) / 5u,
                     1, 1);
             } else if (weight_type == Q36_VK_TENSOR_IQ3_XXS && out_dim % 4u == 0u &&
-                       n_tok == 2u && q36_vk_env_default_on("Q36_VK_DENSE_IQ3_NX")) {
-                /* Two activation rows share one weight unpack.  dense_iq3_xxs_decode_r4
-                 * is ALU-bound (P4: 5.4 VALU/weight), and the 128-row MMQ tile costs
-                 * a full tile for two rows (dense_iq3_xxs_mmq + predequant_b16). */
+                       n_tok >= 2u && n_tok <= 8u &&
+                       q36_vk_env_default_on("Q36_VK_DENSE_IQ3_NX")) {
+                /* Small-batch activation rows share one weight unpack.
+                 * dense_iq3_xxs_decode_r4 is ALU-bound (P4: 5.4 VALU/weight), and
+                 * the 128-row MMQ tile costs a full tile for 2..8 rows
+                 * (dense_iq3_xxs_mmq + predequant_b16).  Only 2 rows is
+                 * reachable today (P7: the verify is 2 rows, never 3); 3..8 is
+                 * P6's recorded reconsider_if condition, bit-exact at 3/4/8 in
+                 * tests/test_dense_iq3xxs_nx.c, and 8 is the audit's scope. */
                 struct {
                     uint32_t out_dim;
                     uint32_t n_tok;
@@ -8873,6 +8881,9 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                 const char *op = q36_vk_prof_iq3_shape(
                     weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
                     (uint32_t)out_dim, "dense_iq3_xxs_decode_nx");
+                if (getenv("Q36_VK_DBG_IQ3N"))
+                    fprintf(stderr, "IQ3F n_tok=%u in=%u out=%u nx\n",
+                            (uint32_t)n_tok, (uint32_t)in_dim, (uint32_t)out_dim);
                 ok = q36_vk_run_unlocked(
                     op, &q36_vk.dense_iq3_xxs_decode_nx,
                     bindings, &push, sizeof(push),
@@ -8900,6 +8911,9 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                 const char *op = q36_vk_prof_iq3_shape(
                     weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
                     (uint32_t)out_dim, "dense_iq3_mmq");
+                if (getenv("Q36_VK_DBG_IQ3N"))
+                    fprintf(stderr, "IQ3F n_tok=%u in=%u out=%u mmq\n",
+                            (uint32_t)n_tok, (uint32_t)in_dim, (uint32_t)out_dim);
                 q36_gpu_tensor *b16 = q36_vk_predequant_b16_unlocked(
                     q8, (uint32_t)n_tok, (uint32_t)blocks);
                 const q36_gpu_tensor *mmq_bindings[5] = {

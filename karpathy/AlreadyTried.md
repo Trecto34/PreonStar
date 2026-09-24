@@ -1776,3 +1776,94 @@ never measured. The two closed-line entries that touch readback
   overflows on a real prompt family (the fallback makes this a no-op, but the cap
   is one line); or the top-k / top_p < 1 path is ever made the default, which this
   path deliberately does not cover.
+
+## MTP loop (P7) — probe NEGATIVE: the 3-row verify does not exist, nx already serves every multi-row step (2026-09-24)
+
+Reopens **P2** (`## MTP draft acceptance measured, and the MTP loop is a net loss
+as shipped`) and **corrects one sentence of P6** (`## Two-row dense IQ3_XXS
+decode...`).  Audit §P7's cheapest listed fix is "use P6's kernel for verify",
+and P6's own `reconsider_if` is "MTP verify moves to 3+ rows (then build the
+`n_tok 2..8` dispatch, which is a condition change, not new kernel work)".  Both
+rest on the same premise, and P6 states it outright: "at draft 3 the verify is 3
+rows and nx only fires on the accepted-prefix replay (`commit_n == 2`)".  That
+premise is false.
+
+- **What the MTP loop actually dispatches.**  An env-gated diagnostic
+  (`Q36_VK_DBG_IQ3N`, kept — it is the instrument, not a semantic variant) prints
+  every `dense_iq3_xxs` dispatch as `n_tok in out branch`.  Swift, ctx 512,
+  `--mtp-margin 0`, whole run including the 512-token prefill:
+  `--mtp-draft 3`: n_tok=1 (r4) 1530 disp, **n_tok=2 (nx) 161 disp**, n_tok=256
+  (MMQ, prefill tile) 644 disp, and **nothing else**.
+  `--mtp-draft 4`: n_tok=1 1144, n_tok=256 644, no n_tok=2 at all.
+  `--mtp-draft 5`: same shape as draft 4.
+  There is no 3-row, 4-row or 8-row IQ3_XXS step in any reachable MTP
+  configuration.  The 2-row step P6's kernel serves *is* the verify; the
+  "3-row verify" is a misreading of `draft_cap = N - 1` and does not appear on
+  the wire.  Raw: `evidence/raw/p7-mtp/ntok-reached.txt`.
+- **The condition change P6 named was made anyway, and measures inert.**
+  `vulkan/dense_iq3_xxs_decode_nx.comp` now guards the partial tail chunk with
+  `tn = min(NTOK, n_tok - t0)` (the per-row FMA chains are independent, so the
+  rows a partial chunk *does* compute keep their exact operand order) and the
+  dispatch at `q36_vulkan.c:8858` is `n_tok >= 2u && n_tok <= 8u` instead of
+  `== 2u`.  `tests/test_dense_iq3xxs_nx.c` now takes `n_tok` and checks every row
+  against its own one-token `dense_iq3_xxs_decode_r4` dispatch:
+  **mismatches=0 max_abs=0 at n_tok 2, 3, 4 and 8** (real weights, attn_qkv shape
+  5120x17408, 68 blocks).  Cost on the same call: 3 rows 0.344 ms vs the 3-row
+  MMQ tile **2.089 ms (6.1x)**, 4 rows 0.347 vs 2.100, 8 rows 0.654 vs 2.103;
+  the 3-row figure repeats at 0.339/0.344, but its *first* dispatch after
+  process start costs 0.679, so a single cold sample reads 2.7x, not 6.1x;
+  the MMQ arms differ in the last bits (bit-diff = every element, `max_abs` 121-170
+  on random-byte weights), which is the f16-vs-f32 accumulation from P3 and is
+  why P6 saw the accept counters drift.
+- **End-to-end this changes nothing, exactly as the diagnostic predicts.**
+  7 interleaved reps, Swift, ctx 512, gen 256, `--mtp-margin 0 --mtp-draft 3`:
+  nx OFF **4.330 t/s (MAD 0.050)** -> nx ON **6.880 t/s (MAD 0.100)** = **+58.9%**,
+  worst pairing +52.7% — against P6's **+62.6%** on the same configuration, i.e.
+  the difference is run drift, not the widening.  The accept counters are
+  bit-identical to P6's arms (OFF `100/140/113/43` = 80.7%, ON `97/120/91/31`
+  = 75.8%, identical in all 7 reps), and all four greedy parity outputs
+  (MTP-off, d2, d3 nx-OFF, d3 nx-ON; seed 42, 64 tokens, ctx 1400) are
+  **byte-identical to P6's saved outputs**, including d2 vs P6's d2 — so the
+  `n_tok == 2` path is unchanged and no token moved anywhere.  Evidence:
+  `evidence/raw/p7-mtp/parity.txt`, `p7gate.txt`.
+- **Attribution, with the audit's own profiling caveat applied.**  The prof
+  `label=decode` block leaks prefill; subtracting a `--gen-tokens 1` run of the
+  same ctx (both prefill 512) gives, per generated token, nx 4.40 -> 0.00 and
+  `dense_iq3_xxs_decode` (r4) 26.35 -> 19.49, while **every IQ3_XXS MMQ row
+  subtracts negative** (`dense_iq3_mmq` 322 disp ON vs 1127 OFF in the decode
+  block, yet -83.7 ms/tok after subtraction) — consistent with the diagnostic
+  showing MMQ only at n_tok=256.  Decode-block kernel totals 313.7 ms/tok (ON)
+  and 475.4 (OFF) against 5805.3 ms for the prefill-mostly run, which is larger
+  than either decode block and is why the subtraction is only good to ~20 ms per
+  row.  Raw: `evidence/raw/p7-mtp/attribution.txt` + `p7attr.py`.
+- **So the remaining d3 cost is structural, not a kernel.**  After P6, a spec
+  call is one draft forward (1 row) plus one verify forward (2 rows, already nx)
+  and commits 1.94 tokens/call (97 calls, 91 accepted), i.e. roughly two forwards
+  per 1.9 tokens: 6.88 t/s against 21.9 t/s plain.  The audit's other three P7
+  fixes — draft argmax on the GPU instead of a 1 MB logits readback, a
+  reduced-vocab draft head, per-verify-row DeltaNet state capture — all sit inside
+  the draft head, which P2 measured at **+3.3 ms of a 47.5 ms one-token spec call
+  (7.5%)**.  <=7.5% of a spec call cannot close a 3.2x gap to plain decode, and
+  the per-row state capture only addresses the 29/120 rejected drafts, not the
+  second forward.  Verdict: **not built**; the audit's P7 lever, as written,
+  does not exist.
+- **Gates:** `karpathy/compat_gate.sh` **PASS** (Swift 1024/177.96 prefill tps +
+  guard).  `./q36_test --vulkan-kernels` fails at `tests/q36_test.c:4958`
+  (`attn decode n_tok invariance` memcmp) exactly as on unmodified HEAD —
+  reproduced this pass, unchanged, out of scope.  Guard untouched by
+  construction (the branch is `Q36_VK_TENSOR_IQ3_XXS`-only; the guard's tensors
+  are IQ2XXS).
+- Honest limitation: the widened dispatch range is **unreachable today**.  It is
+  kept because it is the condition P6 recorded, it is covered by a bit-exact
+  test at 3/4/8 rows, and it is strictly better than the MMQ tile if any future
+  path does dispatch 3-8 rows — but do not count it as a P7 win.
+- Raw: `evidence/raw/p7-mtp/` (`ntok-reached.txt`, `nx-rows.txt`, `parity.txt`,
+  `p7gate.py` + `p7gate.txt`, `p7attr.py` + `attribution.txt`, the four parity
+  outputs, `prof-d3{off,on}.log`, `prof-pre.txt`, `shape-d3on.log`, `run16.s`,
+  `compat.log`, `vkern.log`).
+- `reconsider_if`: the MTP loop starts carrying 3+ verify rows (the dispatch is
+  already right and already bit-exact for them); or a depth-2 path appears that
+  does *not* spend 1-4 draftless backoff tokens after each miss — P2 measured
+  that as the reason only ~47% of calls carry a draft at `--mtp-margin 0`, and
+  committed-tokens-per-forward has to come from there, not from the draft head;
+  or a draft head that is a much larger share of a spec call than 7.5%.

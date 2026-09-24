@@ -1,11 +1,13 @@
-/* Parity + cost for the two-row IQ3_XXS decode kernel
- * (vulkan/dense_iq3_xxs_decode_nx.comp, n_tok == 2) against two separate
- * one-token dispatches of dense_iq3_xxs_decode_r4.
+/* Parity + cost for the small-batch IQ3_XXS decode kernel
+ * (vulkan/dense_iq3_xxs_decode_nx.comp, 2..8 activation rows) against n_tok
+ * separate one-token dispatches of dense_iq3_xxs_decode_r4.
  *
  * The gate is bit-exactness: the nx kernel unpacks each weight word once and
  * then walks, per row, the same FMA chain in the same order as the r4 kernel, so
- * row t of the n_tok == 2 dispatch must equal the n_tok == 1 dispatch of the same
- * activation row, bit for bit.  The real-weight path is exercised through
+ * row t of the n_tok-row dispatch must equal the n_tok == 1 dispatch of the same
+ * activation row, bit for bit -- including the partial chunk of an odd n_tok.
+ * `n_tok` 1..8 is the range the kernel can be dispatched with (P7: only 2 is
+ * reachable today).  The real-weight path is exercised through
  * q36_gpu_matmul_iq_quant_q8_scaled_tensor with a host-backed model map.
  *
  * Weights are random bytes: grid entries are byte LUT indices, the sign and
@@ -13,6 +15,7 @@
  * activation rows are written by hand in the layout add_rms_norm_q8_k.comp
  * produces (word 0 = f32 block scale, words 2..65 = 256 int8).
  *
+ * Usage: test_dense_iq3xxs_nx [iters] [out_dim] [in_dim] [n_tok]
  * Exit status is nonzero if any output bit differs.
  */
 #ifndef _GNU_SOURCE
@@ -78,12 +81,14 @@ int main(int argc, char **argv) {
      * row); the default is the attn_qkv shape. */
     const uint32_t out_dim = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 0) : 5120u;
     const uint32_t in_dim = argc > 3 ? (uint32_t)strtoul(argv[3], NULL, 0) : 17408u;
-    const uint32_t n_tok = 2u;
+    const uint32_t n_tok = argc > 4 ? (uint32_t)strtoul(argv[4], NULL, 0) : 2u;
     const uint32_t blocks = in_dim / QK_K;
     const uint64_t row_bytes = (uint64_t)blocks * BLOCK_BYTES;
     const uint64_t weight_bytes = row_bytes * out_dim;
     const float scale = 1.0f;
     const int iters = argc > 1 ? atoi(argv[1]) : 200;
+
+    if (n_tok < 1u || n_tok > 8u) { fprintf(stderr, "n_tok 1..8\n"); return 1; }
 
     uint8_t *wmap;
     if (posix_memalign((void **)&wmap, (size_t)getpagesize(), weight_bytes)) return 1;
@@ -93,47 +98,46 @@ int main(int argc, char **argv) {
     q36_gpu_set_quality(false);
     q36_gpu_set_model_map(wmap, weight_bytes);
 
-    /* q8 rows: one tensor per arm so both arms read the same bytes. */
+    /* q8 rows: one tensor holding n_tok rows, plus a single-row one, so every
+     * arm reads the same bytes. */
     const uint64_t row_words = (uint64_t)blocks * Q8K_WORDS * 4u;
     q36_gpu_tensor *q8_1 = q36_gpu_tensor_alloc(row_words);
-    q36_gpu_tensor *q8_2 = q36_gpu_tensor_alloc(row_words);
-    q36_gpu_tensor *q8_12 = q36_gpu_tensor_alloc(row_words * 2u);
-    q36_gpu_tensor *oa = q36_gpu_tensor_alloc(out_dim * 4u);
-    q36_gpu_tensor *ob = q36_gpu_tensor_alloc(out_dim * 4u);
-    q36_gpu_tensor *o2 = q36_gpu_tensor_alloc(2u * out_dim * 4u);
-    q36_gpu_tensor *o2m = q36_gpu_tensor_alloc(2u * out_dim * 4u); /* MMQ tile, nx off */
-    if (!q8_1 || !q8_2 || !q8_12 || !oa || !ob || !o2 || !o2m) { fprintf(stderr, "alloc failed\n"); return 1; }
+    q36_gpu_tensor *q8_n = q36_gpu_tensor_alloc(row_words * n_tok);
+    q36_gpu_tensor *o1 = q36_gpu_tensor_alloc(out_dim * 4u);
+    q36_gpu_tensor *on = q36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * 4u);
+    q36_gpu_tensor *om = q36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * 4u);
+    if (!q8_1 || !q8_n || !o1 || !on || !om) { fprintf(stderr, "alloc failed\n"); return 1; }
 
-    uint8_t *rows = malloc(row_words * 2u);
+    uint8_t *rows = malloc(row_words * n_tok);
     if (!rows) return 1;
-    make_q8_row(rows, blocks);
-    make_q8_row(rows + row_words, blocks);
+    for (uint32_t t = 0; t < n_tok; t++) make_q8_row(rows + t * row_words, blocks);
     q36_gpu_tensor_write(q8_1, 0, rows, row_words);
-    q36_gpu_tensor_write(q8_2, 0, rows + row_words, row_words);
-    q36_gpu_tensor_write(q8_12, 0, rows, row_words * 2u);
+    q36_gpu_tensor_write(q8_n, 0, rows, row_words * n_tok);
 
     int ok = 1;
     double ms[3] = { 0, 0, 0 };
     for (int arm = 0; arm < 3; arm++) {
-        /* Arm 2 is the shipped n_tok == 2 path (the 128-row MMQ tile); it is not
-         * the parity reference, only the source of the logit ULP difference that
-         * explains why MTP acceptance counts move when nx takes over the
-         * two-row verify: MMQ accumulates in f16 (P3), nx in f32. */
+        /* Arm 2 is the shipped path for n_tok >= 2 (the 128-row MMQ tile); it is
+         * not the parity reference, only the source of the logit ULP difference
+         * that explains why MTP acceptance counts move when nx takes over the
+         * verify: MMQ accumulates in f16 (P3), nx in f32. */
         if (arm == 2) setenv("Q36_VK_DENSE_IQ3_NX", "0", 1);
         double best = 1e30;
         for (int it = 0; it < iters; it++) {
             double t0 = now_ms();
             if (arm == 0) {
-                ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(oa, wmap, weight_bytes, 0, IQ3_XXS,
-                                                               in_dim, out_dim, q8_1, 1, scale);
-                ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(ob, wmap, weight_bytes, 0, IQ3_XXS,
-                                                               in_dim, out_dim, q8_2, 1, scale);
+                /* n_tok one-token dispatches; the same activation bytes every
+                 * time, so this is the r4 decode cost per row. */
+                for (uint32_t t = 0; t < n_tok; t++)
+                    ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(
+                        o1, wmap, weight_bytes, 0, IQ3_XXS, in_dim, out_dim,
+                        q8_n, 1, scale);
             } else if (arm == 1) {
-                ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(o2, wmap, weight_bytes, 0, IQ3_XXS,
-                                                               in_dim, out_dim, q8_12, n_tok, scale);
+                ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(on, wmap, weight_bytes, 0, IQ3_XXS,
+                                                               in_dim, out_dim, q8_n, n_tok, scale);
             } else {
-                ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(o2m, wmap, weight_bytes, 0, IQ3_XXS,
-                                                               in_dim, out_dim, q8_12, n_tok, scale);
+                ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(om, wmap, weight_bytes, 0, IQ3_XXS,
+                                                               in_dim, out_dim, q8_n, n_tok, scale);
             }
             /* Dispatches are recorded into an eager ring, so without a sync the
              * host time is pure record time. */
@@ -147,49 +151,50 @@ int main(int argc, char **argv) {
     }
     unsetenv("Q36_VK_DENSE_IQ3_NX");
 
-    float *ra = calloc(out_dim, 4), *rb = calloc(out_dim, 4), *r2 = calloc(2u * out_dim, 4);
-    float *r2m = calloc(2u * out_dim, 4);
-    q36_gpu_tensor_read(oa, 0, ra, out_dim * 4u);
-    q36_gpu_tensor_read(ob, 0, rb, out_dim * 4u);
-    q36_gpu_tensor_read(o2, 0, r2, 2u * out_dim * 4u);
-    q36_gpu_tensor_read(o2m, 0, r2m, 2u * out_dim * 4u);
+    /* Parity: n_tok separate one-token dispatches, row by row, read back each
+     * time so the comparison is against the r4 kernel's own bits. */
+    float *ref = calloc(out_dim, 4);
+    float *rn = calloc((size_t)n_tok * out_dim, 4);
+    float *rm = calloc((size_t)n_tok * out_dim, 4);
+    q36_gpu_tensor_read(on, 0, rn, (uint64_t)n_tok * out_dim * 4u);
+    q36_gpu_tensor_read(om, 0, rm, (uint64_t)n_tok * out_dim * 4u);
 
     uint64_t mism = 0;
     double max_abs = 0;
     for (uint32_t t = 0; t < n_tok; t++) {
-        const float *ref = t ? rb : ra;
+        if (!q36_gpu_tensor_write(q8_1, 0, rows + t * row_words, row_words)) return 1;
+        ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(o1, wmap, weight_bytes, 0, IQ3_XXS,
+                                                       in_dim, out_dim, q8_1, 1, scale);
+        ok &= q36_gpu_synchronize() != 0;
+        q36_gpu_tensor_read(o1, 0, ref, out_dim * 4u);
         for (uint32_t i = 0; i < out_dim; i++) {
-            double d = fabs((double)ref[i] - (double)r2[t * out_dim + i]);
+            double d = fabs((double)ref[i] - (double)rn[(size_t)t * out_dim + i]);
             if (!(d <= max_abs)) max_abs = d;
-            if (memcmp(&ref[i], &r2[t * out_dim + i], 4) != 0) mism++;
+            if (memcmp(&ref[i], &rn[(size_t)t * out_dim + i], 4) != 0) mism++;
         }
     }
-    /* nx vs the shipped MMQ 2-row path: expected to differ in the last bits, not
-     * to be equal.  Measured so the MTP acceptance drift has a named cause. */
+    if (!ok) { fprintf(stderr, "dispatch failed (parity)\n"); return 1; }
+
+    /* nx vs the shipped MMQ path: expected to differ in the last bits, not to be
+     * equal.  Measured so the MTP acceptance drift has a named cause. */
     double mmq_max_abs = 0;
-    uint32_t mmq_bit_diff = 0;
+    uint64_t mmq_bit_diff = 0;
     for (uint32_t t = 0; t < n_tok; t++) {
         for (uint32_t i = 0; i < out_dim; i++) {
-            double d = fabs((double)r2m[t * out_dim + i] - (double)r2[t * out_dim + i]);
+            size_t k = (size_t)t * out_dim + i;
+            double d = fabs((double)rm[k] - (double)rn[k]);
             if (!(d <= mmq_max_abs)) mmq_max_abs = d;
-            if (memcmp(&r2m[t * out_dim + i], &r2[t * out_dim + i], 4) != 0) mmq_bit_diff++;
+            if (memcmp(&rm[k], &rn[k], 4) != 0) mmq_bit_diff++;
         }
     }
-    uint32_t mmq_argmax_moved = 0;
-    for (uint32_t t = 0; t < n_tok; t++) {
-        uint32_t am = 0, an = 0;
-        for (uint32_t i = 1; i < out_dim; i++) {
-            if (r2m[t * out_dim + i] > r2m[t * out_dim + am]) am = i;
-            if (r2[t * out_dim + i] > r2[t * out_dim + an]) an = i;
-        }
-        if (am != an) mmq_argmax_moved++;
-    }
-    printf("iq3_xxs nx2: out_dim=%u in_dim=%u blocks=%u iters=%d  mismatches=%llu max_abs=%.3g  %s\n",
-           out_dim, in_dim, blocks, iters, (unsigned long long)mism, max_abs, mism ? "FAIL" : "ok");
-    printf("   two one-token dispatches %8.3f ms   one two-token dispatch %8.3f ms   (%.2fx, %.3f vs %.3f ms/token)\n",
-           ms[0], ms[1], ms[0] / ms[1], ms[0] / 2.0, ms[1] / 2.0);
-    printf("   nx vs MMQ 2-row tile   %8.3f ms   bit-diff %u/%u  max_abs=%.3g  argmax moved %u/%u rows\n",
-           ms[2], mmq_bit_diff, 2u * out_dim, mmq_max_abs, mmq_argmax_moved, n_tok);
+    printf("iq3_xxs nx n_tok=%u: out_dim=%u in_dim=%u blocks=%u iters=%d  mismatches=%llu max_abs=%.3g  %s\n",
+           n_tok, out_dim, in_dim, blocks, iters, (unsigned long long)mism, max_abs,
+           mism ? "FAIL" : "ok");
+    printf("   %u one-token dispatches %8.3f ms   one %u-token nx dispatch %8.3f ms   (%.2fx, %.3f vs %.3f ms/token)\n",
+           n_tok, ms[0], n_tok, ms[1], ms[0] / ms[1], ms[0] / (double)n_tok, ms[1] / (double)n_tok);
+    printf("   nx vs MMQ %u-row tile   %8.3f ms   bit-diff %llu/%llu  max_abs=%.3g\n",
+           n_tok, ms[2], (unsigned long long)mmq_bit_diff,
+           (unsigned long long)n_tok * out_dim, mmq_max_abs);
     q36_gpu_cleanup();
     return mism != 0;
 }

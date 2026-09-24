@@ -1,0 +1,13 @@
+arm       n gen_tps median     MAD  values
+d3off     7          4.330   0.050  ['4.40', '4.33', '4.28', '4.33', '4.31', '4.27', '4.42']
+d3on      7          6.880   0.100  ['6.88', '6.84', '7.00', '6.80', '6.98', '6.98', '6.75']
+prof-d3off  1          3.920   0.000  ['3.92']
+prof-d3on  1          7.550   0.000  ['7.55']
+
+decode t/s medians: off -> on
+  d3off median 4.330  d3on median 6.880  ratio 1.589x  (+58.9%)
+  worst-case ratio min(on)/max(off) = 1.527x
+
+MTP accept counters (deterministic - identical every rep?)
+  d3off  n=7 distinct=1  [(100, 140, 113, 43, 80.7)]
+  d3on   n=7 distinct=1  [(97, 120, 91, 31, 75.8)]

@@ -1,0 +1,33 @@
+decode tokens = 15;  prefill-only baseline = karpathy/evidence/raw/p7-mtp/prof-pre.txt
+op                         d3on-pre/tok d3off-pre/tok  on_disp off_disp
+add_rms_norm                      0.169         0.071     2688     2432
+attn_combine                     -0.105        -0.108      347      316
+attn_decode_split                 1.473         1.111      267      204
+attn_prefill_fa_gqa6             -0.475         0.476       80      112
+delta_gates                       0.043         0.038     1008      912
+delta_net_decode                 -1.930        -1.613     1008      912
+delta_qkv_l2                     -0.378        -0.379     1008      912
+dense_f32f_d_other                0.910         0.670     1536     1152
+dense_f32f_p_other               -1.621        -1.312      480      672
+dense_iq3_mmq                   -83.688        19.668      322     1127
+dense_iq3_xxs_decode             26.350        19.491     4080     3060
+dense_iq3_xxs_decode_nx           4.396         0.000      483        0
+dense_iq3_xxs_pair_mmq          -19.440        15.679      235      329
+dense_iq4_xs_decode               4.200         3.090      704      528
+dense_iq4_xs_mmq                 -9.158         4.159      220      308
+dense_kquant_mmq                 -1.370        21.544      508      712
+dense_q4k_decode                  2.795         2.060      592      444
+dense_q5k_decode                  7.309         6.043      700      529
+dense_q6k_decode                  0.659         0.487      352      264
+dense_q8_0_d_other                0.854         0.949       88       96
+embed_stage_copy                 -0.006        -0.008       21       19
+norm                              0.086         0.091       76       79
+norm_rope                        -0.123        -0.100      347      316
+norm_rope_kv_quant               -0.021        -0.004      347      316
+predequant_b16                   -0.415        -0.357      875     1692
+q8_k_quant                       -0.333        -0.261     3066     2778
+recurrent_conv_silu_decode       -1.205        -1.079     1008      912
+recurrent_norm_gate_q8_k         -1.122        -0.907     1008      912
+swiglu_q8_k                      -1.136        -1.125     1355     1228
+d3on: decode-block kernel total 4706.2 ms over 15 tok = 313.7 ms/tok (prefill-mostly run total 5805.3 ms)
+d3off: decode-block kernel total 7131.0 ms over 15 tok = 475.4 ms/tok (prefill-mostly run total 5805.3 ms)

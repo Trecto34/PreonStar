@@ -749,6 +749,50 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    `tests/q36_test.c:4958` exactly as on unmodified HEAD (pre-existing, unchanged).
    Evidence: `evidence/raw/p9-minp/`.  P9(b) is scope-only
    (`evidence/raw/p9-host/P9B-SCOPE.md`), prototype not started.
+   **P7. Fix the MTP loop — probe NEGATIVE; the 3-row verify does not exist and
+   nx already serves every multi-row step (2026-09-24).**  Reopens P2 and
+   **corrects one sentence of P6**: P6 says "at draft 3 the verify is 3 rows and
+   nx only fires on the accepted-prefix replay (`commit_n == 2`)", and its
+   `reconsider_if` is "MTP verify moves to 3+ rows".  Audit §P7's first fix
+   ("use P6's kernel for verify") rests on the same premise.  An env-gated
+   diagnostic (`Q36_VK_DBG_IQ3N`, kept — instrument, not a semantic variant)
+   prints every `dense_iq3_xxs` dispatch as `n_tok in out branch`.  Swift, ctx
+   512, `--mtp-margin 0`, whole run incl. the 512-token prefill: `--mtp-draft 3`
+   -> n_tok=1 (r4) 1530 disp, **n_tok=2 (nx) 161 disp**, n_tok=256 (MMQ prefill
+   tile) 644, nothing else; `--mtp-draft 4`/`5` -> n_tok=1 1144, n_tok=256 644,
+   **no n_tok=2 at all**.  There is no 3/4/8-row IQ3_XXS step in any reachable
+   MTP config: `draft_cap = N - 1` makes the verify 2 rows at draft 3, and the
+   2-row step nx serves *is* the verify.  The widening P6 recorded as its
+   `reconsider_if` was still built — `vulkan/dense_iq3_xxs_decode_nx.comp` gains
+   `tn = min(NTOK, n_tok - t0)` on all five row-indexed loops, dispatch
+   `q36_vulkan.c` `n_tok == 2u` -> `n_tok >= 2u && n_tok <= 8u`,
+   `tests/test_dense_iq3xxs_nx.c` takes `n_tok` as argv[4] — and is **bit-exact
+   at 3/4/8 rows** (`mismatches=0 max_abs=0`), 3 rows 0.344 ms vs the MMQ tile
+   2.089 ms = **6.1x**, 8 rows 0.654 vs 2.103 = 3.2x, so it is strictly better
+   if such a path ever exists.  It is **not** a P7 win: unreachable today, kept
+   as condition coverage.  End-to-end 7 reps draft 3: OFF 4.330 t/s (MAD 0.050)
+   -> ON 6.880 (MAD 0.100) = +58.9% vs P6's +62.6%, accept counters bit-identical
+   to P6 (OFF 100/140/113/43 = 80.7%, ON 97/120/91/31 = 75.8%), all four greedy
+   parity outputs byte-identical to P6's saved outputs.  Attribution (subtract a
+   `--gen-tokens 1` run): nx 4.40 -> 0.00 ms/tok, r4 26.35 -> 19.49, every
+   IQ3_XXS MMQ row subtracts negative (the `label=decode` block leaks prefill).
+   **So the residual d3 cost is structural, not a kernel:** after P6 a spec call
+   is one draft forward (1 row) + one verify forward (2 rows) committing 1.94
+   tokens/call (97 calls, 91 accepted) = ~2 forwards per 1.9 tokens, 6.88 t/s
+   against 21.9 t/s plain.  The other three audit fixes (GPU draft argmax,
+   reduced-vocab draft head, per-verify-row state capture) all sit in the draft
+   head, which P2 measured at **+3.3 ms of a 47.5 ms spec call (7.5%)** — 7.5%
+   cannot close a 3.2x gap, and the state capture only addresses the 29/120
+   rejected drafts, not the second forward.  Verdict: **not built**; the audit's
+   P7 lever, as written, does not exist.  `compat_gate.sh` PASS (Swift
+   1024/177.96 prefill tps); `q36_test --vulkan-kernels` fails at
+   `tests/q36_test.c:4958` exactly as on unmodified HEAD (pre-existing).  Guard
+   untouched by construction (branch is `Q36_VK_TENSOR_IQ3_XXS`-only; guard
+   tensors are IQ2XXS).  Evidence: `evidence/raw/p7-mtp/`.  `reconsider_if`: the
+   MTP loop starts carrying 3+ verify rows (dispatch already right and already
+   bit-exact for them), or a depth-2 path appears that does not spend 1-4
+   draftless backoff tokens after each miss, or a draft head that is a much
+   larger share of a spec call than 7.5%.
 
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence

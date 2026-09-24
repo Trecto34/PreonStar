@@ -1,0 +1,27 @@
+iq3_xxs nx n_tok=3: out_dim=5120 in_dim=17408 blocks=68 iters=200  mismatches=0 max_abs=0  ok
+   3 one-token dispatches    0.950 ms   one 3-token nx dispatch    0.759 ms   (1.25x, 0.317 vs 0.253 ms/token)
+   nx vs MMQ 3-row tile      2.087 ms   bit-diff 15360/15360  max_abs=144
+iq3_xxs nx n_tok=4: out_dim=5120 in_dim=17408 blocks=68 iters=200  mismatches=0 max_abs=0  ok
+   4 one-token dispatches    0.472 ms   one 4-token nx dispatch    0.346 ms   (1.36x, 0.118 vs 0.087 ms/token)
+   nx vs MMQ 4-row tile      2.090 ms   bit-diff 20480/20480  max_abs=144
+iq3_xxs nx n_tok=8: out_dim=5120 in_dim=17408 blocks=68 iters=200  mismatches=0 max_abs=0  ok
+   8 one-token dispatches    0.908 ms   one 8-token nx dispatch    0.652 ms   (1.39x, 0.113 vs 0.082 ms/token)
+   nx vs MMQ 8-row tile      2.089 ms   bit-diff 40960/40960  max_abs=170
+iq3_xxs nx n_tok=3: out_dim=5120 in_dim=17408 blocks=68 iters=200  mismatches=0 max_abs=0  ok
+   3 one-token dispatches    0.364 ms   one 3-token nx dispatch    0.334 ms   (1.09x, 0.121 vs 0.111 ms/token)
+   nx vs MMQ 3-row tile      2.084 ms   bit-diff 15360/15360  max_abs=144
+iq3_xxs nx n_tok=4: out_dim=5120 in_dim=17408 blocks=68 iters=200  mismatches=0 max_abs=0  ok
+   4 one-token dispatches    0.475 ms   one 4-token nx dispatch    0.345 ms   (1.37x, 0.119 vs 0.086 ms/token)
+   nx vs MMQ 4-row tile      2.093 ms   bit-diff 20480/20480  max_abs=144
+iq3_xxs nx n_tok=8: out_dim=5120 in_dim=17408 blocks=68 iters=200  mismatches=0 max_abs=0  ok
+   8 one-token dispatches    0.907 ms   one 8-token nx dispatch    0.656 ms   (1.38x, 0.113 vs 0.082 ms/token)
+   nx vs MMQ 8-row tile      2.112 ms   bit-diff 40960/40960  max_abs=170
+iq3_xxs nx n_tok=3: out_dim=5120 in_dim=17408 blocks=68 iters=200  mismatches=0 max_abs=0  ok
+   3 one-token dispatches    0.366 ms   one 3-token nx dispatch    0.343 ms   (1.07x, 0.122 vs 0.114 ms/token)
+   nx vs MMQ 3-row tile      2.104 ms   bit-diff 15360/15360  max_abs=144
+iq3_xxs nx n_tok=4: out_dim=5120 in_dim=17408 blocks=68 iters=200  mismatches=0 max_abs=0  ok
+   4 one-token dispatches    0.479 ms   one 4-token nx dispatch    0.351 ms   (1.37x, 0.120 vs 0.088 ms/token)
+   nx vs MMQ 4-row tile      2.099 ms   bit-diff 20480/20480  max_abs=144
+iq3_xxs nx n_tok=8: out_dim=5120 in_dim=17408 blocks=68 iters=200  mismatches=0 max_abs=0  ok
+   8 one-token dispatches    0.906 ms   one 8-token nx dispatch    0.655 ms   (1.38x, 0.113 vs 0.082 ms/token)
+   nx vs MMQ 8-row tile      2.112 ms   bit-diff 40960/40960  max_abs=170

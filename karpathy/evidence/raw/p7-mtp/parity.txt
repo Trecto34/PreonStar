@@ -1,0 +1,11 @@
+generated-text bytes per arm (seed 42, greedy, 64 tokens, ctx 1400)
+  par-mtp-off  new 270 bytes  P6-era 270 bytes
+  par-d2       new 270 bytes  P6-era 270 bytes
+  par-d3nxoff  new 284 bytes  P6-era 284 bytes
+  par-d3nxon   new 284 bytes  P6-era 284 bytes
+nx-widened d3 vs MMQ d3      : IDENTICAL
+nx-widened d3 vs P6 d3nxon   : IDENTICAL
+nx-widened d3 vs P6 d3nxoff  : IDENTICAL
+d3 (either) vs MTP off       : DIFFER
+d2 now vs P6 d2 (n_tok 2 inert): IDENTICAL
+MTP off now vs P6 MTP off     : IDENTICAL

@@ -1,0 +1,30 @@
+# Extended ix3_xxs nx kernel: parity vs n_tok separate one-token r4 dispatches + cost
+# ./tests/test_dense_iq3xxs_nx 100 5120 17408 <n_tok>, real weights (attn_qkv shape)
+
+=== cold (first GPU job of the session: clock ramp inflates arm 0) ===
+iq3_xxs nx n_tok=2: out_dim=5120 in_dim=17408 blocks=68 iters=100  mismatches=0 max_abs=0  ok
+   2 one-token dispatches    0.751 ms   one 2-token nx dispatch    0.467 ms   (1.61x, 0.375 vs 0.234 ms/token)
+   nx vs MMQ 2-row tile      2.096 ms   bit-diff 10240/10240  max_abs=121
+iq3_xxs nx n_tok=3: out_dim=5120 in_dim=17408 blocks=68 iters=100  mismatches=0 max_abs=0  ok
+   3 one-token dispatches    0.357 ms   one 3-token nx dispatch    0.337 ms   (1.06x, 0.119 vs 0.112 ms/token)
+   nx vs MMQ 3-row tile      2.087 ms   bit-diff 15360/15360  max_abs=144
+iq3_xxs nx n_tok=4: out_dim=5120 in_dim=17408 blocks=68 iters=100  mismatches=0 max_abs=0  ok
+   4 one-token dispatches    0.469 ms   one 4-token nx dispatch    0.345 ms   (1.36x, 0.117 vs 0.086 ms/token)
+   nx vs MMQ 4-row tile      2.097 ms   bit-diff 20480/20480  max_abs=144
+iq3_xxs nx n_tok=8: out_dim=5120 in_dim=17408 blocks=68 iters=100  mismatches=0 max_abs=0  ok
+   8 one-token dispatches    0.917 ms   one 8-token nx dispatch    0.663 ms   (1.38x, 0.115 vs 0.083 ms/token)
+   nx vs MMQ 8-row tile      2.093 ms   bit-diff 40960/40960  max_abs=170
+
+=== after a warmup run, same sweep ===
+iq3_xxs nx n_tok=2: out_dim=5120 in_dim=17408 blocks=68 iters=100  mismatches=0 max_abs=0  ok
+   2 one-token dispatches    0.251 ms   one 2-token nx dispatch    0.191 ms   (1.31x, 0.125 vs 0.095 ms/token)
+   nx vs MMQ 2-row tile      2.095 ms   bit-diff 10240/10240  max_abs=121
+iq3_xxs nx n_tok=3: out_dim=5120 in_dim=17408 blocks=68 iters=100  mismatches=0 max_abs=0  ok
+   3 one-token dispatches    0.361 ms   one 3-token nx dispatch    0.336 ms   (1.07x, 0.120 vs 0.112 ms/token)
+   nx vs MMQ 3-row tile      2.089 ms   bit-diff 15360/15360  max_abs=144
+iq3_xxs nx n_tok=4: out_dim=5120 in_dim=17408 blocks=68 iters=100  mismatches=0 max_abs=0  ok
+   4 one-token dispatches    0.472 ms   one 4-token nx dispatch    0.347 ms   (1.36x, 0.118 vs 0.087 ms/token)
+   nx vs MMQ 4-row tile      2.100 ms   bit-diff 20480/20480  max_abs=144
+iq3_xxs nx n_tok=8: out_dim=5120 in_dim=17408 blocks=68 iters=100  mismatches=0 max_abs=0  ok
+   8 one-token dispatches    0.912 ms   one 8-token nx dispatch    0.654 ms   (1.39x, 0.114 vs 0.082 ms/token)
+   nx vs MMQ 8-row tile      2.103 ms   bit-diff 40960/40960  max_abs=170
