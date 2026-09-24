@@ -699,6 +699,26 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    IQ2XXS, zero nx dispatches in its profile).  Evidence:
    `evidence/raw/p6-nx2/` (`nx2-test.log`, `p6gate.py|txt`, 14 `out9` logs,
    `prof-d3{off,on}.log`, parity outputs, `run6.s`, `run9.s`, `run11.s`).
+   **P8. IQ2_M shared expert folded into the fused expert pair — premise
+   measured, prize below the bar, NOT built (2026-09-24).**  The audit's dispatch
+   argument is confirmed (the `ffn_*_shexp` tensors are IQ2_S, miss the
+   Q8_0-only fused path at `q36.c:8278-8320`, and fall through to
+   `q36.c:8337-8361`), but the shared-expert path is **4.55% of IQ2_M decode,
+   not 20%**: per-shape profile (`Q36_VK_PROF_SHAPE=1`, ctx 512, gen 128) names
+   `dense_iq2_s_decode_2048x512_n1` (gate+up) 11520 disp / 48.565 ms at 4.22
+   us/disp = **79.7 GB/s** and `dense_iq2_s_decode_512x2048_n1` (down) 4864 disp
+   / 26.872 ms = **60.8 GB/s**, against **151.0 GB/s** for the routed
+   `moe_iq2s_gate_up_decode` in the same run (byte model cross-checked:
+   `moe_iq2s_down_sum_decode` predicts 40.3 GB/s vs P1's measured 40.6).  75.437
+   ms = 0.589 ms/tok of a 12.951 ms/tok decode-row total, ~5.1% with the swiglu
+   and mid `q8_k_quant`.  The fold can therefore only capture the ~2x efficiency
+   gap, ~0.3-0.4 ms/tok = **2.5-3%**, for two new shader paths + host wiring + a
+   new parity surface; the 5 fewer dispatches per layer are worth nothing because
+   the path is not dispatch-bound.  Cheapest capture point recorded and not
+   taken: `q36_gpu_matmul_iq2s_pair_scaled_tensor` (`q36_vulkan.c:8429`, already
+   used for `ssm_beta`/`ssm_alpha` at `q36.c:8722`) is the identical call shape
+   for the shexp gate/up, ~1%.  Guard unchanged by construction (Q5_K/Q6_K).
+   Evidence: `evidence/raw/p8-shexp/{p8-shape.log,p8probe.py,p8probe.txt}`.
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 

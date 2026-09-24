@@ -1636,3 +1636,59 @@ rows 8, global LUT), all of which keep the per-weight cvt+fma that P4 killed.
   2` check is replaced by a general small-batch path; or an f32-accumulate MMQ
   replacement lands, which would make the d3 OFF/ON accept counters agree and let
   the 1.626x be quoted without the acceptance caveat.
+
+## IQ2_M shared expert folded into the fused expert pair — premise measured, prize below the MoE bar, NOT built (2026-09-24)
+
+Audit §P8 ("add the shared expert as a 9th slot in `moe_gate_up_decode` /
+`moe_down_q2k_sum_decode` IQ2_S builds").  Not a rejection of an earlier
+attempt: the ledger has no entry for the shared expert, and the audit's argument
+was a *dispatch count* (`ffn_*_shexp` are IQ2_S so they miss the Q8_0-only fused
+path at `q36.c:8278-8320` and fall through to `q36.c:8337-8361`, three matvecs +
+swiglu + one mid `q8_k_quant`).  What was measured is that the dispatch count is
+right and the cost model behind it is not.
+
+- **Method.** `Q36_VK_PROF=1 Q36_VK_PROF_SHAPE=1` on IQ2_M, ctx 512, gen 128 —
+  per-shape op rows, and `q36_vk_prof_iq3_shape` (`q36_vulkan.c:700-733`) names a
+  `n_tok == 1` matvec `dense_<kind>_decode_<in_dim>x<out_dim>_n1`, so the shared
+  expert's two shapes are identifiable: `2048x512` (gate and up, 2048 -> 512) and
+  `512x2048` (down, 512 -> 2048).  Byte model: IQ2_S = 2.5625 bpw = 0.3203 B per
+  weight.  Cross-check: the model predicts 40.3 GB/s for
+  `moe_iq2s_down_sum_decode`, which reproduces P1's independently measured 40.6
+  GB/s (`evidence/raw/p1-sumdecode/`).
+- **Shared-expert matvecs are 4.55% of decode, at 60-80 GB/s:**
+  `dense_iq2_s_decode_2048x512_n1` 11520 disp (90.0/tok, 2.25/layer) 48.565 ms,
+  4.22 us/disp, 0.336 MB/disp -> **79.7 GB/s**;
+  `dense_iq2_s_decode_512x2048_n1` 4864 disp (38.0/tok, 0.95/layer) 26.872 ms,
+  5.52 us/disp -> **60.8 GB/s**.  Total **75.437 ms = 0.589 ms/tok = 4.55%** of
+  the decode-row GPU total (1657.702 ms over 128 tokens = 12.951 ms/tok); ~5.1%
+  including the swiglu and the mid `q8_k_quant`.
+- **Why the fold does not capture the audit's number.**  Same model, same format,
+  same run: `moe_iq2s_gate_up_decode` (8 experts x gate+up) runs at **151.0
+  GB/s** — so there is real headroom (~2x) on the shexp bytes — but the shexp
+  matvecs are **efficiency-bound, not dispatch-latency-bound**: 0.336 MB per
+  dispatch in 4.2-5.5 us puts them in the same bytes-per-microsecond class as the
+  kernels they would be folded into, and the audit's 128 disp/token is a
+  consequence of the same small shape, not a separate overhead to delete.
+  Realizable prize: 75.4 ms -> ~25-35 ms, i.e. **~0.3-0.4 ms/tok = 2.5-3% of
+  IQ2_M decode**, at or under the audit's 3.4% MoE bar, for two new shader paths
+  plus host wiring plus a new parity surface.  The 5 fewer dispatches per layer
+  are irrelevant precisely because the path is not dispatch-bound.
+- **Cheaper capture point identified, not taken.**  `q36_gpu_matmul_iq2s_pair_scaled_tensor`
+  (`q36_vulkan.c:8429`) already pairs two IQ2_S projections off one Q8_K input,
+  and is already used for `ssm_beta`/`ssm_alpha` (`q36.c:8722`).  The shexp
+  gate/up is the identical call shape (two 2048->512 projections, one input
+  quant) and would save ~1 dispatch/layer, ~1% — the same order as the fold's
+  dispatch saving and a fraction of its cost.  Recorded as the first thing to try
+  if anyone wants this prize; deliberately not in this pass.
+- **Verdict: not built.**  The premise is confirmed (the path exists, is IQ2_S,
+  misses the Q8_0 fast path, and is 128 of the ~713 decodes/token) but the
+  prize is bounded at 2.5-3% of IQ2_M decode, under the audit's own MoE bar.
+  Guard unchanged by construction (its `ffn_*_shexp` are Q5_K/Q6_K, so the IQ2_S
+  branch cannot fire).
+- Raw: `evidence/raw/p8-shexp/` (`p8-shape.log`, `p8probe.py`, `p8probe.txt`,
+  `run10.s`).
+- `reconsider_if`: the fold is bundled with a general fix for small
+  single-projection IQ2_S matvecs (the 60-80 GB/s is a shared property of the
+  `dense_iq2_s_decode_*` shapes, and both shexp legs plus the delta/ssm
+  projections ride on it — that lever is worth more than the fold); or a target
+  where 2.5-3% of IQ2_M decode decides something.

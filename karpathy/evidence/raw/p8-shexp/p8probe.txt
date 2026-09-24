@@ -1,0 +1,12 @@
+op rows 58, decode rows 45, decode gpu total 1657.702 ms = 12.951 ms/tok
+  mixed q8_k_quant     disp=21490 gpu=52.788 -> decode est 50.621 ms
+  mixed add_rms_norm   disp=10560 gpu=56.158 -> decode est 54.456 ms
+
+shared-expert matvecs vs the routed kernels:
+  dense_iq2_s_decode_2048x512_n1     disp= 11520 ( 90.0/tok, 2.25/layer)    4.22 us/disp  0.336 MB/disp    79.7 GB/s
+  dense_iq2_s_decode_512x2048_n1     disp=  4864 ( 38.0/tok, 0.95/layer)    5.52 us/disp  0.336 MB/disp    60.8 GB/s
+  moe_iq2s_gate_up_decode            disp=  5120 ( 40.0/tok, 1.00/layer)   35.59 us/disp  5.374 MB/disp   151.0 GB/s
+  moe_iq2s_down_sum_decode           disp=  4736 ( 37.0/tok, 0.93/layer)   66.73 us/disp  2.687 MB/disp    40.3 GB/s
+
+shared-expert matvecs 75.437 ms = 0.5894 ms/tok = 4.55% of the decode-row total
+  + swiglu and one mid q8_k_quant per layer: ~5.1% including them
