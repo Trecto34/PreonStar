@@ -1,0 +1,12 @@
+#version 460
+#extension GL_EXT_integer_dot_product : require
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer A { uint a[]; };
+layout(set = 0, binding = 1) readonly buffer B { uint b[]; };
+layout(set = 0, binding = 2) writeonly buffer O { int o[]; };
+void main(void) {
+    int acc = 0;
+    for (uint i = gl_GlobalInvocationID.x; i < a.length(); i += 64u)
+        acc += dotPacked4x8EXT(int(a[i]), int(b[i]));
+    o[gl_GlobalInvocationID.x] = acc;
+}

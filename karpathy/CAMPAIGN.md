@@ -587,6 +587,23 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    ms and +14% IQ2_M decode.  Evidence:
    `evidence/raw/p1-sumdecode/P1-VERDICT.md` + `ab-p1-{fma,loadfloor,alufree}.csv`,
    `summary.csv`, `isa-f64-counts.txt`, `p1-diag-probes.diff`.
+   **P4. Bit-exact integer IQ3_XXS decode — REJECTED, no packed signed dot on
+   GFX1013 (2026-09-24).** Reopened the 2026-09-17 sign-mask rejection with the
+   audit's ISA evidence (690 VALU / 128 weight-MACCs = 5.4 VALU/weight; 6.497
+   ms/tok = 24.4% of the kernel is exposed ALU above the 20.081 ms/tok
+   loads-only floor).  The arithmetic premise is right — grid <= 62, q8 <= 127,
+   partial sums < 2^24, so an int32 dot is bit-exact — but the instruction is
+   not there: a `dotPacked4x8EXT` shader compiles and ACO emits **zero**
+   `v_dot4_i32_i8`, lowering it to 4x `v_mul_i32_i24_sdwa` (byte select) + 3
+   adds + accumulate = 2 VALU/weight for the MAC alone.  Best reachable integer
+   layout is 4.75-5.0 VALU/weight vs the shipped 5.4-6.0 = 0.3-1.0 ms/tok,
+   1-2%; the <= 2.5 target needs a pre-signed grid word (16-variant 512-entry
+   LUT, 32 KB LDS, over budget).  `device-query.txt:165
+   has_accelerated_dot_product = 0`.  The Q4_K/Q5_K half inherits the ceiling;
+   its only survivor is a *load* lever (source-confirmed double fetch of every
+   dword row, `dense_kquant_decode.comp:229-234`), left unbuilt.  Evidence:
+   `evidence/raw/p4-iq3xxs/P4-VERDICT.md`, `dot4.comp`, `dot4.isa.txt`,
+   `dot4.stats.txt`.
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 

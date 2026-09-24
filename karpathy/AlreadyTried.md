@@ -1312,3 +1312,64 @@ decompose the kernel's 313.2 ms into DRAM floor, field-load, and ALU cost.
   #1 at 21.6% of decode) and someone builds the coalesced-fetch version; target
   315 -> 200-230 ms kernel and 74.4 -> ~80 t/s decode, parity `max_abs_diff = 0`
   on the frontier-513 dump because only the fetch changes.
+
+## Bit-exact integer IQ3_XXS decode — REJECTED: no packed signed dot on GFX1013 (2026-09-24)
+
+Reopens **"Integer sign-mask IQ3_XXS decode — REJECTED"** (2026-09-17 §"BC-250
+transfer audit": 373.83 -> 407.97 ms over 16 generation tokens) and §7's closed
+line **"`int dot: 0` is a hardware truth on GFX1013"**.  The reopening case was
+legitimate: that 2026-09-17 variant applied the sign *per weight* and still paid
+the per-weight convert + fma, so it never tested the audit's actual proposal (a
+packed signed integer dot).  New evidence reproduced here: the shipped
+`dense_iq3_xxs_decode_r4` loop is 5.4 VALU per weight MACC (690 VALU / 128 MACCs
+per lane, `evidence/raw/iq3xxs-isa/dense_iq3_xxs_decode_r4.isa.txt`) against a
+20.081 ms/tok loads-only floor and a 26.578 ms/tok baseline, i.e. 6.497 ms/tok
+(24.4%) of exposed ALU (`evidence/raw/iq3xxs-isa/W2-VERDICT.md`).  The audit's
+arithmetic premise also holds: grid magnitudes <= 62, q8 <= 127, 32-term partial
+sums < 2^24, so the shipped f32 loop *is* exact integer math and an int32 inner
+product would be bit-identical (`max_abs_diff = 0`).
+
+- **Probe — does this chip have a packed signed 4x8 dot? NEGATIVE.** A minimal
+  `dotPacked4x8EXT(int, int)` shader over two SSBOs (`dot4.comp`) is accepted by
+  `./glslc --target-env=vulkan1.1 -O`, but the ACO dump shows **zero**
+  `v_dot4_i32_i8`.  ACO lowers it to 4x
+  `v_mul_i32_i24_sdwa ... src0_sel:BYTE_n src1_sel:BYTE_n` + 2 `v_add_nc_u32`/
+  `v_add3_u32` + 1 accumulate = **8 VALU per 4 weights = 2 VALU/weight for the
+  MAC alone**, with the byte select eating SDWA slots.  Raw: `dot4.comp`,
+  `dot4.isa.txt`, `dot4.stats.txt`.
+- **Op accounting.**  shipped f32 5.4-6.0 VALU/weight; int with the signs from a
+  *second* packed dot ~5.0; int with signs pre-folded into the weight word ~3.0;
+  int with signs pre-folded + SWAR negation ~4.75 (the byte-wise `~w + 1` carry
+  corrupts a zero magnitude).  The <= 2.5 target needs the sign-free 3.0 row,
+  which needs the grid word to *already be signed* — 16 sign variants of the
+  512-entry table, 32 KB of LDS built per workgroup, over budget and a
+  per-dispatch build cost.  The two reachable layouts (5.0, 4.75) buy
+  0.3-1.0 ms/tok = 1-2% of Swift's 46.7 ms/tok decode, below the dense gate and
+  far below the audit's 13-15% estimate, which assumed a packed dot that this
+  hardware does not have.
+- **Not built.**  `device-query.txt:165` `has_accelerated_dot_product = 0` and
+  the §7 closed line stand.  Caveat recorded for honesty: the ISA dump was made
+  by a tool that never enables
+  `VkPhysicalDeviceShaderIntegerDotProductFeatures`, so it shows ACO's fallback
+  lowering; the hardware claim rests on RADV's own feature query, not on the
+  ISAs.  That does not change the verdict — a capability the driver refuses is a
+  capability the shipped pipeline cannot use.
+- **The Q4_K/Q5_K half of the audit item does not inherit this verdict, but its
+  only remaining lever is a *load* lever, not an integer one.**  Read
+  `vulkan/dense_kquant_decode.comp:229-234`: for `QTYPE == Q4_K` the dword is
+  fetched at `base + 16 + (group >> 1) * 32 + (idx & 31)` with
+  `group = itid >> 1` and `idx = 16 * itid + 4 * i`, so lanes `4k` and `4k + 2`
+  read the **same** dword row and select opposite nibbles (`group & 1`), and
+  lanes `4k + 1` / `4k + 3` likewise — every 32-value group's bytes are loaded
+  twice from L1.  The audit's "lane pairs reload the same dword for the other
+  nibble" is confirmed.  No packed dot is needed to fix it (one lane unpacks both
+  nibbles of a dword row), but that is a rebuild of the loop's lane mapping, not
+  a probe; left unbuilt and listed under `reconsider_if`.
+- Raw: `evidence/raw/p4-iq3xxs/P4-VERDICT.md`, `dot4.comp`, `dot4.isa.txt`,
+  `dot4.stats.txt`, plus the pre-existing `evidence/raw/iq3xxs-isa/`.
+- `reconsider_if`: hardware with a real `V_DOT4_I32_I8` (RDNA3+/gfx11), where the
+  MAC drops to 1 op per 4 weights and the 2.5 target becomes reachable; or a
+  repacked IQ3_XXS layout that stores the magnitudes already signed, which makes
+  the 3.0 VALU/weight row reachable with no per-4-weight sign work; or for the
+  Q4_K/Q5_K half, anyone who builds the one-lane-per-dword-row load mapping
+  (lm_head Q5_K is 5.8 ms/tok at ~282 GB/s vs IQ4_XS 360).

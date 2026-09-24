@@ -1,0 +1,210 @@
+[dbg] 3 descriptor bindings, 32 push bytes
+[dbg] pipeline built with CAPTURE_INTERNAL_REPRESENTATIONS
+[dbg] exec 0 'compute': IR count query -> 0, n=3
+[dbg] sizes query -> 0
+[dbg]   ir 0 'NIR Shader(s)' text=1 size=3783
+[dbg]   ir 1 'ACO IR' text=1 size=2840
+[dbg]   ir 2 'Assembly' text=1 size=2951
+[dbg] data query -> 0
+
+===== executable 0 'compute' / IR 'NIR Shader(s)' (The optimized NIR shader(s)) =====
+shader: MESA_SHADER_COMPUTE
+source_blake3: {0xd7cfe987, 0x71f77cad, 0xa2f9083c, 0x7b579c54, 0x32b6a65d, 0x383ce14b, 0xb89a1d05, 0xc90d0190}
+name: 
+workgroup_size: 64, 1, 1
+num_ssbos: 3
+system_values_read: 0x00000000'00000000'00008400'00000000
+api_subgroup_size: 64
+max_subgroup_size: 64
+min_subgroup_size: 64
+uses_resource_info_query: true
+bit_sizes_int: 0x21
+separate_shader: true
+flrp_lowered: true
+writes_memory: true
+decl_var ssbo INTERP_MODE_NONE restrict readonly A #0 (~0, 0, 0)
+decl_var ssbo INTERP_MODE_NONE restrict readonly B #1 (~0, 0, 1)
+decl_var ssbo INTERP_MODE_NONE restrict writeonly O #2 (~0, 0, 2)
+decl_function main () (entrypoint)
+
+impl main {
+    con block b0:       // preds:
+    con 32     %0 = @load_scalar_arg_amd (base=2, arg_upper_bound_u32_amd=0, arg_num_lsb_zero=0)
+    div 32     %1 = @load_vector_arg_amd (base=4, arg_upper_bound_u32_amd=63, arg_num_lsb_zero=0)
+    con 32     %2 = load_const (0x00000006)
+    con 32     %3 = ishl %0, %2 (0x6)
+    div 32     %4 = iadd %3, %1
+    con 32     %5 = @load_scalar_arg_amd (base=1, arg_upper_bound_u32_amd=0, arg_num_lsb_zero=2)
+    con 32     %6 = load_const (0xffff8000 = -32768 = 4294934528)
+    con 64     %7 = pack_64_2x32_split %5, %6 (0xffff8000)
+    con 32     %8 = load_const (0x00000000)
+    con 32x4   %9 = @load_global_amd (%7, %8 (0x0)) (base=0, access=readonly|reorderable|smem-amd, align_mul=4, align_offset=0)
+    con 32    %10 = load_const (0x00000040 = 64)
+    con 32    %11 = load_const (0x00000002)
+    con 32    %12 = ushr %9.z, %11 (0x2)
+                    // succs: b1
+    div loop {
+        div block b1:       // preds: b0 b4
+        div 32    %13 = phi b0: %8 (0x0), b4: %37
+        div 32    %14 = phi b0: %4, b4: %38
+        div 1     %15 = uge %14, %12
+                        // succs: b2 b3
+        if %15 {
+            div block b2:// preds: b1
+            break
+            // succs: b5
+        } else {
+            div block b3:  // preds: b1, succs: b4
+        }
+        div block b4:       // preds: b3
+        div 32    %16 = ishl %14, %11 (0x2)
+        div 32    %17 = @load_ssbo (%9, %16) (access=readonly|reorderable, align_mul=4, align_offset=0, offset_shift=0)
+        con 32x4  %18 = @load_global_amd (%7, %8 (0x0)) (base=16, access=readonly|reorderable|speculatable|smem-amd, align_mul=4, align_offset=0)
+        div 32    %19 = @load_ssbo (%18, %16) (access=readonly|reorderable, align_mul=4, align_offset=0, offset_shift=0)
+        div 32    %20 = extract_i8 %19, %8 (0x0)
+        div 32    %21 = extract_i8 %17, %8 (0x0)
+        div 32    %22 = imul24_relaxed %21, %20
+        con 32    %23 = load_const (0x00000001)
+        div 32    %24 = extract_i8 %19, %23 (0x1)
+        div 32    %25 = extract_i8 %17, %23 (0x1)
+        div 32    %26 = imul24_relaxed %25, %24
+        div 32    %27 = iadd %22, %26
+        div 32    %28 = extract_i8 %19, %11 (0x2)
+        div 32    %29 = extract_i8 %17, %11 (0x2)
+        div 32    %30 = imul24_relaxed %29, %28
+        con 32    %31 = load_const (0x00000003)
+        div 32    %32 = extract_i8 %19, %31 (0x3)
+        div 32    %33 = extract_i8 %17, %31 (0x3)
+        div 32    %34 = imul24_relaxed %33, %32
+        div 32    %35 = iadd %30, %34
+        div 32    %36 = iadd %27, %35
+        div 32    %37 = iadd %36, %13
+        div 32    %38 = iadd %14, %10 (0x40)
+                        // succs: b1
+    }
+    con block b5:       // preds: b2
+    div 32    %39 = phi b2: %13
+    con 32x4  %40 = @load_global_amd (%7, %8 (0x0)) (base=32, access=readonly|reorderable|smem-amd, align_mul=4, align_offset=0)
+    div 32    %41 = ishl %4, %11 (0x2)
+                    @store_ssbo (%39, %40, %41) (wrmask=x, access=writeonly, align_mul=4, align_offset=0, offset_shift=0)
+                    // succs: b6
+    block b6:
+}
+
+
+
+===== executable 0 'compute' / IR 'ACO IR' (The ACO IR after some optimizations) =====
+After Spilling:
+ACO shader stage: SW (CS), HW (COMPUTE_SHADER)
+BB0
+/* logical preds: / linear preds: / kind: uniform, top-level, loop-preheader, */
+	 s2: %43:s[0-1],  s1: %44:s[2],  s1: %45:s[3],  s1: %46:s[4],  v1: %47:v[0],  v1: (kill)%48:v[1],  v1: (kill)%49:v[2] = p_startpgm
+	 s2: (kill)%51,  s1: (kill)%50:scc = p_init_scratch (kill)%43, (lateKill)%46
+	p_logical_start
+	 v1: %5 = v_lshl_add_u32 (kill)%45, 6, (kill)%47
+	 s2: %8 = p_create_vector (kill)%44, 0xffff8000
+	 s4: %10 = s_load_dwordx4 %8, 0 storage:buffer semantics:private,reorder
+	 s1: %55 = p_extract_vector %10, 2
+	 s1: %13,  s1: (kill)%57:scc = s_lshr_b32 (kill)%55, 2
+	p_logical_end
+	p_branch BB1
+BB1
+/* logical preds: BB0, BB6, / linear preds: BB0, BB6, / kind: loop-header, branch, */
+	 v1: %15 = p_phi %5, (kill)%39
+	 v1: %14 = p_phi 0, (kill)%38
+	p_logical_start
+	 s2: %16 = v_cmp_le_u32 %13, %15
+	p_logical_end
+	 s2: %67,  s1: (kill)%66:scc,  s2: %0:exec = s_and_saveexec_b64 (kill)%16, %0:exec
+	p_cbranch_z %0:exec BB5, BB2
+BB2
+/* logical preds: BB1, / linear preds: BB1, / kind: break, */
+	p_logical_start
+	p_logical_end
+	 s2: %69,  s1: %68:scc = s_andn2_b64 (kill)%67, %0:exec
+	p_cbranch_nz (kill)%68:scc BB4, BB3
+BB3
+/* logical preds: / linear preds: BB2, / kind: uniform, */
+	p_branch BB7
+BB4
+/* logical preds: / linear preds: BB2, / kind: uniform, */
+	p_branch BB6
+BB5
+/* logical preds: / linear preds: BB1, / kind: uniform, */
+	p_branch BB6
+BB6
+/* logical preds: BB1, / linear preds: BB4, BB5, / kind: uniform, merge, */
+	 s2: %70 = p_linear_phi (kill)%69, (kill)%67
+	 s2: %0:exec = p_parallelcopy (kill)%70
+	p_logical_start
+	 v1: %17 = v_lshlrev_b32 2, %15
+	 v1: %18 = buffer_load_dword %10, %17, 0 offen storage:buffer semantics:private,reorder
+	 s4: %19 = s_load_dwordx4 %8, 16 storage:buffer semantics:private,reorder
+	 v1: %20 = buffer_load_dword (kill)%19, (kill)%17, 0 offen storage:buffer semantics:private,reorder
+	 v1: %23 = v_mul_i32_i24 %18, %20 dst_sel:dword src0_sel:sbyte0 src1_sel:sbyte0
+	 v1: %27 = v_mul_i32_i24 %18, %20 dst_sel:dword src0_sel:sbyte1 src1_sel:sbyte1
+	 v1: %28 = v_add_u32 (kill)%23, (kill)%27
+	 v1: %31 = v_mul_i32_i24 %18, %20 dst_sel:dword src0_sel:sbyte2 src1_sel:sbyte2
+	 v1: %35 = v_mul_i32_i24 (kill)%18, (kill)%20 dst_sel:dword src0_sel:sbyte3 src1_sel:sbyte3
+	 v1: %37 = v_add3_u32 (kill)%28, (kill)%31, (kill)%35
+	 v1: %38 = v_add_u32 (kill)%37, (kill)%14
+	 v1: %39 = v_add_u32 64, (kill)%15
+	p_logical_end
+	p_branch BB1
+BB7
+/* logical preds: BB2, / linear preds: BB3, / kind: uniform, top-level, loop-exit, */
+	 v1: %40 = p_phi (kill)%14
+	 s2: %0:exec = p_parallelcopy -1
+	p_logical_start
+	 s4: %41 = s_load_dwordx4 (kill)%8, 32 storage:buffer semantics:private,reorder
+	 v1: %42 = v_lshlrev_b32 2, (kill)%5
+	buffer_store_dword (kill)%41, (kill)%42, 0, (kill)%40 offen storage:buffer
+	p_logical_end
+	s_endpgm
+
+
+
+===== executable 0 'compute' / IR 'Assembly' (Final Assembly) =====
+BB0:
+	s_mov_b32 s0, s3                                            ; be800303
+	s_movk_i32 s3, 0x8000                                       ; b0038000
+	s_load_dwordx4 s[4:7], s[2:3], null                         ; f4080101 fa000000
+	v_mov_b32_e32 v2, 0                                         ; 7e040280
+	v_lshl_add_u32 v0, s0, 6, v0                                ; d7460000 04010c00
+	v_mov_b32_e32 v1, v0                                        ; 7e020300
+	s_waitcnt lgkmcnt(0)                                        ; bf8cc07f
+	s_lshr_b32 s1, s6, 2                                        ; 90018206
+	s_branch BB1                                                ; bf82001c
+	s_nop 0                                                     ; bf800000
+	(then repeated 4 times)
+BB6:
+	s_mov_b64 exec, s[8:9]                                      ; befe0408
+	s_load_dwordx4 s[8:11], s[2:3], 0x10                        ; f4080201 fa000010
+	v_lshlrev_b32_e32 v3, 2, v1                                 ; 34060282
+	buffer_load_dword v4, v3, s[4:7], 0 offen                   ; e0301000 80010403
+	s_waitcnt lgkmcnt(0)                                        ; bf8cc07f
+	buffer_load_dword v3, v3, s[8:11], 0 offen                  ; e0301000 80020303
+	v_add_nc_u32_e32 v1, 64, v1                                 ; 4a0202c0
+	s_waitcnt vmcnt(0)                                          ; bf8c3f70
+	v_mul_i32_i24_sdwa v5, sext(v4), sext(v3) dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:BYTE_0 src1_sel:BYTE_0 ; 120a06f9 08080604
+	v_mul_i32_i24_sdwa v6, sext(v4), sext(v3) dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:BYTE_1 src1_sel:BYTE_1 ; 120c06f9 09090604
+	v_mul_i32_i24_sdwa v7, sext(v4), sext(v3) dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:BYTE_2 src1_sel:BYTE_2 ; 120e06f9 0a0a0604
+	v_mul_i32_i24_sdwa v4, sext(v4), sext(v3) dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:BYTE_3 src1_sel:BYTE_3 ; 120806f9 0b0b0604
+	v_add_nc_u32_e32 v5, v5, v6                                 ; 4a0a0d05
+	v_add3_u32 v5, v5, v7, v4                                   ; d76d0005 04120f05
+	v_add_nc_u32_e32 v2, v5, v2                                 ; 4a040505
+BB1:
+	s_mov_b64 s[8:9], exec                                      ; be88047e
+	s_waitcnt_depctr 0xfffe                                     ; bfa3fffe
+	v_cmpx_le_u32_e32 s1, v1                                    ; 7da60201
+BB2:
+	s_andn2_b64 s[8:9], s[8:9], exec                            ; 8a887e08
+	s_cbranch_scc1 BB6                                          ; bf85ffe4
+BB7:
+	s_load_dwordx4 s[0:3], s[2:3], 0x20                         ; f4080001 fa000020
+	s_mov_b64 exec, -1                                          ; befe04c1
+	v_lshlrev_b32_e32 v0, 2, v0                                 ; 34000082
+	s_waitcnt lgkmcnt(0)                                        ; bf8cc07f
+	buffer_store_dword v2, v0, s[0:3], 0 offen                  ; e0701000 80000200
+	s_endpgm                                                    ; bf810000
+
