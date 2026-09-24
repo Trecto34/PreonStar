@@ -1283,7 +1283,12 @@ static bool q36_vk_use_attn_splitk(void) {
  * workgroups, so on this 40-CU board the stock 512 gives 16 * 5 = 80
  * workgroups at ctx 2048 -- two per CU, and the kernel measures ~17 GB/s
  * against a ~360 GB/s roofline, i.e. it is occupancy-bound rather than
- * bandwidth-bound.  A narrower span buys occupancy.
+ * bandwidth-bound.  A narrower span buys occupancy there.  At ctx 8192 and up
+ * the returns are small in both directions (round-2 R5): the split already
+ * dispatches n_head * n_spans workgroups and 408 workgroups at ctx 8192 (10
+ * per CU, 4 waves each) fill the board, so the kernel is instruction-bound,
+ * not occupancy-bound -- attn_decode_split.spv is VGPR 48 / LDS 1536 B / 20
+ * subgroups per SIMD, i.e. nothing is register- or LDS-limited.
  *
  * NOT bit-exact: attn_combine walks the per-span partials sequentially in
  * f32, rescaling by exp(m - nm) at each step, so changing the span count
@@ -1302,7 +1307,23 @@ static bool q36_vk_use_attn_splitk(void) {
  *
  * The +2.2% for span 128 was measured at ctx 2048 only (16 spans vs 4) and
  * MUST NOT be assumed to hold at long context -- neither the gain nor the
- * numerical cost has been measured beyond 2064. */
+ * numerical cost has been measured beyond 2064.  Long context is measured now
+ * (ctx 16384, split ms/call, 1 rep per arm, fresh process): 512 -> 0.5334 ms
+ * with 792 workgroups on Swift (24 q heads) and 0.3588 ms with 528 on the
+ * guard (16 q heads); 1024 -> +7.1% / +12.3%, 2048 -> +28.1% / +39.4%,
+ * 4096 -> +70.5% / +96.5%, i.e. WIDENING starves the grid monotonically (per
+ * key 1.32 -> 1.85 ns Swift, 1.33 -> 2.15 ns guard).  Narrowing is monotone and
+ * real but small: 256 -> -4.2% and 128 -> -7.0% of the split on Swift
+ * (1.315 -> 1.280 -> 1.252 ns per key), 128 -> -9.9% on the guard, and the
+ * guard's 256 arm disagrees with that trend (+4.0%, single rep), so the narrow
+ * side is not established.  attn_combine pays it back: per call it is
+ * 0.06037 + 1.02e-4 * spans ms on Swift and 0.04006 + 1.03e-4 * spans ms on
+ * the guard (residual <= 0.0003 ms over 5..129 spans) -- a fixed cost that
+ * scales with the head count plus ~1 us per partial, so at span 128 the
+ * combine is +15% / +22% over 512.  Net: at most ~1% of the decode token on
+ * Swift, ~2-3% on the guard, both single-rep, on top of the drift above.
+ * 512 stays until someone pays for an interleaved A/B plus the NLL check.
+ * Evidence: karpathy/evidence/raw/r5-longctx-attn/. */
 static uint32_t q36_vk_attn_span(void) {
     static int cached = -1;
     if (cached < 0) {

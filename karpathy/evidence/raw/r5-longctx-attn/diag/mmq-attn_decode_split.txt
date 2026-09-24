@@ -1,0 +1,36 @@
+VK_KHR_pipeline_executable_properties: yes
+[dbg] creating device fam=0
+[dbg] device ok
+[dbg] creating sm len=39616
+[dbg] sm ok
+[dbg] layout ok
+[dbg] pipeline ok
+[dbg] entry points ok
+
+=== executable 0: compute (Vulkan Compute Shader) subgroup=64 ===
+  stat Driver pipeline hash     = 10677625124693211310   (Driver pipeline hash used by RGP)
+  stat SGPRs                    = 108   (Number of SGPR registers allocated per subgroup)
+  stat VGPRs                    = 48   (Number of VGPR registers allocated per subgroup)
+  stat Spilled SGPRs            = 0   (Number of SGPR registers spilled per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat Code size                = 10312   (Code size in bytes)
+  stat LDS size                 = 1536   (LDS size in bytes per workgroup)
+  stat Scratch size             = 0   (Private memory in bytes per subgroup)
+  stat Subgroups per SIMD       = 20   (The maximum number of subgroups in flight on a SIMD unit)
+  stat Combined inputs          = 0   (Number of input slots reserved for the shader (including merged stages))
+  stat Combined outputs         = 0   (Number of output slots reserved for the shader (including merged stages))
+  stat Hash                     = 0   (CRC32 hash of code and constant data)
+  stat Instructions             = 0   (Instruction count)
+  stat Copies                   = 220   (Copy instructions created for pseudo-instructions)
+  stat Branches                 = 0   (Branch instructions)
+  stat Latency                  = 0   (Issue cycles plus stall cycles)
+  stat Inverse Throughput       = 0   (Estimated busy cycles to execute one wave)
+  stat VMEM Clause              = 0   (Number of VMEM clauses (includes 1-sized clauses))
+  stat SMEM Clause              = 0   (Number of SMEM clauses (includes 1-sized clauses))
+  stat Pre-Sched SGPRs          = 0   (SGPR usage before scheduling)
+  stat Pre-Sched VGPRs          = 0   (VGPR usage before scheduling)
+  stat VALU                     = 0   (Number of VALU instructions)
+  stat SALU                     = 0   (Number of SALU instructions)
+  stat VMEM                     = 0   (Number of VMEM instructions)
+  stat SMEM                     = 0   (Number of SMEM instructions)
+  stat VOPD                     = 0   (Number of VOPD instructions)

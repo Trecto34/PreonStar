@@ -1,0 +1,14 @@
+vulkan-kernels:
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-test: routed gemm mv_max_rel=3.93391e-06 gemm_max_rel=0.00894794 worst(gemm=4994 matvec=4343) got=-1.0794 want=-1.08914
+tests/q36_test.c:4988: assertion failed: memcmp(out_host, out_single, out_floats * sizeof(float)) == 0
+tests/q36_test.c:4988: assertion failed: memcmp(out_host, out_single, out_floats * sizeof(float)) == 0
+tests/q36_test.c:4988: assertion failed: memcmp(out_host, out_single, out_floats * sizeof(float)) == 0
+q36-test: attn fa batch drift pos0=129 n_tok=3 ratio=8 = 1.02445e-08
+q36-test: attn fa batch drift pos0=129 n_tok=3 ratio=6 = 1.02445e-08
+q36-test: attn fa batch drift pos0=2100 n_tok=12 ratio=6 = 7.68341e-09
+q36-test: attn fa batch drift pos0=2100 n_tok=12 ratio=8 = 9.0804e-09
+vulkan-kernels: ERR
+q36 tests: 3 failure(s)

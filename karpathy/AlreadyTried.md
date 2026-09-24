@@ -2118,3 +2118,124 @@ types.  Round-2 R4.
   (then build the standard shape - the +9% is real once the 725 ms step becomes
   52 ms); or a per-verify-row DeltaNet state capture lands, which removes the
   `commit` replay (max 51.55 ms/cycle) but not the second forward.
+
+## Long-context decode attention (R5) — diagnosed: instruction-bound tile loop, combine-cost model, grid knee bracketed (2026-09-25)
+
+Takes up round-1 **P5**'s open end ("16K/32K were not re-run because
+decode-after-long-prefill swings 20-32 t/s with an identical binary").  That
+swing is why this pass reports **per-dispatch GPU time and dispatch counts**, not
+end-to-end tok/s: `attn_decode_split` runs exactly once per full-attention layer
+per *decode* token (prefill uses `attn_prefill_fa_gqa{6,8}`), so
+`split_disp / gen_tokens` gives the layer count (16 Swift, 10 guard) and the
+split's ms/token needs no prefill subtraction.  `attn_combine` carries
+`2 x chunks x L` prefill dispatches plus `1 x L` per decode token, so its decode
+share is recovered from the combine/split dispatch ratio.  Round-2 R5.
+
+- **Setup.**  Fresh process per (model, ctx), Swift and the guard at ctx
+  8192/16384/32768 (2/2/3 reps), `--prefill-chunk 256 --gen-tokens 64
+  --mtp-margin 0`, `Q36_VK_PROF_OP=1 Q36_VK_PROF_KERNEL=1`.  Stages B/C sweep
+  `Q36_VK_ATTN_SPAN` 128/256/1024/2048/4096 at ctx 16384, 1 rep each (512 is
+  stage A's 2 reps).
+- **Reproducibility.**  0.3-1.4% on `split_ms/call` everywhere except Swift at
+  ctx 32768, which disagrees with itself by 7% (1.0221 vs 1.0943 ms/call, 15.40
+  vs 14.63 t/s) - the enter-temperature caution, localized to the longest arm;
+  the attention *share* is stable there anyway (27.7 vs 28.1%).  Per-span split
+  cost 0.01675 / 0.01616 / 0.01572 ms at 8K/16K/32K, i.e. the 32K arm is the
+  *fastest* per key, so the long wall time is the profiler's flush count
+  (`submit_eager` 4904 / 7568 / 15696), not throttling.
+- **Grid: the knee is bracketed, and 512 is on the good side of it.**  At fixed
+  span 512 the split costs a constant 25-28 us of CU time per workgroup while
+  the count grows 408 -> 792 -> 1560 (1.94x, 1.97x Swift) and 272 -> 528 -> 1040
+  (guard), so 10 workgroups per CU (4 waves each) already fills the board at 8K.
+  The sweep says the same from both sides: **widening** 512 -> 1024 -> 2048 ->
+  4096 costs +7.1 / +28.1 / +70.5% per split call (Swift) and +12.3 / +39.4 /
+  +96.5% (guard), per-key rate 1.32 -> 1.85 ns / 1.33 -> 2.15 ns; **narrowing**
+  to 256/128 saves 4.2 / 7.0% of the split on Swift (per-key 1.315 -> 1.280 ->
+  1.252 ns) and 9.9% on the guard at 128, but the **guard's 256 arm is an
+  outlier** (+4.0% where the 128/512 trend puts it at ~-3%).  The narrow side is
+  closed anyway: single-rep, not bit-exact, and it **fails the kernel gate** -
+  `Q36_VK_ATTN_SPAN=128 ./q36_test --vulkan-kernels` gives 3 failures and `=256`
+  gives 1, all at `tests/q36_test.c:4988` (bitwise batch-vs-step-replay), 0 at
+  512, reproducibly.  The failing arms are the 132-key ones: single-span (fused)
+  at 512, 2 spans at 128 - so the split path is not `n_tok`-invariant for that
+  shape, and 512 is the setting that property is verified at.  FA arms unaffected
+  (batch drift 9.1e-09 at 128/256 vs 1.0e-08 at 512).  Round-1 P5's "occupancy-bound" reading of the
+  80-workgroup ctx-2048 case does not survive at 8K+.
+- **Occupancy probe (compile-free, `mmq_info`):**
+  `attn_decode_split.spv` = SGPRs 108, **VGPRs 48**, LDS 1536 B, Spilled 0,
+  **Subgroups per SIMD 20** (the driver's own ceiling); `attn_combine.spv` =
+  SGPRs 108, VGPRs 8, LDS 0, code 524 B, subgroups/SIMD 40.  Nothing about the
+  256-thread, 4-wave workgroup is register- or LDS-limited.
+- **Not bandwidth.**  Requested bytes (every query head reads its own copy) are
+  6x (Swift) / 8x (guard) the unique bytes, yet the requested rate is a flat
+  **249-310 GB/s** across both models and all three contexts while the unique
+  rate is 31-49 GB/s and *differs by model* at the same ctx (Swift 44-49, guard
+  31-39).  A DRAM-bound kernel would have to show the same unique rate for both;
+  a request-bound one would show the 6-8x duplicate reads dominating.  P5 already
+  showed the re-read is an L2 effect (GQA grouping buys only 1.01-1.14x past 8k).
+- **What does: per-element instructions in the tile loop - the R2 lever again.**
+  Hand count of the live fast path (K q8_0 / V q4_0, TILE 64, 256 threads) per
+  key per workgroup: K `4 quads x k_q8_dot_pair` ~580 (word-wide qs, 8 dwords +
+  8 shared reads per 64 dims), V `256 x v_q4` ~2048 (per element: a dword load
+  for the block scale, a dword load for one nibble, shift, and, int->float, mul,
+  mad, add - `v_q4` at `vulkan/attn_decode_split.comp:158`), lane scan+exp ~1500
+  (serial `tmax` over up to 64 keys per thread per tile, 13 `barrier()`s).
+  4128 thread-instr = 64.5 wave-instructions per key = 32.2 cycles of CU issue
+  (wave64 fp32, 4-SIMD CU) against **52.6 ns of CU time measured per key per
+  workgroup** (40 CU x 0.5334 ms / (792 x 512) at Swift 16384) = 70 cycles at
+  1.34 GHz, 100 at 1.9 GHz: the kernel runs its instruction stream at
+  **2.2-3.1x its own issue bound**, i.e. issue/stall-bound, not a dependency hole
+  (a latency-bound gather of this shape sits ~10x off).  ~86% of that stream is
+  V extraction plus the lane scan; the K side already uses the wide-load form
+  `k_q8_dot_pair` that the V side does not.
+- **`attn_combine` has a clean cost model and it is what punishes narrowing.**
+  24 (Swift) / 16 (guard) workgroups - under one per CU - 524 B of code, serial
+  dependent-load loop (3 loads per span, no vector width, `exp`/`v_rcp_f32` per
+  step).  Per call over 5..129 spans: **Swift `0.06037 + 1.02e-4 x spans` ms**,
+  **guard `0.04006 + 1.03e-4 x spans` ms** (max residual 0.00015 / 0.00030 ms,
+  n=7): a fixed cost that scales with the head count plus ~1 us per partial -
+  the stock comment's prediction, now quantified.  At span 128 that is +15% /
+  +22% over span 512, which is why the narrow side nets out small.  The whole
+  term is 1.8-3.7% of the decode token.
+- **Absolute share of decode** (same binary, plain decode, gen 64):
+
+  | model | ctx | decode | split/tok | comb/tok | attn | share |
+  |-------|-----|--------|-----------|----------|------|-------|
+  | Swift | 8192 | 49.6 ms (20.15 t/s) | 4.56 | 0.63 | 5.19 | **10.4%** |
+  | Swift | 16384 | 54.1 ms (18.48 t/s) | 8.53 | 1.02 | 9.55 | **17.7%** |
+  | Swift | 32768 | 66.6 ms (15.40/14.63 t/s) | 16.35 | 1.67 | 18.0 | **27.7-28.1%** |
+  | guard | 8192 | 13.8 ms (72.39 t/s) | 2.03 | 0.27 | 2.30 | **16.6%** |
+  | guard | 16384 | 15.6 ms (64.09 t/s) | 3.59 | 0.44 | 4.03 | **25.8%** |
+  | guard | 32768 | 19.1 ms (52.26 t/s) | 6.50 | 0.70 | 7.20 | **37.9-38.1%** |
+
+  From 8K to 32K the Swift token grows 49.8 -> 66.6 ms and attention grows
+  5.19 -> 18.6 = **80% of the slowdown**; guard 13.7 -> 19.1 ms, attention
+  2.30 -> 7.25 = **92%**.  Prefill tok/s falls with ctx too (Swift 138.85 /
+  126.40 / 111.19, guard 569.39 / 488.47 / 391.98), so the long-context penalty
+  is the same kernel twice.  Round-1's "guard ctx 8192: 3.0 ms/tok for ~68 MB"
+  reproduces as 2.03 ms/tok for 63.4 MB unique (31.1 GB/s).
+- **Verdict: diagnosed, no lever landed.**  Not latency-, occupancy-, grid- or
+  bandwidth-limited; a per-element instruction stream (V gathered one nibble at a
+  time + serial per-key lane scan) issued at 2.2-3.1x its minimum, whose total
+  cost is keys x that per-key rate.  The only cheap experiment the item allowed
+  (the host-tunable `span_keys`) is worth **at most ~1% of the decode token on
+  Swift and ~2-3% on the guard** on the narrow side, single-rep, in exchange for
+  a non-bit-exact regrouping of the softmax reduction that also fails the
+  `n_tok`-invariance kernel check - so the default stays 512.
+  The rewrite the accounting names - vectorise the V extraction as
+  `k_q8_dot_pair` already does for K, hoist `tmax` - is the same class R2
+  **rejected** on `moe_iq2s_down_sum_decode` (fewer/wider loads bought 0.06% on
+  an instruction-issue-bound kernel), so it is not proposed.  The stale
+  "narrower buys occupancy" claim in the `q36_vk_attn_span()` comment
+  (`q36_vulkan.c:1282`) is corrected in place with these numbers.
+- `Q36_VK_ATTN_SPAN` is a **diagnostic switch, not a semantic variant**: it is
+  not bit-exact, and any use needs the NLL check rather than the byte-identical
+  one (the drift grows with the span count, which is also why 1-rep evidence is
+  not enough to move the default).
+- Raw: `evidence/raw/r5-longctx-attn/` (`R5-VERDICT.md`, `out/`, `outB/`,
+  `diag/`, `scripts/`, `ANALYSIS-stage{A,B}.txt`, `thermal-samples.txt`).
+- `reconsider_if`: an interleaved A/B plus an NLL check for span 256/128 at ctx
+  16384 and 32768 (pays ~1-3% of the token, and only while attention stays this
+  share of decode); or a V-side vectorised gather that keeps the per-key FMA
+  order and beats 52.6 -> <45 ns per key per workgroup at ctx 16384 before being
+  tested at ctx 32768.

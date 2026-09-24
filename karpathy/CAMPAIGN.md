@@ -906,6 +906,34 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    **Verdict: diagnosed, reported as a net loss, no MTP code landed.**  Evidence:
    `evidence/raw/r4-mtp-diagnosis/`.
 
+   **R5. Long-context decode attention: instruction-bound tile loop, grid knee
+   bracketed, no lever landed (2026-09-25).**  Closes round-1 P5's open end
+   (16K/32K) on per-dispatch GPU time rather than tok/s (which swings 20-32 t/s
+   at identical binaries).  Swift ctx 8192/16384/32768: `split_ms/call` 0.2847 /
+   0.5334 / 1.0221 ms at 408 / 792 / 1560 workgroups - cost is proportional to
+   the grid at a constant 25-28 us of CU time per workgroup, so 10 workgroups
+   per CU already fills the board, and `attn_decode_split.spv` is unconstrained
+   (VGPR 48, LDS 1536 B, 20 subgroups/SIMD).  Not bandwidth either: requested
+   bytes are 6x/8x the unique bytes yet the requested rate is flat 249-310 GB/s
+   while the unique rate differs by model (Swift 44-49, guard 31-39 GB/s).  The
+   cost is the per-element instruction stream - V gathered one nibble at a time
+   (`v_q4`: 2 dword loads, shift, and, int->float, mul, mad per element) plus a
+   serial per-key `tmax` scan, 4128 thread-instructions per key = 64.5
+   wave-instr = 32.2 cycles of issue against 52.6 ns (70 cycles) measured = its
+   own issue bound x2.2-3.1; the K side already uses the wide-load form the V
+   side does not.  Attention is **80% (Swift) / 92% (guard) of the 8K->32K
+   decode slowdown** (share 10.4 -> 17.7 -> 27.7%, guard 16.6 -> 25.8 -> 38.1%).
+   `attn_combine` = `0.06037 + 1.02e-4 x spans` ms/call (Swift) and
+   `0.04006 + 1.03e-4 x spans` (guard), residual <= 0.0003 ms over 5..129 spans:
+   1.8-3.7% of the token.  Cheap experiment, `Q36_VK_ATTN_SPAN` at ctx 16384:
+   widening 512 -> 1024/2048/4096 costs +7.1/+28.1/+70.5% (Swift) and
+   +12.3/+39.4/+96.5% (guard) per split call; narrowing saves 4.2/7.0% (Swift,
+   256/128) but is 1-rep, not bit-exact, **fails `./q36_test --vulkan-kernels`
+   on the `n_tok`-invariance check** (3 failures at span 128, 1 at 256, 0 at 512
+   - the 132-key arms are single-span/fused at 512 and 2-span at 128) and nets
+   ~1-3% of the token.  **Verdict: diagnosed, no lever landed** - the rewrite it
+   names is the R2 class already rejected on an instruction-issue-bound kernel.
+   Evidence: `evidence/raw/r5-longctx-attn/`.
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 
 Authoritative detail and per-item "reconsider_if" live in

@@ -1,0 +1,12 @@
+=== default (span 512)
+q36-test: attn fa batch drift pos0=2100 n_tok=12 ratio=8 = 1.00117e-08
+vulkan-kernels: OK
+q36 tests: ok
+=== Q36_VK_ATTN_SPAN=128
+q36-test: attn fa batch drift pos0=2100 n_tok=12 ratio=8 = 9.0804e-09
+vulkan-kernels: ERR
+q36 tests: 3 failure(s)
+=== Q36_VK_ATTN_SPAN=256
+q36-test: attn fa batch drift pos0=2100 n_tok=12 ratio=8 = 9.0804e-09
+vulkan-kernels: ERR
+q36 tests: 1 failure(s)
