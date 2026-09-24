@@ -1,0 +1,9 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: in-file MTP head bound (blk.64 nextn), draft=1
+q36: memory: KV 0.18 GiB (raw 0.03 + compressed 0.15) + buffers 0.05 GiB = 0.23 GiB context
+q36: memory detail: ctx=1400 prefill_cap=128 raw_kv_rows=1400 compressed_kv_rows=0 backend=vulkan
+processing 32 input tokens: 32/32 (100.0%)
+The user wants a short story about a lazy duck who avoids work. Let me think about what makes this fun and engaging. I want to create a character with personality, a setting, and a little arc. Let me think about what "work" a duck might do - maybe it's a farm duck, or a
+q36: prefill: 48.73 t/s, generation: 24.34 t/s

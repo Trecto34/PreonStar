@@ -1,0 +1,7 @@
+## frontier logits, FA on (new) vs FA off (ref), ctx 512/520, chunk 256
+== guard
+frontier_000512.logits.json: max_abs_diff=0.650295 at 276  top1 ref=13 (22.492279) new=13 (22.437641) same=True  top64 overlap=64/64
+frontier_000520.logits.json: max_abs_diff=0.614791 at 51386  top1 ref=11 (17.516384) new=11 (17.632919) same=True  top64 overlap=62/64
+== swift
+frontier_000512.logits.json: max_abs_diff=0.667795 at 11362  top1 ref=13 (21.107763) new=13 (20.994312) same=True  top64 overlap=61/64
+frontier_000520.logits.json: max_abs_diff=0.854534 at 46  top1 ref=11 (18.354971) new=11 (18.144178) same=True  top64 overlap=63/64

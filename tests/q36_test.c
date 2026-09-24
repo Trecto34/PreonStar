@@ -4823,8 +4823,8 @@ static float test_kv_at(const uint8_t *row, uint32_t type, uint32_t i) {
  * step (fused/split kernels).  Callers pick pos0/n_tok to cover partial
  * query tiles and multi-span causal ranges. */
 static void test_vulkan_attn_case(uint32_t pos0, uint32_t n_tok,
-                                  uint32_t k_type, uint32_t v_type) {
-    const uint32_t n_head = 16, n_head_kv = 2, head_dim = 256;
+                                  uint32_t n_head, uint32_t k_type, uint32_t v_type) {
+    const uint32_t n_head_kv = 2, head_dim = 256;
     const uint32_t kv_max = pos0 + n_tok;
     const uint32_t cache_row = n_head_kv * head_dim;
     const uint32_t k_row_bytes = test_kv_row_bytes(k_type, cache_row);
@@ -4955,7 +4955,38 @@ static void test_vulkan_attn_case(uint32_t pos0, uint32_t n_tok,
         q36_gpu_tensor_free(ov);
     }
     TEST_ASSERT(q36_gpu_tensor_read(out, 0, out_single, out_floats * sizeof(float)) != 0);
-    TEST_ASSERT(memcmp(out_host, out_single, out_floats * sizeof(float)) == 0);
+    /* The FA prefill kernels (ratio 6/8, K q8_0, V q4_0, head_dim 256) replace
+     * attn_prefill_qtile2{,_gqa6} for n_tok >= 2 and accumulate V in a different
+     * order, so a batch row no longer reproduces the split/fused decode step bit
+     * for bit.  Measured at pos0 129 / n_tok 3 (132 keys): 11137 of 12288 floats
+     * differ, all by <= 1.02e-08, while that same batch output sits 1.18e-08 from
+     * the f64 CPU reference checked above against 1.62e-08 for the qtile2 path
+     * FA replaced -- FA is closer to the reference, so this is f32
+     * reassociation, not a defect.  Every other arm uses the same kernel for
+     * batch and decode and stays bitwise; `Q36_VK_ATTN_FA=0` restores bitwise
+     * equality here too.  Bound is 4e-5: ~4000x the measured drift and still
+     * four orders inside the 2e-3 quality bound, so a broken FA reduction still
+     * trips it. */
+    /* Same condition the dispatcher applies (q36_vk_use_attn_fa, which is static
+     * to q36_vulkan.o and not visible here): on unless Q36_VK_ATTN_FA starts 0. */
+    const char *fa_env = getenv("Q36_VK_ATTN_FA");
+    const bool fa_batch = n_tok > 1u && head_dim == 256u &&
+                          k_type == Q36_KV_CACHE_Q8_0 &&
+                          v_type == Q36_KV_CACHE_Q4_0 &&
+                          (n_head == 6u * n_head_kv || n_head == 8u * n_head_kv) &&
+                          (!fa_env || !fa_env[0] || fa_env[0] != '0');
+    if (fa_batch) {
+        float drift = 0.0f;
+        for (uint64_t i = 0; i < out_floats; i++) {
+            float d = fabsf(out_host[i] - out_single[i]);
+            if (d > drift) drift = d;
+        }
+        TEST_ASSERT(drift <= 4.0e-5f);
+        fprintf(stderr, "q36-test: attn fa batch drift pos0=%u n_tok=%u ratio=%u = %g\n",
+                pos0, n_tok, n_head / n_head_kv, (double)drift);
+    } else {
+        TEST_ASSERT(memcmp(out_host, out_single, out_floats * sizeof(float)) == 0);
+    }
 
     if (k_type != Q36_KV_CACHE_F16 || v_type != Q36_KV_CACHE_F16) {
         float max_quality_diff = 0.0f;
@@ -5000,12 +5031,17 @@ static void test_vulkan_attn_decode_fused(void) {
     test_skip("vulkan-kernels", "CPU-only build");
 #else
     /* Single span, partial query tile. */
-    test_vulkan_attn_case(129, 3, Q36_KV_CACHE_F16, Q36_KV_CACHE_F16);
+    test_vulkan_attn_case(129, 3, 16, Q36_KV_CACHE_F16, Q36_KV_CACHE_F16);
     /* Two 2048-key spans, query tiles crossing the span boundary, causal
      * ends landing mid-tile; batch (qtile) vs decode (split) bit equality. */
-    test_vulkan_attn_case(2100, 12, Q36_KV_CACHE_F16, Q36_KV_CACHE_F16);
-    test_vulkan_attn_case(129, 3, Q36_KV_CACHE_Q4_0, Q36_KV_CACHE_Q4_0);
-    test_vulkan_attn_case(129, 3, Q36_KV_CACHE_Q8_0, Q36_KV_CACHE_Q4_0);
+    test_vulkan_attn_case(2100, 12, 16, Q36_KV_CACHE_F16, Q36_KV_CACHE_F16);
+    test_vulkan_attn_case(129, 3, 16, Q36_KV_CACHE_Q4_0, Q36_KV_CACHE_Q4_0);
+    test_vulkan_attn_case(129, 3, 16, Q36_KV_CACHE_Q8_0, Q36_KV_CACHE_Q4_0);
+    /* The production KV pair (Vulkan default k q8_0 / v q4_0) at both ratios
+     * that have a flash-attention prefill build: 8 = guard MoE, 6 = Swift. */
+    test_vulkan_attn_case(129, 3, 12, Q36_KV_CACHE_Q8_0, Q36_KV_CACHE_Q4_0);
+    test_vulkan_attn_case(2100, 12, 12, Q36_KV_CACHE_Q8_0, Q36_KV_CACHE_Q4_0);
+    test_vulkan_attn_case(2100, 12, 16, Q36_KV_CACHE_Q8_0, Q36_KV_CACHE_Q4_0);
 #endif
 }
 

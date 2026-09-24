@@ -795,6 +795,35 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    larger share of a spec call than 7.5%.
 
 
+9. **2026-09-25 round 2 — build what the audit sweep measured but did not land.**
+   Per-item entries land here as they close; the round-2 item numbers are used
+   (`R1`..`R5`).
+   **R1. The red `--vulkan-kernels` gate was a stale test expectation, not a
+   kernel bug (2026-09-25).**  Closes the paragraph P7 left open.
+   `git bisect run` between `8e8e788` (last commit §1c records as PASS) and
+   `e6a442b`, exit 1 iff `tests/q36_test.c:4958` appears: first bad commit
+   **`9d54dc7`** ("flash-attention prefill for GQA 8 MoE too").  The assertion is
+   the batch-vs-decode bitwise invariance check, and it trips on exactly one
+   shape - `pos0=129 n_tok=3` with the production KV pair `k Q8_0 / v Q4_0`, the
+   arm `attn_prefill_fa.comp` takes over.  FA on: 11137/12288 floats differ, all
+   `<= 1.02445e-08`, and that batch output is **1.18406e-08 from the f64 CPU
+   reference**; FA off (qtile2): 0/12288 differ and **1.62379e-08** from the same
+   reference.  FA is nearer the reference - the old bitwise assertion only held
+   because qtile2 reused the decode reduction order.  End to end: guard greedy
+   64 tokens FA on vs off **byte-identical**; Swift diverges at token ~35, with
+   frontier top-1 preserved at ctx 512/520 (guard 64/64 and 62/64 top64 overlap,
+   Swift 61/64 and 63/64), and a 5-arm x 2-run control showing every arm
+   reproducing its own text exactly (so it is a real FA effect, not run noise) -
+   inside the drift the FA landing already accepted (`fa-parity.txt`: FA moves
+   teacher-forced NLL less than a chunk 256 -> 128 change, Swift 3.08 vs 3.58,
+   guard 2.01 vs 2.60).  Fix is in the test: `test_vulkan_attn_case` takes
+   `n_head`, a `fa_batch` predicate mirrors the dispatcher, FA arms assert
+   `drift <= 4.0e-5f` (4000x the measured drift, four orders inside the 2e-3
+   bound) and every other arm keeps the memcmp; coverage widened to the
+   production KV pair at both FA ratios.  `--vulkan-kernels` **PASS** with FA on
+   and with `Q36_VK_ATTN_FA=0`; `compat_gate.sh` **PASS**.  No performance delta
+   (test + comment only).  Evidence: `evidence/raw/r1-fa-gate/`.
+
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 
 Authoritative detail and per-item "reconsider_if" live in

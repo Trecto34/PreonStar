@@ -1867,3 +1867,58 @@ premise is false.
   that as the reason only ~47% of calls carry a draft at `--mtp-margin 0`, and
   committed-tokens-per-forward has to come from there, not from the draft head;
   or a draft head that is a much larger share of a spec call than 7.5%.
+
+## Flash-attention prefill vs the `n_tok`-invariance test — stale expectation, fixed the test, not the kernel (2026-09-25)
+
+Closes the paragraph P7 left open ("`q36_test --vulkan-kernels` fails at
+`tests/q36_test.c:4958` exactly as on unmodified HEAD — reproduced this pass,
+unchanged, out of scope").  Round-2 R1.
+
+- **Bisect.**  `git bisect run` between `8e8e788` (last commit CAMPAIGN §1c
+  records as PASS) and `e6a442b`, harness = rebuild `q36_test`, exit 1 iff
+  `q36_test.c:4958` appears in the log.  First bad commit: **`9d54dc7`**
+  ("flash-attention prefill for GQA 8 MoE too").  Raw: `evidence/raw/r1-fa-gate/`
+  (`bisect.log`, `bisect-check.sh`).
+- **Which arm, and how far off.**  The failing assertion is `test_vulkan_attn_case`'s
+  "a batch row must reproduce the per-row decode step bit for bit" memcmp.  A
+  temporary diagnostic print (removed) pinned it to one shape: `pos0=129 n_tok=3`
+  with the production KV pair `k=Q36_KV_CACHE_Q8_0 / v=Q36_KV_CACHE_Q4_0`, i.e.
+  exactly the arm `attn_prefill_fa.comp` takes over.  FA on: **11137 of 12288
+  floats differ, all by <= 1.02445e-08**, and that same batch output sits
+  **1.18406e-08** from the f64 CPU reference the test already computes; FA off
+  (qtile2): 0/12288 differ and **1.62379e-08** from the same reference.  So FA is
+  *closer* to the reference than the kernel it replaced; the old assertion only
+  held because qtile2 happened to reuse the decode reduction order for its V
+  accumulation and FA's LDS-staged tile order does not.  Reassociation, not a bug.
+- **Inert end to end.**  Greedy, temp 0, seed 42, 64 tokens, ctx 1400, FA on vs
+  off: **guard (ratio 8) byte-identical**; Swift (ratio 6) diverges at token ~35.
+  Frontier dumps at ctx 512/520 (chunk 256): guard `max_abs` 0.650/0.615, top-1
+  same, top64 64/64 and 62/64; Swift `max_abs` 0.668/0.855, top-1 same, top64
+  61/64 and 63/64.  A 5-arm x 2-run determinism control shows every arm
+  reproducing its own token text exactly (only the timing line moves), so Swift's
+  token-35 divergence is a real FA effect, not run noise — and it is inside the
+  drift the FA landing itself accepted: `evidence/raw/fa-parity.txt` measures FA's
+  teacher-forced NLL moving *less* than a plain prefill-chunk 256 -> 128 change
+  (Swift 3.08 vs 3.58, guard 2.01 vs 2.60 mean |dNLL|), and at ctx 8192 the
+  chunk-128 reference arm is the one that flips top-1, not FA.
+- **Fix = make the test FA-aware.**  `test_vulkan_attn_case` gains an `n_head`
+  parameter (ratio 6 and 8 are now both reachable) and a `fa_batch` predicate that
+  mirrors the dispatcher (head_dim 256, K q8_0, V q4_0, ratio 6 or 8, FA not
+  disabled; `q36_vk_use_attn_fa()` is static to `q36_vulkan.o` so the env default
+  is repeated).  FA arms assert `drift <= 4.0e-5f` — ~4000x the measured drift,
+  four orders inside the test's own 2e-3 quality bound, so a broken FA reduction
+  still trips it — and print the drift.  Every other arm keeps the bitwise memcmp.
+  Coverage widened with three production-KV arms: `129/3` and `2100/12` at ratio
+  6, `2100/12` at ratio 8.  `attn_prefill_fa.comp`'s header now says outright that
+  it is not bit-identical to `attn_decode_split/fused` and by how much.
+- **Gates:** `./q36_test --vulkan-kernels` **exit 0, "vulkan-kernels: OK"** with FA
+  on and with `Q36_VK_ATTN_FA=0`; drift printed 1.02445e-08 at `129/3` and
+  1.00117e-08 at `2100/12`, identical at both ratios.
+  `karpathy/compat_gate.sh` **PASS** (Swift 1024/177.46 prefill tps).  No
+  performance delta: test + comment only, no kernel touched.
+- Raw: `evidence/raw/r1-fa-gate/` (`R1-VERDICT.md`, `bisect.log`,
+  `bisect-check.sh`, `gate-fa-{on,off}.log`, `sweep.log`, `run-r1.s`, `run-ctl.s`,
+  `e2e/` incl. `frontier-cmp.txt` and the 8 frontier dumps, `ctl/` 10 outputs).
+- `reconsider_if`: the batch-vs-decode drift ever exceeds 4e-5 (then it is a
+  reduction bug, not reassociation); or a real-task eval shows long-context
+  regression that a prefill-chunk 256 -> 128 change does not also show.

@@ -1,0 +1,13 @@
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36: memory: KV 0.07 GiB (raw 0.01 + compressed 0.06) + buffers 0.22 GiB = 0.29 GiB context
+q36: memory detail: ctx=1400 prefill_cap=1024 raw_kv_rows=1400 compressed_kv_rows=0 backend=vulkan
+processing 32 input tokens: 32/32 (100.0%)
+Here's a thinking process:
+
+1.  **Analyze User Request:**
+   - **Topic:** A lazy duck who avoids work
+   - **Format:** Short story
+   - **Key Elements:** Character (lazy duck), conflict/theme (avoiding work), narrative arc (beginning, middle, end
+q36: prefill: 141.45 t/s, generation: 95.29 t/s

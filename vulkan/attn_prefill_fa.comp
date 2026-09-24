@@ -33,7 +33,11 @@
  *
  * The score order for a row depends only on absolute key index (tiles are
  * aligned to the group start), so results stay invariant to n_tok/chunking
- * like the kernel it replaces. */
+ * like the kernel it replaces.  It is NOT bit-identical to the decode kernels
+ * (attn_decode_split/fused), which was the property qtile2 happened to have:
+ * the LDS-staged tile order puts ~1e-8 of f32 reassociation into a batch row
+ * (tests/q36_test.c, `fa_batch` drift print), below the f64 CPU reference's
+ * own 1.2e-8 spread and 4 orders inside the test's 2e-3 quality bound. */
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
