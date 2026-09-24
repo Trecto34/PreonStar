@@ -876,3 +876,188 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    defect a naive fallback fixes.  Deferred lever: nx-style variants for the
    pair/K-quant/IQ4_XS tiles - **not built**, and R4's MTP restructure is
    blocked on them.  Evidence: `evidence/raw/r3-batched-nx/`.
+   **R4. MTP loop diagnosed: two target forwards per cycle, `verify` is 10x a
+   one-row forward, net loss, no restructure (2026-09-25).**  Corrects the P7
+   ledger entry ("nx already serves every multi-row step", "the remaining d3
+   cost is structural, not a kernel").  New env-gated `Q36_MTP_TIMING` per-cycle
+   phase report + `q36_gpu_read_bytes()`/`q36_gpu_read_flushes()` counters (the
+   instrument, kept; inert unset).  Same binary, Swift ctx 512 margin 0: plain
+   32 tok **22.68 t/s**, plain 256 **23.04**, `--mtp-draft 2` **21.17 (0.92x)**,
+   draft 3 nx ON **6.97 (0.30x)**, nx OFF **4.10 (0.18x)** - round-1's 6.88
+   reproduces, both depths are net losses.  97-cycle d3 run: `fwd` 51.70 ms,
+   `draft` 4.84, `snap` 0.13, **`verify` 391.03** (max 482), `commit` 0.01 (max
+   51.55 = restore+replay on a partial accept), total 462.69, `read_kb` 4850,
+   `drains` 3; `submit_wait_ms` **563.0 vs 167.4 plain** = +57 ms/cycle of pure
+   drain.  `verify` is **391 ms for 2 rows vs ~39 ms for 1 row = 10x** (nx OFF
+   638 ms); the kernel differential over the 7 verify cycles is
+   pair +104 / kquant +70 / iq4xs +40 / residual-iq3 +30 / nx +10 ms per cycle,
+   i.e. three of four dense types pay R3's 128-row tile.  The Q8_0 host-drain
+   suspicion is **refuted**: MTP matmuls appear as `matmul_q8_0_f32b`
+   (0 -> 88 disp / 14.2 ms) and `submit_wait_q8_0_quant_x` is absent from every
+   profile; the draft head is 5 ms and `mtp` inside `fwd` is 12 ms (P2's 7.5%
+   held).  d2's 100% accept is **by construction** (`draft_cap = N-1 = 1` makes
+   `verify_n == commit_n == 1`, so the comparison loop never runs).  Ceiling:
+   273-310 ms/token = **0.15x plain**; with `verify` free, `fwd + commit` = 57
+   ms/token = **0.76x** because the shape runs two target forwards per cycle plus
+   a replay on every partial accept.  The standard shape (one forward over
+   [committed, draft...], per-row GPU argmax, adopt-on-partial-accept) is
+   `52 + 12 + 5 = 69 ms` per 1.71 tokens = **25 t/s = +9% over plain** - and
+   that 52 ms assumes an n_tok 2..8 trunk covering pair/kquant/iq4xs.
+   **Verdict: diagnosed, reported as a net loss, no MTP code landed.**  Evidence:
+   `evidence/raw/r4-mtp-diagnosis/`.
+
+## 7. Closed lines — do not re-litigate without new hardware evidence
+
+Authoritative detail and per-item "reconsider_if" live in
+`karpathy/AlreadyTried.md`; this is only the index.
+
+- **`int dot: 0` is a hardware truth on GFX1013** — all accelerated
+  integer-dot properties are `false`; the gate at `ggml-vulkan.cpp:4019` can
+  never pass. No flag, pull or shader edit fixes it. (Build-side causes were
+  investigated and eliminated.)
+- **`bf16: 0` / `VK_VALVE_shader_mixed_float_dot_product` absent** — genuinely
+  not exposed.
+- **Updating llama.cpp bought nothing** (`0cae430` → `972d231`, full rebuild):
+  −2.2% prefill / +3.1% decode, inside the 4.4 stddev.
+- **The drain fix is rejected as a speed lever** — +0.45% prefill / +0.43%
+  decode, and inert in production (profiler-gated). Keep it only as profiling
+  hygiene.
+- **The 41-block IQ2_M refusal is fixed, not open:** `f9d537d` loads it with
+  `--gpu-cpu-parity` OK and no guard regression. Do not re-derive the root cause
+  and do not "relax a check" again — the remaining IQ2_M gap is kernel selection
+  (§6.1).
+- **Thermal drift is not a factor** — 171.96 vs 171.91 prefill hot vs cooled.
+  `bench_ab.sh` deliberately does no cool-down.
+- **The roofline is 454.4 GB/s, not ~360** as an earlier report claimed. Do not
+  gate against 360.
+- **The reported "80/128 token-coverage hole" in `dense_iq3_xxs_mmq` is false** —
+  force-wave32 at `q36_vulkan.c:1575` covers all 128 tokens.
+- **IQ3_XXS MMQ/decode micro-variants, 512-thread add/RMS, XOR-swizzled staging,
+  MTP draft depth 2/3, smaller prefill chunks, integer sign-mask decode** — all
+  measured and rejected; numbers in the ledger.
+- **The peer BC-250 cluster's nulls** (MOVNTDQA, BK 32→64, `nogttspill`,
+  decode-ubatch np=16, MTU 9000, split-heap readback, `GEMM_FORCE_L_PERTYPE`)
+  — recorded in the ledger so they are not reopened here.
+- **Host-cached readback and shader-core-count levers are already implemented /
+  not applicable** in this engine.
+- **PQ2_0/Q2_0 decode-matvec workgroup shapes — closed (2026-09-23).** The
+  streaming ceiling on this board is **~437 GB/s** (standalone probe,
+  `evidence/raw/probe.c` + `stream.comp`); the PQ2_0 decode matvec runs at
+  **~318 GB/s**, and the gap is that kernel's own access pattern, not dispatch
+  shape: fewer workgroups (caps 320/640/1280/2560), 2/8/16 rows per workgroup,
+  and four 4-row wave64s packed into one 256-thread workgroup were all **neutral
+  or worse** (best -1.8%, worst +43%; 1385 -> 1381 ms on the packing test). Do
+  not retry without a wide-aligned load layout that needs no offline repack.
+- **GQA-grouped split-K decode attention — rejected (2026-09-23).** One
+  workgroup per (kv head, token, span) sharing each K/V read across the heads
+  that share a kv head: **bit-exact** (18/18 cases, 600..65535 keys) but
+  **0.3-0.7x at 600-4k keys** and only ~1.0-1.17x at 16k-64k, net negative end to
+  end. Its first sweeps read **+11% at ctx 8k** and **+23.6% at ctx 2k**
+  (`evidence/raw/ab-attn-decode-gqa-ctx{2k,8k}*`) and neither survived
+  re-measurement: at ctx 1k/1.5k/2k/4k the same change measures **-2..-9%**, and
+  the wins were the decode-variance pitfall below (§9). Shader, harness and the
+  rejected patch are archived under `evidence/raw/attn-decode-gqa-rejected*`.
+
+## 8. Model set — what loads and what does not
+
+| file (`/home/server/q36/gguf/`) | size | arch | q36 | upstream llama.cpp |
+|---|---|---|---|---|
+| `Swift-Qwen3.8-27B-IQ3_XXS.gguf` | 11952M | qwen3 dense 27B | **171.09 / 23.19** | 105.43 / 22.13 |
+| `Qwen3.8-27B-UD-IQ3_S.gguf` | 11484M | qwen3 dense 27B | 166.36 / 21.44 | not measured |
+| `Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf` | 11194M | qwen35moe 40 blk | **909.49 / 87.37** | 615.08 / 78.72 |
+| `RavenX-35B-Q36-IQ2XXS.gguf` | 11194M | qwen35moe 40 blk | 717.36 / 89.47 | 545.46 / 77.96 |
+| `Qwen3.8-35B-A3B-IQ2_M.gguf` | 11977M | qwen35moe **41 blk** | 116.51 / 29.29 | 529.90 / 91.53 |
+| `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` | 6873M | qwen35 dense 27B + MTP head | **211.08 / 32.97** at ctx 512 | not measured |
+
+- The guard is the no-regression reference; `Qwen3.6-35B-A3B-AntirezExperts-
+  …gguf` is a **symlink** to it, and `q36moe.gguf` points at the *dense* 27B.
+  **Always pass absolute model paths** — several entries are symlinks and
+  worktrees have no `gguf/` link.
+- RavenX out-decodes the guard while its prefill is 21% lower, on a file 128
+  bytes different in length: that is quant mix, not layout. There is no single
+  "MoE ≈ 900 t/s prefill" figure.
+- IQ2_M **loads** since `f9d537d` but its quant mix (375× `IQ2_S` trunk) misses the
+  fast prefill dispatch, so it is the one file where q36 is far *behind* upstream.
+  Never quote it as a q36 win; see §6.1.
+- `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` is the **DERISKED re-release** of the
+  file §6.6 could not load: same `qwen35` dense 27B layout, now carrying type-142
+  **PQ2_0** tensors this engine has kernels for (402 PQ2_0 tensors + BF16
+  `ssm_alpha`/`ssm_beta`). 6873M, published md5 matches. Numbers above are the
+  standard Bonsai workload (ctx 512, 128 greedy tokens, `--prefill-chunk 256`);
+  the older `Q2_0-g64` file measured ~200 / ~33.3 on it. Raw:
+  `evidence/raw/pq2-bonsai-workload.txt`. Unlike the models above it, its decode
+  matvec is a *dense* PQ2_0 kernel (`dense_extra_decode_pq2_0`) — see §6.7.
+
+## 9. Known pitfalls (each of these has cost real time)
+
+1. **Shader blobs are untracked and absent in fresh worktrees.** 108 `.spv`
+   live in `vulkan/`; a new worktree starts with none. If `VULKAN_SHADERS`
+   references a missing `.spv` the build or run fails: `cp -a vulkan/*.spv
+   <worktree>/vulkan/`. `make clean` deletes them too.
+2. **No committed binary** — rebuild from a pinned commit; verify freshness by
+   comparing `q36-bench` mtime against the `.o`/source mtimes.
+3. **Never build during a bench, never two model processes at once.**
+   `bench_ab.sh` refuses to start if `q36-bench`/`q36_test` is running.
+4. **`/tmp` is the scratch convention**, but it is volatile — copy every raw CSV
+   into `karpathy/evidence/raw/` when the run ends. Numbers whose raw data is
+   gone are not evidence.
+5. **Tool stdout gets truncated** on this host: write long output to a file and
+   read it back with a narrow range.
+6. **Worker quirks:** `opencode run --model union-alpha '<brief>'` (the
+   `--model union-alpha` flag is mandatory here) and it auto-rejects reads
+   under `/tmp` — copy inputs into the worker's worktree. `codex exec
+   --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C <dir>`
+   hits a usage-quota wall that clears on a schedule. `agy -p` can exit 0 with
+   an empty transcript — treat empty output as failure, not success.
+7. **`~/Karpathy` is a separate checkout and stays untouched** unless the user
+   says otherwise.
+
+- **A wrapper B that is not executable kills an A/B before a model loads.** If
+  `bench_ab.sh` returns exit **2** almost instantly with "B binary not
+  executable", the run produced no numbers at all — do not read it as a failed
+  experiment. `tests/bench_cswave32.sh` was committed without its exec bit and
+  cost two launches on 2026-09-17. Fix: `chmod +x`, and commit the bit.
+- **Worker availability is not stable — check before assigning the critical
+  item (2026-09-17).** `claude --dangerously-skip-permissions -p` failed
+  instantly with `You've hit your weekly limit · resets Sep 19, 1pm
+  (America/Sao_Paulo)`; `opencode run --model union-alpha` returned
+  `UnknownError / Unexpected server error. ref: err_...` on both attempts
+  (exit 1, no patch written); `agy` is unusable (`print timeout after 5m0s`).
+  **codex is the only CLI worker that has delivered a patch on this box** — give
+  it the highest-value file first, then fall back. Always give a worker the
+  fallback order explicitly so a dead agent is not the end of the item.
+- **Syntax-checking a shader with bare `glslc` gives a false negative.** The
+  Makefile compiles with `--target-env=vulkan1.1`; the default target env is
+  too low, so builtins such as `subgroupAdd` fail and a worker may conclude its
+  own (fine) file is broken. Tell workers the exact permitted command:
+  `glslc --target-env=vulkan1.1 -fshader-stage=comp <file>.comp -o /tmp/x.spv`.
+  - **A subagent that returns a summary but no file leaves no artifact.** Name an
+  explicit output path when delegating and verify the file exists before planning
+  around it: one audit subagent here returned 4,820 chars of summary and never
+  wrote `evidence/wave32-eligibility.md`, so the table was lost.
+- **A decode-only patch cannot be judged on the prefill gate.**
+  `bench_ab.sh` declares `FAIL (prefill)` by construction when only a decode
+  kernel changed. Judge those on the decode median **with its spread** — the
+  decode spread on Swift 27B is up to 9.4% and a cold first rep can move the
+  whole median.
+- **Decode t/s measured right after a >=1.5k-token prefill does not repeat
+  (2026-09-23).** Same binary, same settings, ctx 4096: 30.9 / 21.8 / 25.2 t/s.
+  Per-kernel `gpu_ms` moves too (one prefill mmq kernel time changed 12% between
+  two runs with identical prefill t/s). Decode at ctx <= 1024 is stable to MAD
+  0.02. Judge decode changes at short context, in a kernel harness, or with >=7
+  interleaved reps that agree on direction — a single sweep at long context is
+  not evidence.
+
+## 10. Handoff checklist for the next agent
+
+- [ ] Read this file, then `git log --oneline -6` + `git status`.
+- [ ] Confirm the GPU is idle before any build or bench.
+- [ ] Before proposing a change: **grep `AlreadyTried.md` for the mechanism**,
+      not just the file you are about to edit.
+- [ ] grepped the runtime flag that gates the code you will change (§4.5/4.6).
+- [ ] Measured with `bench_ab.sh`, 7 reps, interleaved; report median + MAD.
+- [ ] Copied the raw CSV into `karpathy/evidence/raw/`.
+- [ ] Wrote the verdict into `AlreadyTried.md` in the house style: what was
+      changed, what it measured, why it was accepted or rejected, and the
+      `reconsider_if` condition.
+- [ ] Committed (**everything**, with the numbers in the message).

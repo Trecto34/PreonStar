@@ -1,0 +1,36 @@
+== /tmp/r4/out/mtp2-32.log  cycles=16
+   fwd     n= 16 med=   50.31 min=   46.10 max=   52.28
+   draft   n= 16 med=    0.21 min=    0.00 max=    0.32
+   snap    n= 16 med=    0.15 min=    0.00 max=    0.18
+   verify  n= 16 med=   41.84 min=    0.00 max=   45.98
+   commit  n= 16 med=    0.00 min=    0.00 max=    0.01
+   total   n= 16 med=   88.52 min=   46.10 max=   97.22
+   read_kb med=2910  drains med=2
+   exits={'gate-reject': 6, 'full-accept': 9, 'no-draft': 1}
+== /tmp/r4/out/mtp3-256.log  cycles=97
+   fwd     n= 97 med=   51.70 min=   46.58 max=   56.54
+   draft   n= 97 med=    4.84 min=    0.00 max=   47.88
+   snap    n= 97 med=    0.13 min=    0.00 max=    0.19
+   verify  n= 97 med=  391.03 min=    0.00 max=  482.21
+   commit  n= 97 med=    0.01 min=    0.00 max=   51.55
+   total   n= 97 med=  462.69 min=   46.58 max=  595.04
+   read_kb med=4850  drains med=3
+   exits={'gate-reject': 37, 'partial': 29, 'full-accept': 31}
+== /tmp/r4/out/mtp3-32-nxoff.log  cycles=14
+   fwd     n= 14 med=   51.05 min=   46.16 max=   52.89
+   draft   n= 14 med=    4.75 min=    0.00 max=    5.04
+   snap    n= 14 med=    0.13 min=    0.00 max=    0.14
+   verify  n= 14 med=  638.41 min=    0.00 max=  696.60
+   commit  n= 14 med=    0.01 min=    0.00 max=   48.36
+   total   n= 14 med=  703.66 min=   51.01 max=  801.81
+   read_kb med=4850  drains med=3
+   exits={'gate-reject': 4, 'partial': 6, 'full-accept': 4}
+== /tmp/r4/out/mtp3-32.log  cycles=15
+   fwd     n= 15 med=   49.39 min=   46.32 max=   51.54
+   draft   n= 15 med=    4.68 min=    0.00 max=    4.97
+   snap    n= 15 med=    0.13 min=    0.00 max=    0.15
+   verify  n= 15 med=  370.47 min=    0.00 max=  428.04
+   commit  n= 15 med=    0.01 min=    0.00 max=   46.96
+   total   n= 15 med=  464.16 min=   46.57 max=  531.31
+   read_kb med=4850  drains med=3
+   exits={'gate-reject': 6, 'partial': 6, 'full-accept': 2, 'no-draft': 1}

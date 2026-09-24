@@ -12445,6 +12445,26 @@ int q36_sessions_eval_batch_with_prefill(
     return rc;
 }
 
+/* Q36_MTP_TIMING: one line per speculative cycle.  `drains` counts open-batch
+ * flushes (each one stalls until the GPU queue is empty), and read_kb is what
+ * the host pulled back in that same window. */
+static void q36_mtp_timing_report(uint32_t pos, const char *exit_reason,
+                                  int verify_n, int commit_n, int n_draft,
+                                  double c0, double c_fwd, double c_draft,
+                                  double c_snap, double c_verify, double c_commit,
+                                  uint64_t r0, uint64_t f0) {
+    fprintf(stderr,
+            "q36: mtp cycle pos=%u %-12s verify_n=%d commit_n=%d drafts=%d "
+            "fwd=%.2f draft=%.2f snap=%.2f verify=%.2f commit=%.2f total=%.2f ms "
+            "read_kb=%.0f drains=%" PRIu64 "\n",
+            pos, exit_reason ? exit_reason : "-", verify_n, commit_n, n_draft,
+            (c_fwd - c0) * 1000.0, (c_draft - c_fwd) * 1000.0,
+            (c_snap - c_draft) * 1000.0, (c_verify - c_snap) * 1000.0,
+            (c_commit - c_verify) * 1000.0, (c_commit - c0) * 1000.0,
+            (double)(q36_gpu_read_bytes() - r0) / 1024.0,
+            q36_gpu_read_flushes() - f0);
+}
+
 int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
                                         int max_tokens, int eos_token,
                                         int *accepted, int accepted_cap,
@@ -12470,6 +12490,20 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
         int prev_token;
         if (!rt || !rt->last_h || !rt->logits) return 0;
 
+        /* Q36_MTP_TIMING: per-phase wall clock for one speculative cycle plus
+         * the host readback volume and the GPU drains it caused.  Diagnostic
+         * only: nothing below changes the tokens produced. */
+        const bool mtp_timing = getenv("Q36_MTP_TIMING") != NULL;
+        double tc0 = 0.0, tc_fwd = 0.0, tc_draft = 0.0, tc_snap = 0.0;
+        double tc_verify = 0.0;
+        uint64_t tr0 = 0, tf0 = 0;
+        int n_draft = 0;
+        if (mtp_timing) {
+            tc0 = q36_now_sec();
+            tr0 = q36_gpu_read_bytes();
+            tf0 = q36_gpu_read_flushes();
+        }
+
         /* Draft backoff: after unconfident drafts, decode plainly for a
          * few tokens so hard content does not pay the draft head on every
          * token. Confident content resets to drafting every token. */
@@ -12485,18 +12519,34 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
          * against the fresh target logits are then free. */
         if (q36_session_eval_with_draft(s, first_token, err, errlen) != 0) return -1;
         accepted[0] = first_token;
+        if (mtp_timing) {
+            tc_fwd = q36_now_sec();
+            tc_draft = tc_fwd;
+            tc_snap = tc_fwd;
+            tc_verify = tc_fwd;
+        }
 
         if (draft_cap > Q36_MTP_MAX_DRAFT) draft_cap = Q36_MTP_MAX_DRAFT;
         if (draft_cap > accepted_cap - 1) draft_cap = accepted_cap - 1;
         if (draft_cap > max_tokens - 1) draft_cap = max_tokens - 1;
         if (draft_cap > s->ctx_size - s->checkpoint.len) draft_cap = s->ctx_size - s->checkpoint.len;
         if (rt->prefill_cap > 0 && draft_cap > (int)rt->prefill_cap) draft_cap = (int)rt->prefill_cap;
-        if (first_token == eos_token || draft_cap <= 0 || !s->mtp_draft_valid) return 1;
+        if (first_token == eos_token || draft_cap <= 0 || !s->mtp_draft_valid) {
+            if (mtp_timing) {
+                q36_mtp_timing_report((uint32_t)s->checkpoint.len, "no-draft", 0, 1, 0,
+                                      tc0, tc_fwd, tc_draft, tc_snap, tc_verify, tc_fwd, tr0, tf0);
+            }
+            return 1;
+        }
         if ((e->mtp_margin > 0.0f && s->mtp_draft_margin < e->mtp_margin) ||
             s->mtp_draft_token != q36_session_argmax(s)) {
             s->mtp_backoff_len = s->mtp_backoff_len ? (s->mtp_backoff_len < 4 ? s->mtp_backoff_len * 2 : 4) : 1;
             s->mtp_backoff = s->mtp_backoff_len;
             q36_mtp_stats_add(0, 0, false);
+            if (mtp_timing) {
+                q36_mtp_timing_report((uint32_t)s->checkpoint.len, "gate-reject", 0, 1, 0,
+                                      tc0, tc_fwd, tc_draft, tc_snap, tc_verify, tc_fwd, tr0, tf0);
+            }
             return 1;
         }
         s->mtp_backoff_len = 0;
@@ -12518,14 +12568,18 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
             if (e->mtp_margin > 0.0f && margin < e->mtp_margin) break;
             verify[verify_n++] = s->mtp_draft_token;
             prev_token = s->mtp_draft_token;
+            n_draft++;
         }
+        if (mtp_timing) tc_draft = q36_now_sec();
 
         if (!q36_vulkan_spec_frontier_snapshot(rt)) return 1;
+        if (mtp_timing) tc_snap = q36_now_sec();
         if (!q36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
             if (!q36_vulkan_spec_frontier_restore(rt)) q36_session_invalidate(s);
             if (err && errlen) snprintf(err, errlen, "MTP target verifier failed at pos %u", start_pos);
             return -1;
         }
+        if (mtp_timing) tc_verify = q36_now_sec();
 
         commit_n = 1;
         for (int i = 1; i < verify_n; i++) {
@@ -12570,6 +12624,12 @@ int q36_session_eval_speculative_argmax(q36_session *s, int first_token,
         for (int i = 0; i < commit_n; i++) {
             accepted[1 + i] = verify[i];
             q36_tokens_push(&s->checkpoint, verify[i]);
+        }
+        if (mtp_timing) {
+            q36_mtp_timing_report(start_pos,
+                                  commit_n == verify_n ? "full-accept" : "partial",
+                                  verify_n, commit_n, n_draft, tc0, tc_fwd, tc_draft,
+                                  tc_snap, tc_verify, q36_now_sec(), tr0, tf0);
         }
         s->checkpoint_valid = true;
         s->mtp_draft_valid = false;

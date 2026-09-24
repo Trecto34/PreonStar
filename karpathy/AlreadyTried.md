@@ -1779,6 +1779,18 @@ never measured. The two closed-line entries that touch readback
 
 ## MTP loop (P7) — probe NEGATIVE: the 3-row verify does not exist, nx already serves every multi-row step (2026-09-24)
 
+> **Corrected 2026-09-25 (round 2, R4 — see the entry below).** Two claims here
+> are too strong and the numbers behind them are now measured directly.  (i) "nx
+> already serves every multi-row step" holds only for IQ3_XXS: the 2-row verify
+> still takes the 128-row MMQ tile for `dense_iq3_xxs_mmq_pair`, `dense_kquant_mmq`
+> and `dense_iq4_xs_mmq`, which is why `verify` costs **391 ms for 2 rows vs 39 ms
+> for 1 row** (nx OFF: 638 ms).  (ii) "the remaining d3 cost is structural, not a
+> kernel" is wrong about the cost: the structure costs that because of those
+> kernels - the kernel differential over the 7 verify cycles attributes
+> +104/+70/+40/+30 ms per cycle to pair/kquant/iq4xs/residual-iq3 and only +10 ms
+> to nx.  The shape conclusion (two target forwards per cycle; even with `verify`
+> free, `fwd + commit` is 0.76x plain) stands and is now measured per phase.
+
 Reopens **P2** (`## MTP draft acceptance measured, and the MTP loop is a net loss
 as shipped`) and **corrects one sentence of P6** (`## Two-row dense IQ3_XXS
 decode...`).  Audit §P7's cheapest listed fix is "use P6's kernel for verify",
@@ -1836,7 +1848,9 @@ premise is false.
   and 475.4 (OFF) against 5805.3 ms for the prefill-mostly run, which is larger
   than either decode block and is why the subtraction is only good to ~20 ms per
   row.  Raw: `evidence/raw/p7-mtp/attribution.txt` + `p7attr.py`.
-- **So the remaining d3 cost is structural, not a kernel.**  After P6, a spec
+- **So the remaining d3 cost is structural, not a kernel.**  (The "not a kernel"
+  half is corrected above: R4 measures the 2-row verify at 391 ms, and three of
+  the four dense types pay the 128-row tile for it.)  After P6, a spec
   call is one draft forward (1 row) plus one verify forward (2 rows, already nx)
   and commits 1.94 tokens/call (97 calls, 91 accepted), i.e. roughly two forwards
   per 1.9 tokens: 6.88 t/s against 21.9 t/s plain.  The audit's other three P7
@@ -2045,3 +2059,62 @@ had never been measured.  Round-2 R3.  Measurement only, no source change.
   reasons other than throughput (latency spread, KV memory), in which case the
   0.50x is a documented cost of that choice and not a defect.
 
+## MTP loop diagnosed: two target forwards per cycle, `verify` is 10x a one-row forward, net loss (2026-09-25)
+
+Corrects round-1 **P7** (`## MTP loop (P7) — probe NEGATIVE: the 3-row verify does
+not exist, nx already serves every multi-row step`), which concluded "the
+remaining d3 cost is structural, not a kernel".  That conclusion was right about
+the *shape* and wrong about the *cost*: the shape costs 391 ms per cycle because
+the two-row verify is **not** served by nx for three of the four dense trunk
+types.  Round-2 R4.
+
+- **Diagnostic added (env-gated, kept - it is the instrument).**
+  `Q36_MTP_TIMING` prints one line per speculative cycle from
+  `q36_session_eval_speculative_argmax` (`fwd`, each draft, `snap`, `verify`,
+  `commit`, total, `read_kb`, `drains`), plus `q36_gpu_read_bytes()` /
+  `q36_gpu_read_flushes()` counters in `q36_vulkan.c` / `q36_gpu.h`.  No
+  semantic change; inert when unset.
+- **Absolute rates, same binary, Swift ctx 512 margin 0, plain alongside:**
+  plain 32 tok **22.68 t/s**, plain 256 tok **23.04**; `--mtp-draft 2`
+  **21.17 (0.92x)**; `--mtp-draft 3` nx ON **6.97 (0.30x)**, nx OFF
+  **4.10 (0.18x)**.  Round-1's 6.88 reproduces.  Both depths are net losses.
+- **Per cycle (97 cycles, d3 nx ON, 1.94 tokens/cycle, accept 75.8%, exits 37
+  gate-reject / 29 partial / 31 full-accept):** `fwd` 51.70 ms median,
+  `draft` 4.84, `snap` 0.13, **`verify` 391.03** (max 482.21), `commit` 0.01
+  (max 51.55 on a partial accept = restore + replay), total 462.69.  `read_kb`
+  median 4850 = five 993 KB logits readbacks per full cycle; `drains` 3.
+  `submit_wait_ms` **563.0 d3 vs 167.4 plain** = +57 ms/cycle of queue drain on
+  top of the GPU work.
+- **`verify` is 391 ms for 2 rows against ~39 ms for 1 row = 10x** (nx OFF: 638
+  ms).  Kernel differential over the 7 verify cycles: `dense_iq3_xxs_mmq_pair`
+  +104 ms/cycle, `dense_kquant_mmq` +70, `dense_iq4_xs_mmq` +40, residual
+  `dense_iq3_xxs_mmq` +30, `dense_iq3_xxs_decode_nx` +10 (the one type nx
+  covers), `attn_prefill_fa_gqa6` +3, lm_head `dense_q5k_decode` +5.  So the
+  two-row verify leaves the decode kernels for the **128-row tile** on three of
+  four types - R3's wall, in the MTP path.
+- **The Q8_0 host-drain suspicion is refuted.**  The MTP block's matmuls show up
+  as `matmul_q8_0_f32b` (0 -> 88 disp / 14.2 ms); `submit_wait_q8_0_quant_x`
+  never appears in any profile.  The draft head is 5 ms; `mtp` inside `fwd` is
+  12 ms.  P2's 7.5% figure held.
+- **d2 is not speculation at all.**  `draft_cap = N - 1 = 1` makes
+  `verify_n == commit_n == 1`, so the `row_tops` comparison loop never runs and
+  the 100% accept counter is **by construction**.  d2 = one extra forward per
+  token plus a wasted draft head = its 0.92x.
+- **Ceiling.**  Measured d3 cycle 466-531 ms for 1.71 tokens = **273-310
+  ms/token = 0.15x plain**; even with `verify` free, `fwd + commit` = 57
+  ms/token = **0.76x plain**, because the shipped shape runs two target forwards
+  per cycle plus a replay on every partial accept.  The standard shape (one
+  forward over [committed, draft...], per-row argmax on GPU, adopt-on-partial
+  accept so there is no replay) is `52 + 12 + 5 = 69 ms` per 1.71 tokens =
+  **25 t/s = +9% over plain** (+17% at round-1's 76% accept) - and that `52 ms`
+  assumes the n_tok 2..8 trunk covers pair/kquant/iq4xs.  **Verdict: diagnosed,
+  reported as a net loss, no restructure landed.**  The restructure is a strict
+  dependency on the deferred R3 kernel work for ~+10%.
+- Raw: `evidence/raw/r4-mtp-diagnosis/` (`R4-VERDICT.md`, `R4-PHASES.txt`,
+  `plain32.log`, `plain256.log`, `mtp2-32.log`, `mtp3-32.log`, `mtp3-256.log`,
+  `mtp3-32-nxoff.log`, `prof-{plain,mtp2,mtp3,mtp3-nxoff}.log`, `run-r3c-r4.s`,
+  `run-r4b.s`).
+- `reconsider_if`: the n_tok 2..8 nx trunk covers the pair/K-quant/IQ4_XS tiles
+  (then build the standard shape - the +9% is real once the 725 ms step becomes
+  52 ms); or a per-verify-row DeltaNet state capture lands, which removes the
+  `commit` replay (max 51.55 ms/cycle) but not the second forward.

@@ -510,6 +510,10 @@ static uint64_t q36_vk_completed_seq;
  * recording.  Printed by q36_gpu_print_memory_report(). */
 static uint64_t q36_vk_prof_dispatches;
 static uint64_t q36_vk_prof_flushes;
+/* Diagnostic counters behind q36_gpu_read_bytes/read_flushes (Q36_MTP_TIMING):
+ * how much the host pulls back and how many of those pulls drain the GPU. */
+static uint64_t q36_vk_read_bytes_total;
+static uint64_t q36_vk_flush_total;
 static uint64_t q36_vk_prof_submit_ns;
 static uint64_t q36_vk_prof_record_ns;
 
@@ -2198,6 +2202,7 @@ static int q36_vk_flush_unlocked(void) {
     }
     if (had_work) {
         q36_vk_prof_flushes++;
+        q36_vk_flush_total++;
         {
             uint64_t submit_ns = q36_vk_now_ns() - t0;
             q36_vk_prof_submit_ns += submit_ns;
@@ -4031,8 +4036,12 @@ int q36_gpu_tensor_read(const q36_gpu_tensor *tensor, uint64_t offset, void *dat
     unsigned char *src = q36_vk_tensor_contents_labeled((q36_gpu_tensor *)tensor, "submit_wait_tensor_read");
     if (!src || !data || !q36_gpu_tensor_range_ok(tensor, offset, bytes)) return 0;
     memcpy(data, src + offset, (size_t)bytes);
+    q36_vk_read_bytes_total += bytes;
     return 1;
 }
+
+uint64_t q36_gpu_read_bytes(void) { return q36_vk_read_bytes_total; }
+uint64_t q36_gpu_read_flushes(void) { return q36_vk_flush_total; }
 
 int q36_gpu_tensor_copy(q36_gpu_tensor *dst, uint64_t dst_offset,
                         const q36_gpu_tensor *src, uint64_t src_offset,
