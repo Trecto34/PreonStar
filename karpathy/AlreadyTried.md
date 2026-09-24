@@ -1248,3 +1248,67 @@ Model `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` (402 PQ2_0 tensors, dense 27B).
   decode (ctx <= 1024) is stable to MAD 0.02.
 - Judge decode-only changes at ctx <= 1024, or in a kernel harness, or with
   >=7 interleaved reps and all pairs in one direction.
+
+## MoE IQ2_S down sum-decode: fp64 and wave64 dead, field-load shape is the lever (2026-09-24)
+
+Reopens the audit's 2026-09-24 P1 items and, for the wave32 half, the exclusion
+in `evidence/wave32-eligibility.md:146` (`moe_down_q2k_sum_decode.comp` marked
+CROSS-LANE-HEAVY on the strength of its `subgroupAdd`, never measured). New
+evidence: a per-kernel decode profile plus two in-kernel floor probes that
+decompose the kernel's 313.2 ms into DRAM floor, field-load, and ALU cost.
+
+- **Measured baseline** (`moe_iq2s_down_sum_decode`, IQ2_M, ctx 512, gen 128):
+  `dispatches=4736 groups=9699328 gpu_ms=313.156` = 37 calls/tok x 2048 rows x
+  8 experts x 164 B = **99.4 MB/tok unique** = 12.72 GB/run at **40.6 GB/s**;
+  21.6% of decode GPU, 2.46 ms of a 13.42 ms/tok decode.  The audit's ~40 GB/s
+  figure is confirmed, and it is unique traffic: the 16 lanes of a half-wave
+  share one 82 B superblock, so per-lane redundancy is L1 broadcast.
+- **Probe A — fp64 (`fma32`, audit item c) — NEGATIVE.** `fma32` already
+  compiles to **one `v_fma_f64` per expert** (plus 3 `v_cvt_f64_f32`, 1
+  `v_cvt_f32_f64`), all inside the `tid == 0` tail, i.e. once per expert per
+  workgroup, not per weight: there is no 7-op fp64 sequence to remove.  The
+  profile-only `fma32 -> fma` swap moved the kernel 315.18/314.65 ->
+  314.65 ms, inside noise.  Raw `evidence/raw/p1-sumdecode/isa-f64-counts.txt`,
+  `ab-p1-fma.csv`.  Do not reuse the "fp64 emulation is 1/16 rate on every MAC"
+  framing.
+- **Probe B — wave32 (audit item a) — PREMISE FALSE.** `mmq_info` reports
+  `subgroup=32` for `moe_down_q2k_sum_decode{,_iq2s,_iq3s}.spv` (VGPR 48, code
+  4004/4112, 20 subgroups/SIMD), so the dispatched blobs already run wave32 and
+  no half-wave idles.  Only the non-IQ2S/Q2_K build reports VGPR 64 /
+  16 subgroups.  Nothing to force, nothing to fix.
+- **Probe C — "experts in parallel" — NEGATIVE.** 3 interleaved env pairs of
+  `Q36_VK_MOE_DOWN_SUM_DECODE=0` (falls back to the per-expert parallel down
+  kernels) vs default: decode **70.65/71.07/70.95** vs **74.46/74.42/74.39 t/s**,
+  prefill unchanged.  The serial 8-expert combine with one `subgroupAdd` per
+  expert already wins by 4.8%; the audit's "experts in parallel" suggestion is
+  dead in that form.
+- **Probe D — load shape — POSITIVE, 3.23x.** A diagnostic IQ2_S body that
+  keeps the workgroup/block/expert mapping but reads the whole 82 B superblock
+  with **3 lane-strided 2-byte loads** (and does no dequant, no mid, no
+  tables - `Q36_P1_LOADFLOOR`, `diag.comp` + `p1-diag-probes.diff`) runs
+  **97.10/97.74/97.69 ms** against the stock **314.88/315.51/315.52 ms** for the
+  *same 12.72 GB*: 131 GB/s achievable vs 40.6 GB/s delivered.  End to end the
+  run drops 1465 -> 1246 ms of decode GPU, decode 74.4 -> 85.0 t/s.
+- **Probe E — ALU is only 51 ms.** The same diagnostic with the stock ~40
+  scattered field loads kept verbatim and the dequant arithmetic collapsed to an
+  add (`Q36_P1_ALUFLOOR`) runs **263.93/264.40/264.53 ms**, so
+  `315.4 = 97.0 floor + 167.2 field loads + 51.2 ALU`.  The kernel is
+  load-shape-bound, not ALU-bound and not fp64-bound.
+- **Why it does not beat the Q2_K branch:** both experts' byte footprints are
+  ~identical per block (82 B vs 84 B), but the IQ2_S branch fetches its scale /
+  9-bit grid index / qh / sign fields with ~40 independent 2-byte loads at
+  scattered offsets per lane per block, where the Q2_K branch of the same file
+  needs ~7 loads per block.  That is the whole 40.6 vs ~62 GB/s gap.
+- **Not built this session.** The fix (fetch the superblock with coalesced
+  lane-strided loads and redistribute the field bytes with `subgroupShuffle` or
+  LDS, keeping the per-element fma order so the result stays bit-exact) is a
+  real rewrite of the IQ2_S branch; it was left unbuilt rather than starting a
+  build the remaining audit items cannot be traded against.  Probes D/E are the
+  evidence that it is worth it.  Raw:
+  `evidence/raw/p1-sumdecode/P1-VERDICT.md`, `ab-p1-loadfloor.csv`,
+  `ab-p1-alufree.csv`, `summary.csv`, `iq2m-decode-base.txt`, `loadfloor.spv`,
+  `alufree.spv`.
+- `reconsider_if`: the IQ2_M decode kernel is on the critical path again (it is
+  #1 at 21.6% of decode) and someone builds the coalesced-fetch version; target
+  315 -> 200-230 ms kernel and 74.4 -> ~80 t/s decode, parity `max_abs_diff = 0`
+  on the frontier-513 dump because only the fetch changes.

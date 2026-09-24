@@ -567,6 +567,27 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    (not a measurement) only breaks even near 0.7 acceptance, so draft=1 MTP stays
    the only speculative configuration. Draft depth 2+ remains rejected (ledger).
 
+8. **2026-09-24 audit sweep.** Per-item entries land here as they are closed;
+   the audit's own item numbers are used (`P1`..`P9`).
+   **P1. MoE IQ2_S down sum-decode — audited levers NEGATIVE, load shape
+   CONFIRMED as the lever, not built (2026-09-24).** `moe_iq2s_down_sum_decode`
+   is 21.6% of IQ2_M decode (`dispatches=4736 gpu_ms=313.156`, 40.6 GB/s over
+   99.4 MB/tok of *unique* bytes).  (a) wave32 premise **false** - `mmq_info`
+   says `subgroup=32` already for all three blobs (`wave32-eligibility.md:146`
+   excluded it on the `subgroupAdd`, never measured); (c) `fma32` **negative** -
+   ACO already emits exactly one `v_fma_f64` per *expert* in the `tid == 0`
+   tail, and a profile-only `fma32 -> fma` swap was inside noise; "experts in
+   parallel" **negative** - `Q36_VK_MOE_DOWN_SUM_DECODE=0` costs 4.8% decode
+   (70.9 vs 74.4 t/s).  (b) byte-granular loads **confirmed**: two in-kernel
+   floors decompose the kernel as `315.4 = 97.0 coalesced-load floor + 167.2
+   scattered field loads + 51.2 ALU`, i.e. 131 GB/s is achievable for the same
+   12.72 GB.  The fix (coalesced lane-strided fetch + `subgroupShuffle`/LDS
+   redistribution, per-element fma order unchanged so it stays bit-exact) is a
+   real rewrite of the IQ2_S branch and was left unbuilt; target 315 -> 200-230
+   ms and +14% IQ2_M decode.  Evidence:
+   `evidence/raw/p1-sumdecode/P1-VERDICT.md` + `ab-p1-{fma,loadfloor,alufree}.csv`,
+   `summary.csv`, `isa-f64-counts.txt`, `p1-diag-probes.diff`.
+
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 
 Authoritative detail and per-item "reconsider_if" live in

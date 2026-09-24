@@ -1,0 +1,56 @@
+diff --git a/vulkan/moe_down_q2k_sum_decode.comp b/vulkan/moe_down_q2k_sum_decode.comp
+index 718c245..aa86154 100644
+--- a/vulkan/moe_down_q2k_sum_decode.comp
++++ b/vulkan/moe_down_q2k_sum_decode.comp
+@@ -95,7 +95,50 @@ void main(void) {
+         uint m2 = u * pc.in_dim / 2u;
+         float acc = 0.0;
+ 
+-#ifdef Q36_MOE_IQ2S
++#if defined(Q36_MOE_IQ2S) && defined(Q36_P1_LOADFLOOR)
++        /* DIAGNOSTIC ONLY (Q36_P1_LOADFLOOR, 2026-09-24 P1).  Same workgroup /
++         * block / expert mapping, but the whole 82-byte superblock is read with
++         * three coalesced 2-byte loads per lane (lane stride one word) instead
++         * of the ~48 scattered per-lane byte loads the real IQ2_S dequant
++         * performs.  No dequant, no mid, no tables.  Measures the achievable
++         * DRAM rate for this key/value layout, so the 40.6 GB/s of the real
++         * kernel can be attributed to the bus or to the load pattern. */
++        uint lane16 = tid & 15u;
++        for (uint i = ix; i < pc.blocks; i += 2u) {
++            uint w = (base_bytes + i * IQ2S_BYTES) >> 1u;
++            uint c = 0u;
++            for (uint k = 0u; k < 3u; k++) {
++                uint idx = w + lane16 + 16u * k;
++                if (idx < w + 41u) c += uint(wb[idx]);
++            }
++            acc += float(c);
++        }
++#elif defined(Q36_MOE_IQ2S) && defined(Q36_P1_ALUFLOOR)
++        /* DIAGNOSTIC ONLY (Q36_P1_ALUFLOOR, 2026-09-24 P1).  The real IQ2_S
++         * field loads are kept verbatim (same 5 loads per element group, same
++         * addresses, so no load can be dead-code eliminated) but the dequant
++         * arithmetic around them is collapsed to a plain add.  Together with
++         * Q36_P1_LOADFLOOR this splits the measured 315 ms into the cost of the
++         * scattered field loads and the cost of the ALU that consumes them. */
++        for (uint i = ix; i < pc.blocks; i += 2u) {
++            uint bb = base_bytes + i * IQ2S_BYTES;
++            uint y2 = m2 + ((i * 256u + y_off) >> 1u);
++            for (uint p = 0u; p < 8u; p++) {
++                uint n = y_off + 16u * p;
++                uint ib32 = n >> 5u;
++                uint lg = (n >> 3u) & 3u;
++                uint j = n & 7u;
++                uint scb = wb_u8(bb + 74u + ib32);
++                uint entry = wb_u8(bb + 2u + 4u * ib32 + lg) |
++                             ((wb_u8(bb + 66u + ib32) << (8u - 2u * lg)) & 0x300u);
++                uint signs = wb_u8(bb + 34u + 4u * ib32 + lg);
++                uint word = tables[TAB_IQ2S + entry * 2u + (j >> 2u)];
++                vec2 bv = mid[y2 + 8u * p];
++                acc += float(scb) + float(entry) + float(signs) +
++                       float(word & 255u) + bv.x + bv.y;
++            }
++        }
++#elif defined(Q36_MOE_IQ2S)
+         /* Same element slotting as the Q2_K path: this thread owns the two
+          * elements at y_off + 16*p for p = 0..7 and each 16-element group
+          * carries one IQ2_S scale, one grid index and one sign byte. */
