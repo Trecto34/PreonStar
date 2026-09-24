@@ -1,0 +1,6 @@
+out_dim 5120  groups 1280  inner 512  per-dispatch ms and effective GB/s (0.0 GiB buffer)
+  mv3_v0.spv                   median 0.0154 ms  453.6 GB/s   best 0.0153 ms  454.3 GB/s   spread 72.0%
+  mv3_v1.spv                   median 0.0142 ms  490.8 GB/s   best 0.0141 ms  492.6 GB/s   spread 75.1%
+  mv3_v2.spv                   median 0.0638 ms  109.1 GB/s   best 0.0483 ms  144.3 GB/s   spread 102.9%
+  mv3_v3.spv                   median 0.0480 ms  145.2 GB/s   best 0.0367 ms  190.0 GB/s   spread 25.1%
+  mv3_v4.spv                   median 0.0152 ms  457.4 GB/s   best 0.0152 ms  458.6 GB/s   spread 5.5%

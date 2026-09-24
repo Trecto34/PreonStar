@@ -587,6 +587,25 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    ms and +14% IQ2_M decode.  Evidence:
    `evidence/raw/p1-sumdecode/P1-VERDICT.md` + `ab-p1-{fma,loadfloor,alufree}.csv`,
    `summary.csv`, `isa-f64-counts.txt`, `p1-diag-probes.diff`.
+   **P2. MTP acceptance measured; the drafted token is always right and MTP is
+   still a net loss (2026-09-24).**  Swift, greedy, ctx 512, gen 512, three
+   prompts.  Draft acceptance when a draft is carried: **100% at depth 1**
+   (172/172 margin 0, 60/60 margin 3, 91/91 code, 77/77 agent), **>= 69.4% at
+   depth 2** (100 of at most 144 two-draft calls) - the P7 >= 60% gate is met.
+   But decode is **slower in 6/6 pairs, 0.4-7%** (story 22.63 -> 21.08/21.14,
+   code 21.89 -> 20.92, agent 21.87 -> 20.98), and structurally so: at
+   `draft_cap 1` the verify row is a *new position*, so it is a whole extra
+   forward - **47.5 ms per one-token spec call, 94.4 ms per two-token call
+   (= 47.2 ms/token) vs 44.19 ms per plain step** (solved from the two margin-0
+   arms), with the draft head only +3.3 ms.  `--mtp-draft 3/4` (draft_cap 2/3)
+   collapses to **4.17/4.44 t/s** because the moment the verify carries a second
+   row it leaves the decode kernel for `dense_iq3_xxs_mmq` +
+   `predequant_b16` (`q36_vulkan.c:8687-8730`: only `n_tok == 1` gets a decode
+   kernel) - the P6 small-batch gap.  Also: the `MTP stats accept=100.0%` line is
+   100% by construction at the published `--mtp-draft 2` (`draft_cap = N - 1`
+   makes `verify_n == commit_n == 1`), and the default `--mtp-margin 3` gate only
+   costs (margin 0 gives +33% tokens/call at the same t/s).  Evidence:
+   `evidence/raw/p2-mtp/*.log`, `evidence/raw/p6-smallbatch/NOTES-cost-model.md`.
    **P4. Bit-exact integer IQ3_XXS decode — REJECTED, no packed signed dot on
    GFX1013 (2026-09-24).** Reopened the 2026-09-17 sign-mask rejection with the
    audit's ISA evidence (690 VALU / 128 weight-MACCs = 5.4 VALU/weight; 6.497

@@ -1313,6 +1313,69 @@ decompose the kernel's 313.2 ms into DRAM floor, field-load, and ALU cost.
   315 -> 200-230 ms kernel and 74.4 -> ~80 t/s decode, parity `max_abs_diff = 0`
   on the frontier-513 dump because only the fetch changes.
 
+## MTP draft acceptance measured, and the MTP loop is a net loss as shipped (2026-09-24)
+
+Reopens nothing; this is the audit's P2 measurement, and it **corrects** an
+earlier reading of the same harness.  Swift, in-file MTP head (`blk.64 nextn`,
+`draft=N`), greedy, ctx 512, 512 generated tokens, three prompts (prose / code /
+agent transcript).  Raw: `evidence/raw/p2-mtp/*.log`.
+
+- **Draft acceptance, when a draft is actually carried: 100% at depth 1, >= 69%
+  at depth 2.**  Depth 1: 172/172 (story, `--mtp-margin 0`), 60/60 (story,
+  margin 3), 91/91 (code), 77/77 (agent).  Depth 2 (`--mtp-draft 3`,
+  `draft_cap = 2`): 100 calls committed both drafts out of at most 144 two-draft
+  calls, so the second draft is accepted at least 69.4% of the time (the
+  `Q36_MTP_STATS` `drafted` count gives the exact denominator).  The audit's
+  >= 60% P7 gate is met.
+- **CORRECTION — the `q36: MTP stats ... accept=100.0%` line is not an
+  acceptance rate at the default setting.**  `q36_mtp_stats_add(verify_n,
+  commit_n, ...)` is only called on calls that carry a draft, and
+  `--mtp-draft N` sets `draft_cap = N - 1` (`q36.c:12366`), so at the published
+  default of 2 `verify_n` is always 1 and `commit_n` is always 1: the line is
+  100% by construction (earlier runs read `drafted=60 accepted=60 full=60`, and
+  so on).  Set the margin to 0 and/or draft to 3+ before quoting acceptance.
+- **MTP makes decode SLOWER at every setting measured — 6 of 6 prompt/flag
+  pairs, 0.4-7%.**  ctx 512, gen 512, t/s (plain -> MTP): story 22.63 -> 21.08
+  (margin 3) / 21.14 (margin 0) / 22.24 (earlier run, margin 3); code 21.89 ->
+  20.92 / 21.81; agent 21.87 -> 20.98 / 20.99.  Prefill is untouched
+  (186-191 t/s in every arm).
+- **Why, and it is structural: at `draft_cap = 1` the verify row is a new
+  position, so it costs a whole extra forward.**  `histogram=k` counts *tokens
+  committed per call* (`1 + commit_n`, `q36.c:12483`), so solving the two
+  `--mtp-margin 0` arms (340 calls: 168 committing 1, 172 committing 2, 24.22 s;
+  452 calls: 392 / 60, 24.29 s) gives **47.5 ms per one-token spec call and
+  94.4 ms per two-token spec call = 47.2 ms/token, against 44.19 ms for a plain
+  step**.  The piggybacked draft head is only +3.3 ms (7.5%); the loss is that
+  two forwards buy two tokens.  Depth 1 is therefore break-even at best and a
+  loss after the draft head — it cannot be tuned into a win, only kept from
+  hurting.
+- **The default margin gate is pure cost.**  `--mtp-margin 0` beats the shipped
+  margin 3 on tokens/call by 33% with no measurable decode change; the
+  `s->mtp_draft_token != q36_session_argmax(s)` check that cannot be turned off
+  is already the free, exact filter.  Backoff then spends 1-4 draftless tokens
+  after each miss, which is why only ~47% of calls carry a draft at margin 0
+  (172/340) and ~13% at margin 3 (60/452).
+- **Depth 2+ collapses: `--mtp-draft 3` (draft_cap 2) = 4.17 t/s and
+  `--mtp-draft 4` (draft_cap 3) = 4.44 t/s** against 22.63 plain, while still
+  committing 1.910 / 1.673 tokens per call and with prefill unchanged at
+  ~187 t/s.  The same algebra puts a two-draft call at ~1.1 s, i.e. ~0.4 s per
+  committed token, 8-9x a plain step; the direct evidence is the per-kernel
+  decode profile in `evidence/raw/p6-smallbatch/`.  Mechanism: for IQ3_XXS only
+  `n_tok == 1` is given a decode kernel (`q36_vulkan.c:8687-8730`), so the
+  moment the verify carries a *second* row it takes `dense_iq3_xxs_mmq` (a
+  `ceil(n_tok/128)` grid) plus a `predequant_b16` pass — the 128-token prefill
+  tile.  `q36_vk_micro_batch` exists but is only wired for Q8_0
+  (`q36_vulkan.c:5173`).  This is the audit's P6, measured from the outside.
+- `reconsider_if`: the small-batch (n_tok 2..8) decode kernel from P6 lands — at
+  draft depth 1 there is nothing to fix (one verify row is one row), so the win
+  has to come from depth 2, which is exactly the case that is broken today.  The
+  break-even is arithmetic: at the measured 1.469 tokens/call a call may cost at
+  most `1.469 x 44.19 = 64.9 ms` and costs 94.4; with two drafts accepted at
+  100% / >= 69.4% the same call commits 1 + 1 + 0.694 = 2.694 tokens, so a
+  two-row verify that costs ~1.2 plain steps projects ~50 t/s (2.2x).  A kernel
+  that loads each weight block once for both rows (the MoE sum-decode shape, or
+  `dense_extra_small_q2`) is the only way there.
+
 ## Bit-exact integer IQ3_XXS decode — REJECTED: no packed signed dot on GFX1013 (2026-09-24)
 
 Reopens **"Integer sign-mask IQ3_XXS decode — REJECTED"** (2026-09-17 §"BC-250

@@ -1,0 +1,142 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+/* PQ2_0 decode matvec memory patterns, math removed, at production geometry.
+ *
+ * PQ2_0 block = { uint16 d ; uint8 qs[32] } = 34 B per 128 weights.  Because
+ * the payload starts 2 B into every block, a lane's 4-code dword is never
+ * 4-byte aligned: the production kernel pays load_u32's two dword loads plus a
+ * funnel shift (2 code dwords + 1 scale u16 = 5 load instructions per lane-row).
+ * These variants test what happens when the SAME bytes are physically repacked
+ * so the payload blocks are 32 B and the load is naturally aligned.
+ *
+ *   VARIANT 0  production: 34 B blocks, scale inline, 2x unaligned u32/lane
+ *   VARIANT 1  SoA flat planes: payload 32 B blocks, uvec2/lane (8 B)
+ *   VARIANT 2  SoA flat planes: payload 32 B blocks, uvec4/lane (16 B)
+ *   VARIANT 3  VARIANT 2 with scale and activation loads removed (ablation)
+ *   VARIANT 4  VARIANT 0 with scale and activation loads removed (ablation)
+ *   VARIANT 7  as VARIANT 1 but the row's scales stay in the row (stride padded
+ *              to 1376 = 43 x 32 so the payload plane is 32 B aligned and the
+ *              scale block sits at the row end, same DRAM page, +1.2% bytes)
+ *   VARIANT 8  as VARIANT 2 with the VARIANT 7 in-row scale placement
+ *   VARIANT 9  as VARIANT 8 with scale and activation loads removed (ablation)
+ *
+ * Rows are addressed as row0 + WorkGroupID*4 so the host can walk a small
+ * production-shaped window through a large buffer (defeats L2 residency while
+ * keeping the per-dispatch geometry of a real decode dispatch). */
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly buffer W { uint wb[]; };
+layout(set = 0, binding = 1) readonly buffer A { uint q8[]; };
+layout(set = 0, binding = 2) buffer O { uint o[]; };
+layout(push_constant) uniform P { uint rows; uint blocks; uint row0; } pc;
+
+#define ROWS 4u
+#define Q8K_WORDS 74u
+#define PQ_BYTES 32u          /* payload bytes per 128-weight block */
+#define PQ_SCALE 2u           /* scale bytes per block               */
+#define PQ_BLOCKS_PER_Q8K 2u
+
+#if VARIANT == 0 || VARIANT == 4
+#define BLK 34u
+#else
+#define BLK PQ_BYTES
+#endif
+
+#if VARIANT == 0 || VARIANT == 4
+#define IN_ROW_SCALE 0
+#elif VARIANT == 1
+#define IN_ROW_SCALE 0
+#elif VARIANT == 2 || VARIANT == 3
+#define IN_ROW_SCALE 0
+#elif VARIANT == 7 || VARIANT == 8 || VARIANT == 9
+#define IN_ROW_SCALE 1
+#else
+#error unknown VARIANT
+#endif
+
+/* In-row layout: [ payload blocks (32 B each) ][ scales ][ pad to 32 B ].
+ * The pad is 16 B per row for every production shape (1360 -> 1376,
+ * 4624 -> 4640), i.e. +1.2% / +0.35% of the row's bytes. */
+#define ROW_BASE (pc.blocks * (PQ_BYTES + PQ_SCALE) * 2u)
+#define ROW_PAD ((32u - (ROW_BASE & 31u)) & 31u)
+#define ROW_STRIDE (ROW_BASE + ROW_PAD)
+
+uint load_u16(uint off) { uint w = wb[off >> 2u]; return (w >> (8u * (off & 3u))) & 0xffffu; }
+uint load_u32(uint off) {
+    uint shift = 8u * (off & 3u); uint i = off >> 2u; uint lo = wb[i];
+    return shift == 0u ? lo : (lo >> shift) | (wb[i + 1u] << (32u - shift));
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x & 63u, lane8 = lid & 7u;
+    uint first_row = pc.row0 + gl_WorkGroupID.x * ROWS;
+    uint nrows = pc.rows;                       /* rows this dispatch covers */
+    uint acc = 0u;
+
+#if IN_ROW_SCALE
+    /* scales live at the end of their own row */
+    #define SCALE_AT(row, pq) (row * ROW_STRIDE + (pc.blocks * 2u * PQ_BYTES) + (pq) * PQ_SCALE)
+    #define PAY_AT(row, pq, off) (row * ROW_STRIDE + (pq) * PQ_BYTES + (off))
+#else
+    /* flat planes: whole payload area, then the whole scale area */
+    #define SCALE_AT(row, pq) (nrows * (pc.blocks * 2u * PQ_BYTES) + (row) * (pc.blocks * 2u * PQ_SCALE) + (pq) * PQ_SCALE)
+    #define PAY_AT(row, pq, off) (row * (pc.blocks * 2u * PQ_BYTES) + (pq) * PQ_BYTES + (off))
+#endif
+
+#if VARIANT == 0 || VARIANT == 4
+    for (uint b = lid >> 3u; b < pc.blocks; b += 8u) {
+#if VARIANT == 0
+        uint qbase = b * Q8K_WORDS + 2u + 8u * lane8;
+        [[unroll]] for (uint i = 0u; i < 8u; i++) acc ^= q8[(qbase + i) % 4096u];
+#endif
+        [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+            uint row = first_row + r;
+            if (row >= pc.row0 + nrows) continue;
+            uint base = row * (pc.blocks * 2u * BLK) + (PQ_BLOCKS_PER_Q8K * b + (lane8 >> 2u)) * BLK;
+            uint code_base = base + 2u + (lane8 & 3u) * 8u;
+            acc ^= load_u32(code_base) ^ load_u32(code_base + 4u);
+#if VARIANT == 0
+            acc ^= load_u16(base);
+#endif
+        }
+    }
+#elif VARIANT == 1 || VARIANT == 7
+    /* uvec2: 4 lanes per 128-weight block, 8 B per lane (one aligned uvec2). */
+    for (uint b = lid >> 3u; b < pc.blocks; b += 8u) {
+        uint qbase = b * Q8K_WORDS + 2u + 8u * lane8;
+        [[unroll]] for (uint i = 0u; i < 8u; i++) acc ^= q8[(qbase + i) % 4096u];
+        [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+            uint row = first_row + r;
+            if (row >= pc.row0 + nrows) continue;
+            uint pq = PQ_BLOCKS_PER_Q8K * b + (lane8 >> 2u);
+            uint poff = PAY_AT(row, pq, (lane8 & 3u) * 8u);
+            uvec2 c = uvec2(wb[poff >> 2u], wb[(poff >> 2u) + 1u]);
+            acc ^= c.x ^ c.y;
+            acc ^= load_u16(SCALE_AT(row, pq));
+        }
+    }
+#else
+    /* uvec4: 2 lanes per 128-weight block, 16 B (64 weights) per lane, which
+     * needs 64 activations = 16 q8 dwords per lane.  64 lanes therefore cover
+     * 32 blocks per iteration; a 40-block row needs a ragged second pass. */
+    for (uint pq = lid >> 1u; pq < PQ_BLOCKS_PER_Q8K * pc.blocks; pq += 32u) {
+        uint hsel = lid & 1u;
+#if VARIANT == 2 || VARIANT == 8
+        uint qbase = (pq >> 1u) * Q8K_WORDS + 2u + 16u * hsel;
+        [[unroll]] for (uint i = 0u; i < 16u; i++) acc ^= q8[(qbase + i) % 4096u];
+#endif
+        [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+            uint row = first_row + r;
+            if (row >= pc.row0 + nrows) continue;
+            uint poff = PAY_AT(row, pq, hsel * 16u);
+            uvec4 c = uvec4(wb[poff >> 2u], wb[(poff >> 2u) + 1u],
+                            wb[(poff >> 2u) + 2u], wb[(poff >> 2u) + 3u]);
+            acc ^= c.x ^ c.y ^ c.z ^ c.w;
+#if VARIANT == 2 || VARIANT == 8
+            acc ^= load_u16(SCALE_AT(row, pq));
+#endif
+        }
+    }
+#endif
+
+    if (acc == 0x12345678u) o[0] = acc;
+}

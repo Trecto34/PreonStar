@@ -1,0 +1,9 @@
+total_rows 783360  window_rows 17408 (4352 groups/dispatch x 45 dispatches)  blocks 20  row_bytes 1360  buffer 0.99 GiB
+  mv3_v0.spv                   pass median    3.911 ms   272.4 GB/s   best    2.737 ms   389.2 GB/s   spread 49.6%  0.0869 ms/dispatch
+  mv3_v1.spv                   pass median    3.624 ms   294.0 GB/s   best    2.490 ms   427.9 GB/s   spread 38.8%  0.0805 ms/dispatch
+  mv3_v2.spv                   pass median    3.610 ms   295.1 GB/s   best    2.474 ms   430.7 GB/s   spread 31.6%  0.0802 ms/dispatch
+  mv3_v7.spv                   pass median    3.869 ms   275.4 GB/s   best    2.709 ms   393.3 GB/s   spread 30.1%  0.0860 ms/dispatch
+  mv3_v8.spv                   pass median    3.829 ms   278.2 GB/s   best    2.625 ms   405.8 GB/s   spread 31.5%  0.0851 ms/dispatch
+  mv3_v4.spv                   pass median    3.863 ms   275.8 GB/s   best    2.661 ms   400.4 GB/s   spread 31.2%  0.0858 ms/dispatch
+  mv3_v3.spv                   pass median    3.368 ms   316.3 GB/s   best    2.281 ms   467.0 GB/s   spread 32.3%  0.0748 ms/dispatch
+  mv3_v9.spv                   pass median    3.639 ms   292.8 GB/s   best    2.484 ms   428.9 GB/s   spread 31.8%  0.0809 ms/dispatch
