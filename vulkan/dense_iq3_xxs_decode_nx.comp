@@ -1,0 +1,148 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Two activation rows per weight block, for the n_tok == 2 MTP verify step.
+ *
+ * dense_iq3_xxs_decode_r4 is ALU-bound (5.4 VALU per weight MACC, P4), and the
+ * K-quant MMQ tile it is replaced by for n_tok >= 2 costs a full 128-row tile
+ * (q36_vulkan.c dense_iq3_xxs_mmq + predequant_b16).  Here the weight word is
+ * unpacked once and feeds both rows: the loads and the grid/sign work are paid
+ * once, only the FMA chain is duplicated.
+ *
+ * Each row's FMA chain is the same operands in the same order as
+ * dense_iq3_xxs_decode_r4, so every output row is bit-identical to a separate
+ * n_tok == 1 dispatch (tests/test_dense_iq3xxs_nx.c).
+ *
+ * Requires out_dim % ROWS == 0 (the dispatch checks it) and the q8_k
+ * activation layout written by add_rms_norm_q8_k.comp: row r of the token
+ * starts at r * blocks * Q8K_WORDS words. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint16_t wh[]; };
+layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 3) readonly buffer Tables { uint tables[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint n_tok;
+    uint blocks;
+    uint row_bytes;
+    float scale;
+} pc;
+
+const uint ROWS = 4u;
+const uint NTOK = 2u;
+const uint Q8K_WORDS = 74u;
+const uint TAB_IQ3XXS_GRID = 3104u;
+
+shared uint grid_lut[256];
+
+uint load_u8(uint off) {
+    return (uint(wh[off >> 1u]) >> ((off & 1u) * 8u)) & 255u;
+}
+
+uint load_u16(uint off) {
+    return uint(wh[off >> 1u]);
+}
+
+uint load_u32(uint off) {
+    uint i = off >> 1u;
+    return uint(wh[i]) | (uint(wh[i + 1u]) << 16u);
+}
+
+vec4 unpack_i8(uint v) {
+    return vec4(float(bitfieldExtract(int(v), 0, 8)),
+                float(bitfieldExtract(int(v), 8, 8)),
+                float(bitfieldExtract(int(v), 16, 8)),
+                float(bitfieldExtract(int(v), 24, 8)));
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint itid = lid & 7u;
+    uint ib = itid;
+    uint first_row = gl_WorkGroupID.x * ROWS;
+    for (uint i = lid; i < 256u; i += 64u)
+        grid_lut[i] = tables[TAB_IQ3XXS_GRID + i];
+    barrier();
+
+    /* Whole-token-pair chunks: a partially valid tail chunk would waste a whole
+     * chain, so the dispatch only sends n_tok % NTOK == 0 here. */
+    for (uint t0 = 0u; t0 < pc.n_tok; t0 += NTOK) {
+        float acc[ROWS][NTOK];
+        for (uint r = 0u; r < ROWS; r++)
+            for (uint t = 0u; t < NTOK; t++) acc[r][t] = 0.0;
+
+        for (uint b = lid >> 3u; b < pc.blocks; b += 8u) {
+            vec4 qv[NTOK][8];
+            float yd[NTOK];
+            for (uint t = 0u; t < NTOK; t++) {
+                uint qbase = (t0 + t) * pc.blocks * Q8K_WORDS + b * Q8K_WORDS;
+                for (uint l = 0u; l < 8u; l++)
+                    qv[t][l] = unpack_i8(q8[qbase + 2u + 8u * itid + l]);
+                yd[t] = uintBitsToFloat(q8[qbase]);
+            }
+
+            for (uint r = 0u; r < ROWS; r++) {
+                uint row = first_row + r;
+                uint base = row * pc.row_bytes + 98u * b;
+                uint aux = load_u32(base + 66u + 4u * ib);
+                float sum[NTOK];
+                for (uint t = 0u; t < NTOK; t++) sum[t] = 0.0;
+                for (uint part = 0u; part < 2u; part++) {
+                    uint qs = load_u32(base + 2u + 8u * ib + 4u * part);
+                    for (uint l = 0u; l < 2u; l++) {
+                        uint signs =
+                            (aux >> (7u * (2u * part + l))) & 127u;
+                        uint parity = bitCount(signs) & 1u;
+                        uint grid0 = grid_lut[(qs >> (16u * l)) & 255u];
+                        uint grid1 = grid_lut[(qs >> (16u * l + 8u)) & 255u];
+                        vec4 w0 = unpack_i8(grid0) * vec4(
+                            (signs & 1u) != 0u ? -1.0 : 1.0,
+                            (signs & 2u) != 0u ? -1.0 : 1.0,
+                            (signs & 4u) != 0u ? -1.0 : 1.0,
+                            (signs & 8u) != 0u ? -1.0 : 1.0);
+                        signs >>= 4u;
+                        vec4 w1 = unpack_i8(grid1) * vec4(
+                            (signs & 1u) != 0u ? -1.0 : 1.0,
+                            (signs & 2u) != 0u ? -1.0 : 1.0,
+                            (signs & 4u) != 0u ? -1.0 : 1.0,
+                            parity != 0u ? -1.0 : 1.0);
+                        uint q = 4u * part + 2u * l;
+                        for (uint t = 0u; t < NTOK; t++) {
+                            vec4 q0 = qv[t][q];
+                            vec4 q1 = qv[t][q + 1u];
+                            sum[t] = fma(w0.x, q0.x,
+                                     fma(w0.y, q0.y,
+                                     fma(w0.z, q0.z,
+                                     fma(w0.w, q0.w,
+                                     fma(w1.x, q1.x,
+                                     fma(w1.y, q1.y,
+                                     fma(w1.z, q1.z,
+                                     fma(w1.w, q1.w, sum[t]))))))));
+                        }
+                    }
+                }
+                int ls = 2 * int(aux >> 28u) + 1;
+                float wd = unpackHalf2x16(load_u16(base)).x;
+                for (uint t = 0u; t < NTOK; t++)
+                    acc[r][t] = fma(wd * yd[t] * float(ls), sum[t], acc[r][t]);
+            }
+        }
+
+        for (uint r = 0u; r < ROWS; r++) {
+            uint row = first_row + r;
+            for (uint t = 0u; t < NTOK; t++) {
+                float total = subgroupAdd(acc[r][t]);
+                if (lid == 0u)
+                    y[(t0 + t) * pc.out_dim + row] = total * (0.25 * pc.scale);
+            }
+        }
+    }
+}

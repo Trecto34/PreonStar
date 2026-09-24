@@ -243,6 +243,7 @@ typedef struct {
     q36_vk_kernel moe_matvec_fast;
     q36_vk_kernel dense_iq3_xxs_decode;
     q36_vk_kernel dense_iq3_xxs_decode_r4;
+    q36_vk_kernel dense_iq3_xxs_decode_nx;
     q36_vk_kernel dense_iq3_xxs_mmq;
     q36_vk_kernel dense_iq3_xxs_mmq_pair;
     q36_vk_kernel dense_iq3_s_decode;
@@ -3338,6 +3339,7 @@ int q36_gpu_init(void) {
     q36_vk.moe_matvec_fast = Q36_VK_KERNEL("vulkan/moe_matvec_fast.spv", 6, 36, 1u << 4);
     q36_vk.dense_iq3_xxs_decode = Q36_VK_KERNEL("vulkan/dense_iq3_xxs_decode.spv", 4, 16, 1u << 2);
     q36_vk.dense_iq3_xxs_decode_r4 = Q36_VK_KERNEL("vulkan/dense_iq3_xxs_decode_r4.spv", 4, 16, 1u << 2);
+    q36_vk.dense_iq3_xxs_decode_nx = Q36_VK_KERNEL("vulkan/dense_iq3_xxs_decode_nx.spv", 4, 20, 1u << 2);
     q36_vk.dense_iq3_xxs_mmq = Q36_VK_KERNEL("vulkan/dense_iq3_xxs_mmq.spv", 5, 20, 1u << 2);
     /* Bindings: gate weights, up weights, gate out, up out, tables, b16. */
     q36_vk.dense_iq3_xxs_mmq_pair = Q36_VK_KERNEL("vulkan/dense_iq3_xxs_mmq_pair.spv", 6, 20,
@@ -3786,6 +3788,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_xxs_mmq);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_xxs_mmq_pair);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_xxs_decode_r4);
+    q36_vk_kernel_destroy(&q36_vk.dense_iq3_xxs_decode_nx);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_xxs_decode);
     q36_vk_kernel_destroy(&q36_vk.moe_matvec_fast);
     q36_vk_kernel_destroy(&q36_vk.moe_matvec);
@@ -8808,6 +8811,28 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                         ((uint32_t)out_dim + 3u) / 4u :
                         ((uint32_t)out_dim + 4u) / 5u,
                     1, 1);
+            } else if (weight_type == Q36_VK_TENSOR_IQ3_XXS && out_dim % 4u == 0u &&
+                       n_tok == 2u && q36_vk_env_default_on("Q36_VK_DENSE_IQ3_NX")) {
+                /* Two activation rows share one weight unpack.  dense_iq3_xxs_decode_r4
+                 * is ALU-bound (P4: 5.4 VALU/weight), and the 128-row MMQ tile costs
+                 * a full tile for two rows (dense_iq3_xxs_mmq + predequant_b16). */
+                struct {
+                    uint32_t out_dim;
+                    uint32_t n_tok;
+                    uint32_t blocks;
+                    uint32_t row_bytes;
+                    float scale;
+                } push = {
+                    (uint32_t)out_dim, (uint32_t)n_tok,
+                    (uint32_t)blocks, (uint32_t)row_bytes, scale,
+                };
+                const char *op = q36_vk_prof_iq3_shape(
+                    weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
+                    (uint32_t)out_dim, "dense_iq3_xxs_decode_nx");
+                ok = q36_vk_run_unlocked(
+                    op, &q36_vk.dense_iq3_xxs_decode_nx,
+                    bindings, &push, sizeof(push),
+                    ((uint32_t)out_dim + 3u) / 4u, 1, 1);
             } else {
                 struct {
                     uint32_t out_dim;

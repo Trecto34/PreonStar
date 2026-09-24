@@ -1547,3 +1547,92 @@ the DeltaNet recurrent state can be stored f16 or f32.
   differently (GFX11+).  Also relevant: if a future change makes the decode
   path's reduction order match the MMQ tile's, arm A's reference disappears and
   this check has to be re-based on an f32-accumulate MMQ build.
+
+## Two-row dense IQ3_XXS decode (`dense_iq3_xxs_decode_nx.comp`) — ACCEPTED, +62.6% on MTP draft 3 (2026-09-24)
+
+Audit §P6 ("build a dequantize-once / n-FMA decode variant for small batches").
+Reopens **P2**'s cost model (`## MTP draft acceptance measured, and the MTP loop
+is a net loss as shipped`), whose closing note is that `--mtp-draft 3/4`
+collapses to 4.17/4.44 t/s "the moment the verify carries a second row": the
+new evidence is that the collapse is one dispatch wide, not a property of small
+batches, and it is worth 1.63x once that dispatch has a decode kernel.  The
+precedent is the accepted `## IQ2_S in the small-batch (2..127 token) fused MoE
+expert pair` (2026-09-21) — same shape of fix, different format; what was *not*
+reopened is any of the rejected IQ3_XXS decode variants (sign mask, f16 grid,
+rows 8, global LUT), all of which keep the per-weight cvt+fma that P4 killed.
+
+- **Mechanism.** `q36_vulkan.c:8774-8813` gives `n_tok == 1` a purpose-built
+  decode kernel and sends everything else to the 128-row MMQ tile
+  (`dense_iq3_xxs_mmq` + `predequant_b16`).  A 2-row step therefore pays a whole
+  128-row tile.  The new kernel unpacks each weight word once and walks the two
+  activation rows through it: the loads and the grid/sign work are shared, only
+  the FMA chain is duplicated.  Per-row operand order is identical to
+  `dense_iq3_xxs_decode_r4`, so each row is *bit-identical* to a separate
+  one-token dispatch — that is the parity gate, not a max_abs tolerance.
+- **Landed.** `vulkan/dense_iq3_xxs_decode_nx.comp` (local_size 64, ROWS 4,
+  NTOK 2), `tests/test_dense_iq3xxs_nx.c`, and a `q36_vulkan.c:8814-8835`
+  branch gated on `weight_type == IQ3_XXS && out_dim % 4 == 0 && n_tok == 2 &&
+  Q36_VK_DENSE_IQ3_NX` (default on; `=0` restores the MMQ tile).
+- **Kernel cost, real weights 5120x17408 x 68 blocks (the `attn_qkv` shape), 200
+  iters, best-of:** two one-token dispatches **0.242 ms** vs one two-token
+  dispatch **0.167 ms** = **1.44x**, i.e. 0.121 vs **0.084 ms/token = 0.70x the
+  per-token cost**.  The audit's gate was a 2-token step at <= 1.3x a 1-token
+  step; it is met with room.  Parity on the same call: `mismatches=0 max_abs=0`.
+- **Against the path it replaces:** the MMQ 2-row tile is **2.086 ms**, 12.5x the
+  nx dispatch and 8.6x two one-token decode dispatches — that is the whole P2
+  collapse.  It is **not** bit-identical to nx (`bit-diff 10240/10240`), which
+  matters below.
+- **End-to-end, Swift, ctx 512, gen 256, 7 interleaved reps (median + MAD):**
+  `--mtp-draft 3` nx OFF **4.220 t/s (MAD 0.020)** vs nx ON **6.860 t/s (MAD
+  0.030) = 1.626x**; worst-case pairing (min ON / max OFF) still **1.569x**.
+  This is the exact configuration P2 recorded at 4.17/4.44 t/s.  Profile at gen
+  16: total kernel time 4022.954 -> 1960.724 ms, with 483 `nx` dispatches /
+  54.049 ms replacing `dense_iq3_xxs_mmq` 1374.146 ms + `dense_iq3_xxs_mmq_pair`
+  948.838 ms + 1210 `predequant_b16` dispatches.
+- **`--mtp-draft 2` is neutral, and that is the parity proof.**  With draft 2 the
+  verify itself is the 2-row step, so nx is on the verify path: 21.00/22.06/21.94
+  t/s vs plain 21.88/22.86/21.90, and the d2 output is **byte-identical to MTP
+  off**.  At draft 3 the verify is 3 rows and nx only fires on the accepted-prefix
+  replay (`commit_n == 2`); d3 nx OFF and nx ON are byte-identical to each other
+  over 64 greedy tokens, and both differ from MTP off for the pre-existing
+  MTP-side reason (P2).
+- **Known, and why it does not inflate the number.**  The MTP accept counters are
+  *deterministic* and *different* between the arms — identical in all 7 reps per
+  arm, OFF `calls=100 drafted=140 accepted=113 full=43 (80.7%)` vs ON
+  `calls=97 drafted=120 accepted=91 full=31 (75.8%)`.  Cause: nx (f32 accumulate)
+  and the MMQ tile it replaces (f16 accumulate, see the P3 entry) do not agree to
+  the last bit, and the MTP gate compares a draft argmax against the target
+  argmax, so the backoff trips on a different set of positions.  The direction
+  matters: the faster arm accepts *less*, so 1.626x is a floor on the kernel's
+  contribution, not a mix of a kernel win with a lucky acceptance pattern.
+- **Verdict: landed, default on.**  It does not make MTP pay on its own — 6.86
+  t/s against 21.9 t/s plain, because a 3-row verify still takes the MMQ tile and
+  the replay is only 2 rows.  It removes the specific collapse P2 recorded, which
+  is what makes the rest of P7 measurable at all.
+- Honest limitations: (a) nx is bit-exact with the *one-token decode path*, not
+  with the MMQ tile it replaces — anyone who needs the shipped d3 token stream
+  byte-for-byte has to keep `Q36_VK_DENSE_IQ3_NX=0`; (b) only `n_tok == 2` was
+  built.  The kernel loops over `t0 < n_tok` in steps of 2, so 4/6/8 rows is a
+  dispatch-condition change, deliberately not made (audit scope was 2..8; the
+  measured target was the single 2-row step); (c) the guard is untouched by
+  construction — the branch is Q36_VK_TENSOR_IQ3_XXS-only and the guard's tensors
+  are IQ2XXS, confirmed by `dense_iq3_xxs_decode_nx` never appearing in its
+  profile.
+- **Gates.** `karpathy/compat_gate.sh` **PASS** (Swift 1024/177.23 prefill tps +
+  guard).  `./q36_test --vulkan-kernels` fails, but **on an attention test:**
+  `tests/q36_test.c:4958` (`memcmp(out_host, out_single)` after replaying each
+  batch row of `q36_gpu_attn_decode_tensor` as a decode step).  Reproduced on
+  unmodified HEAD by stashing the whole change and rebuilding — **pre-existing,
+  not caused by this kernel**, and out of P6's scope (`git stash` / `pop` used;
+  the routed-gemm oracle lines `mv_max_rel=3.93391e-06 gemm_max_rel=0.00894794`
+  are identical before and after).  Guard inertness measured, not argued: guard
+  profile at ctx 512 / gen 32 runs 82.11 t/s with **0 `dense_iq3_xxs_decode_nx`
+  dispatches** (IQ2XXS model, branch is IQ3_XXS-only).
+- Raw: `evidence/raw/p6-nx2/` (`nx2-test.log`, `p6gate.py` + `p6gate.txt`, the 14
+  `out9` logs, `prof-d3{off,on}.log`, the four greedy parity outputs, `run6.s`,
+  `run9.s`, `run11.s` + `compat.log` / `vkern.log` / `guard-prof.log`).
+- `reconsider_if`: MTP verify moves to 3+ rows (then build the `n_tok 2..8`
+  dispatch, which is a condition change, not new kernel work); the flat `n_tok ==
+  2` check is replaced by a general small-batch path; or an f32-accumulate MMQ
+  replacement lands, which would make the d3 OFF/ON accept counters agree and let
+  the 1.626x be quoted without the acceptance caveat.

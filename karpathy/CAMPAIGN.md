@@ -661,6 +661,44 @@ cd /home/server/q36-wt/<slug> && make -j16          # only when the GPU is idle
    Limitation recorded: arm A compares two different kernels, so it bounds the whole
    prefill-path error, not the dtype alone.  Evidence:
    `evidence/raw/p3-f16-nll/VERDICT.md` + stats files + sweep scripts.
+   **P6. Two-row dense IQ3_XXS decode kernel — BUILT and LANDED, +62.6% on MTP
+   draft 3 (2026-09-24).**  Reopened P2's cost-model note ("`--mtp-draft 3/4`
+   collapses the moment the verify carries a second row") with the measurement
+   that the collapse is one dispatch wide.  `q36_vulkan.c:8774-8813` gives
+   `n_tok == 1` a decode kernel and sends everything else to the 128-row MMQ
+   tile, so a 2-row step pays a whole tile.  New
+   `vulkan/dense_iq3_xxs_decode_nx.comp` (local_size 64, ROWS 4, NTOK 2) unpacks
+   each weight word once and walks both rows through it, per-row operand order
+   identical to `dense_iq3_xxs_decode_r4`.  Landed at `q36_vulkan.c:8814-8835`,
+   gated on `IQ3_XXS && out_dim % 4 == 0 && n_tok == 2`, default on
+   (`Q36_VK_DENSE_IQ3_NX=0` restores the MMQ tile).
+   **Kernel, real weights 5120x17408 x 68 blocks, best of 200:** two one-token
+   dispatches 0.242 ms vs one two-token 0.167 ms = 1.44x, **0.121 -> 0.084
+   ms/token = 0.70x per token** (audit gate was <= 1.3x) and `mismatches=0
+   max_abs=0` against two one-token dispatches — bit-exact, not a tolerance.
+   The MMQ tile it replaces is 2.086 ms on the same call = 12.5x the nx
+   dispatch, and is *not* bit-identical to it (`bit-diff 10240/10240`).
+   **End-to-end, Swift ctx 512 gen 256, 7 interleaved reps:** draft 3 nx OFF
+   **4.220 t/s (MAD 0.020)** vs nx ON **6.860 t/s (MAD 0.030) = 1.626x**,
+   worst-case pairing 1.569x — this is the exact configuration P2 recorded at
+   4.17/4.44 t/s.  Profile (gen 16) total kernel time 4022.954 -> 1960.724 ms,
+   483 `nx` dispatches / 54.049 ms replacing `dense_iq3_xxs_mmq` 1374.146 +
+   `dense_iq3_xxs_mmq_pair` 948.838 + 1210 `predequant_b16` dispatches.
+   Draft 2 is neutral by construction and is the parity proof: the verify itself
+   is the 2-row step (21.00/22.06/21.94 vs plain 21.88/22.86/21.90) and the d2
+   output is **byte-identical to MTP off**; at draft 3 nx fires only on the
+   `commit_n == 2` replay and nx OFF == nx ON byte-identical over 64 greedy
+   tokens.  **Recorded caveat:** the MTP accept counters are deterministic and
+   differ between the arms (OFF 100/140/113/43 = 80.7%, ON 97/120/91/31 = 75.8%,
+   identical in all 7 reps each) because nx (f32 accumulate) and the MMQ tile
+   (f16 accumulate, see P3) disagree in the last bits and the MTP gate compares a
+   draft argmax against a target argmax.  The faster arm accepts *less*, so
+   1.626x is a floor.  MTP is still a net loss overall (6.86 vs 21.9 t/s plain)
+   because a 3-row verify still takes the MMQ tile; only `n_tok == 2` was built.
+   Guard untouched by construction (IQ3_XXS-only branch, guard tensors are
+   IQ2XXS, zero nx dispatches in its profile).  Evidence:
+   `evidence/raw/p6-nx2/` (`nx2-test.log`, `p6gate.py|txt`, 14 `out9` logs,
+   `prof-d3{off,on}.log`, parity outputs, `run6.s`, `run9.s`, `run11.s`).
 
 ## 7. Closed lines — do not re-litigate without new hardware evidence
 

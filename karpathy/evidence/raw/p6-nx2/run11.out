@@ -1,0 +1,18 @@
+### compat gate
+--- compat rc=0
+q36: clamping prefill chunk 512 -> 256 on GFX1013 (GQA 6); a larger chunk can exceed the 10 s amdgpu watchdog and destroy the GPU context. Set Q36_VK_PREFILL_CHUNK_UNSAFE=1 to override.
+q36-bench: context buffers 269.21 MiB (scratch=93.46 MiB, raw=26.13 MiB, compressed=149.62 MiB, ctx=1029, backend=vulkan, prefill_chunk=256, raw_kv_rows=1029, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+1024,1024,177.23,4,19.46,4108
+COMPATIBILITY_GATE: PASS
+### vulkan kernel self-test
+--- vkern rc=1
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+q36-test: routed gemm mv_max_rel=3.93391e-06 gemm_max_rel=0.00894794 worst(gemm=4994 matvec=4343) got=-1.0794 want=-1.08914
+tests/q36_test.c:4958: assertion failed: memcmp(out_host, out_single, out_floats * sizeof(float)) == 0
+vulkan-kernels: ERR
+q36 tests: 1 failure(s)
+### guard decode profile: nx dispatch count must be 0
+--- guard rc=2
+guard nx dispatches: 0
+### done
