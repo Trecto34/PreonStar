@@ -5,6 +5,7 @@
 #include "q36_kvstore.h"
 #include "q36_web.h"
 #include "linenoise.h"
+#include "q36_cli_args.h"
 
 #include <errno.h>
 #include <ctype.h>
@@ -651,7 +652,7 @@ static void usage(FILE *fp, const char *topic) {
 }
 
 static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
-    if (*i + 1 >= argc) {
+    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
         fprintf(stderr, "q36-agent: missing value for %s\n", opt);
         exit(2);
     }
@@ -683,15 +684,14 @@ static agent_config parse_options(int argc, char **argv) {
     bool ctx_set = false;
     bool cache_type_k_set = false;
     bool cache_type_v_set = false;
+    bool show_help = false;
+    const char *help_topic = NULL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
-            const char *topic = (i + 1 < argc && argv[i + 1][0] != '-') ?
-                argv[i + 1] : NULL;
-            usage(stdout, topic);
-            exit(0);
-        }
-        if (!strcmp(arg, "-p") || !strcmp(arg, "--prompt")) {
+            show_help = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') help_topic = argv[++i];
+        } else if (!strcmp(arg, "-p") || !strcmp(arg, "--prompt")) {
             c.gen.prompt = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--non-interactive")) {
             c.non_interactive = true;
@@ -860,6 +860,14 @@ static agent_config parse_options(int argc, char **argv) {
         }
     }
 
+    if (show_help) {
+        if (help_topic && !q36_help_topic_valid(Q36_HELP_AGENT, help_topic)) {
+            fprintf(stderr, "q36-agent: unknown help topic: %s\n", help_topic);
+            exit(2);
+        }
+        usage(stdout, help_topic);
+        exit(0);
+    }
     if (c.engine.directional_steering_file && !steering_scale_set)
         c.engine.directional_steering_ffn = 1.0f;
     if (!ctx_set) {
@@ -12917,6 +12925,7 @@ resume_editor:
 
 #ifndef Q36_AGENT_TEST_NO_MAIN
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "q36-agent");
     agent_config cfg = parse_options(argc, argv);
     char workdir[PATH_MAX] = {0};
     if (cfg.chdir_path) {

@@ -1,6 +1,7 @@
 #include "q36.h"
 #include "q36_eval_cases.h"
 #include "q36_help.h"
+#include "q36_cli_args.h"
 
 /* q36-eval: small built-in benchmark integration test.
  *
@@ -1560,7 +1561,7 @@ static float parse_float_arg(const char *s, const char *opt, float min, float ma
 }
 
 static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
-    if (*i + 1 >= argc) {
+    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
         fprintf(stderr, "q36-eval: %s requires an argument\n", opt);
         exit(2);
     }
@@ -1609,15 +1610,14 @@ static eval_config parse_options(int argc, char **argv) {
 
     bool cache_type_k_set = false;
     bool cache_type_v_set = false;
+    bool show_help = false;
+    const char *help_topic = NULL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
-            const char *topic = (i + 1 < argc && argv[i + 1][0] != '-') ?
-                argv[i + 1] : NULL;
-            usage(stdout, topic);
-            exit(0);
-        }
-        if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
+            show_help = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') help_topic = argv[++i];
+        } else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
             c.model_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--mtp")) {
             c.mtp_path = need_arg(&i, argc, argv, arg);
@@ -1764,6 +1764,14 @@ static eval_config parse_options(int argc, char **argv) {
             usage(stderr, NULL);
             exit(2);
         }
+    }
+    if (show_help) {
+        if (help_topic && !q36_help_topic_valid(Q36_HELP_EVAL, help_topic)) {
+            fprintf(stderr, "q36-eval: unknown help topic: %s\n", help_topic);
+            exit(2);
+        }
+        usage(stdout, help_topic);
+        exit(0);
     }
     if (!cache_type_k_set)
         c.cache_type_k = q36_default_kv_cache_type_k(c.backend, c.ssd_streaming);
@@ -4672,6 +4680,7 @@ static void list_eval_cases(const eval_case *cases, int ncases) {
 }
 
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "q36-eval");
     eval_config cfg = parse_options(argc, argv);
     if (cfg.self_test_extractors) return run_extractor_self_tests();
     if (cfg.validate_cases) return validate_eval_cases(true);

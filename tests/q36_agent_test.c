@@ -990,13 +990,33 @@ static void test_observation_error_is_not_context_exhaustion(void) {
 }
 
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "q36_agent_test");
+    if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+        puts("usage: q36_agent_test [--terminal-fixtures DIR]");
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--password-child")) return password_child();
     if (argc == 4 && !strcmp(argv[1], "--password-driver"))
         return password_driver(argv[2], atoi(argv[3]), false);
     if (argc == 4 && !strcmp(argv[1], "--noninteractive-driver"))
         return password_driver(argv[2], atoi(argv[3]), true);
     if (argc == 2 && !strcmp(argv[1], "--terminal-driver")) return test_terminal_driver();
-    if (argc == 3 && !strcmp(argv[1], "--terminal-fixtures")) test_output_dir = argv[2];
+    if (argc == 2 && !strcmp(argv[1], "--terminal-fixtures")) {
+        fputs("q36_agent_test: missing value for --terminal-fixtures\n", stderr);
+        return 2;
+    }
+    if (argc == 3 && !strcmp(argv[1], "--terminal-fixtures")) {
+        if (q36_cli_token_is_option(argv[2])) {
+            fputs("q36_agent_test: missing value for --terminal-fixtures\n", stderr);
+            return 2;
+        }
+        test_output_dir = argv[2];
+    }
+    else if (argc != 1) {
+        fprintf(stderr, "q36_agent_test: unknown option or invalid arguments: %s\n",
+                argv[1]);
+        return 2;
+    }
     q36_agent_unit_tests_run();
     test_worker_ownership();
     test_worker_pause_ui_waits();

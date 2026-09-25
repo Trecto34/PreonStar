@@ -427,7 +427,7 @@ CORE_OBJS := q36_gpu_core.o q36_vulkan.o q36_image.o
 METAL_CORE_OBJS := q36_gpu_core_metal.o q36_metal.o q36_image.o
 CPU_CORE_OBJS := q36_cpu.o q36_image.o
 
-.PHONY: test-quality all help cpu gpu vulkan vulkan-generic vulkan-bc250 metal q36-quality-score test test-metal test-metal-model test-qwen27b-metal-parity test-qwen27b-vulkan-parity test-qwen27b-llama-parity test-quick test-all test-unit test-vulkan test-streaming test-mtp test-model test-session-batch test-server-live test-server-live-metal test-server-live-metal-ssd test-server-batching test-server-batching-metal test-server-batching-metal-ssd test-release release-build-check release-build-check-metal benchmark-gate benchmark-session-batch benchmark-qwen27b benchmark-qwen27b-gate benchmark-qwen27b-metal-gate benchmark-qwen27b-vulkan benchmark-qwen27b-metal benchmark-qwen27b-llama test-reference test-reference-local test-vectors-local reference-openrouter test-llama test-llama-long test-llama-batch test-llama-all clean
+.PHONY: test-quality test-cli all help cpu gpu vulkan vulkan-generic vulkan-bc250 metal q36-quality-score test test-metal test-metal-model test-qwen27b-metal-parity test-qwen27b-vulkan-parity test-qwen27b-llama-parity test-quick test-all test-unit test-vulkan test-streaming test-mtp test-model test-session-batch test-server-live test-server-live-metal test-server-live-metal-ssd test-server-batching test-server-batching-metal test-server-batching-metal-ssd test-release release-build-check release-build-check-metal benchmark-gate benchmark-session-batch benchmark-qwen27b benchmark-qwen27b-gate benchmark-qwen27b-metal-gate benchmark-qwen27b-vulkan benchmark-qwen27b-metal benchmark-qwen27b-llama test-reference test-reference-local test-vectors-local reference-openrouter test-llama test-llama-long test-llama-batch test-llama-all clean
 
 all: q36 q36-server q36-bench q36-agent q36-eval q36_test
 
@@ -495,7 +495,7 @@ q36_test: q36_test.o rax.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 
 TOPK8_TEST := tests/test_topk8
 
-tests/test_topk8.o: tests/test_topk8.c q36_gpu.h
+tests/test_topk8.o: tests/test_topk8.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(TOPK8_TEST): tests/test_topk8.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -503,7 +503,7 @@ $(TOPK8_TEST): tests/test_topk8.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 
 ATTN_DECODE_TEST := tests/test_attn_decode
 
-tests/test_attn_decode.o: tests/test_attn_decode.c q36_gpu.h
+tests/test_attn_decode.o: tests/test_attn_decode.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(ATTN_DECODE_TEST): tests/test_attn_decode.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -511,7 +511,7 @@ $(ATTN_DECODE_TEST): tests/test_attn_decode.o q36_ssd.o q36_prompt_prefix.o $(CO
 
 ATTN_PREFILL_QTILE2_TEST := tests/test_attn_prefill_qtile2
 
-tests/test_attn_prefill_qtile2.o: tests/test_attn_prefill_qtile2.c q36_gpu.h
+tests/test_attn_prefill_qtile2.o: tests/test_attn_prefill_qtile2.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(ATTN_PREFILL_QTILE2_TEST): tests/test_attn_prefill_qtile2.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -519,7 +519,7 @@ $(ATTN_PREFILL_QTILE2_TEST): tests/test_attn_prefill_qtile2.o q36_ssd.o q36_prom
 
 PQ2_SMALL_TEST := tests/test_pq2_small
 
-tests/test_pq2_small.o: tests/test_pq2_small.c q36_gpu.h
+tests/test_pq2_small.o: tests/test_pq2_small.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(PQ2_SMALL_TEST): tests/test_pq2_small.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -527,7 +527,7 @@ $(PQ2_SMALL_TEST): tests/test_pq2_small.o q36_ssd.o q36_prompt_prefix.o $(CORE_O
 
 ATTN_FA_TEST := tests/test_attn_fa
 
-tests/test_attn_fa.o: tests/test_attn_fa.c q36_gpu.h
+tests/test_attn_fa.o: tests/test_attn_fa.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(ATTN_FA_TEST): tests/test_attn_fa.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -535,7 +535,7 @@ $(ATTN_FA_TEST): tests/test_attn_fa.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 
 NORM_ROPE_KV_TEST := tests/test_norm_rope_kv
 
-tests/test_norm_rope_kv.o: tests/test_norm_rope_kv.c q36_gpu.h
+tests/test_norm_rope_kv.o: tests/test_norm_rope_kv.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(NORM_ROPE_KV_TEST): tests/test_norm_rope_kv.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -543,7 +543,7 @@ $(NORM_ROPE_KV_TEST): tests/test_norm_rope_kv.o q36_ssd.o q36_prompt_prefix.o $(
 
 MATMUL_Q8_TEST := tests/test_matmul_q8
 
-tests/test_matmul_q8.o: tests/test_matmul_q8.c q36_gpu.h
+tests/test_matmul_q8.o: tests/test_matmul_q8.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(MATMUL_Q8_TEST): tests/test_matmul_q8.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -551,7 +551,7 @@ $(MATMUL_Q8_TEST): tests/test_matmul_q8.o q36_ssd.o q36_prompt_prefix.o $(CORE_O
 
 MOE_GATE_UP_TEST := tests/test_moe_gate_up
 
-tests/test_moe_gate_up.o: tests/test_moe_gate_up.c q36_gpu.h
+tests/test_moe_gate_up.o: tests/test_moe_gate_up.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(MOE_GATE_UP_TEST): tests/test_moe_gate_up.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -559,7 +559,7 @@ $(MOE_GATE_UP_TEST): tests/test_moe_gate_up.o q36_ssd.o q36_prompt_prefix.o $(CO
 
 MOE_DOWN_TEST := tests/test_moe_down
 
-tests/test_moe_down.o: tests/test_moe_down.c q36_gpu.h
+tests/test_moe_down.o: tests/test_moe_down.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(MOE_DOWN_TEST): tests/test_moe_down.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -567,7 +567,7 @@ $(MOE_DOWN_TEST): tests/test_moe_down.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJ
 
 IQ3XXS_NX_TEST := tests/test_dense_iq3xxs_nx
 
-tests/test_dense_iq3xxs_nx.o: tests/test_dense_iq3xxs_nx.c q36_gpu.h
+tests/test_dense_iq3xxs_nx.o: tests/test_dense_iq3xxs_nx.c q36_gpu.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(IQ3XXS_NX_TEST): tests/test_dense_iq3xxs_nx.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
@@ -598,7 +598,7 @@ q36_gpu_core_metal.o: q36.c q36.h q36_image.h q36_gpu.h q36_quant.h q36_ssd.h q3
 q36_gpu_core_metal_test.o: q36.c q36.h q36_gpu.h q36_quant.h q36_ssd.h q36_iq_tables.h q36_iq3s_grid_values.inc q36_streaming_hotlist.inc
 	$(CC) $(GPU_CFLAGS) -DQ36_METAL -DQ36_METAL_TEST_COMPAT -c -o $@ q36.c
 
-q36_cli_metal.o: q36_prompt_prefix.h q36_cli.c q36.h q36_ssd.h linenoise.h
+q36_cli_metal.o: q36_prompt_prefix.h q36_cli.c q36.h q36_cli_args.h q36_ssd.h linenoise.h
 	$(CC) $(GPU_CFLAGS) -DQ36_METAL -c -o $@ q36_cli.c
 
 q36_vulkan.o: q36_vulkan.c q36_gpu.h q36_quant.h q36_iq2_tables_vulkan.inc q36_iq_tables.h q36_iq3s_grid_values.inc $(VULKAN_SHADERS)
@@ -607,19 +607,19 @@ q36_vulkan.o: q36_vulkan.c q36_gpu.h q36_quant.h q36_iq2_tables_vulkan.inc q36_i
 q36_metal.o: q36_metal.m q36_gpu.h q36_quant.h q36_ssd.h $(METAL_SRCS)
 	$(CC) $(GPU_CFLAGS) -fobjc-arc -c -o $@ q36_metal.m
 
-q36_cli.o: q36_prompt_prefix.h q36_cli.c q36.h q36_ssd.h linenoise.h
+q36_cli.o: q36_prompt_prefix.h q36_cli.c q36.h q36_cli_args.h q36_ssd.h linenoise.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_cli.c
 
-q36_server.o: q36_server.c q36.h rax.h q36_tool_text.h
+q36_server.o: q36_server.c q36.h q36_cli_args.h rax.h q36_tool_text.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_server.c
 
-q36_bench.o: q36_bench.c q36.h
+q36_bench.o: q36_bench.c q36.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_bench.c
 
-q36_agent.o: q36_prompt_prefix.h q36_agent.c q36.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
+q36_agent.o: q36_prompt_prefix.h q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_agent.c
 
-q36_eval.o: q36_eval_cases.h q36_eval.c q36.h q36_help.h q36_ssd.h
+q36_eval.o: q36_eval_cases.h q36_eval.c q36.h q36_cli_args.h q36_help.h q36_ssd.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_eval.c
 
 q36_help.o: q36_help.c q36_help.h q36.h
@@ -634,13 +634,13 @@ q36_ssd.o: q36_ssd.c q36_ssd.h
 q36_web.o: q36_web.c q36_web.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_web.c
 
-q36_test.o: tests/q36_test.c q36_server.c q36.h rax.h q36_gpu.h q36_tool_text.h
+q36_test.o: tests/q36_test.c q36_server.c q36.h q36_cli_args.h rax.h q36_gpu.h q36_tool_text.h
 	$(CC) $(GPU_CFLAGS) -Wno-unused-function -c -o $@ tests/q36_test.c
 
-q36_test_metal.o: tests/q36_test.c q36_server.c q36.h rax.h q36_gpu.h q36_tool_text.h
+q36_test_metal.o: tests/q36_test.c q36_server.c q36.h q36_cli_args.h rax.h q36_gpu.h q36_tool_text.h
 	$(CC) $(GPU_CFLAGS) -DQ36_METAL -Wno-unused-function -c -o $@ tests/q36_test.c
 
-gguf-tools/quality-testing/score_openrouter.o: gguf-tools/quality-testing/score_openrouter.c q36.h q36_ssd.h q36_prompt_prefix.h
+gguf-tools/quality-testing/score_openrouter.o: gguf-tools/quality-testing/score_openrouter.c q36.h q36_cli_args.h q36_ssd.h q36_prompt_prefix.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ gguf-tools/quality-testing/score_openrouter.c
 
 linenoise.o: linenoise.c linenoise.h
@@ -687,19 +687,19 @@ q36_cpu.o: q36.c q36.h q36_image.h q36_gpu.h q36_quant.h q36_ssd.h q36_iq_tables
 q36_image.o: q36_image.c q36_image.h third_party/iris/jpeg.h third_party/iris/png.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_image.c
 
-q36_cli_cpu.o: q36_prompt_prefix.h q36_cli.c q36.h q36_ssd.h linenoise.h
+q36_cli_cpu.o: q36_prompt_prefix.h q36_cli.c q36.h q36_cli_args.h q36_ssd.h linenoise.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_cli.c
 
-q36_server_cpu.o: q36_server.c q36.h rax.h q36_tool_text.h
+q36_server_cpu.o: q36_server.c q36.h q36_cli_args.h rax.h q36_tool_text.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_server.c
 
-q36_bench_cpu.o: q36_bench.c q36.h
+q36_bench_cpu.o: q36_bench.c q36.h q36_cli_args.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_bench.c
 
-q36_agent_cpu.o: q36_prompt_prefix.h q36_agent.c q36.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
+q36_agent_cpu.o: q36_prompt_prefix.h q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_agent.c
 
-q36_eval_cpu.o: q36_eval_cases.h q36_eval.c q36.h q36_help.h q36_ssd.h
+q36_eval_cpu.o: q36_eval_cases.h q36_eval.c q36.h q36_cli_args.h q36_help.h q36_ssd.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_eval.c
 
 q36_help_cpu.o: q36_help.c q36_help.h q36.h
@@ -714,13 +714,13 @@ q36_ssd_cpu.o: q36_ssd.c q36_ssd.h
 q36_web_cpu.o: q36_web.c q36_web.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_web.c
 
-q36_test_cpu.o: tests/q36_test.c q36_server.c q36.h rax.h q36_tool_text.h
+q36_test_cpu.o: tests/q36_test.c q36_server.c q36.h q36_cli_args.h rax.h q36_tool_text.h
 	$(CC) $(CPU_CFLAGS) -Wno-unused-function -c -o $@ tests/q36_test.c
 
 q36_sampling_test_core.o: q36.c q36.h q36_gpu.h q36_quant.h q36_ssd.h q36_iq_tables.h q36_iq3s_grid_values.inc q36_streaming_hotlist.inc
 	$(CC) $(CPU_CFLAGS) -Wno-unused-function -DQ36_TEST_HOOKS -c -o $@ q36.c
 
-tests/test_sampling.o: tests/test_sampling.c q36.h
+tests/test_sampling.o: tests/test_sampling.c q36.h q36_cli_args.h
 	$(CC) $(CPU_CFLAGS) -DQ36_TEST_HOOKS -I. -c -o $@ $<
 
 $(SAMPLING_TEST): tests/test_sampling.o q36_sampling_test_core.o q36_ssd_cpu.o q36_prompt_prefix.o q36_image.o
@@ -732,7 +732,11 @@ linenoise_cpu.o: linenoise.c linenoise.h
 rax_cpu.o: rax.c rax.h rax_malloc.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ rax.c
 
-test: all q36_agent_test $(SAMPLING_TEST) $(TOPK8_TEST) test-quality
+test-cli: all q36_agent_test q36-quality-score $(SAMPLING_TEST) $(TOPK8_TEST) test-quality
+	$(MAKE) -C gguf-tools qwen36-quantize
+	python3 tests/test_cli_arguments.py
+
+test: all q36_agent_test $(SAMPLING_TEST) $(TOPK8_TEST) test-quality test-cli
 	./q36-eval --self-test-extractors
 	./q36_agent_test
 	python3 tests/test_agent_password.py ./q36_agent_test
@@ -898,7 +902,7 @@ test-server: q36_test
 test-long: q36_test
 	./q36_test --long-context
 
-.opencode-tmp/llama_qwen_logprobs_capture: tests/test-vectors/llama_qwen_logprobs_capture.c
+.opencode-tmp/llama_qwen_logprobs_capture: tests/test-vectors/llama_qwen_logprobs_capture.c q36_cli_args.h
 	@mkdir -p .opencode-tmp
 	$(CC) $(filter-out -ffast-math,$(CFLAGS)) $(LLAMA_INCLUDE) \
 		-o $@ tests/test-vectors/llama_qwen_logprobs_capture.c \
@@ -913,13 +917,13 @@ q36_llama_test: q36_llama_test.o rax_cpu.o q36_ssd_cpu.o q36_prompt_prefix.o $(C
 q36_reference_test: q36_test_cpu.o rax_cpu.o q36_ssd_cpu.o q36_prompt_prefix.o $(CPU_CORE_OBJS)
 	$(CC) $(CPU_CFLAGS) -o $@ q36_test_cpu.o rax_cpu.o q36_ssd_cpu.o q36_prompt_prefix.o $(CPU_CORE_OBJS) $(LDLIBS)
 
-q36_agent_test.o: q36_prompt_prefix.h tests/q36_agent_test.c q36_agent.c q36.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
+q36_agent_test.o: q36_prompt_prefix.h tests/q36_agent_test.c q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
 	$(CC) $(GPU_CFLAGS) -Wno-unused-function -c -o $@ tests/q36_agent_test.c
 
 q36_agent_test: q36_agent_test.o q36_help.o q36_kvstore.o q36_ssd.o q36_prompt_prefix.o q36_web.o linenoise.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ q36_agent_test.o q36_help.o q36_kvstore.o q36_ssd.o q36_prompt_prefix.o q36_web.o linenoise.o $(CORE_OBJS) $(GPU_LDLIBS)
 
-q36_agent_test_metal.o: q36_prompt_prefix.h tests/q36_agent_test.c q36_agent.c q36.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
+q36_agent_test_metal.o: q36_prompt_prefix.h tests/q36_agent_test.c q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
 	$(CC) $(GPU_CFLAGS) -DQ36_METAL -Wno-unused-function -c -o $@ tests/q36_agent_test.c
 
 q36_agent_test_metal: q36_agent_test_metal.o q36_help.o q36_kvstore.o q36_ssd.o q36_prompt_prefix.o q36_web.o linenoise.o $(METAL_CORE_OBJS)
@@ -931,10 +935,10 @@ clean:
 q36_prompt_prefix.o: q36_prompt_prefix.c q36_prompt_prefix.h q36.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_prompt_prefix.c
 
-tests/test_prompt_prefix: tests/test_prompt_prefix.c q36_prompt_prefix.o
-	$(CC) $(CPU_CFLAGS) -I. -o $@ $^ $(LDLIBS)
+tests/test_prompt_prefix: tests/test_prompt_prefix.c q36_prompt_prefix.o q36_cli_args.h
+	$(CC) $(CPU_CFLAGS) -I. -o $@ $< q36_prompt_prefix.o $(LDLIBS)
 
-tests/test_quality_api: tests/test_quality_api.c gguf-tools/quality-testing/score_openrouter.c q36.h
+tests/test_quality_api: tests/test_quality_api.c gguf-tools/quality-testing/score_openrouter.c q36.h q36_cli_args.h
 	$(CC) $(CPU_CFLAGS) -ffunction-sections -fdata-sections -I. $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections) -o $@ $< $(LDLIBS)
 
 test-quality: tests/test_prompt_prefix tests/test_quality_api

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "quants.h"
+#include "../q36_cli_args.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -1253,11 +1254,11 @@ static bool exists(const char *path) {
 }
 
 static char *need(int argc, char **argv, int *i, const char *arg) {
-    if (++*i >= argc) {
+    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
         fprintf(stderr, "error: missing value for %s\n", arg);
         exit(1);
     }
-    return argv[*i];
+    return argv[++*i];
 }
 
 static void add_input(params *p, char *path) {
@@ -1275,27 +1276,28 @@ static void usage(const char *argv0) {
     printf("  optional q4 expert window   -> q4_k for gate/up/down\n");
     printf("  explicit keep-list f16/bf16 tensors -> q8_0; f32 tensors stay f32\n\n");
     printf("options:\n");
-    printf("  --in FILE                  input GGUF; repeat in shard order, default %s\n", Q36_DEFAULT_IN);
+    printf("  --in FILE, --model FILE    input GGUF; repeat in shard order, default %s\n", Q36_DEFAULT_IN);
     printf("  --out FILE                 output GGUF\n");
     printf("  --imatrix FILE             llama-imatrix legacy .dat or GGUF imatrix file\n");
     printf("  --imatrix-strict           fail if any quantized tensor has no imatrix entry\n");
     printf("  --allow-synthetic-imatrix  fallback to weight-energy importance for iq2_xxs\n");
     printf("  --audit FILE               write TSV tensor decision audit\n");
-    printf("  --threads N                quantization workers, default 1\n");
+    printf("  -t, --threads N            quantization workers, default 1\n");
     printf("  --q4-expert-layers A-B     quantize routed experts in layers A..B as q4_k\n");
     printf("  --q4-expert-last N         quantize routed experts in the last N layers as q4_k\n");
-    printf("  --strip-nextn              strip MTP/nextn layer 40 for q36 MoE compatibility\n");
+    printf("  --strip-nextn, --strip-mtp strip MTP/nextn layer 40 for q36 MoE compatibility\n");
     printf("  --dry-run                  parse metadata and print plan only\n");
     printf("  --force                    overwrite output\n");
+    printf("  -h, --help                 show this help\n");
 }
 
 static params parse_args(int argc, char **argv) {
     params p = { .threads = 1, .q4_start = -1, .q4_end = -1 };
+    bool show_help = false;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
-            usage(argv[0]);
-            exit(0);
+            show_help = true;
         } else if (!strcmp(a, "--in") || !strcmp(a, "--model")) {
             add_input(&p, need(argc, argv, &i, a));
         } else if (!strcmp(a, "--out")) {
@@ -1328,6 +1330,10 @@ static params parse_args(int argc, char **argv) {
             exit(1);
         }
     }
+    if (show_help) {
+        usage(argv[0]);
+        exit(0);
+    }
     if (p.threads < 1) die("--threads must be >= 1");
     if (p.q4_last && p.q4_start >= 0) die("use either --q4-expert-last or --q4-expert-layers");
     if (!p.dry_run && !p.out) die("--out is required unless --dry-run is used");
@@ -1338,6 +1344,7 @@ static params parse_args(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "qwen36-quantize");
     params pa = parse_args(argc, argv);
     imatrix im = {0};
     if (pa.imatrix) imatrix_load(&im, pa.imatrix, pa.strict_imatrix);

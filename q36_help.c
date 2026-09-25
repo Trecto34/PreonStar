@@ -387,7 +387,7 @@ static void print_eval_specific(FILE *fp, const help_colors *c) {
     fputc('\n', fp);
 }
 
-static bool tool_has_topic(q36_help_tool tool, const char *topic) {
+bool q36_help_topic_valid(q36_help_tool tool, const char *topic) {
     if (!topic) return true;
     if (streq(topic, "all")) return true;
     if (streq(topic, "runtime")) return true;
@@ -425,9 +425,9 @@ static void more_line(FILE *fp, const help_colors *c, const char *label, const c
 static void print_more_info(FILE *fp, const help_colors *c, q36_help_tool tool) {
     title(fp, c, "More Info");
     more_line(fp, c, "Runtime full info:", "runtime");
-    if (tool_has_topic(tool, "sampling"))
+    if (q36_help_topic_valid(tool, "sampling"))
         more_line(fp, c, "Sampling full info:", "sampling");
-    if (tool_has_topic(tool, "steering"))
+    if (q36_help_topic_valid(tool, "steering"))
         more_line(fp, c, "Steering full info:", "steering");
     if (tool == Q36_HELP_Q36) {
         more_line(fp, c, "Interactive commands:", "commands");
@@ -492,8 +492,8 @@ static void print_examples(FILE *fp, const help_colors *c, q36_help_tool tool, c
 static void print_topic(FILE *fp, const help_colors *c, q36_help_tool tool, const char *topic) {
     if (streq(topic, "all")) {
         print_model_runtime(fp, c, tool, true);
-        if (tool_has_topic(tool, "sampling")) print_sampling(fp, c, true);
-        if (tool_has_topic(tool, "steering")) print_steering(fp, c);
+        if (q36_help_topic_valid(tool, "sampling")) print_sampling(fp, c, true);
+        if (q36_help_topic_valid(tool, "steering")) print_steering(fp, c);
         if (tool == Q36_HELP_Q36) {
             print_cli_specific(fp, c, true);
             print_cli_commands(fp, c);
@@ -553,7 +553,7 @@ static void print_default(FILE *fp, const help_colors *c, q36_help_tool tool) {
 
 void q36_help_print(FILE *fp, q36_help_tool tool, const char *topic) {
     help_colors c = help_make_colors(fp);
-    if (topic && !tool_has_topic(tool, topic)) {
+    if (topic && !q36_help_topic_valid(tool, topic)) {
         fprintf(fp, "%s: unknown help topic '%s'\n\n", tool_name(tool), topic);
         topic = NULL;
     }
@@ -566,6 +566,9 @@ void q36_help_print(FILE *fp, q36_help_tool tool, const char *topic) {
     else {
         print_default(fp, &c, tool);
         print_more_info(fp, &c, tool);
+        title(fp, &c, "Help");
+        opt(fp, &c, "-h, --help [TOPIC]", "Show help; optional topics are listed above.");
+        fputc('\n', fp);
     }
     print_examples(fp, &c, tool, topic);
 }

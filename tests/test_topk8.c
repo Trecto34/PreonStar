@@ -11,6 +11,7 @@
 #include <math.h>
 #include <stdint.h>
 #include "../q36_gpu.h"
+#include "../q36_cli_args.h"
 
 static int better(float av, int ai, float bv, int bi) {
     return av > bv || (av == bv && ai < bi);
@@ -76,7 +77,9 @@ static int run_case(const char *name, const float *x, uint32_t n) {
     return fail;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_topk8");
+    if (cli_rc) return cli_rc;
     if (!q36_gpu_init()) {
         fprintf(stderr, "q36_gpu_init failed (no Vulkan device?) — skipping\n");
         return 0;

@@ -7,7 +7,34 @@
 #  - Idempotent, exits 0 even if a node is missing (so it is safe in harnesses).
 set -uo pipefail
 
+usage() {
+    echo "Usage: $0 [apply|restore]"
+}
+
+if [ "$#" -gt 1 ]; then
+    echo "setup_bc250_env: unexpected argument: $2" >&2
+    usage >&2
+    exit 2
+fi
+
 MODE="${1:-apply}"
+case "$MODE" in
+    apply|restore) ;;
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    -*)
+        echo "setup_bc250_env: unknown option: $MODE" >&2
+        usage >&2
+        exit 2
+        ;;
+    *)
+        echo "setup_bc250_env: unknown mode: $MODE" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
 
 if [ "$(id -u)" != 0 ]; then
     echo "setup_bc250_env: must run as root (try: sudo $0)" >&2

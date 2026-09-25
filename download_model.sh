@@ -83,6 +83,7 @@ Options:
   --token TOKEN  Hugging Face token. Otherwise HF_TOKEN or the local HF
                  token cache is used if present. The main repository is
                  public, so a token is usually not required.
+  -h, --help     Show this help.
 
 Environment:
   Q36_GGUF_DIR   Directory used for downloaded GGUF files.
@@ -136,6 +137,10 @@ case "$MODEL" in
         ;;
     mtp) MODEL_FILE=$MTP_FILE; LINK_MODEL=0 ;;
     -h|--help|help)
+        if [ "$#" -ne 0 ]; then
+            echo "Unknown option: $1" >&2
+            exit 1
+        fi
         usage
         exit 0
         ;;
@@ -156,6 +161,13 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             TOKEN=$1
+            ;;
+        --token=*)
+            TOKEN=${1#--token=}
+            if [ -z "$TOKEN" ]; then
+                echo "Missing value after --token" >&2
+                exit 1
+            fi
             ;;
         *)
             echo "Unknown option: $1" >&2

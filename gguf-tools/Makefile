@@ -5,7 +5,7 @@ LDLIBS ?= -lm -pthread
 
 all: qwen36-quantize
 
-qwen36-quantize: qwen36-quantize.c quants.c quants.h
+qwen36-quantize: qwen36-quantize.c quants.c quants.h ../q36_cli_args.h
 	$(CC) $(CFLAGS) -o $@ qwen36-quantize.c quants.c $(LDFLAGS) $(LDLIBS)
 
 clean:

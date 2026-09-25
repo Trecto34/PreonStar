@@ -10,9 +10,46 @@
 set -uo pipefail
 
 TARGET="${SOAK_TEMP:-55}"
-LABEL="${1:?usage: bench_soak.sh LABEL -- command...}"
+usage() {
+    echo "Usage: $0 LABEL [--] command..."
+}
+
+if [ "$#" -eq 0 ]; then
+    usage >&2
+    exit 2
+fi
+case "$1" in
+    -h|--help)
+        if [ "$#" -ne 1 ]; then
+            echo "bench_soak: unexpected argument after $1: $2" >&2
+            usage >&2
+            exit 2
+        fi
+        usage
+        exit 0
+        ;;
+    -*)
+        echo "bench_soak: unknown option: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
+
+LABEL="$1"
 shift
 [ "${1:-}" = "--" ] && shift
+if [ "$#" -eq 0 ]; then
+    echo "bench_soak: missing command" >&2
+    usage >&2
+    exit 2
+fi
+case "$1" in
+    -*)
+        echo "bench_soak: unknown option: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
 LOG="${SOAK_LOG:-logs/thermal_run_log.csv}"
 
 NODE=$(ls /sys/class/drm/card*/device/hwmon/hwmon*/temp1_input 2>/dev/null | head -1)

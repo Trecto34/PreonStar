@@ -1,4 +1,5 @@
 #include "../q36.h"
+#include "../q36_cli_args.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -258,7 +259,9 @@ static void benchmark(const float *logits, float *scratch, uint32_t n,
            (unsigned long long)checksum);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_sampling");
+    if (cli_rc) return cli_rc;
     CHECK(q36_test_kv_next_cap(32768, 32769, 100000) == 40960,
           "KV growth after 32k should reserve 40k");
     CHECK(q36_test_kv_next_cap(40960, 40961, 100000) == 51200,

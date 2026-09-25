@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include "../q36.h"
 #include "../q36_gpu.h"
+#include "../q36_cli_args.h"
 
 static double get_time_us(void) {
     struct timespec ts;
@@ -136,7 +137,9 @@ static void run_bench(uint32_t n_tok, uint32_t pos0, int iters) {
     free(sinks_raw);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_attn_prefill_qtile2");
+    if (cli_rc) return cli_rc;
     if (!q36_gpu_init()) {
         fprintf(stderr, "q36_gpu_init failed\n");
         return 1;

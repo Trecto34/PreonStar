@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "llama.h"
+#include "../../q36_cli_args.h"
 
 typedef struct {
     llama_token id;
@@ -173,7 +174,18 @@ static token_prob *topk_from_logits(const float *logits, int n_vocab,
     return top;
 }
 
+static const char *cli_need_arg(int argc, char **argv, int *i,
+                                const char *option) {
+    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
+        fprintf(stderr, "llama_qwen_logprobs_capture: missing value for %s\n",
+                option);
+        exit(2);
+    }
+    return argv[++(*i)];
+}
+
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "llama_qwen_logprobs_capture");
     const char *model_path = NULL;
     const char *prompt_file = NULL;
     const char *out_path = NULL;
@@ -183,6 +195,7 @@ int main(int argc, char **argv) {
     int top_k = 20;
     int threads = 1;
     bool hf_template = false;
+    bool show_help = false;
     bool backend = false;
     struct llama_model *model = NULL;
     struct llama_context *lctx = NULL;
@@ -195,21 +208,24 @@ int main(int argc, char **argv) {
     int rc = 1;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--model") && i + 1 < argc) model_path = argv[++i];
-        else if (!strcmp(argv[i], "--prompt-file") && i + 1 < argc) prompt_file = argv[++i];
-        else if (!strcmp(argv[i], "--out") && i + 1 < argc) out_path = argv[++i];
-        else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--n-predict") && i + 1 < argc) n_predict = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--top-k") && i + 1 < argc) top_k = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
+        if (!strcmp(argv[i], "--model")) model_path = cli_need_arg(argc, argv, &i, argv[i]);
+        else if (!strcmp(argv[i], "--prompt-file")) prompt_file = cli_need_arg(argc, argv, &i, argv[i]);
+        else if (!strcmp(argv[i], "--out")) out_path = cli_need_arg(argc, argv, &i, argv[i]);
+        else if (!strcmp(argv[i], "--ctx")) ctx = atoi(cli_need_arg(argc, argv, &i, argv[i]));
+        else if (!strcmp(argv[i], "--n-predict")) n_predict = atoi(cli_need_arg(argc, argv, &i, argv[i]));
+        else if (!strcmp(argv[i], "--top-k")) top_k = atoi(cli_need_arg(argc, argv, &i, argv[i]));
+        else if (!strcmp(argv[i], "--threads")) threads = atoi(cli_need_arg(argc, argv, &i, argv[i]));
         else if (!strcmp(argv[i], "--hf-template")) hf_template = true;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            puts("usage: llama_qwen_logprobs_capture --model FILE --prompt-file FILE --out FILE [--ctx N] [--n-predict N] [--top-k N] [--threads N] [--hf-template]");
-            return 0;
+            show_help = true;
         } else {
             fprintf(stderr, "unknown option: %s\n", argv[i]);
             return 2;
         }
+    }
+    if (show_help) {
+        puts("usage: llama_qwen_logprobs_capture --model FILE --prompt-file FILE --out FILE [--ctx N] [--n-predict N] [--top-k N] [--threads N] [--hf-template]");
+        return 0;
     }
     if (!model_path || !prompt_file || !out_path) {
         fputs("missing required arguments\n", stderr);

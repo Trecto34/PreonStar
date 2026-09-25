@@ -1,4 +1,5 @@
 #include "q36_prompt_prefix.h"
+#include "q36_cli_args.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,7 +99,9 @@ static void test_load_file(void) {
     CHECK(unlink(path) == 0);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_prompt_prefix");
+    if (cli_rc) return cli_rc;
     test_multiline();
     test_multiple_pairs_and_bom();
     test_errors();

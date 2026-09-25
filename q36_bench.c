@@ -1,5 +1,6 @@
 #include "q36.h"
 #include "q36_ssd.h"
+#include "q36_cli_args.h"
 #ifndef Q36_NO_GPU
 #include "q36_gpu.h"
 #endif
@@ -122,7 +123,8 @@ static void usage(FILE *fp) {
         "  --step-mul F           Multiplicative step. Default: 1\n"
         "  --step-incr N          Linear step when --step-mul is 1. Default: 2048\n"
         "  --dump-frontier-logits-dir DIR  Write complete logits before decode.\n"
-        "  --gen-tokens N         Greedy decode tokens per frontier. Default: 128\n"
+        "  -n, --gen-tokens N, --tokens N\n"
+        "                         Greedy decode tokens per frontier. Default: 128\n"
         "                         0 benchmarks prefill only: no snapshot, decode,\n"
         "                         or restore, so each frontier extends the last.\n"
         "\n"
@@ -162,7 +164,7 @@ static double parse_double_arg(const char *s, const char *opt) {
 }
 
 static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
-    if (*i + 1 >= argc) {
+    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
         fprintf(stderr, "q36-bench: %s requires an argument\n", opt);
         exit(2);
     }
@@ -244,11 +246,11 @@ static bench_config parse_options(int argc, char **argv) {
 
     bool cache_type_k_set = false;
     bool cache_type_v_set = false;
+    bool show_help = false;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
-            usage(stdout);
-            exit(0);
+            show_help = true;
         } else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
             c.model_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--prompt-file")) {
@@ -354,6 +356,10 @@ static bench_config parse_options(int argc, char **argv) {
         }
     }
 
+    if (show_help) {
+        usage(stdout);
+        exit(0);
+    }
     if (!!c.prompt_path == !!c.chat_prompt_path) {
         fprintf(stderr, "q36-bench: specify exactly one of --prompt-file or --chat-prompt-file\n");
         exit(2);
@@ -527,6 +533,7 @@ static void log_context_memory(const bench_config *c) {
 }
 
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "q36-bench");
     bench_config cfg = parse_options(argc, argv);
 
     q36_engine_options opt = {

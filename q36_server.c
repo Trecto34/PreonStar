@@ -1,6 +1,7 @@
 #include "q36.h"
 #include "q36_tool_text.h"
 #include "rax.h"
+#include "q36_cli_args.h"
 
 /* OpenAI/Anthropic compatible local server.
  *
@@ -11038,7 +11039,7 @@ static float parse_float_arg(const char *s, const char *opt, float minv, float m
 }
 
 static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
-    if (*i + 1 >= argc) {
+    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
         server_log(Q36_LOG_DEFAULT, "q36-server: missing value for %s", opt);
         exit(2);
     }
@@ -11272,11 +11273,11 @@ static server_config parse_options(int argc, char **argv) {
     bool directional_steering_scale_set = false;
     bool cache_type_k_set = false;
     bool cache_type_v_set = false;
+    bool show_help = false;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
-            usage(stdout);
-            exit(0);
+            show_help = true;
         } else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
             c.engine.model_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--vision")) {
@@ -11413,6 +11414,10 @@ static server_config parse_options(int argc, char **argv) {
             exit(2);
         }
     }
+    if (show_help) {
+        usage(stdout);
+        exit(0);
+    }
     if (c.kv_cache.cold_max_tokens > 0 &&
         c.kv_cache.cold_max_tokens < c.kv_cache.min_tokens)
     {
@@ -11437,6 +11442,7 @@ static server_config parse_options(int argc, char **argv) {
 
 #ifndef Q36_SERVER_TEST
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "q36-server");
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -15368,7 +15374,9 @@ static void q36_server_unit_tests_run(void) {
 }
 
 #ifndef Q36_SERVER_TEST_NO_MAIN
-int main(void) {
+int main(int argc, char **argv) {
+    int cli_rc = q36_cli_require_no_arguments(argc, argv, "q36_server_test");
+    if (cli_rc) return cli_rc;
     q36_server_unit_tests_run();
     if (test_failures) {
         fprintf(stderr, "q36-server tests: %d failure(s)\n", test_failures);

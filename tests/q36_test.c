@@ -347,7 +347,7 @@ static void test_ssd_cache_shrink(void) {
 static int test_parse_positive_int(int argc, char **argv, int *i, const char *name) {
     char *end = NULL;
     long v;
-    if (*i + 1 >= argc) {
+    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
         fprintf(stderr, "q36-test: missing value for %s\n", name);
         exit(2);
     }
@@ -357,6 +357,15 @@ static int test_parse_positive_int(int argc, char **argv, int *i, const char *na
         exit(2);
     }
     return (int)v;
+}
+
+static const char *test_need_arg(int argc, char **argv, int *i,
+                                 const char *name) {
+    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
+        fprintf(stderr, "q36-test: missing value for %s\n", name);
+        exit(2);
+    }
+    return argv[++(*i)];
 }
 
 static char *test_json_string_value(const char *line, const char *key) {
@@ -607,18 +616,22 @@ static int test_dump_chat_prompt_main(int argc, char **argv) {
     q36_tokens prompt = {0};
     char *prompt_text = NULL;
     int rc = 1;
+    bool show_help = false;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--model") && i + 1 < argc) model_path = argv[++i];
-        else if (!strcmp(argv[i], "--prompt-file") && i + 1 < argc) prompt_path = argv[++i];
+        if (!strcmp(argv[i], "--model")) model_path = test_need_arg(argc, argv, &i, argv[i]);
+        else if (!strcmp(argv[i], "--prompt-file")) prompt_path = test_need_arg(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--hf-template")) hf_template = true;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-            puts("usage: q36_test --dump-chat-prompt --prompt-file FILE [--model FILE] [--hf-template]");
-            return 0;
+            show_help = true;
         } else {
             fprintf(stderr, "q36-test: unknown option for --dump-chat-prompt: %s\n", argv[i]);
             return 2;
         }
+    }
+    if (show_help) {
+        puts("usage: q36_test --dump-chat-prompt --prompt-file FILE [--model FILE] [--hf-template]");
+        return 0;
     }
     if (!prompt_path) {
         fprintf(stderr, "q36-test: --dump-chat-prompt needs --prompt-file FILE\n");
@@ -669,6 +682,10 @@ static int test_dump_case_main(int argc, char **argv) {
         .threads = 1,
     };
     if (argc >= 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) {
+        if (argc != 2) {
+            fprintf(stderr, "q36-test: unknown dump option: %s\n", argv[2]);
+            return 2;
+        }
         printf("usage: %s --dump-logprob-case CASE_ID [--model FILE] [--prompts FILE] [--out FILE] [--tokens N] [--ctx N] [--top-k N] [--threads N] [--hf-template]\n", "q36_test");
         return 0;
     }
@@ -678,9 +695,9 @@ static int test_dump_case_main(int argc, char **argv) {
     }
     cfg.case_id = argv[1];
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--model")) cfg.model_path = argv[++i];
-        else if (!strcmp(argv[i], "--prompts")) cfg.prompt_file = argv[++i];
-        else if (!strcmp(argv[i], "--out")) cfg.out_path = argv[++i];
+        if (!strcmp(argv[i], "--model")) cfg.model_path = test_need_arg(argc, argv, &i, argv[i]);
+        else if (!strcmp(argv[i], "--prompts")) cfg.prompt_file = test_need_arg(argc, argv, &i, argv[i]);
+        else if (!strcmp(argv[i], "--out")) cfg.out_path = test_need_arg(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--tokens")) cfg.tokens = test_parse_positive_int(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--ctx")) cfg.ctx = test_parse_positive_int(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--top-k")) cfg.top_k = test_parse_positive_int(argc, argv, &i, argv[i]);
@@ -830,9 +847,9 @@ static int test_layer_probe_main(int argc, char **argv) {
     int n_diverge = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--model")) model_path = argv[++i];
-        else if (!strcmp(argv[i], "--prompts")) prompt_file = argv[++i];
-        else if (!strcmp(argv[i], "--json")) json_out = argv[++i];
+        if (!strcmp(argv[i], "--model")) model_path = test_need_arg(argc, argv, &i, argv[i]);
+        else if (!strcmp(argv[i], "--prompts")) prompt_file = test_need_arg(argc, argv, &i, argv[i]);
+        else if (!strcmp(argv[i], "--json")) json_out = test_need_arg(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--ctx")) ctx_size = test_parse_positive_int(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--threads")) threads = test_parse_positive_int(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--hf-template")) hf_template = true;
@@ -1117,8 +1134,8 @@ static parity_config parity_parse_args(int argc, char **argv) {
         .hf_template = 0,
     };
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--model") || !strcmp(argv[i], "-m")) cfg.model_path = argv[++i];
-        else if (!strcmp(argv[i], "--out")) cfg.report_path = argv[++i];
+        if (!strcmp(argv[i], "--model") || !strcmp(argv[i], "-m")) cfg.model_path = test_need_arg(argc, argv, &i, argv[i]);
+        else if (!strcmp(argv[i], "--out")) cfg.report_path = test_need_arg(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--steps")) cfg.steps = parity_parse_int_arg(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--ctx")) cfg.ctx_size = parity_parse_int_arg(argc, argv, &i, argv[i]);
         else if (!strcmp(argv[i], "--threads") || !strcmp(argv[i], "-t")) cfg.threads = parity_parse_int_arg(argc, argv, &i, argv[i]);
@@ -8306,30 +8323,29 @@ static void test_run_entry(const q36_test_entry *entry) {
 }
 
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "q36_test");
     if (argc >= 2 && !strcmp(argv[1], "--dump-chat-prompt")) {
         return test_dump_chat_prompt_main(argc - 1, argv + 1);
     }
-    if (argc >= 3 && !strcmp(argv[1], "--dump-logprob-case")) {
+    if (argc >= 2 && !strcmp(argv[1], "--dump-logprob-case")) {
         return test_dump_case_main(argc - 1, argv + 1);
     }
     bool run_all = argc == 1;
     bool selected[sizeof(test_entries) / sizeof(test_entries[0])] = {0};
+    bool show_help = false;
+    bool show_list = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--all")) {
             run_all = true;
-        } else if (!strcmp(argv[i], "--model") && i + 1 < argc) {
-            test_model_override = argv[++i];
-        } else if (!strcmp(argv[i], "--case") && i + 1 < argc) {
-            test_case_override = argv[++i];
+        } else if (!strcmp(argv[i], "--model")) {
+            test_model_override = test_need_arg(argc, argv, &i, argv[i]);
+        } else if (!strcmp(argv[i], "--case")) {
+            test_case_override = test_need_arg(argc, argv, &i, argv[i]);
         } else if (!strcmp(argv[i], "--list")) {
-            for (size_t j = 0; j < sizeof(test_entries) / sizeof(test_entries[0]); j++) {
-                puts(test_entries[j].flag);
-            }
-            return 0;
+            show_list = true;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            test_print_help(argv[0]);
-            return 0;
+            show_help = true;
         } else {
             const q36_test_entry *entry = test_find_entry(argv[i]);
             if (!entry) {
@@ -8339,6 +8355,17 @@ int main(int argc, char **argv) {
             }
             selected[(size_t)(entry - test_entries)] = true;
         }
+    }
+
+    if (show_help) {
+        test_print_help(argv[0]);
+        return 0;
+    }
+    if (show_list) {
+        for (size_t j = 0; j < sizeof(test_entries) / sizeof(test_entries[0]); j++) {
+            puts(test_entries[j].flag);
+        }
+        return 0;
     }
 
     if (run_all) {

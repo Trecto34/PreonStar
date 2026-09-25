@@ -30,6 +30,7 @@
 #include <time.h>
 #include "../q36.h"
 #include "../q36_gpu.h"
+#include "../q36_cli_args.h"
 
 #define IQ3_XXS 18u /* Q36_VK_TENSOR_IQ3_XXS, q36_vulkan.c:33 (not exported in q36_gpu.h) */
 #define Q8K_WORDS 74u
@@ -77,6 +78,8 @@ static void make_q8_row(uint8_t *row, uint32_t blocks) {
 }
 
 int main(int argc, char **argv) {
+    int cli_rc = q36_cli_reject_option_arguments(argc, argv, "test_dense_iq3xxs_nx");
+    if (cli_rc) return cli_rc;
     /* Real shapes are out_dim 5120..17408 x in_dim 17408 (68 IQ3_XXS blocks a
      * row); the default is the attn_qkv shape. */
     const uint32_t out_dim = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 0) : 5120u;

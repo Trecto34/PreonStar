@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include "../q36.h"
 #include "../q36_gpu.h"
+#include "../q36_cli_args.h"
 
 #define PQ2_0_TYPE 142u
 #define PQ2_BLK 34u
@@ -111,7 +112,9 @@ static int run_case(uint32_t in_dim, uint32_t out_dim, uint32_t n_tok, int iters
     return checked && mism != 0;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_pq2_small");
+    if (cli_rc) return cli_rc;
     const char *env = getenv("Q36_VK_Q2_SMALL_MAX");
     if (env && env[0]) small_max = (uint32_t)strtoul(env, NULL, 10);
     if (!q36_gpu_init()) { fprintf(stderr, "q36_gpu_init failed\n"); return 1; }

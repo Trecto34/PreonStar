@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include "../q36.h"
 #include "../q36_gpu.h"
+#include "../q36_cli_args.h"
 
 static uint32_t rng = 12345u;
 static float frand(void) { /* uniform [-1, 1) */
@@ -107,7 +108,9 @@ static int run_case(uint32_t n_head, uint32_t n_head_kv, uint32_t n_tok, uint32_
     return bad;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_attn_fa");
+    if (cli_rc) return cli_rc;
     /* Any of these off would route both arms to the same kernel. */
     unsetenv("Q36_VK_ATTN_QTILE2");
     unsetenv("Q36_VK_ATTN_QTILE");

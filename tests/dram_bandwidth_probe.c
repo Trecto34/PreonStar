@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include "../q36_cli_args.h"
 
 #define NTH 8
 #define REPS 20
@@ -78,6 +79,8 @@ static double sum_best(double *v) {
 }
 
 int main(int argc, char **argv) {
+    int cli_rc = q36_cli_reject_option_arguments(argc, argv, "dram_bandwidth_probe");
+    if (cli_rc) return cli_rc;
     double gb = (argc > 1) ? atof(argv[1]) : 2.0;
     NELEM = (size_t)(gb * GB / sizeof(float));
 

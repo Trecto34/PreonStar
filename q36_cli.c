@@ -2,6 +2,7 @@
 #include "q36_prompt_prefix.h"
 #include "linenoise.h"
 #include "q36_ssd.h"
+#include "q36_cli_args.h"
 
 /* q36 CLI.
  *
@@ -1431,7 +1432,7 @@ static int run_repl(q36_engine *engine, cli_config *cfg) {
 }
 
 static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
-    if (*i + 1 >= argc) {
+    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
         fprintf(stderr, "q36: missing value for %s\n", opt);
         exit(2);
     }
@@ -1510,11 +1511,11 @@ static cli_config parse_options(int argc, char **argv) {
     bool directional_steering_scale_set = false;
     bool cache_type_k_set = false;
     bool cache_type_v_set = false;
+    bool show_help = false;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
-            usage(stdout);
-            exit(0);
+            show_help = true;
         } else if (!strcmp(arg, "-p") || !strcmp(arg, "--prompt")) {
             if (c.gen.prompt) {
                 fprintf(stderr, "q36: specify only one prompt source\n");
@@ -1726,6 +1727,10 @@ static cli_config parse_options(int argc, char **argv) {
         }
     }
 
+    if (show_help) {
+        usage(stdout);
+        exit(0);
+    }
     if (c.engine.directional_steering_file && !directional_steering_scale_set) {
         c.engine.directional_steering_ffn = 1.0f;
     }
@@ -1759,6 +1764,7 @@ static void cli_apply_model_sampling_defaults(
 }
 
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "q36");
     cli_config cfg = parse_options(argc, argv);
     if (cfg.gen.dump_tokens) {
         if (cfg.gen.prefix.count) {

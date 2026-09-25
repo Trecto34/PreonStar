@@ -1,4 +1,5 @@
 #include "q36.h"
+#include "q36_cli_args.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -522,10 +523,11 @@ static double safe_ratio(long num, long den) {
 }
 
 
-static void usage(const char *argv0) {
-    fprintf(stderr,
+static void usage(FILE *fp, const char *argv0) {
+    fprintf(fp,
             "usage: %s MODEL manifest.tsv OUT.tsv [ctx] [options]\n"
             "options:\n"
+            "  -h, --help\n"
             "  --vulkan | --cpu\n"
             "  --threads N\n"
             "  --ssd-streaming\n"
@@ -539,8 +541,20 @@ static void usage(const char *argv0) {
 }
 
 int main(int argc, char **argv) {
+    q36_cli_expand_long_equals(&argc, &argv, "score_openrouter");
+    if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+        usage(stdout, argv[0]);
+        return 0;
+    }
+    for (int i = 1; i < argc && i <= 3; i++) {
+        if (argv[i][0] == '-') {
+            fprintf(stderr, "score_openrouter: unknown option: %s\n", argv[i]);
+            fprintf(stderr, "Try '%s --help' for usage.\n", argv[0]);
+            return 2;
+        }
+    }
     if (argc < 4) {
-        usage(argv[0]);
+        usage(stderr, argv[0]);
         return 2;
     }
 
@@ -551,6 +565,7 @@ int main(int argc, char **argv) {
     bool rendered_prompt = false;
     const char *first_logits_path = NULL;
     int max_cases = 0;
+    bool show_help = false;
     int argi = 4;
     if (argi < argc && argv[argi][0] != '-') {
         ctx_size = atoi(argv[argi++]);
@@ -567,17 +582,21 @@ int main(int argc, char **argv) {
 
     while (argi < argc) {
         const char *a = argv[argi++];
-        if (!strcmp(a, "--vulkan")) {
+        if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
+            show_help = true;
+        } else if (!strcmp(a, "--vulkan")) {
             opt.backend = Q36_BACKEND_VULKAN;
         } else if (!strcmp(a, "--cpu")) {
             opt.backend = Q36_BACKEND_CPU;
         } else if (!strcmp(a, "--rendered-prompt")) {
             rendered_prompt = true;
         } else if (!strcmp(a, "--dump-first-logits")) {
-            if (argi == argc) die("--dump-first-logits requires an argument");
+            if (argi == argc || q36_cli_token_is_option(argv[argi]))
+                die("--dump-first-logits requires an argument");
             first_logits_path = argv[argi++];
         } else if (!strcmp(a, "--max-cases")) {
-            if (argi == argc) die("--max-cases requires an argument");
+            if (argi == argc || q36_cli_token_is_option(argv[argi]))
+                die("--max-cases requires an argument");
             char *end;
             long n = strtol(argv[argi++], &end, 10);
             if (*end || n <= 0 || n > INT_MAX) die("invalid --max-cases value");
@@ -589,19 +608,27 @@ int main(int argc, char **argv) {
         } else if (!strcmp(a, "--ssd-streaming-cold")) {
             opt.ssd_streaming_cold = true;
         } else if (!strcmp(a, "--threads")) {
-            if (argi == argc) die("--threads requires an argument");
+            if (argi == argc || q36_cli_token_is_option(argv[argi]))
+                die("--threads requires an argument");
             opt.n_threads = atoi(argv[argi++]);
         } else if (!strcmp(a, "--ssd-streaming-cache-experts")) {
-            if (argi == argc) die("--ssd-streaming-cache-experts requires an argument");
+            if (argi == argc || q36_cli_token_is_option(argv[argi]))
+                die("--ssd-streaming-cache-experts requires an argument");
             if (!q36_parse_streaming_cache_experts_arg(argv[argi++],
                                                        &opt.ssd_streaming_cache_experts,
                                                        &opt.ssd_streaming_cache_bytes)) {
                 die("bad --ssd-streaming-cache-experts value");
             }
         } else {
-            fprintf(stderr, "unknown option: %s\n", a);
+            fprintf(stderr, "score_openrouter: unknown option: %s\n", a);
+            fprintf(stderr, "Try '%s --help' for usage.\n", argv[0]);
             return 2;
         }
+    }
+
+    if (show_help) {
+        usage(stdout, argv[0]);
+        return 0;
     }
 
     q36_engine *engine = NULL;
