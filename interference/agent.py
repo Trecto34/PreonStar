@@ -170,8 +170,8 @@ class FileRepairDomain(Domain):
             is_d = (ret != 0 and ("SyntaxError" in combined_out or "IndentationError" in combined_out))
             v_res = "tests PASS" if is_g else f"tests FAIL (exit={ret})"
 
-            tail_lines = "\n".join(combined_out.splitlines()[-2:])
-            m_key = (ret, tail_lines)
+            verifier_fingerprint = short_hash(f"{ret}:{combined_out}")
+            m_key = f"{ws_post}:{verifier_fingerprint}"
 
             candidate_state = {
                 "content": code,
@@ -204,8 +204,10 @@ class FileRepairDomain(Domain):
         return [], 0.0
 
     def key(self, state: Dict[str, Any]) -> Any:
-        tail_lines = "\n".join(state["output"].splitlines()[-2:])
-        return (state["returncode"], tail_lines)
+        from interference.core import short_hash
+        ws_hash = self.workspace_hash(state)
+        verifier_fingerprint = short_hash(f"{state['returncode']}:{state['output']}")
+        return f"{ws_hash}:{verifier_fingerprint}"
 
     def judge(self, states: List[Dict[str, Any]], problem: Any) -> Tuple[Optional[List[float]], float]:
         scores = []
