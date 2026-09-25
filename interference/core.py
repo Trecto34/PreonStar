@@ -55,6 +55,10 @@ class BranchRecord:
     is_goal: bool
     candidate_data: Any
     rank: int = 0
+    temp: float = 0.7
+    top_p: float = 0.8
+    raw_response_hash: str = "none00"
+    dead_reason: Optional[str] = None
 
 
 @dataclass
@@ -175,6 +179,9 @@ def search(
                         is_goal=is_g,
                         candidate_data=kid,
                         rank=rank,
+                        temp=0.7,
+                        top_p=0.8,
+                        raw_response_hash=short_hash(domain.key(kid)),
                     ))
                 proposals_per_parent.append(wrapped_records)
 
@@ -200,13 +207,14 @@ def search(
                     res.dead_ends += 1
                     dead_count += 1
                     if verbose:
-                        print(f"  {b.branch_id} seed={b.seed} prompt={b.prompt_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post} -> {b.verifier_result} -> DEAD")
+                        reason_str = f"reason={b.dead_reason}" if b.dead_reason else f"{b.verifier_result}"
+                        print(f"  {b.branch_id} seed={b.seed} temp={b.temp} top_p={b.top_p} prompt={b.prompt_hash} raw={b.raw_response_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post} -> DEAD ({reason_str})")
                     continue
 
                 k = b.merge_key if merge else (b.merge_key, raw_count)
                 if merge and k in expanded_keys:
                     if verbose:
-                        print(f"  {b.branch_id} seed={b.seed} prompt={b.prompt_hash} -> diff={b.diff_hash} -> ALREADY_EXPANDED -> PRUNED")
+                        print(f"  {b.branch_id} seed={b.seed} temp={b.temp} top_p={b.top_p} prompt={b.prompt_hash} raw={b.raw_response_hash} -> diff={b.diff_hash} -> ALREADY_EXPANDED -> PRUNED")
                     continue
 
                 vote_weight = 1.0 / (b.rank + 1)
@@ -227,7 +235,7 @@ def search(
                     }
 
                 if verbose:
-                    print(f"  {b.branch_id} seed={b.seed} prompt={b.prompt_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post} -> {b.verifier_result} -> state={state_sig}")
+                    print(f"  {b.branch_id} seed={b.seed} temp={b.temp} top_p={b.top_p} prompt={b.prompt_hash} raw={b.raw_response_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post} -> {b.verifier_result} -> state={state_sig}")
 
         merged_this_round = (raw_count - len(pool) - dead_count)
         res.merged_away += max(0, merged_this_round)

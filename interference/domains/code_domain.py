@@ -178,7 +178,12 @@ class CodeDomain(Domain):
         )
 
         child_groups: List[List[CodeState]] = [[] for _ in range(len(states))]
-        for text, state_idx in zip(raw_texts, state_map):
+        for cand, state_idx in zip(raw_texts, state_map):
+            if hasattr(cand, "is_error") and cand.is_error:
+                continue
+            text = cand.text if hasattr(cand, "text") else cand
+            if not text:
+                continue
             code = extract_python_code(text)
             behaviour = run_tests_sandbox(code, tests)
             child_groups[state_idx].append(CodeState(src=code, behaviour=behaviour))

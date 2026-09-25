@@ -60,6 +60,9 @@ class FileRepairDomain(Domain):
         cwd: str,
         task_instruction: str,
         k: int = 3,
+        temperature: float = 0.7,
+        top_p: float = 0.8,
+        max_tokens: int = 2048,
     ):
         self.backend = backend
         self.target_file = target_file
@@ -67,6 +70,9 @@ class FileRepairDomain(Domain):
         self.cwd = cwd
         self.task_instruction = task_instruction
         self.k = k
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_tokens = max_tokens
 
         # Cache original content to restore on cancellation
         with open(target_file, "r", encoding="utf-8", errors="replace") as f:
@@ -113,17 +119,51 @@ class FileRepairDomain(Domain):
         p_hash = short_hash(prompt)
         ws_pre = self.workspace_hash(parent_state)
 
-        # Prepare branch seeds
+        # Bug 2: Generate distinct seeds for each branch and pass to backend
+        branch_seeds = [base_seed + start_branch_idx + i for i in range(self.k)]
         prompts = [prompt] * self.k
-        raw_responses, token_cost = self.backend.generate_candidates(prompts, max_tokens=2048)
+        raw_responses, token_cost = self.backend.generate_candidates(
+            prompts,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            seeds=branch_seeds,
+            max_tokens=self.max_tokens,
+        )
 
         branch_records = []
         for i, resp in enumerate(raw_responses):
             b_num = start_branch_idx + i
             b_id = f"b{b_num}"
-            seed = base_seed + b_num
+            seed = branch_seeds[i]
 
-            code = extract_code_block(resp)
+            # Bug 1: Backend timeout or error must NEVER become code or modify workspace
+            if resp.is_error:
+                branch_records.append(BranchRecord(
+                    branch_id=b_id,
+                    parent_id=parent_node.state_id,
+                    depth=parent_node.depth + 1,
+                    seed=seed,
+                    temp=self.temperature,
+                    top_p=self.top_p,
+                    prompt_hash=p_hash,
+                    raw_response_hash=resp.raw_hash,
+                    workspace_pre=ws_pre,
+                    workspace_post=ws_pre,
+                    diff_hash="nodiff",
+                    verifier_result=f"DEAD reason={resp.error_reason}",
+                    dead_reason=resp.error_reason,
+                    merge_key=("dead", resp.error_reason, b_id),
+                    is_dead=True,
+                    is_goal=False,
+                    candidate_data=parent_state,
+                    rank=i,
+                ))
+                continue
+
+            # Bug 4: Log raw_response_hash before extracting code
+            raw_hash = resp.raw_hash
+            raw_text = resp.text or ""
+            code = extract_code_block(raw_text)
             if not code:
                 # Empty response -> Dead
                 branch_records.append(BranchRecord(
@@ -131,12 +171,16 @@ class FileRepairDomain(Domain):
                     parent_id=parent_node.state_id,
                     depth=parent_node.depth + 1,
                     seed=seed,
+                    temp=self.temperature,
+                    top_p=self.top_p,
                     prompt_hash=p_hash,
+                    raw_response_hash=raw_hash,
                     workspace_pre=ws_pre,
                     workspace_post=ws_pre,
-                    diff_hash="empty0",
-                    verifier_result="EMPTY_RESPONSE",
-                    merge_key=("empty",),
+                    diff_hash="nodiff",
+                    verifier_result="DEAD reason=empty_response",
+                    dead_reason="empty_response",
+                    merge_key=("empty", b_id),
                     is_dead=True,
                     is_goal=False,
                     candidate_data=parent_state,
@@ -154,17 +198,18 @@ class FileRepairDomain(Domain):
             diff_text = "".join(diff_lines)
             d_hash = short_hash(diff_text if diff_text else "nodiff")
 
-            # Apply candidate to disk and verify workspace isolation
-            with open(self.target_file, "w", encoding="utf-8") as f:
-                f.write(code)
+            # Apply candidate to disk and verify under try-finally for workspace isolation
+            try:
+                with open(self.target_file, "w", encoding="utf-8") as f:
+                    f.write(code)
 
-            ws_post = short_hash(code)
-            ret, stdout, stderr = run_command(self.test_cmd, self.cwd)
-            combined_out = (stdout + "\n" + stderr).strip()
-
-            # Restore original file immediately to ensure strict branch isolation
-            with open(self.target_file, "w", encoding="utf-8") as f:
-                f.write(self.original_content)
+                ws_post = short_hash(code)
+                ret, stdout, stderr = run_command(self.test_cmd, self.cwd)
+                combined_out = (stdout + "\n" + stderr).strip()
+            finally:
+                # Restore original file immediately to ensure strict branch isolation
+                with open(self.target_file, "w", encoding="utf-8") as f:
+                    f.write(self.original_content)
 
             is_g = (ret == 0)
             is_d = (ret != 0 and ("SyntaxError" in combined_out or "IndentationError" in combined_out))
@@ -185,11 +230,15 @@ class FileRepairDomain(Domain):
                 parent_id=parent_node.state_id,
                 depth=parent_node.depth + 1,
                 seed=seed,
+                temp=self.temperature,
+                top_p=self.top_p,
                 prompt_hash=p_hash,
+                raw_response_hash=raw_hash,
                 workspace_pre=ws_pre,
                 workspace_post=ws_post,
                 diff_hash=d_hash,
                 verifier_result=v_res,
+                dead_reason="syntax_error" if is_d else None,
                 merge_key=m_key,
                 is_dead=is_d,
                 is_goal=is_g,
@@ -235,6 +284,10 @@ def run_agent_task(
     max_rounds: int = 5,
     width: int = 3,
     verbose: bool = True,
+    generation_timeout: int = 600,
+    temperature: float = 0.7,
+    top_p: float = 0.8,
+    max_tokens: int = 2048,
 ):
     print("=" * 65)
     print(" Q36 INTERFERENCE SEARCH CODING AGENT")
@@ -245,13 +298,18 @@ def run_agent_task(
     print(f"Backend     : {backend_choice}")
 
     if backend_choice == "q36":
-        backend = Q36Backend(model_path=model_choice)
+        backend = Q36Backend(
+            model_path=model_choice,
+            generation_timeout=generation_timeout,
+        )
         print(f"Model       : {os.path.basename(backend.model_path)}")
+        print(f"Gen Timeout : {generation_timeout}s")
     else:
         # Simple test mock
         backend = MockBackend(lambda p: ["```python\ndef solve(): return True\n```"])
         print("Model       : Mock")
 
+    print(f"Sampling    : temp={temperature} | top_p={top_p} | max_tokens={max_tokens}")
     print(f"Verbose     : {'Ativado' if verbose else 'Desativado'}")
     print("=" * 65)
 
@@ -264,7 +322,10 @@ def run_agent_task(
         test_cmd=test_cmd,
         cwd=cwd,
         task_instruction=task_instruction,
-        k=3,
+        k=width,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
     )
 
     initial_state = domain.start(None)
@@ -277,7 +338,7 @@ def run_agent_task(
     print("Starting multi-branch search with constructive merging...")
 
     from interference.core import search
-    res = search(domain, problem=None, budget=10000, width=width, merge=True, verbose=verbose)
+    res = search(domain, problem=None, budget=10000, width=width, merge=True, verbose=verbose, max_rounds=max_rounds)
 
     if res.solved and res.solution:
         print("\n" + "=" * 65)
@@ -304,6 +365,12 @@ def main():
     parser.add_argument("--model", "-m", default=None, help="Name, number or path of the model to load")
     parser.add_argument("--verbose", action="store_true", default=True, help="Enable live verbose trace of search")
     parser.add_argument("--quiet", action="store_false", dest="verbose", help="Disable verbose trace")
+    parser.add_argument("--generation-timeout", type=int, default=600, help="Timeout in seconds for backend generation per candidate")
+    parser.add_argument("--temp", "--temperature", type=float, default=0.7, dest="temperature", help="Sampling temperature")
+    parser.add_argument("--top-p", type=float, default=0.8, dest="top_p", help="Sampling top-p")
+    parser.add_argument("--max-tokens", type=int, default=2048, help="Max tokens per candidate generation")
+    parser.add_argument("--width", "-w", type=int, default=3, help="Search beam width / number of branches")
+    parser.add_argument("--max-rounds", "-r", type=int, default=5, help="Maximum search rounds")
     args = parser.parse_args()
 
     run_agent_task(
@@ -312,7 +379,13 @@ def main():
         task_instruction=args.task,
         backend_choice=args.backend,
         model_choice=args.model,
+        max_rounds=args.max_rounds,
+        width=args.width,
         verbose=args.verbose,
+        generation_timeout=args.generation_timeout,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        max_tokens=args.max_tokens,
     )
 
 
