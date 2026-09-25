@@ -1,12 +1,17 @@
 """
 Interactive Chat Interface for Q36 with Interference Search capabilities.
 """
+import argparse
 import os
 import readline
 import sys
 import time
 
-from interference.backends.q36_backend import Q36Backend
+from interference.backends.q36_backend import (
+    Q36Backend,
+    list_available_models,
+    resolve_model_path,
+)
 from interference.backends.mock_backend import MockBackend
 from interference.agent import run_agent_task
 from interference.domains.countdown_domain import CountdownDomain
@@ -23,14 +28,60 @@ BANNER = r"""
 
 
 class InterferenceChatSession:
-    def __init__(self, backend_choice: str = "q36", verbose: bool = True):
+    def __init__(
+        self,
+        backend_choice: str = "q36",
+        model_choice: str = None,
+        verbose: bool = True,
+    ):
         self.backend_choice = backend_choice
         self.verbose = verbose
         if backend_choice == "q36":
-            self.backend = Q36Backend()
+            self.backend = Q36Backend(model_path=model_choice)
         else:
             self.backend = MockBackend(lambda p: ["Olá! Sou o agente Q36 com busca por interferência."])
         self.history = []
+
+    def get_current_model_info(self) -> str:
+        if self.backend_choice != "q36":
+            return "Mock / Simulado"
+        path = getattr(self.backend, "model_path", "desconhecido")
+        name = os.path.basename(path)
+        storage = "SSD NVMe" if "/home/server/models" in path else "HDD Externo"
+        return f"{name} ({storage})"
+
+    def list_models(self):
+        models = list_available_models()
+        if not models:
+            print("Nenhum modelo GGUF encontrado nos diretórios padrão.")
+            return
+
+        current_path = getattr(self.backend, "model_path", "")
+        print("\n\033[1;34m=== Modelos Disponíveis no Sistema ===\033[0m")
+        for i, m in enumerate(models, 1):
+            is_active = (os.path.abspath(m["path"]) == os.path.abspath(current_path))
+            tag = "\033[1;32m* [ATIVO]\033[0m" if is_active else " "
+            storage_color = "\033[36m" if "SSD" in m["storage"] else "\033[33m"
+            print(f"  {tag} {i:2d}. {storage_color}[{m['storage']}]\033[0m {m['name']} ({m['size_gb']:.1f} GB)")
+        print("\nPara trocar o modelo, digite: \033[1m/model <número ou nome>\033[0m (ex: \033[36m/model 1\033[0m ou \033[36m/model bonsai\033[0m)\n")
+
+    def switch_model(self, arg_str: str):
+        query = arg_str.strip()
+        if not query:
+            self.list_models()
+            return
+
+        success, res = self.backend.set_model(query)
+        if success:
+            model_name = os.path.basename(res)
+            storage = "SSD NVMe (Rápido)" if "/home/server/models" in res else "HDD Externo"
+            print(f"\n✅ \033[1;32mModelo alterado com sucesso!\033[0m")
+            print(f"   • Modelo: \033[1m{model_name}\033[0m")
+            print(f"   • Local: {storage}")
+            print(f"   • Caminho: {res}\n")
+        else:
+            print(f"\n❌ {res}")
+            print("Digite \033[1m/models\033[0m para ver a lista de modelos disponíveis.\n")
 
     def handle_countdown(self, arg_str: str):
         # Format: 24 98 19 3 -> 361
@@ -74,6 +125,7 @@ class InterferenceChatSession:
             test_cmd=test_cmd,
             task_instruction=task,
             backend_choice=self.backend_choice,
+            model_choice=getattr(self.backend, "model_path", None),
             verbose=self.verbose,
         )
 
@@ -89,7 +141,7 @@ class InterferenceChatSession:
         print(f"[Modo Verboso] {status}")
 
     def chat_message(self, user_msg: str):
-        print("\nQ36 pensando...", end="", flush=True)
+        print(f"\nQ36 ({os.path.basename(self.backend.model_path)}) pensando...", end="", flush=True)
         t0 = time.perf_counter()
 
         system_prompt = (
@@ -101,7 +153,7 @@ class InterferenceChatSession:
         responses, tokens = self.backend.generate_candidates([full_prompt], max_tokens=1024)
         elapsed = time.perf_counter() - t0
 
-        print(f"\r{' ' * 20}\r", end="")  # Clear thinking text
+        print(f"\r{' ' * 50}\r", end="")  # Clear thinking text
         if responses:
             reply = responses[0].strip()
             print(f"\n{reply}\n")
@@ -112,8 +164,11 @@ class InterferenceChatSession:
 
     def run(self):
         print(BANNER)
-        print(f"Modo Verboso: {'\033[1;32mATIVADO\033[0m' if self.verbose else '\033[1;31mDESATIVADO\033[0m'}")
-        print("Comandos disponíveis:")
+        print(f"Modelo Ativo : \033[1;32m{self.get_current_model_info()}\033[0m")
+        print(f"Modo Verboso : {'\033[1;32mATIVADO\033[0m' if self.verbose else '\033[1;31mDESATIVADO\033[0m'}")
+        print("\nComandos disponíveis:")
+        print("  /models                                     -> Lista todos os modelos (SSD e HDD)")
+        print("  /model <nome_ou_número>                     -> Troca o modelo ativo em tempo real")
         print("  /fix <arquivo> ; <comando_teste> ; <tarefa> -> Dispara o Interference Search no código")
         print("  /countdown <nums> -> <target>              -> Roda o desafio matemático de Countdown")
         print("  /verbose [on|off]                           -> Ativa/desativa telemetria detalhada de busca")
@@ -134,6 +189,14 @@ class InterferenceChatSession:
 
                 if user_input.startswith("/clear"):
                     os.system("clear")
+                    continue
+
+                if user_input.startswith("/models"):
+                    self.list_models()
+                    continue
+
+                if user_input.startswith("/model"):
+                    self.switch_model(user_input[len("/model"):].strip())
                     continue
 
                 if user_input.startswith("/verbose"):
@@ -157,11 +220,17 @@ class InterferenceChatSession:
 
 
 def main():
-    backend = "q36"
-    if "--mock" in sys.argv:
-        backend = "mock"
-    verbose = "--quiet" not in sys.argv
-    session = InterferenceChatSession(backend_choice=backend, verbose=verbose)
+    parser = argparse.ArgumentParser(description="Q36 Interactive Interference Chat")
+    parser.add_argument("--backend", choices=["q36", "mock"], default="q36", help="LLM backend")
+    parser.add_argument("--model", "-m", default=None, help="Name, number or path of the model to load")
+    parser.add_argument("--quiet", action="store_true", help="Disable verbose trace by default")
+    args = parser.parse_args()
+
+    session = InterferenceChatSession(
+        backend_choice=args.backend,
+        model_choice=args.model,
+        verbose=not args.quiet,
+    )
     session.run()
 
 

@@ -164,6 +164,7 @@ def run_agent_task(
     test_cmd: str,
     task_instruction: str,
     backend_choice: str = "q36",
+    model_choice: str = None,
     max_rounds: int = 5,
     width: int = 3,
     verbose: bool = True,
@@ -175,14 +176,17 @@ def run_agent_task(
     print(f"Verify Cmd  : {test_cmd}")
     print(f"Task        : {task_instruction}")
     print(f"Backend     : {backend_choice}")
-    print(f"Verbose     : {'Ativado' if verbose else 'Desativado'}")
-    print("=" * 65)
 
     if backend_choice == "q36":
-        backend = Q36Backend()
+        backend = Q36Backend(model_path=model_choice)
+        print(f"Model       : {os.path.basename(backend.model_path)}")
     else:
         # Simple test mock
         backend = MockBackend(lambda p: ["```python\ndef solve(): return True\n```"])
+        print("Model       : Mock")
+
+    print(f"Verbose     : {'Ativado' if verbose else 'Desativado'}")
+    print("=" * 65)
 
     abs_path = os.path.abspath(target_file)
     cwd = os.path.dirname(abs_path) or "."
@@ -230,6 +234,7 @@ def main():
     parser.add_argument("--test", required=True, help="Verification command (e.g. 'pytest', 'python3 test.py')")
     parser.add_argument("--task", required=True, help="Description of the task or bug to fix")
     parser.add_argument("--backend", choices=["q36", "mock"], default="q36", help="LLM backend")
+    parser.add_argument("--model", "-m", default=None, help="Name, number or path of the model to load")
     parser.add_argument("--verbose", action="store_true", default=True, help="Enable live verbose trace of search")
     parser.add_argument("--quiet", action="store_false", dest="verbose", help="Disable verbose trace")
     args = parser.parse_args()
@@ -239,6 +244,7 @@ def main():
         test_cmd=args.test,
         task_instruction=args.task,
         backend_choice=args.backend,
+        model_choice=args.model,
         verbose=args.verbose,
     )
 
