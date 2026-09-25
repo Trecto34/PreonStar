@@ -38,6 +38,7 @@ def search(
     width: int = 4,
     merge: bool = True,
     restarts: bool = True,
+    verbose: bool = False,
 ) -> Result:
     """
     Executes Interference Search over a problem within a given budget.
@@ -46,13 +47,25 @@ def search(
     expanded_keys: Set[Any] = set()
     res = Result(solved=False)
 
+    if verbose:
+        print("\n\033[1;34m[Interference Search: Iniciando busca]\033[0m")
+        print(f"  • Budget máximo: {budget} | Largura (width): {width} | Merging: {merge}")
+
     while res.cost < budget:
         if not live:
             if not restarts:
+                if verbose:
+                    print("\033[33m  [!] Nenhum estado vivo restante e restarts desativados. Encerrando.\033[0m")
                 break
+            if verbose:
+                print("\033[33m  [!] Fronteira vazia, reiniciando do estado inicial...\033[0m")
             live = [domain.start(problem)]
 
         res.rounds += 1
+        if verbose:
+            print(f"\n\033[1;36m━━━ Rodada {res.rounds} ━━━\033[0m")
+            print(f"  • Expandindo {len(live)} estado(s) vivo(s)... (Custo acumulado: {res.cost:.1f})")
+
         proposals, pcost = domain.propose(live, problem)
         res.cost += pcost
         res.expanded += len(live)
@@ -62,8 +75,9 @@ def search(
 
         pool: Dict[Any, List[Any]] = {}  # key -> [state, pooled_vote]
         raw_candidates = 0
+        dead_ends_this_round = 0
 
-        for kids in proposals:
+        for p_idx, kids in enumerate(proposals):
             for rank, candidate in enumerate(kids):
                 raw_candidates += 1
                 if domain.is_goal(candidate, problem):
@@ -76,23 +90,41 @@ def search(
                         "kept": 1,
                         "goal_reached": True,
                     })
+                    if verbose:
+                        print(f"  \033[1;32m🎯 [OBJETIVO ALCANÇADO] Candidato {raw_candidates} satisfez 100% dos requisitos!\033[0m")
+                        print(f"     Rodadas: {res.rounds} | Custo total: {res.cost:.1f} | Estados fundidos no total: {res.merged_away}")
                     return res
 
                 if domain.is_dead(candidate, problem):
                     res.dead_ends += 1
+                    dead_ends_this_round += 1
+                    if verbose:
+                        print(f"  \033[31m  ✗ [Poda Destrutiva] Candidato {raw_candidates} descartado (estado morto/erro irrecuperável)\033[0m")
                     continue
 
                 k = domain.key(candidate) if merge else (domain.key(candidate), raw_candidates)
                 if merge and k in expanded_keys:
+                    if verbose:
+                        print(f"  \033[90m  ~ [Já Visitado] Candidato {raw_candidates} redundante com chave já expandida.\033[0m")
                     continue
 
                 vote_weight = 1.0 / (rank + 1)
                 if k in pool:
-                    pool[k][1] += vote_weight  # Constructive interference: votes from multiple paths combine
+                    pool[k][1] += vote_weight  # Constructive interference
+                    if verbose:
+                        print(f"  \033[35m  ⚡ [Fusão Construtiva] Candidato {raw_candidates} colapsou na chave existente! Novo peso acumulado: {pool[k][1]:.3f}\033[0m")
                 else:
                     pool[k] = [candidate, vote_weight]
 
-        res.merged_away += (raw_candidates - len(pool) - res.dead_ends)
+        merged_this_round = (raw_candidates - len(pool) - dead_ends_this_round)
+        res.merged_away += max(0, merged_this_round)
+
+        if verbose:
+            print(f"  📊 Síntese da Rodada {res.rounds}:")
+            print(f"     - Candidatos brutos gerados: {raw_candidates}")
+            print(f"     - Podados por erro/morte: {dead_ends_this_round}")
+            print(f"     - Estados únicos no pool: {len(pool)} ({merged_this_round} fundidos por equivalência)")
+
         if not pool:
             live = []
             res.trace.append({
@@ -117,6 +149,11 @@ def search(
         ranked_indices = sorted(range(len(candidates)), key=lambda i: -scores[i])
         live = [candidates[i] for i in ranked_indices[:width]]
 
+        if verbose:
+            print(f"  🏆 Selecionados top {len(live)} para avançar:")
+            for rank_pos, idx in enumerate(ranked_indices[:width]):
+                print(f"     #{rank_pos + 1}: Score = {scores[idx]:.2f} (Voto pooled = {pooled_votes[idx]:.3f})")
+
         res.trace.append({
             "round": res.rounds,
             "raw": raw_candidates,
@@ -124,6 +161,9 @@ def search(
             "kept": len(live),
             "best_score": scores[ranked_indices[0]] if ranked_indices else 0,
         })
+
+    if verbose and not res.solved:
+        print(f"\n\033[33m[Busca Encerrada] Limite de budget atingido ({res.cost:.1f}/{budget}).\033[0m")
 
     return res
 

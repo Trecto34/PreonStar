@@ -23,8 +23,9 @@ BANNER = r"""
 
 
 class InterferenceChatSession:
-    def __init__(self, backend_choice: str = "q36"):
+    def __init__(self, backend_choice: str = "q36", verbose: bool = True):
         self.backend_choice = backend_choice
+        self.verbose = verbose
         if backend_choice == "q36":
             self.backend = Q36Backend()
         else:
@@ -43,14 +44,15 @@ class InterferenceChatSession:
             print(f"\n[Interference Search] Resolvendo Countdown: {nums} -> {target}...")
             domain = CountdownDomain(max_branch=12)
             t0 = time.perf_counter()
-            res = search(domain, (nums, target), budget=200, width=6, merge=True)
+            res = search(domain, (nums, target), budget=200, width=6, merge=True, verbose=self.verbose)
             dt = (time.perf_counter() - t0) * 1000
 
             if res.solved and res.solution:
                 for v, e in zip(res.solution.numbers, res.solution.exprs):
                     if v == target:
-                        print(f"✅ Solução encontrada em {res.rounds} rodadas ({dt:.2f} ms): {e} = {target}")
-                        print(f"   (Estados fundidos por interferência construtiva: {res.merged_away})")
+                        print(f"\n✅ \033[1;32mSolução encontrada em {res.rounds} rodadas ({dt:.2f} ms):\033[0m {e} = {target}")
+                        print(f"   • Estados fundidos (Interferência Construtiva): {res.merged_away}")
+                        print(f"   • Ramos podados (Interferência Destrutiva): {res.dead_ends}")
             else:
                 print("❌ Não foi possível encontrar uma solução exata.")
         except Exception as e:
@@ -72,7 +74,19 @@ class InterferenceChatSession:
             test_cmd=test_cmd,
             task_instruction=task,
             backend_choice=self.backend_choice,
+            verbose=self.verbose,
         )
+
+    def toggle_verbose(self, arg_str: str):
+        arg = arg_str.lower().strip()
+        if arg in ["on", "1", "true", "ativar"]:
+            self.verbose = True
+        elif arg in ["off", "0", "false", "desativar"]:
+            self.verbose = False
+        else:
+            self.verbose = not self.verbose
+        status = "\033[1;32mATIVADO\033[0m" if self.verbose else "\033[1;31mDESATIVADO\033[0m"
+        print(f"[Modo Verboso] {status}")
 
     def chat_message(self, user_msg: str):
         print("\nQ36 pensando...", end="", flush=True)
@@ -98,9 +112,11 @@ class InterferenceChatSession:
 
     def run(self):
         print(BANNER)
+        print(f"Modo Verboso: {'\033[1;32mATIVADO\033[0m' if self.verbose else '\033[1;31mDESATIVADO\033[0m'}")
         print("Comandos disponíveis:")
         print("  /fix <arquivo> ; <comando_teste> ; <tarefa> -> Dispara o Interference Search no código")
         print("  /countdown <nums> -> <target>              -> Roda o desafio matemático de Countdown")
+        print("  /verbose [on|off]                           -> Ativa/desativa telemetria detalhada de busca")
         print("  /clear                                      -> Limpa o terminal")
         print("  exit ou quit                                -> Sai do chat")
         print("-" * 75)
@@ -118,6 +134,10 @@ class InterferenceChatSession:
 
                 if user_input.startswith("/clear"):
                     os.system("clear")
+                    continue
+
+                if user_input.startswith("/verbose"):
+                    self.toggle_verbose(user_input[len("/verbose"):].strip())
                     continue
 
                 if user_input.startswith("/countdown"):
@@ -140,7 +160,8 @@ def main():
     backend = "q36"
     if "--mock" in sys.argv:
         backend = "mock"
-    session = InterferenceChatSession(backend_choice=backend)
+    verbose = "--quiet" not in sys.argv
+    session = InterferenceChatSession(backend_choice=backend, verbose=verbose)
     session.run()
 
 

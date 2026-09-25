@@ -166,6 +166,7 @@ def run_agent_task(
     backend_choice: str = "q36",
     max_rounds: int = 5,
     width: int = 3,
+    verbose: bool = True,
 ):
     print("=" * 65)
     print(" Q36 INTERFERENCE SEARCH CODING AGENT")
@@ -174,6 +175,7 @@ def run_agent_task(
     print(f"Verify Cmd  : {test_cmd}")
     print(f"Task        : {task_instruction}")
     print(f"Backend     : {backend_choice}")
+    print(f"Verbose     : {'Ativado' if verbose else 'Desativado'}")
     print("=" * 65)
 
     if backend_choice == "q36":
@@ -204,12 +206,12 @@ def run_agent_task(
     print("Starting multi-branch search with constructive merging...")
 
     from interference.core import search
-    res = search(domain, problem=None, budget=10000, width=width, merge=True)
+    res = search(domain, problem=None, budget=10000, width=width, merge=True, verbose=verbose)
 
     if res.solved and res.solution:
         print("\n" + "=" * 65)
         print(" SUCCESS! Found verified solution that passes all checks.")
-        print(f" Rounds: {res.rounds} | States Merged Away: {res.merged_away}")
+        print(f" Rounds: {res.rounds} | States Merged Away: {res.merged_away} | Dead Ends: {res.dead_ends}")
         print("=" * 65)
 
         # Write solution permanently
@@ -228,6 +230,8 @@ def main():
     parser.add_argument("--test", required=True, help="Verification command (e.g. 'pytest', 'python3 test.py')")
     parser.add_argument("--task", required=True, help="Description of the task or bug to fix")
     parser.add_argument("--backend", choices=["q36", "mock"], default="q36", help="LLM backend")
+    parser.add_argument("--verbose", action="store_true", default=True, help="Enable live verbose trace of search")
+    parser.add_argument("--quiet", action="store_false", dest="verbose", help="Disable verbose trace")
     args = parser.parse_args()
 
     run_agent_task(
@@ -235,6 +239,7 @@ def main():
         test_cmd=args.test,
         task_instruction=args.task,
         backend_choice=args.backend,
+        verbose=args.verbose,
     )
 
 
