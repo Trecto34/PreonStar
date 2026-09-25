@@ -1,22 +1,60 @@
 """
-Interference Search Core Engine.
+Interference Search Core Engine with Rigorous Execution Provenance.
 
-Maintains explicit state frontiers. Each round:
-1. Every live state expands concurrently.
-2. The environment executes proposed moves/actions.
-3. Constructive Interference (Merging):
-   States landing on identical semantic merge keys collapse into one,
-   and reciprocal rank votes (1 / (rank + 1)) from all parent paths pool together.
-4. Destructive Interference (Cancellation):
-   Branches hitting invalid states or dead ends are dropped immediately.
-5. Selection:
-   A judge (e.g. test assertions or scoring model) ranks candidate states,
-   and the top `width` states advance together.
+Maintains explicit state frontiers and branch telemetry.
+Tracks:
+- Branch provenance (branch_id, parent_id, depth)
+- Sampling seeds & prompt fingerprints
+- Workspace hashes (pre/post) proving branch isolation
+- Patch / diff hashes
+- Verifier outcomes
+- Exact merge keys and winner selection rationales
 """
 from dataclasses import dataclass, field
+import hashlib
 import math
 import random
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+
+def short_hash(data: Any) -> str:
+    """Computes a 6-character sha256 hex digest for fingerprints."""
+    if data is None:
+        return "none00"
+    if isinstance(data, (bytes, bytearray)):
+        raw = data
+    else:
+        raw = str(data).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:6]
+
+
+@dataclass
+class StateNode:
+    state_id: str
+    depth: int
+    data: Any
+    parent_id: Optional[str] = None
+    workspace_hash: str = ""
+    vote_weight: float = 1.0
+    reason: str = "initial"
+
+
+@dataclass
+class BranchRecord:
+    branch_id: str
+    parent_id: str
+    depth: int
+    seed: int
+    prompt_hash: str
+    workspace_pre: str
+    workspace_post: str
+    diff_hash: str
+    verifier_result: str
+    merge_key: Any
+    is_dead: bool
+    is_goal: bool
+    candidate_data: Any
+    rank: int = 0
 
 
 @dataclass
@@ -37,129 +75,234 @@ def search(
     budget: float,
     width: int = 4,
     merge: bool = True,
-    restarts: bool = True,
+    restarts: bool = False,
     verbose: bool = False,
+    base_seed: int = 40,
+    max_rounds: int = 10,
 ) -> Result:
     """
-    Executes Interference Search over a problem within a given budget.
+    Executes Interference Search with provenance tracking and strict isolation logging.
     """
-    live = [domain.start(problem)]
+    initial_data = domain.start(problem)
+    initial_ws_hash = getattr(domain, "workspace_hash", lambda s: short_hash(domain.key(s)))(initial_data)
+
+    root_node = StateNode(
+        state_id="s0",
+        depth=0,
+        data=initial_data,
+        parent_id=None,
+        workspace_hash=initial_ws_hash,
+        vote_weight=1.0,
+        reason="initial_state",
+    )
+
+    live: List[StateNode] = [root_node]
     expanded_keys: Set[Any] = set()
     res = Result(solved=False)
 
-    if verbose:
-        print("\n\033[1;34m[Interference Search: Iniciando busca]\033[0m")
-        print(f"  • Budget máximo: {budget} | Largura (width): {width} | Merging: {merge}")
+    state_counter = 0
+    branch_counter = 0
 
-    while res.cost < budget:
+    if verbose:
+        print("\n\033[1;34m============================================================\033[0m")
+        print("\033[1;34m INTERFERENCE SEARCH ENGINE (PROVENANCE & MERGE TRACE)\033[0m")
+        print(f" Budget: {budget} | Max Rounds: {max_rounds} | Width: {width} | Merging: {merge} | Base Seed: {base_seed}")
+        print("\033[1;34m============================================================\033[0m")
+
+    while res.cost < budget and res.rounds < max_rounds:
         if not live:
             if not restarts:
                 if verbose:
-                    print("\033[33m  [!] Nenhum estado vivo restante e restarts desativados. Encerrando.\033[0m")
+                    print("\033[33m[!] Nenhum estado vivo restante. Encerrando busca.\033[0m")
                 break
             if verbose:
-                print("\033[33m  [!] Fronteira vazia, reiniciando do estado inicial...\033[0m")
-            live = [domain.start(problem)]
+                print("\033[33m[!] Fronteira esgotada, reiniciando a partir da raiz s0...\033[0m")
+            live = [root_node]
 
+        current_depth = live[0].depth + 1
         res.rounds += 1
-        if verbose:
-            print(f"\n\033[1;36m━━━ Rodada {res.rounds} ━━━\033[0m")
-            print(f"  • Expandindo {len(live)} estado(s) vivo(s)... (Custo acumulado: {res.cost:.1f})")
 
-        proposals, pcost = domain.propose(live, problem)
+        # Check if domain implements detailed branch execution
+        has_branch_builder = hasattr(domain, "propose_branches")
+
+        proposals_per_parent: List[List[BranchRecord]] = []
+        pcost = 0.0
+
+        for parent in live:
+            res.expanded += 1
+            expanded_keys.add(domain.key(parent.data))
+
+            if has_branch_builder:
+                kids_records, cost_delta = domain.propose_branches(
+                    parent,
+                    problem,
+                    start_branch_idx=branch_counter + 1,
+                    base_seed=base_seed,
+                )
+                branch_counter += len(kids_records)
+                pcost += cost_delta
+                proposals_per_parent.append(kids_records)
+            else:
+                # Wrap standard propose with provenance records
+                (kids_list,), cost_delta = domain.propose([parent.data], problem)
+                pcost += cost_delta
+                wrapped_records = []
+                for rank, kid in enumerate(kids_list):
+                    branch_counter += 1
+                    b_id = f"b{branch_counter}"
+                    seed = base_seed + branch_counter
+                    p_hash = short_hash(f"{parent.state_id}_{domain.key(parent.data)}")
+                    ws_pre = parent.workspace_hash
+                    ws_post = getattr(domain, "workspace_hash", lambda s: short_hash(domain.key(s)))(kid)
+                    d_hash = short_hash(f"{ws_pre}->{ws_post}")
+
+                    is_g = domain.is_goal(kid, problem)
+                    is_d = domain.is_dead(kid, problem)
+                    v_res = "tests PASS" if is_g else ("tests FAIL" if is_d else "ALIVE")
+
+                    wrapped_records.append(BranchRecord(
+                        branch_id=b_id,
+                        parent_id=parent.state_id,
+                        depth=current_depth,
+                        seed=seed,
+                        prompt_hash=p_hash,
+                        workspace_pre=ws_pre,
+                        workspace_post=ws_post,
+                        diff_hash=d_hash,
+                        verifier_result=v_res,
+                        merge_key=domain.key(kid),
+                        is_dead=is_d,
+                        is_goal=is_g,
+                        candidate_data=kid,
+                        rank=rank,
+                    ))
+                proposals_per_parent.append(wrapped_records)
+
         res.cost += pcost
-        res.expanded += len(live)
 
-        for s in live:
-            expanded_keys.add(domain.key(s))
+        # Process branches and log per-parent group
+        pool: Dict[Any, Dict[str, Any]] = {}
+        # key -> { 'candidate_data': ..., 'branches': [b_ids], 'pooled_votes': float, 'state_hash': ... }
+        raw_count = 0
+        dead_count = 0
 
-        pool: Dict[Any, List[Any]] = {}  # key -> [state, pooled_vote]
-        raw_candidates = 0
-        dead_ends_this_round = 0
+        for p_idx, parent in enumerate(live):
+            branches = proposals_per_parent[p_idx]
+            if verbose:
+                print(f"\n\033[1mdepth={current_depth} parent={parent.state_id} workspace={parent.workspace_hash}\033[0m")
+                print(f"\033[90m(gerados {len(branches)} candidatos a partir de {parent.state_id})\033[0m")
 
-        for p_idx, kids in enumerate(proposals):
-            for rank, candidate in enumerate(kids):
-                raw_candidates += 1
-                if domain.is_goal(candidate, problem):
-                    res.solved = True
-                    res.solution = candidate
-                    res.trace.append({
-                        "round": res.rounds,
-                        "raw": raw_candidates,
-                        "pool": len(pool) + 1,
-                        "kept": 1,
-                        "goal_reached": True,
-                    })
-                    if verbose:
-                        print(f"  \033[1;32m🎯 [OBJETIVO ALCANÇADO] Candidato {raw_candidates} satisfez 100% dos requisitos!\033[0m")
-                        print(f"     Rodadas: {res.rounds} | Custo total: {res.cost:.1f} | Estados fundidos no total: {res.merged_away}")
-                    return res
+            for b in branches:
+                raw_count += 1
+                state_sig = short_hash(domain.key(b.candidate_data))
 
-                if domain.is_dead(candidate, problem):
+                if b.is_dead:
                     res.dead_ends += 1
-                    dead_ends_this_round += 1
+                    dead_count += 1
                     if verbose:
-                        print(f"  \033[31m  ✗ [Poda Destrutiva] Candidato {raw_candidates} descartado (estado morto/erro irrecuperável)\033[0m")
+                        print(f"  {b.branch_id} seed={b.seed} prompt={b.prompt_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post} -> {b.verifier_result} -> DEAD")
                     continue
 
-                k = domain.key(candidate) if merge else (domain.key(candidate), raw_candidates)
+                k = b.merge_key if merge else (b.merge_key, raw_count)
                 if merge and k in expanded_keys:
                     if verbose:
-                        print(f"  \033[90m  ~ [Já Visitado] Candidato {raw_candidates} redundante com chave já expandida.\033[0m")
+                        print(f"  {b.branch_id} seed={b.seed} prompt={b.prompt_hash} -> diff={b.diff_hash} -> ALREADY_EXPANDED -> PRUNED")
                     continue
 
-                vote_weight = 1.0 / (rank + 1)
+                vote_weight = 1.0 / (b.rank + 1)
+
                 if k in pool:
-                    pool[k][1] += vote_weight  # Constructive interference
-                    if verbose:
-                        print(f"  \033[35m  ⚡ [Fusão Construtiva] Candidato {raw_candidates} colapsou na chave existente! Novo peso acumulado: {pool[k][1]:.3f}\033[0m")
+                    pool[k]["pooled_votes"] += vote_weight
+                    pool[k]["branches"].append(b.branch_id)
+                    if b.is_goal:
+                        pool[k]["is_goal"] = True
                 else:
-                    pool[k] = [candidate, vote_weight]
+                    pool[k] = {
+                        "candidate_data": b.candidate_data,
+                        "branches": [b.branch_id],
+                        "pooled_votes": vote_weight,
+                        "workspace_post": b.workspace_post,
+                        "state_hash": state_sig,
+                        "is_goal": b.is_goal,
+                    }
 
-        merged_this_round = (raw_candidates - len(pool) - dead_ends_this_round)
+                if verbose:
+                    print(f"  {b.branch_id} seed={b.seed} prompt={b.prompt_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post} -> {b.verifier_result} -> state={state_sig}")
+
+        merged_this_round = (raw_count - len(pool) - dead_count)
         res.merged_away += max(0, merged_this_round)
-
-        if verbose:
-            print(f"  📊 Síntese da Rodada {res.rounds}:")
-            print(f"     - Candidatos brutos gerados: {raw_candidates}")
-            print(f"     - Podados por erro/morte: {dead_ends_this_round}")
-            print(f"     - Estados únicos no pool: {len(pool)} ({merged_this_round} fundidos por equivalência)")
 
         if not pool:
             live = []
-            res.trace.append({
-                "round": res.rounds,
-                "raw": raw_candidates,
-                "pool": 0,
-                "kept": 0,
-                "dead_ends": res.dead_ends,
-            })
+            if verbose:
+                print(f"\n\033[33mNenhum candidato sobreviveu nesta rodada.\033[0m")
             continue
 
-        candidates = [entry[0] for entry in pool.values()]
-        pooled_votes = [entry[1] for entry in pool.values()]
+        # Print Merges
+        new_states: List[StateNode] = []
+        if verbose:
+            print()
 
-        scores, jcost = domain.judge(candidates, problem)
+        for k, entry in pool.items():
+            state_counter += 1
+            sid = f"s{state_counter}"
+            b_list = entry["branches"]
+            pooled_v = entry["pooled_votes"]
+            ws_post = entry["workspace_post"]
+
+            if verbose and len(b_list) > 1:
+                b_str = "+".join(b_list)
+                print(f"  \033[1;35mMERGE {b_str} -> {sid}\033[0m (merge_key='{k}', pooled_votes={pooled_v:.3f})")
+            elif verbose:
+                print(f"  PROMOTE {b_list[0]} -> {sid} (state={entry['state_hash']})")
+
+            new_states.append(StateNode(
+                state_id=sid,
+                depth=current_depth,
+                data=entry["candidate_data"],
+                parent_id=None,
+                workspace_hash=ws_post,
+                vote_weight=pooled_v,
+                reason="pooled_merge" if len(b_list) > 1 else "promoted",
+            ))
+
+        # Judge and Select winners
+        cand_datas = [s.data for s in new_states]
+        scores, jcost = domain.judge(cand_datas, problem)
         res.cost += jcost
 
         if scores is None:
-            scores = pooled_votes
+            scores = [s.vote_weight for s in new_states]
 
         # Rank descending
-        ranked_indices = sorted(range(len(candidates)), key=lambda i: -scores[i])
-        live = [candidates[i] for i in ranked_indices[:width]]
+        ranked_indices = sorted(range(len(new_states)), key=lambda i: -scores[i])
+        selected_nodes = [new_states[i] for i in ranked_indices[:width]]
 
+        goal_winner = None
         if verbose:
-            print(f"  🏆 Selecionados top {len(live)} para avançar:")
-            for rank_pos, idx in enumerate(ranked_indices[:width]):
-                print(f"     #{rank_pos + 1}: Score = {scores[idx]:.2f} (Voto pooled = {pooled_votes[idx]:.3f})")
+            print()
+            for rank_pos, s_node in enumerate(selected_nodes):
+                idx = ranked_indices[rank_pos]
+                if domain.is_goal(s_node.data, problem):
+                    reason_msg = "verified_pass"
+                    goal_winner = s_node
+                else:
+                    reason_msg = f"rank={rank_pos+1} score={scores[idx]:.2f} pooled_votes={s_node.vote_weight:.3f}"
+                print(f"\033[1;32mSELECT {s_node.state_id}\033[0m reason=\"{reason_msg}\"")
 
+        if goal_winner or domain.is_goal(selected_nodes[0].data, problem):
+            winner = goal_winner or selected_nodes[0]
+            res.solved = True
+            res.solution = winner.data
+            return res
+
+        live = selected_nodes
         res.trace.append({
             "round": res.rounds,
-            "raw": raw_candidates,
+            "raw": raw_count,
             "pool": len(pool),
             "kept": len(live),
-            "best_score": scores[ranked_indices[0]] if ranked_indices else 0,
+            "merged": merged_this_round,
         })
 
     if verbose and not res.solved:
@@ -209,3 +352,4 @@ def linear_search(
             s = rng.choices(kids, weights=weights)[0]
 
     return res
+

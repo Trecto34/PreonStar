@@ -81,6 +81,10 @@ class FileRepairDomain(Domain):
             "passed": (ret == 0),
         }
 
+    def workspace_hash(self, state: Dict[str, Any]) -> str:
+        from interference.core import short_hash
+        return short_hash(state["content"])
+
     def _make_prompt(self, state: Dict[str, Any]) -> str:
         return (
             f"You are an expert programming agent. Your task is:\n"
@@ -94,69 +98,130 @@ class FileRepairDomain(Domain):
             f"Reply ONLY with the new file contents inside a single ``` block."
         )
 
-    def propose(self, states: List[Dict[str, Any]], problem: Any) -> Tuple[List[List[Dict[str, Any]]], float]:
-        prompts = []
-        state_indices = []
+    def propose_branches(
+        self,
+        parent_node,
+        problem: Any,
+        start_branch_idx: int,
+        base_seed: int,
+    ) -> Tuple[List[Any], float]:
+        import difflib
+        from interference.core import BranchRecord, short_hash
 
-        for i, s in enumerate(states):
-            p = self._make_prompt(s)
-            for _ in range(self.k):
-                prompts.append(p)
-                state_indices.append(i)
+        parent_state = parent_node.data
+        prompt = self._make_prompt(parent_state)
+        p_hash = short_hash(prompt)
+        ws_pre = self.workspace_hash(parent_state)
 
+        # Prepare branch seeds
+        prompts = [prompt] * self.k
         raw_responses, token_cost = self.backend.generate_candidates(prompts, max_tokens=2048)
 
-        child_groups: List[List[Dict[str, Any]]] = [[] for _ in range(len(states))]
+        branch_records = []
+        for i, resp in enumerate(raw_responses):
+            b_num = start_branch_idx + i
+            b_id = f"b{b_num}"
+            seed = base_seed + b_num
 
-        # Temporarily write each candidate to the file, test it, and restore
-        for resp, s_idx in zip(raw_responses, state_indices):
             code = extract_code_block(resp)
-            if not code or code == states[s_idx]["content"]:
+            if not code:
+                # Empty response -> Dead
+                branch_records.append(BranchRecord(
+                    branch_id=b_id,
+                    parent_id=parent_node.state_id,
+                    depth=parent_node.depth + 1,
+                    seed=seed,
+                    prompt_hash=p_hash,
+                    workspace_pre=ws_pre,
+                    workspace_post=ws_pre,
+                    diff_hash="empty0",
+                    verifier_result="EMPTY_RESPONSE",
+                    merge_key=("empty",),
+                    is_dead=True,
+                    is_goal=False,
+                    candidate_data=parent_state,
+                    rank=i,
+                ))
                 continue
 
-            # Apply candidate to disk
+            # Compute Unified Diff
+            diff_lines = list(difflib.unified_diff(
+                parent_state["content"].splitlines(keepends=True),
+                code.splitlines(keepends=True),
+                fromfile=f"a/{os.path.basename(self.target_file)}",
+                tofile=f"b/{os.path.basename(self.target_file)}",
+            ))
+            diff_text = "".join(diff_lines)
+            d_hash = short_hash(diff_text if diff_text else "nodiff")
+
+            # Apply candidate to disk and verify workspace isolation
             with open(self.target_file, "w", encoding="utf-8") as f:
                 f.write(code)
 
+            ws_post = short_hash(code)
             ret, stdout, stderr = run_command(self.test_cmd, self.cwd)
             combined_out = (stdout + "\n" + stderr).strip()
+
+            # Restore original file immediately to ensure strict branch isolation
+            with open(self.target_file, "w", encoding="utf-8") as f:
+                f.write(self.original_content)
+
+            is_g = (ret == 0)
+            is_d = (ret != 0 and ("SyntaxError" in combined_out or "IndentationError" in combined_out))
+            v_res = "tests PASS" if is_g else f"tests FAIL (exit={ret})"
+
+            tail_lines = "\n".join(combined_out.splitlines()[-2:])
+            m_key = (ret, tail_lines)
 
             candidate_state = {
                 "content": code,
                 "returncode": ret,
                 "output": combined_out,
-                "passed": (ret == 0),
+                "passed": is_g,
             }
-            child_groups[s_idx].append(candidate_state)
 
-        # Restore original file during search
-        with open(self.target_file, "w", encoding="utf-8") as f:
-            f.write(self.original_content)
+            branch_records.append(BranchRecord(
+                branch_id=b_id,
+                parent_id=parent_node.state_id,
+                depth=parent_node.depth + 1,
+                seed=seed,
+                prompt_hash=p_hash,
+                workspace_pre=ws_pre,
+                workspace_post=ws_post,
+                diff_hash=d_hash,
+                verifier_result=v_res,
+                merge_key=m_key,
+                is_dead=is_d,
+                is_goal=is_g,
+                candidate_data=candidate_state,
+                rank=i,
+            ))
 
-        return child_groups, float(token_cost)
+        return branch_records, float(token_cost)
+
+    def propose(self, states: List[Dict[str, Any]], problem: Any) -> Tuple[List[List[Dict[str, Any]]], float]:
+        # Fallback if called directly
+        return [], 0.0
 
     def key(self, state: Dict[str, Any]) -> Any:
-        # Merge key: return code + last 3 lines of output (behavioral error signature)
-        tail_lines = "\n".join(state["output"].splitlines()[-4:])
+        tail_lines = "\n".join(state["output"].splitlines()[-2:])
         return (state["returncode"], tail_lines)
 
     def judge(self, states: List[Dict[str, Any]], problem: Any) -> Tuple[Optional[List[float]], float]:
-        # Score higher if return code is 0, or shorter error message / fewer test failures
         scores = []
         for s in states:
             if s["passed"]:
                 scores.append(100.0)
             else:
-                # Basic heuristic: non-empty output, fewer error traces
-                err_penalty = len(s["output"].splitlines())
-                scores.append(max(1.0, 50.0 - err_penalty))
+                err_lines = len(s["output"].splitlines())
+                scores.append(max(1.0, 50.0 - err_lines))
         return scores, 0.0
 
     def is_goal(self, state: Dict[str, Any], problem: Any) -> bool:
         return state["passed"]
 
     def is_dead(self, state: Dict[str, Any], problem: Any) -> bool:
-        return False
+        return ("SyntaxError" in state["output"] or "IndentationError" in state["output"])
 
 
 def run_agent_task(
