@@ -44,6 +44,11 @@ int linenoiseEditInsert(struct linenoiseState *l, const char *c, size_t clen);
 #define AGENT_RESIDENT_CTX 100000
 #define AGENT_STREAMING_CTX 100000
 #define AGENT_THINKING_BUDGET_DEFAULT 50000
+#define AGENT_REPETITION_WINDOW_BYTES 32768
+#define AGENT_REPETITION_EXACT_LINE_RUN 12
+#define AGENT_REPETITION_NEAR_LINE_RUN 32
+#define AGENT_REPETITION_NGRAM_REPEATS 8
+#define AGENT_REPETITION_NGRAM_MIN_TOTAL 256
 
 static int set_nonblock(int fd, bool on, int *old_flags);
 static int agent_replace_file(const char *path, const char *data, size_t len,
@@ -73,6 +78,7 @@ typedef struct {
     int top_k;
     float top_p;
     float min_p;
+    float frequency_penalty;
     uint64_t seed;
     q36_think_mode think_mode;
     bool think_mode_set;
@@ -747,6 +753,10 @@ static agent_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--min-p")) {
             c.gen.min_p = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
             c.gen.min_p_set = true;
+        } else if (!strcmp(arg, "--frequency-penalty") ||
+                   !strcmp(arg, "--default-frequency-penalty")) {
+            c.gen.frequency_penalty = parse_float_range(
+                need_arg(&i, argc, argv, arg), arg, -2.0f, 2.0f);
         } else if (!strcmp(arg, "--seed")) {
             c.gen.seed = parse_u64(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--think")) {
@@ -6062,8 +6072,19 @@ static bool agent_context_should_compact(int ctx, int used) {
     return ctx - used <= free_threshold;
 }
 
-static int agent_think_close_rank_limit(int think_tokens, int start_tokens) {
-    return q36_think_close_rank_limit(think_tokens, start_tokens);
+static int agent_think_soft_close_start(int hard_budget) {
+    if (hard_budget <= 1) return hard_budget;
+    int start = (int)(((int64_t)hard_budget * 3) / 4);
+    return start > 0 ? start : 1;
+}
+
+static bool agent_think_hard_budget_reached(int think_tokens, int hard_budget) {
+    return hard_budget > 0 && think_tokens >= hard_budget;
+}
+
+static int agent_think_close_rank_limit(int think_tokens, int hard_budget) {
+    return q36_think_close_rank_limit(
+        think_tokens, agent_think_soft_close_start(hard_budget));
 }
 
 typedef struct {
@@ -6111,6 +6132,124 @@ static void agent_split_lines(const char *data, size_t len, agent_line_spans *sp
             .end = pos,
         });
     }
+}
+
+typedef struct {
+    char text[AGENT_REPETITION_WINDOW_BYTES];
+    size_t len;
+    size_t unchecked;
+} agent_repetition_detector;
+
+static void agent_repetition_trim_line(const char *text, agent_line_span span,
+                                       size_t *start, size_t *len) {
+    size_t a = span.start;
+    size_t b = span.content_end;
+    while (a < b && isspace((unsigned char)text[a])) a++;
+    while (b > a && isspace((unsigned char)text[b - 1])) b--;
+    *start = a;
+    *len = b - a;
+}
+
+static bool agent_repetition_lines_near(const char *a, size_t an,
+                                        const char *b, size_t bn) {
+    if (an < 24 || bn < 24 || an + 2 < bn || bn + 2 < an) return false;
+    size_t common = an < bn ? an : bn;
+    size_t mismatches = an > bn ? an - bn : bn - an;
+    size_t allowed = common / 20;
+    if (allowed < 2) allowed = 2;
+    for (size_t i = 0; i < common && mismatches <= allowed; i++)
+        if (a[i] != b[i]) mismatches++;
+    return mismatches <= allowed;
+}
+
+/* Conservative byte-level loop detection. It only considers a suffix made of
+ * many consecutive near-identical lines, or an exact byte period repeated at
+ * least eight times. Ordinary repeated syntax separated by distinct content
+ * therefore does not trip the detector. */
+static bool agent_repetition_text_detected(const char *text, size_t len) {
+    if (!text || len < 128) return false;
+
+    agent_line_spans spans = {0};
+    agent_split_lines(text, len, &spans);
+    int exact_run = 0;
+    int near_run = 0;
+    size_t reference_start = 0, reference_len = 0;
+    for (int i = spans.len - 1; i >= 0 && spans.len - i <= 48; i--) {
+        size_t start = 0, line_len = 0;
+        agent_repetition_trim_line(text, spans.v[i], &start, &line_len);
+        if (line_len == 0) continue;
+        if (!reference_len) {
+            reference_start = start;
+            reference_len = line_len;
+            exact_run = near_run = 1;
+            continue;
+        }
+        if (line_len >= 12 && line_len == reference_len &&
+            !memcmp(text + start, text + reference_start, line_len)) {
+            exact_run++;
+            near_run++;
+        } else if (agent_repetition_lines_near(
+                       text + start, line_len,
+                       text + reference_start, reference_len)) {
+            near_run++;
+            exact_run = 0;
+        } else {
+            break;
+        }
+        if (exact_run >= AGENT_REPETITION_EXACT_LINE_RUN ||
+            near_run >= AGENT_REPETITION_NEAR_LINE_RUN) {
+            agent_line_spans_free(&spans);
+            return true;
+        }
+    }
+    agent_line_spans_free(&spans);
+
+    for (size_t period = 16; period <= 256; period++) {
+        size_t repeated = period * AGENT_REPETITION_NGRAM_REPEATS;
+        if (repeated < AGENT_REPETITION_NGRAM_MIN_TOTAL || repeated > len)
+            continue;
+        const char *suffix = text + len - repeated;
+        bool same = true;
+        for (size_t i = period; i < repeated; i++) {
+            if (suffix[i] != suffix[i % period]) {
+                same = false;
+                break;
+            }
+        }
+        if (!same) continue;
+        unsigned char distinct[4] = {0};
+        int distinct_count = 0;
+        for (size_t i = 0; i < period && distinct_count < 4; i++) {
+            unsigned char c = (unsigned char)suffix[i];
+            bool seen = false;
+            for (int j = 0; j < distinct_count; j++)
+                if (distinct[j] == c) seen = true;
+            if (!seen) distinct[distinct_count++] = c;
+        }
+        if (distinct_count >= 4) return true;
+    }
+    return false;
+}
+
+static bool agent_repetition_detector_feed(agent_repetition_detector *d,
+                                           const char *text, size_t len) {
+    if (!d || !text || !len) return false;
+    if (len >= sizeof(d->text)) {
+        text += len - sizeof(d->text);
+        len = sizeof(d->text);
+        d->len = 0;
+    } else if (d->len + len > sizeof(d->text)) {
+        size_t drop = d->len + len - sizeof(d->text);
+        memmove(d->text, d->text + drop, d->len - drop);
+        d->len -= drop;
+    }
+    memcpy(d->text + d->len, text, len);
+    d->len += len;
+    d->unchecked += len;
+    bool newline = memchr(text, '\n', len) || memchr(text, '\r', len);
+    if (d->unchecked < 32 && !newline) return false;
+    d->unchecked = 0;
+    return agent_repetition_text_detected(d->text, d->len);
 }
 
 static FILE *agent_open_regular_file(const char *path) {
@@ -7120,6 +7259,7 @@ static void test_agent_streaming_defaults(void) {
     char *overridev[] = {"q36-agent", "--temp", "0.2", "--top-k", "7",
                          "--top-p", "0.6", "--min-p", "0.01"};
     char *budgetv[] = {"q36-agent", "--thinking-budget", "32000"};
+    char *penaltyv[] = {"q36-agent", "--default-frequency-penalty", "0.15"};
     char *uptov[] = {"q36-agent", "--edit-upto"};
     agent_config def = parse_options(1, defv);
     agent_config stream = parse_options(2, streamv);
@@ -7134,6 +7274,7 @@ static void test_agent_streaming_defaults(void) {
     agent_config sampling = parse_options(9, samplingv);
     agent_config override = parse_options(9, overridev);
     agent_config budget = parse_options(3, budgetv);
+    agent_config penalty = parse_options(3, penaltyv);
     agent_config upto = parse_options(2, uptov);
     agent_apply_sampling_defaults(&override, NULL);
 
@@ -7141,6 +7282,8 @@ static void test_agent_streaming_defaults(void) {
     AGENT_TEST_ASSERT(def.gen.n_predict == 100000);
     AGENT_TEST_ASSERT(def.gen.thinking_budget == 50000);
     AGENT_TEST_ASSERT(budget.gen.thinking_budget == 32000);
+    AGENT_TEST_ASSERT(def.gen.frequency_penalty == 0.0f);
+    AGENT_TEST_ASSERT(penalty.gen.frequency_penalty == 0.15f);
     AGENT_TEST_ASSERT(!def.edit_upto);
     AGENT_TEST_ASSERT(upto.edit_upto);
     AGENT_TEST_ASSERT(def.gen.ctx_size == AGENT_RESIDENT_CTX);
@@ -7206,8 +7349,8 @@ static void test_agent_thinking_budget_modes(void) {
     cfg = parse_options(3, lowv);
     agent_resolve_thinking_config(&cfg, true);
     AGENT_TEST_ASSERT(cfg.gen.think_mode == Q36_THINK_LOW);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(7999, cfg.gen.thinking_budget) == 0);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(8000, cfg.gen.thinking_budget) == 1);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(5999, cfg.gen.thinking_budget) == 0);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(6000, cfg.gen.thinking_budget) == 1);
     AGENT_TEST_ASSERT(agent_think_close_rank_limit(8000, 50000) == 0);
 
     cfg = parse_options(3, mediumv);
@@ -7261,22 +7404,16 @@ static void test_agent_context_pressure_helpers(void) {
     AGENT_TEST_ASSERT(agent_context_should_compact(100000, 70000));
     AGENT_TEST_ASSERT(!agent_context_should_compact(64000, 44799));
     AGENT_TEST_ASSERT(agent_context_should_compact(64000, 44800));
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(31999, 32000) == 0);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(32000, 32000) == 1);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(32512, 32000) == 2);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(33024, 32000) == 3);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(34048, 32000) == 4);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(36096, 32000) == 5);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(38144, 32000) == 8);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(39168, 32000) == 16);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(39680, 32000) == 32);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(40192, 32000) == 64);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(41216, 32000) == 128);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(42240, 32000) == 256);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(8000, 8000) == 1);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(12000, 8000) == 64);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(512, 512) == 1);
-    AGENT_TEST_ASSERT(agent_think_close_rank_limit(1014, 512) == 64);
+    AGENT_TEST_ASSERT(agent_think_soft_close_start(32) == 24);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(23, 32) == 0);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(24, 32) == 1);
+    AGENT_TEST_ASSERT(!agent_think_hard_budget_reached(31, 32));
+    AGENT_TEST_ASSERT(agent_think_hard_budget_reached(32, 32));
+    AGENT_TEST_ASSERT(agent_think_soft_close_start(64) == 48);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(47, 64) == 0);
+    AGENT_TEST_ASSERT(agent_think_close_rank_limit(48, 64) == 1);
+    AGENT_TEST_ASSERT(!agent_think_hard_budget_reached(63, 64));
+    AGENT_TEST_ASSERT(agent_think_hard_budget_reached(64, 64));
     AGENT_TEST_ASSERT(q36_kvstore_quant_bits_valid(1));
     AGENT_TEST_ASSERT(q36_kvstore_quant_bits_valid(3));
     AGENT_TEST_ASSERT(q36_kvstore_quant_bits_valid(8));
@@ -7294,6 +7431,36 @@ static void test_agent_context_pressure_helpers(void) {
         snprintf(expected, sizeof(expected), "%s/x", home);
         AGENT_TEST_ASSERT(!strcmp(path, expected));
     }
+}
+
+static void test_agent_repetition_detector(void) {
+    agent_repetition_detector detector = {0};
+    const char *line = "scene.add(makeTree({ x: 10, y: 20 }));\n";
+    bool detected = false;
+    for (int i = 0; i < AGENT_REPETITION_EXACT_LINE_RUN; i++)
+        detected = agent_repetition_detector_feed(&detector, line, strlen(line));
+    AGENT_TEST_ASSERT(detected);
+
+    memset(&detector, 0, sizeof(detector));
+    detected = false;
+    char varied[96];
+    for (int i = 0; i < AGENT_REPETITION_NEAR_LINE_RUN; i++) {
+        snprintf(varied, sizeof(varied),
+                 "scene.add(makeTree({ x: %02d, y: 20 }));\n", i);
+        detected = agent_repetition_detector_feed(
+            &detector, varied, strlen(varied));
+    }
+    AGENT_TEST_ASSERT(detected);
+
+    memset(&detector, 0, sizeof(detector));
+    detected = false;
+    for (int i = 0; i < 64; i++) {
+        snprintf(varied, sizeof(varied),
+                 "items[%d] = build_item(%d, %d);\n", i, i, i + 1);
+        detected |= agent_repetition_detector_feed(
+            &detector, varied, strlen(varied));
+    }
+    AGENT_TEST_ASSERT(!detected);
 }
 
 static void test_agent_welcome_banner(void) {
@@ -7375,6 +7542,7 @@ static void q36_agent_unit_tests_run(void) {
     test_agent_streaming_defaults();
     test_agent_thinking_budget_modes();
     test_agent_context_pressure_helpers();
+    test_agent_repetition_detector();
     test_agent_welcome_banner();
 }
 #endif
@@ -9516,14 +9684,76 @@ static bool agent_stream_compaction_needs_lookahead(const agent_stream_renderer 
            (sr->pending_len || sr->qwen_tool_start_len);
 }
 
+static bool agent_stream_has_partial_tool(const agent_stream_renderer *sr) {
+    if (!sr || !sr->parser) return false;
+    return sr->qwen_tool_active || sr->qwen_tool_start_len > 0 ||
+           sr->parser->state == AGENT_QWEN_TOOL_STRUCTURAL ||
+           sr->parser->state == AGENT_QWEN_TOOL_PARAM_VALUE;
+}
+
+typedef struct {
+    float temperature;
+    int top_k;
+    float top_p;
+    float min_p;
+    float frequency_penalty;
+    const int *penalty_tokens;
+    int penalty_token_count;
+} agent_sampling_request;
+
+static agent_sampling_request agent_sampling_request_build(
+        const agent_config *cfg, bool greedy,
+        const q36_tokens *transcript, int generated) {
+    agent_sampling_request request = {
+        .temperature = greedy ? 0.0f : cfg->gen.temperature,
+        .top_k = greedy ? 0 : cfg->gen.top_k,
+        .top_p = greedy ? 1.0f : cfg->gen.top_p,
+        .min_p = greedy ? 0.0f : cfg->gen.min_p,
+        .frequency_penalty = greedy ? 0.0f : cfg->gen.frequency_penalty,
+    };
+    if (!greedy && transcript && generated > 0 && generated <= transcript->len) {
+        request.penalty_tokens = transcript->v + transcript->len - generated;
+        request.penalty_token_count = generated;
+    }
+    return request;
+}
+
 static int worker_sample_with_mode(agent_worker *w, const agent_config *cfg,
-                                   bool greedy, uint64_t *rng) {
-    return q36_session_sample(w->session,
-                              greedy ? 0.0f : cfg->gen.temperature,
-                              greedy ? 0 : cfg->gen.top_k,
-                              greedy ? 1.0f : cfg->gen.top_p,
-                              greedy ? 0.0f : cfg->gen.min_p,
-                              rng);
+                                   bool greedy, int generated, uint64_t *rng) {
+    agent_sampling_request request = agent_sampling_request_build(
+        cfg, greedy, &w->transcript, generated);
+    return q36_session_sample_penalized(
+        w->session, request.temperature, request.top_k,
+        request.top_p, request.min_p,
+        request.penalty_tokens, request.penalty_token_count,
+        0.0f, request.frequency_penalty, rng);
+}
+
+static const char agent_partial_tool_interrupt_warning[] =
+    "The previous tool call was interrupted by the user and was NOT executed. "
+    "The workspace is unchanged by that tool call.";
+
+static const char agent_tool_repetition_warning[] =
+    "Your previous tool call entered a repetitive generation loop and was NOT "
+    "executed. Preserve the intended change, but rewrite it compactly using "
+    "loops, arrays, helpers, or data-driven construction.";
+
+static void agent_rollback_assistant_suffix(agent_worker *w,
+                                            int assistant_start) {
+    if (assistant_start < 0) assistant_start = 0;
+    if (assistant_start > w->transcript.len)
+        assistant_start = w->transcript.len;
+    w->transcript.len = assistant_start;
+    q36_session_invalidate(w->session);
+    w->session_dirty = true;
+}
+
+static void agent_rollback_partial_tool(agent_worker *w, int assistant_start,
+                                        const char *trace_event,
+                                        const char *warning) {
+    agent_rollback_assistant_suffix(w, assistant_start);
+    agent_trace(w, "%s assistant_start=%d", trace_event, assistant_start);
+    q36_chat_append_message(w->engine, &w->transcript, "system", warning);
 }
 
 static void worker_set_greedy_sampling(agent_worker *w, bool greedy) {
@@ -9621,8 +9851,10 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
      * the tool result as a tool message, then ask the model to continue. */
     int consecutive_failures = 0;
     int carried_generation = 0;
+    int carried_thinking_tokens = 0;
     bool resume_assistant = false, resume_in_think = false;
     int resume_start = 0;
+    agent_repetition_detector thinking_repetition = {0};
     for (int tool_round = 0; ; tool_round++) {
         if (!resume_assistant &&
             !agent_worker_compact_if_needed(w, "soft limit before generation",
@@ -9642,7 +9874,8 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         }
         q36_think_mode think_mode = w->thinking_enabled ?
             enabled_think_mode(cfg) : Q36_THINK_NONE;
-        const int assistant_start = resume_assistant ? resume_start : w->transcript.len;
+        const bool continuing_assistant = resume_assistant;
+        const int assistant_start = continuing_assistant ? resume_start : w->transcript.len;
         if (!resume_assistant)
             q36_chat_append_assistant_prefix(w->engine, &w->transcript, think_mode);
 
@@ -9709,7 +9942,9 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         }
 
         bool use_color = isatty(STDOUT_FILENO) != 0;
-        bool in_think = resume_assistant ? resume_in_think : q36_think_mode_enabled(think_mode);
+        bool in_think = continuing_assistant ? resume_in_think : q36_think_mode_enabled(think_mode);
+        int thinking_tokens = continuing_assistant ? carried_thinking_tokens : 0;
+        if (!continuing_assistant) memset(&thinking_repetition, 0, sizeof(thinking_repetition));
         resume_assistant = false;
         agent_token_renderer renderer = {
             .engine = w->engine,
@@ -9730,9 +9965,13 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         bool got_tool = false;
         bool malformed_tool = false;
         bool early_tool_error = false;
+        bool repetitive_tool = false;
+        bool repetition_close_thinking = false;
         bool model_stopped = false;
         int compaction_lookahead = 0;
         int generated = 0;
+        size_t tool_repetition_raw_seen = 0;
+        agent_repetition_detector tool_repetition = {0};
         double t0 = now_sec();
 
         pthread_mutex_lock(&w->mu);
@@ -9744,7 +9983,10 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
 
         bool status_greedy_sampling = false;
         int think_close_id = agent_special_token_id(w->engine, "</think>");
-        int think_close_start = cfg->gen.thinking_budget;
+        int think_soft_close_start = agent_think_soft_close_start(
+            cfg->gen.thinking_budget);
+        agent_trace(w, "active_frequency_penalty=%.3f",
+                    (double)cfg->gen.frequency_penalty);
         while (generated < max_tokens && !worker_should_interrupt(w)) {
             worker_apply_pending_power(w);
             bool greedy_sampling = agent_stream_wants_greedy_sampling(&stream);
@@ -9756,24 +9998,34 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             int close_rank_limit = 0;
             bool in_think = think_close_id >= 0 &&
                             q36_session_in_think(w->session);
-            if (in_think) {
-                close_rank_limit = agent_think_close_rank_limit(carried_generation + generated,
-                                                                think_close_start);
-                if (close_rank_limit > 0 && carried_generation + generated == think_close_start)
+            bool hard_budget_close = in_think &&
+                agent_think_hard_budget_reached(
+                    thinking_tokens, cfg->gen.thinking_budget);
+            if (in_think && !hard_budget_close && !repetition_close_thinking) {
+                close_rank_limit = agent_think_close_rank_limit(
+                    thinking_tokens, cfg->gen.thinking_budget);
+                if (close_rank_limit > 0 && thinking_tokens == think_soft_close_start)
                     agent_trace(w, "thinking closure ranking starts at token=%d",
-                                think_close_start);
+                                think_soft_close_start);
                 if (close_rank_limit > 0)
                     close_rank = q36_session_token_rank(
                         w->session, think_close_id, close_rank_limit);
             }
-            bool hard_close = in_think && !context_limited && generated + 1 >= max_tokens;
-            int token = close_rank > 0 || hard_close ? think_close_id :
-                worker_sample_with_mode(w, cfg, greedy_sampling, &rng);
+            bool output_hard_close = in_think && !context_limited &&
+                                     generated + 1 >= max_tokens;
+            int token = close_rank > 0 || hard_budget_close ||
+                        repetition_close_thinking || output_hard_close ?
+                think_close_id :
+                worker_sample_with_mode(w, cfg, greedy_sampling, generated, &rng);
             if (close_rank > 0)
                 agent_trace(w,
-                    "closing thinking at token=%d rank=%d accepted_rank=%d",
-                    generated, close_rank, close_rank_limit);
-            else if (hard_close)
+                    "closing thinking at thinking_token=%d rank=%d accepted_rank=%d",
+                    thinking_tokens, close_rank, close_rank_limit);
+            else if (hard_budget_close)
+                agent_trace(w,
+                    "thinking_hard_budget_close thinking_tokens=%d hard_budget=%d",
+                    thinking_tokens, cfg->gen.thinking_budget);
+            else if (output_hard_close)
                 agent_trace(w, "closing thinking at hard token budget=%d",
                             max_tokens);
             token = q36_session_eos_to_think_close(w->session, token);
@@ -9799,13 +10051,40 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                     return 1;
                 }
             } else {
-                free(text);
                 if (worker_accept_generated_token(w, token, &generated, t0,
                                                   &stream, err, sizeof(err)) != 0) {
+                    free(text);
                     agent_qwen_tool_parser_free(&qwen_tool);
                     agent_set_error(w, err);
                     return 1;
                 }
+                if (in_think && token != think_close_id) {
+                    thinking_tokens++;
+                    if (!repetition_close_thinking &&
+                        agent_repetition_detector_feed(
+                            &thinking_repetition, text, text_len)) {
+                        repetition_close_thinking = true;
+                        agent_trace(w,
+                            "repetition_detected_thinking thinking_tokens=%d",
+                            thinking_tokens);
+                    }
+                }
+                free(text);
+            }
+
+            if (qwen_tool.raw_len < tool_repetition_raw_seen)
+                tool_repetition_raw_seen = 0;
+            if (qwen_tool.raw_len > tool_repetition_raw_seen) {
+                if (agent_repetition_detector_feed(
+                        &tool_repetition,
+                        qwen_tool.raw + tool_repetition_raw_seen,
+                        qwen_tool.raw_len - tool_repetition_raw_seen)) {
+                    repetitive_tool = true;
+                    agent_trace(w,
+                        "repetition_detected_tool generated=%d raw_bytes=%zu",
+                        generated, qwen_tool.raw_len);
+                }
+                tool_repetition_raw_seen = qwen_tool.raw_len;
             }
 
             greedy_sampling = agent_stream_wants_greedy_sampling(&stream);
@@ -9818,6 +10097,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 got_tool = true;
                 break;
             }
+            if (repetitive_tool) break;
             if (stream.tool_preflight_error) {
                 early_tool_error = true;
                 break;
@@ -9842,18 +10122,58 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         agent_trace(w, "generation finished tool_round=%d generated=%d carried=%d context_limited=%d",
                     tool_round, generated, carried_generation, context_limited);
         bool interrupted = worker_should_interrupt(w);
-        const bool partial_tool = stream.qwen_tool_active || stream.qwen_tool_start_len > 0 ||
-                                  qwen_tool.state != AGENT_QWEN_TOOL_SEARCH;
+        const bool partial_tool = agent_stream_has_partial_tool(&stream);
         agent_stream_text(&stream, NULL, 0, true);
         renderer_finish(&renderer);
         worker_set_greedy_sampling(w, false);
         if (interrupted) {
+            if (partial_tool) {
+                agent_rollback_partial_tool(
+                    w, assistant_start, "partial_tool_interrupt_rollback",
+                    agent_partial_tool_interrupt_warning);
+                agent_qwen_tool_parser_free(&qwen_tool);
+                agent_publish_system_status(w, "Stopped by user; incomplete tool call discarded");
+                worker_clear_interrupt(w);
+
+                char *queued_user = worker_request_queued_user_drain(w);
+                if (queued_user && queued_user[0]) {
+                    char *content = agent_chat_control_text(
+                        queued_user, &w->thinking_enabled);
+                    agent_trace_text(w, "queued_user_after_partial_tool_interrupt",
+                                     content, strlen(content));
+                    if (!agent_worker_append_user(w, content, compact_err,
+                                                  sizeof(compact_err))) {
+                        free(content);
+                        free(queued_user);
+                        agent_set_error(w, compact_err);
+                        return 1;
+                    }
+                    free(content);
+                    free(queued_user);
+                    consecutive_failures = 0;
+                    carried_generation = 0;
+                    carried_thinking_tokens = 0;
+                    continue;
+                }
+                free(queued_user);
+                agent_set_status(w, AGENT_WORKER_IDLE);
+                return 0;
+            }
             q36_tokens_push(&w->transcript, q36_token_eos(w->engine));
             agent_qwen_tool_parser_free(&qwen_tool);
             agent_publish_system_status(w, "Stopped by user");
             worker_clear_interrupt(w);
             agent_set_status(w, AGENT_WORKER_IDLE);
             return 0;
+        }
+        if (repetitive_tool) {
+            agent_rollback_partial_tool(
+                w, assistant_start, "repetition_detected_tool rollback=1",
+                agent_tool_repetition_warning);
+            agent_qwen_tool_parser_free(&qwen_tool);
+            carried_generation = 0;
+            carried_thinking_tokens = 0;
+            continue;
         }
         if (context_limited && generated == max_tokens && !model_stopped &&
             !got_tool && !malformed_tool && !early_tool_error) {
@@ -9888,6 +10208,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 resume_assistant = true;
                 resume_start = open_assistant;
                 resume_in_think = stream.in_think;
+                carried_thinking_tokens = thinking_tokens;
             }
             continue;
         }

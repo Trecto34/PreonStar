@@ -390,16 +390,27 @@ Start the agent in the current directory, another project, or one-shot mode:
 ./q36-agent --non-interactive -p "Inspect the tests and fix the failure."
 ```
 
-Adaptive thinking closure starts after 50000 thinking tokens by default. For
-budgets of at least 8000, its allowed `</think>` rank rises to the top 64 over
-the next `min(N/2, 8192)` tokens, where `N` is `--thinking-budget`. Smaller
-budgets keep the previous ranking schedule. The rank can rise further if
-thinking continues. This is a soft budget; `--tokens` is the hard output limit.
+`--thinking-budget` is a hard maximum for each thinking block and defaults to
+50000 thinking tokens. Adaptive `</think>` rank bias starts at 75% of the hard
+budget; at 100%, the agent emits `</think>` unconditionally and continues with
+its normal action or final response. The closing token itself is not counted as
+a thinking token. `--tokens` remains the separate hard limit for the complete
+assistant generation.
+
+The agent conservatively stops obvious repeated-generation loops. Twelve
+identical consecutive nontrivial lines, 32 near-identical consecutive lines,
+or an exact 16-256 byte suffix period repeated at least eight times and across
+at least 256 bytes triggers recovery. Repetitive thinking is closed and normal
+generation continues. A repetitive partial tool call is discarded before it
+can execute, and the model is asked to express the same change compactly.
+`--frequency-penalty` (also accepted as `--default-frequency-penalty`) is an
+optional low-strength sampler aid; it defaults to 0 and is not used for greedy
+native tool syntax.
 
 With Qwen3.8-27B, `--thinking-budget` also selects the starting effort:
 up to 8000 tokens is `low`, up to 16000 is `medium`, up to 24000 is `high`,
 and larger budgets use `xhigh`. The default is `xhigh` with a 50000-token
-closure target. `high` uses Qwen3.8's native `xhigh` instruction. Explicit
+hard thinking budget. `high` uses Qwen3.8's native `xhigh` instruction. Explicit
 `--think-low`, `--think-medium`, `--think`, or `--think-xhigh` overrides the
 starting mode without changing the budget. At an empty idle agent prompt,
 Tab cycles `low → medium → high → xhigh` for Qwen3.8 and `off ↔ on` for

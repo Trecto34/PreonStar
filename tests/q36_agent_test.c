@@ -845,6 +845,11 @@ static void test_compaction_boundaries(void) {
     stream.qwen_tool_active = false;
     parser.state = AGENT_QWEN_TOOL_PARAM_VALUE;
     AGENT_TEST_ASSERT(!agent_stream_compaction_needs_lookahead(&stream));
+    AGENT_TEST_ASSERT(agent_stream_has_partial_tool(&stream));
+    stream.qwen_tool_start_len = 0;
+    parser.state = AGENT_QWEN_TOOL_DONE;
+    AGENT_TEST_ASSERT(!agent_stream_has_partial_tool(&stream));
+    parser.state = AGENT_QWEN_TOOL_SEARCH;
     int data[1000] = {0}, role[] = {42, 43, 44};
     q36_tokens tokens = {.v = data, .len = 1000};
     q36_tokens user = {.v = role, .len = 3};
@@ -859,6 +864,110 @@ static void test_compaction_boundaries(void) {
     AGENT_TEST_ASSERT(agent_compact_summary_budget(4096) == 512);
     AGENT_TEST_ASSERT(agent_compact_summary_budget(100000) == 4096);
     AGENT_TEST_ASSERT(agent_compact_summary_budget(1024) == 256);
+}
+
+static void test_partial_tool_interrupt_rollback(void) {
+    char path[] = "/tmp/q36-agent-interrupt-XXXXXX";
+    int fd = mkstemp(path);
+    AGENT_TEST_ASSERT(fd >= 0);
+    AGENT_TEST_ASSERT(write(fd, "original\n", 9) == 9);
+    close(fd);
+
+    char partial[PATH_MAX + 256];
+    snprintf(partial, sizeof(partial),
+        "<tool_call>\n<function=write>\n"
+        "<parameter=path>\n%s\n</parameter>\n"
+        "<parameter=content>\nreplacement that never closes", path);
+    agent_qwen_tool_parser parser = {.state = AGENT_QWEN_TOOL_SEARCH};
+    agent_qwen_tool_feed(&parser, partial, strlen(partial));
+    AGENT_TEST_ASSERT(parser.state == AGENT_QWEN_TOOL_PARAM_VALUE);
+    AGENT_TEST_ASSERT(parser.calls.len == 0);
+
+    agent_worker worker = {0};
+    for (int i = 0; i < 8; i++) q36_tokens_push(&worker.transcript, 100 + i);
+    agent_rollback_assistant_suffix(&worker, 3);
+    AGENT_TEST_ASSERT(worker.transcript.len == 3);
+    AGENT_TEST_ASSERT(worker.session_dirty);
+    AGENT_TEST_ASSERT(strstr(agent_partial_tool_interrupt_warning,
+                             "was NOT executed") != NULL);
+    AGENT_TEST_ASSERT(strstr(agent_partial_tool_interrupt_warning,
+                             "workspace is unchanged") != NULL);
+
+    char *contents = NULL;
+    size_t contents_len = 0;
+    char err[160] = {0};
+    AGENT_TEST_ASSERT(agent_read_file_bytes(path, &contents, &contents_len,
+                                            err, sizeof(err)) == 0);
+    AGENT_TEST_ASSERT(contents_len == 9 && !memcmp(contents, "original\n", 9));
+    free(contents);
+    agent_qwen_tool_parser_free(&parser);
+    q36_tokens_free(&worker.transcript);
+    unlink(path);
+}
+
+static void test_repetitive_tool_aborted_before_execution(void) {
+    char path[] = "/tmp/q36-agent-repetition-XXXXXX";
+    int fd = mkstemp(path);
+    AGENT_TEST_ASSERT(fd >= 0);
+    AGENT_TEST_ASSERT(write(fd, "original\n", 9) == 9);
+    close(fd);
+
+    agent_buf partial = {0};
+    agent_buf_puts(&partial,
+        "<tool_call>\n<function=write>\n<parameter=path>\n");
+    agent_buf_puts(&partial, path);
+    agent_buf_puts(&partial,
+        "\n</parameter>\n<parameter=content>\n");
+    for (int i = 0; i < AGENT_REPETITION_EXACT_LINE_RUN; i++)
+        agent_buf_puts(&partial, "scene.add(makeTree({ x: 10, y: 20 }));\n");
+
+    agent_qwen_tool_parser parser = {.state = AGENT_QWEN_TOOL_SEARCH};
+    agent_qwen_tool_feed(&parser, partial.ptr, partial.len);
+    AGENT_TEST_ASSERT(parser.state == AGENT_QWEN_TOOL_PARAM_VALUE);
+    AGENT_TEST_ASSERT(parser.calls.len == 0);
+    AGENT_TEST_ASSERT(agent_repetition_text_detected(parser.raw, parser.raw_len));
+    AGENT_TEST_ASSERT(strstr(agent_tool_repetition_warning,
+                             "was NOT executed") != NULL);
+
+    agent_worker worker = {0};
+    for (int i = 0; i < 6; i++) q36_tokens_push(&worker.transcript, 200 + i);
+    agent_rollback_assistant_suffix(&worker, 2);
+    AGENT_TEST_ASSERT(worker.transcript.len == 2);
+
+    char *contents = NULL;
+    size_t contents_len = 0;
+    char err[160] = {0};
+    AGENT_TEST_ASSERT(agent_read_file_bytes(path, &contents, &contents_len,
+                                            err, sizeof(err)) == 0);
+    AGENT_TEST_ASSERT(contents_len == 9 && !memcmp(contents, "original\n", 9));
+    free(contents);
+    agent_qwen_tool_parser_free(&parser);
+    free(partial.ptr);
+    q36_tokens_free(&worker.transcript);
+    unlink(path);
+}
+
+static void test_agent_frequency_penalty_sampling_path(void) {
+    int token_data[] = {11, 12, 13, 14, 15};
+    q36_tokens transcript = {.v = token_data, .len = 5};
+    agent_config cfg = {0};
+    cfg.gen.temperature = 0.7f;
+    cfg.gen.top_k = 20;
+    cfg.gen.top_p = 0.9f;
+    cfg.gen.min_p = 0.05f;
+    cfg.gen.frequency_penalty = 0.15f;
+
+    agent_sampling_request request = agent_sampling_request_build(
+        &cfg, false, &transcript, 3);
+    AGENT_TEST_ASSERT(request.frequency_penalty == 0.15f);
+    AGENT_TEST_ASSERT(request.penalty_token_count == 3);
+    AGENT_TEST_ASSERT(request.penalty_tokens == token_data + 2);
+    AGENT_TEST_ASSERT(request.penalty_tokens[0] == 13);
+
+    request = agent_sampling_request_build(&cfg, true, &transcript, 3);
+    AGENT_TEST_ASSERT(request.frequency_penalty == 0.0f);
+    AGENT_TEST_ASSERT(request.penalty_token_count == 0);
+    AGENT_TEST_ASSERT(request.penalty_tokens == NULL);
 }
 
 static void test_observation_error_is_not_context_exhaustion(void) {
@@ -892,6 +1001,9 @@ int main(int argc, char **argv) {
     test_worker_ownership();
     test_worker_pause_ui_waits();
     test_compaction_boundaries();
+    test_partial_tool_interrupt_rollback();
+    test_repetitive_tool_aborted_before_execution();
+    test_agent_frequency_penalty_sampling_path();
     test_observation_error_is_not_context_exhaustion();
     test_atomic_file_tools();
     test_streaming_file_tools();
