@@ -80,11 +80,17 @@ class FileRepairDomain(Domain):
 
     def start(self, problem: Any) -> Dict[str, Any]:
         ret, stdout, stderr = run_command(self.test_cmd, self.cwd)
+        combined = (stdout + "\n" + stderr).strip()
+        checks_match = re.search(r"CHECKS:\s*(\d+)/(\d+)", combined)
+        checks_passed = int(checks_match.group(1)) if checks_match else None
+        checks_total = int(checks_match.group(2)) if checks_match else None
         return {
             "content": self.original_content,
             "returncode": ret,
-            "output": (stdout + "\n" + stderr).strip(),
+            "output": combined,
             "passed": (ret == 0),
+            "checks_passed": checks_passed,
+            "checks_total": checks_total,
         }
 
     def workspace_hash(self, state: Dict[str, Any]) -> str:
@@ -215,6 +221,11 @@ class FileRepairDomain(Domain):
             is_d = (ret != 0 and ("SyntaxError" in combined_out or "IndentationError" in combined_out))
             v_res = "tests PASS" if is_g else f"tests FAIL (exit={ret})"
 
+            checks_match = re.search(r"CHECKS:\s*(\d+)/(\d+)", combined_out)
+            checks_passed = int(checks_match.group(1)) if checks_match else None
+            checks_total = int(checks_match.group(2)) if checks_match else None
+            checks_str = f"{checks_passed}/{checks_total} checks" if (checks_passed is not None and checks_total is not None) else None
+
             verifier_fingerprint = short_hash(f"{ret}:{combined_out}")
             m_key = f"{ws_post}:{verifier_fingerprint}"
 
@@ -223,6 +234,8 @@ class FileRepairDomain(Domain):
                 "returncode": ret,
                 "output": combined_out,
                 "passed": is_g,
+                "checks_passed": checks_passed,
+                "checks_total": checks_total,
             }
 
             branch_records.append(BranchRecord(
@@ -239,6 +252,7 @@ class FileRepairDomain(Domain):
                 diff_hash=d_hash,
                 verifier_result=v_res,
                 dead_reason="syntax_error" if is_d else None,
+                checks=checks_str,
                 merge_key=m_key,
                 is_dead=is_d,
                 is_goal=is_g,
@@ -261,11 +275,17 @@ class FileRepairDomain(Domain):
     def judge(self, states: List[Dict[str, Any]], problem: Any) -> Tuple[Optional[List[float]], float]:
         scores = []
         for s in states:
-            if s["passed"]:
+            if s.get("passed", False):
                 scores.append(100.0)
             else:
-                err_lines = len(s["output"].splitlines())
-                scores.append(max(1.0, 50.0 - err_lines))
+                passed = s.get("checks_passed")
+                total = s.get("checks_total")
+                if passed is not None and total and total > 0:
+                    # Granular score based on percentage of checks passed, scaled to 0-99
+                    scores.append(round((passed / total) * 99.0, 2))
+                else:
+                    err_lines = len(s.get("output", "").splitlines())
+                    scores.append(max(1.0, 50.0 - err_lines))
         return scores, 0.0
 
     def is_goal(self, state: Dict[str, Any], problem: Any) -> bool:

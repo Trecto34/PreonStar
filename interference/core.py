@@ -59,6 +59,7 @@ class BranchRecord:
     top_p: float = 0.8
     raw_response_hash: str = "none00"
     dead_reason: Optional[str] = None
+    checks: Optional[str] = None
 
 
 @dataclass
@@ -202,13 +203,14 @@ def search(
             for b in branches:
                 raw_count += 1
                 state_sig = short_hash(domain.key(b.candidate_data))
+                checks_part = f" -> {b.checks}" if b.checks else ""
 
                 if b.is_dead:
                     res.dead_ends += 1
                     dead_count += 1
                     if verbose:
                         reason_str = f"reason={b.dead_reason}" if b.dead_reason else f"{b.verifier_result}"
-                        print(f"  {b.branch_id} seed={b.seed} temp={b.temp} top_p={b.top_p} prompt={b.prompt_hash} raw={b.raw_response_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post} -> DEAD ({reason_str})")
+                        print(f"  {b.branch_id} seed={b.seed} temp={b.temp} top_p={b.top_p} prompt={b.prompt_hash} raw={b.raw_response_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post}{checks_part} -> DEAD ({reason_str})")
                     continue
 
                 k = b.merge_key if merge else (b.merge_key, raw_count)
@@ -235,7 +237,7 @@ def search(
                     }
 
                 if verbose:
-                    print(f"  {b.branch_id} seed={b.seed} temp={b.temp} top_p={b.top_p} prompt={b.prompt_hash} raw={b.raw_response_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post} -> {b.verifier_result} -> state={state_sig}")
+                    print(f"  {b.branch_id} seed={b.seed} temp={b.temp} top_p={b.top_p} prompt={b.prompt_hash} raw={b.raw_response_hash} -> ws_pre={b.workspace_pre} -> diff={b.diff_hash} -> ws_post={b.workspace_post}{checks_part} -> {b.verifier_result} -> state={state_sig}")
 
         merged_this_round = (raw_count - len(pool) - dead_count)
         res.merged_away += max(0, merged_this_round)
@@ -314,7 +316,14 @@ def search(
         })
 
     if verbose and not res.solved:
-        print(f"\n\033[33m[Busca Encerrada] Limite de budget atingido ({res.cost:.1f}/{budget}).\033[0m")
+        if res.cost >= budget:
+            print(f"\n\033[33m[Busca Encerrada] Limite de budget atingido ({res.cost:.1f}/{budget}).\033[0m")
+        elif res.rounds >= max_rounds:
+            print(f"\n\033[33m[Busca Encerrada] Limite de rodadas atingido ({res.rounds}/{max_rounds} rodadas, custo={res.cost:.1f}/{budget}).\033[0m")
+        elif not live:
+            print(f"\n\033[33m[Busca Encerrada] Fronteira de busca vazia (nenhum candidato vivo restante).\033[0m")
+        else:
+            print(f"\n\033[33m[Busca Encerrada] Busca finalizada sem solução (custo={res.cost:.1f}/{budget}).\033[0m")
 
     return res
 

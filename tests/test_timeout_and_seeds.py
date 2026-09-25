@@ -169,6 +169,68 @@ class TestTimeoutAndSeeds(unittest.TestCase):
             n_idx = first_cmd.index("-n")
             self.assertEqual(first_cmd[n_idx + 1], "500")
 
+    def test_granular_checks_and_scoring(self):
+        """
+        Verify that granular verifier output (CHECKS: X/Y passed) is parsed into BranchRecord
+        and directly translates into proportional scoring in judge().
+        """
+        target_file = "/tmp/test_granular_checks.py"
+        with open(target_file, "w", encoding="utf-8") as f:
+            f.write("def solve(): pass\n")
+
+        # Mock candidates (1 per prompt)
+        candidates = [
+            "def solve(): return 1\n",
+            "def solve(): return 2\n",
+            "def solve(): return 3\n",
+        ]
+        backend = MockBackend(response_generator=lambda p: [candidates.pop(0)])
+
+        domain = FileRepairDomain(
+            backend=backend,
+            target_file=target_file,
+            test_cmd="echo 'dummy'",
+            cwd="/tmp",
+            task_instruction="Implement solve",
+            k=3,
+        )
+
+        parent_node = StateNode(
+            state_id="s0",
+            depth=0,
+            data=domain.start(None),
+            parent_id=None,
+            workspace_hash="abc",
+        )
+
+        # Mock run_command to return different granular checks per candidate
+        # b1: 7/10, b2: 5/10, b3: 8/10
+        cmd_responses = [
+            (1, "[PASS] c1\nCHECKS: 7/10 passed", ""),
+            (1, "[PASS] c2\nCHECKS: 5/10 passed", ""),
+            (1, "[PASS] c3\nCHECKS: 8/10 passed", ""),
+        ]
+        with patch("interference.agent.run_command", side_effect=cmd_responses):
+            branch_records, _ = domain.propose_branches(
+                parent_node=parent_node,
+                problem=None,
+                start_branch_idx=1,
+                base_seed=40,
+            )
+
+        self.assertEqual(len(branch_records), 3)
+        self.assertEqual(branch_records[0].checks, "7/10 checks")
+        self.assertEqual(branch_records[1].checks, "5/10 checks")
+        self.assertEqual(branch_records[2].checks, "8/10 checks")
+
+        # Check scoring in judge
+        states = [b.candidate_data for b in branch_records]
+        scores, _ = domain.judge(states, None)
+        self.assertEqual(scores, [69.3, 49.5, 79.2])
+        # Branch 3 (8/10) must have the highest score
+        self.assertGreater(scores[2], scores[0])
+        self.assertGreater(scores[0], scores[1])
+
 
 if __name__ == "__main__":
     unittest.main()
