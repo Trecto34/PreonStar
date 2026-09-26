@@ -48,6 +48,10 @@ def extract_code_block(text: str) -> str:
     blocks = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
     if blocks:
         return blocks[0].strip()
+    # Handle unclosed code block (e.g. if truncated before closing backticks)
+    unclosed = re.search(r"```(?:\w+)?\n(.*)$", text, re.DOTALL)
+    if unclosed:
+        return unclosed.group(1).strip()
     return text.strip()
 
 
