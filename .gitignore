@@ -102,3 +102,17 @@ logs/bc250-sustained-20260918/swiglu_hadamard_parity
 /logs/sustained_2min_thermal_log.csv
 scripts/__pycache__/
 __pycache__/
+
+# Machine-local launchers, scratch and salvage (hardcoded /home/server paths).
+*.pid
+*.bak-pre-opt
+/build-abliterated-q36.sh
+/start-qwen38.sh
+/start-subagent.sh
+/q36_vision_api.py
+/tmp_frame.png
+/double_prompt.txt
+/sample_repos.txt
+/experiments/
+/salvage/
+/tests/test_dense_iq3xxs_nx

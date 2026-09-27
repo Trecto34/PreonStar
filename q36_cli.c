@@ -116,7 +116,7 @@ static void usage(FILE *fp) {
         "  --quality\n"
         "      Prefer exact kernels where faster approximate paths exist; MTP uses strict verification.\n"
         "  --dir-steering-file FILE\n"
-        "      Load a 40 x 2048 f32 direction matrix for directional steering.\n"
+        "      Load an n_layer x n_embd f32 direction matrix for directional steering.\n"
         "  --dir-steering-ffn F\n"
         "      Apply steering after FFN outputs: y -= F*v*dot(v,y). Default with file: 1\n"
         "  --dir-steering-attn F\n"

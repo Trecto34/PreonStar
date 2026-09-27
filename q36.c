@@ -10847,10 +10847,6 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
     }
     e->directional_steering_attn_scale = opt->directional_steering_attn;
     e->directional_steering_ffn_scale = opt->directional_steering_ffn;
-    if (!q36_load_directional_steering(e)) {
-        q36_engine_close(e);
-        return 1;
-    }
     if (opt->simulate_used_memory_bytes != 0 &&
         !q36_ssd_memory_lock_acquire(&e->simulated_memory,
                                      opt->simulate_used_memory_bytes)) {
@@ -10868,6 +10864,10 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
     config_validate_model(&e->model);
     hadamard_parse(&e->model);
     e->variant = g_q36_shape.variant;
+    if (!q36_load_directional_steering(e)) {
+        q36_engine_close(e);
+        return 1;
+    }
     if (opt->vision_path && opt->vision_path[0]) {
         model_open(&e->vision_model, opt->vision_path, false);
         q36_str arch = required_string(&e->vision_model, "general.architecture");
