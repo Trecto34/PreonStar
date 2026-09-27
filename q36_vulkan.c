@@ -4274,6 +4274,7 @@ static void q36_vk_prepare_dense_kernels(void) {
         &q36_vk.dense_extra_decode_iq2s,
         &q36_vk.dense_extra_mmq_iq2s,
         &q36_vk.dense_extra_decode_iq2s_pair,
+        &q36_vk.dense_extra_mmq,
     };
     if (!q36_vk_env_default_on("Q36_VK_PREPARE_DENSE")) return;
     pthread_mutex_lock(&q36_vk_mu);
@@ -8585,7 +8586,13 @@ bool extra_type = weight_type == Q36_VK_TENSOR_IQ2_XXS ||
                       weight_type == Q36_VK_TENSOR_IQ1_S ||
                       weight_type == Q36_VK_TENSOR_IQ4_NL ||
                       weight_type == Q36_VK_TENSOR_PQ2_0 ||
-                      weight_type == Q36_VK_TENSOR_PTQ1_0;
+                      weight_type == Q36_VK_TENSOR_PTQ1_0 ||
+                      /* IQ1_M prefill uses the shared 128-token mmq tile; the
+                       * naive dense_iq1_m re-read the weights once per token.
+                       * Decode and 2..8-row batches (MTP verify) stay on
+                       * dense_iq1_m, row-identical to one-token decode. */
+                      (weight_type == Q36_VK_TENSOR_IQ1_M && n_tok > 8u &&
+                       !q36_gpu_quality && q36_vk_env_default_on("Q36_VK_DENSE_IQ1M_MMQ"));
     if ((weight_type != Q36_VK_TENSOR_IQ3_XXS &&
          weight_type != Q36_VK_TENSOR_IQ3_S &&
          weight_type != Q36_VK_TENSOR_IQ4_XS &&

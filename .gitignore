@@ -116,3 +116,4 @@ __pycache__/
 /experiments/
 /salvage/
 /tests/test_dense_iq3xxs_nx
+/tests/test_dense_iq1m_mmq

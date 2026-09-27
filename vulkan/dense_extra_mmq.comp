@@ -438,6 +438,8 @@ void main(void) {
     }
 }
 #else
+const uint IQ1_M = 29u;
+
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
     uint row0 = gl_WorkGroupID.x * BM;
@@ -455,6 +457,15 @@ void main(void) {
             uint block_bytes = pc.type == IQ2_XXS ? 66u :
                                pc.type == IQ2_XS ? 74u :
                                pc.type == IQ2_S ? 82u : 50u;
+            if (pc.type == IQ1_M) {
+                /* IQ1_M has no leading f16: its block scale is the top
+                 * nibble of each of the four trailing scale words. */
+                uint sb = row * pc.row_bytes + qb * 56u + 48u;
+                uint dh = row < pc.out_dim ?
+                    (load_u16(sb) >> 12u) | ((load_u16(sb + 2u) >> 8u) & 0x00f0u) |
+                    ((load_u16(sb + 4u) >> 4u) & 0x0f00u) | (load_u16(sb + 6u) & 0xf000u) : 0u;
+                weight_scale[lid] = unpackHalf2x16(dh).x * pc.scale;
+            } else
             weight_scale[lid] = row < pc.out_dim &&
                 pc.type != IQ4_NL && pc.type != Q2_0 ?
                 unpackHalf2x16(load_u16(row * pc.row_bytes + qb * block_bytes)).x *
@@ -523,6 +534,22 @@ void main(void) {
                         [[unroll]] for (uint p = 0u; p < 4u; p++) {
                             uint entry = load_u8(base + 2u + 4u * slice + p) |
                                 (((qh >> (3u * p)) & 7u) << 8u);
+                            v[p] = d * (unpack_i8(
+                                tables[TAB_IQ1S + entry * 2u + kw]) + delta);
+                        }
+                    } else if (pc.type == IQ1_M) {
+                        /* Same grid as IQ1_S; qh carries 3 index bits and a
+                         * delta sign per 8 weights, scales are 3 bits per 16. */
+                        base += qb * 56u;
+                        uint sc = load_u16(base + 48u + 2u * (slice >> 1u));
+                        [[unroll]] for (uint p = 0u; p < 4u; p++) {
+                            uint qh = load_u8(base + 32u + 2u * slice + (p >> 1u));
+                            uint hi = (p & 1u) != 0u ? qh << 4u : qh << 8u;
+                            uint entry = load_u8(base + 4u * slice + p) | (hi & 0x700u);
+                            float delta = (qh & ((p & 1u) != 0u ? 0x80u : 0x08u)) != 0u ?
+                                -0.125 : 0.125;
+                            float d = weight_scale[lr] * float(2u * ((sc >>
+                                (6u * (slice & 1u) + 3u * (p >> 1u))) & 7u) + 1u);
                             v[p] = d * (unpack_i8(
                                 tables[TAB_IQ1S + entry * 2u + kw]) + delta);
                         }

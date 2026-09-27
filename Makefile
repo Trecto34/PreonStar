@@ -573,6 +573,14 @@ tests/test_dense_iq3xxs_nx.o: tests/test_dense_iq3xxs_nx.c q36_gpu.h q36_cli_arg
 $(IQ3XXS_NX_TEST): tests/test_dense_iq3xxs_nx.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
+IQ1M_MMQ_TEST := tests/test_dense_iq1m_mmq
+
+tests/test_dense_iq1m_mmq.o: tests/test_dense_iq1m_mmq.c q36_gpu.h q36_cli_args.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(IQ1M_MMQ_TEST): tests/test_dense_iq1m_mmq.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
 
 q36-quality-score: gguf-tools/quality-testing/score_openrouter
 
