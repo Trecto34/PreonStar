@@ -1,0 +1,2 @@
+frontier_000512.logits.json  f-A: KL=0.0019 top1=same  f-B: KL=0.0031 top1=same
+frontier_000768.logits.json  f-A: KL=0.0007 top1=same  f-B: KL=0.0014 top1=same

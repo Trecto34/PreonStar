@@ -1,0 +1,4 @@
+# Applied to vulkan/dense_extra_mmq.comp IQ1_M arm, spv rebuilt, test run, reverted.
+-                                -0.125 : 0.125;
++                                0.125 : -0.125;
+# tests/test_dense_iq1m_mmq -> rms_rel=0.32 FAIL (gate 0.02)

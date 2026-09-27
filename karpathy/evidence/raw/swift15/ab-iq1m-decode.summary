@@ -1,0 +1,7 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    3     180.83         0.410     20.23          0.020     /tmp/claude-1000/-home-server-q36/f3cb69a4-6a1a-4f42-adc5-975a4d21a9a0/scratchpad/binA
+B    3     186.92         0.440     20.30          0.020     /tmp/claude-1000/-home-server-q36/f3cb69a4-6a1a-4f42-adc5-975a4d21a9a0/scratchpad/binB
+
+B vs A prefill: +3.37%   decode: +0.35%   (gate: +1.50%)
+verdict: PASS (prefill)

@@ -2239,3 +2239,42 @@ share is recovered from the combine/split dispatch ratio.  Round-2 R5.
   share of decode); or a V-side vectorised gather that keeps the per-key FMA
   order and beats 52.6 -> <45 ns per key per workgroup at ctx 16384 before being
   tested at ctx 32768.
+
+## Swift-1.5 GSQ-RCO IQ3_S: IQ1_M prefill onto the dense_extra mmq tile — ACCEPTED, +3.4-5% prefill (2026-09-26)
+
+`Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf` is a per-tensor mixed quant (IQ3_S,
+IQ4_XS, IQ3_XXS, Q4_K, IQ2_S, Q2_K, IQ2_XS, IQ2_XXS, and one IQ1_M tensor).
+Every type already reached a tuned kernel except IQ1_M. Its one tensor
+(`blk.13.ffn_gate`, 0.16% of the weights) cost **3.5% of GPU time** on the naive
+`dense_iq1_m` kernel, which dispatches one workgroup per (row, token).
+
+- **Change.** An IQ1_M arm in the generic `dense_extra_mmq.comp` main. It uses
+  the IQ1_S grid and mapping, with the block scale assembled from the scale-word
+  nibbles. IQ1_M routes there only for `n_tok > 8`, not `--quality`, and not
+  `Q36_VK_DENSE_IQ1M_MMQ=0`. `dense_extra_mmq` joins the prewarm list.
+- **Correctness.** `tests/test_dense_iq1m_mmq`: rms_rel 0.0104, equal to the shipped
+  IQ1_S arm's f16 floor. A fault-injected delta flip gives 0.32. With the route
+  off, Swift logits are byte-identical to the pre-change build. KL vs the f32
+  per-token reference is 0.0019 -> 0.0031 / 0.0007 -> 0.0014 nats, with top-1 equal.
+- **No-breakage.** Only `dense_extra_mmq.spv` changed. VGPR/LDS/spills are identical
+  (88/11776/0). Only Penjing-27B-IQ2_XXS and the two GSQ-RCO files use it.
+  Penjing logits are byte-identical.
+- **Speed.** Route off vs on, 7 reps ctx 1024: prefill 168.54 -> 176.98
+  (+5.01%, no overlap). Reported as +3.4-5% because the gain exceeds the
+  profiled cost of the old kernel; that gap is unexplained. At 64 generated
+  tokens decode is +0.54% (flat).
+- **Mistakes caught by the adversarial review, kept here so they are not
+  repeated.** (1) The P3 frontier-NLL recipe with `q36 --dump-tokens` targets
+  gave 6-27 nat NLLs on confident predictions. The targets are misaligned, so do
+  not use it for dNLL; use KL against a `--prefill-chunk 1` reference instead.
+  (2) `env "A=x B=y" cmd` sets one variable; that invalidated a gate-off run.
+  (3) `bench_ab.sh` inherits the cwd, and `shader_root` = cwd wins over the exe
+  dir, so an A snapshot needs `Q36_SHADER_DIR` in a wrapper.
+- `compat_gate.sh`: infra timeout (exit 124) in the MoE CPU capture from the
+  external HDD. Not applicable, since neither gate model has an affected tensor.
+  Not a pass.
+- Raw: `evidence/raw/swift15/` (`VERDICT.md`).
+- `reconsider_if`: an IQ1_M `dense_extra_decode` arm (the decode share of the old
+  kernel was not measured), or a mixed-type gate/up pair kernel. W6's pair covers
+  only 12/64 layers on this file, and the same-type IQ3_S/IQ4_XS pairs (12 more
+  layers) would be worth ~0.5-1% on paper, below the gate.

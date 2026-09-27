@@ -1,0 +1,5 @@
+iq1_m mmq n_tok=256 out_dim=17408 in_dim=5120: max_abs=1.54 max_ref=62.7 rel=0.0246 rms_rel=0.0104 ok
+iq1_m mmq n_tok=9 out_dim=17408 in_dim=5120: max_abs=1.09 max_ref=58.4 rel=0.0186 rms_rel=0.0103 ok
+iq1_m mmq n_tok=131 out_dim=1000 in_dim=5120: max_abs=1.12 max_ref=52.4 rel=0.0213 rms_rel=0.0104 ok
+iq1_s mmq n_tok=256 out_dim=17408 in_dim=5120: max_abs=1.44 max_ref=70.7 rel=0.0204 rms_rel=0.0104 ok
+tests/test_dense_iq1m_mmq; fault-injected delta sign flip -> rms_rel=0.32 FAIL; Q36_VK_DENSE_IQ1M_MMQ=0 -> rms_rel=0 (naive path)

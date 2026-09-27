@@ -1,0 +1,20 @@
+*** SHADER STATS ***
+SGPRs: 108
+VGPRs: 88
+Spilled SGPRs: 0
+Spilled VGPRs: 0
+Code size: 16908
+LDS size: 11776
+Pre-Sched SGPRs: 27
+Pre-Sched VGPRs: 60
+********************
+*** SHADER STATS ***
+SGPRs: 108
+VGPRs: 48
+Spilled SGPRs: 0
+Spilled VGPRs: 0
+Code size: 860
+LDS size: 0
+Pre-Sched SGPRs: 28
+Pre-Sched VGPRs: 18
+********************

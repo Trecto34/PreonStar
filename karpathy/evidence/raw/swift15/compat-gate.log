@@ -1,0 +1,13 @@
+Karpathy compatibility gate
+root=/home/server/q36
+swift_model=Swift-Qwen3.8-27B-IQ3_XXS.gguf
+qwen35_model=Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf
+context=1024 generation=4 timeout=180s
+[1/2] Qwen3.5/Qwen3.6 MoE CPU/Vulkan parity
+gpu-cpu-parity:
+q36-test: gpu-cpu-parity reference = f16 dense-MMQ contract (compares against production arithmetic)
+q36-test: gpu-cpu-parity CPU capture short_reasoning_plain
+q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+q36: Vulkan generic backend, BC-250 fast path, subgroup 64
+q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+COMPATIBILITY_GATE: FAIL: Qwen3.5/Qwen3.6 parity exited with 124

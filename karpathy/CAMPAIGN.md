@@ -4,7 +4,7 @@
 `## Pick up in 5 minutes` and `## The rules that decide a verdict`, then go
 straight to `## Open items, ranked`.
 
-Last updated: 2026-09-23 (BC-250 session) · repo `/home/server/q36` + worktree
+Last updated: 2026-09-26 (BC-250 session; earlier: 2026-09-23) · repo `/home/server/q36` + worktree
 `/home/server/q36-wt/pq2-persist`, branch `experiment/pq2-smallbatch`
 (uncommitted) · the 2026-09-21 notes below are from `/home/server/q36-opt-27b` ·
 branch `trackB-ptq1_0`. PLAN items W2–W7 (`karpathy/PLAN-implementation-2026-09-20.md`)
@@ -41,6 +41,14 @@ latter look like wins (§9). The `ssm_alpha`/`ssm_beta` fusion was not attempted
 the IQ2_S precedent for that fusion measured +1.42% on a MoE file, and this dense
 file's ceiling for it is under 1%. Everything is uncommitted in this worktree per
 the session's instruction; the ledger, this map and `evidence/raw/` are the record.
+
+**2026-09-26 session (`/home/server/q36`, branch `main`).** New file
+`Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf` is a per-tensor mixed quant, not a plain
+IQ3_S. Its one IQ1_M tensor ran on the naive `dense_iq1_m` kernel (3.5% of GPU time
+for 0.16% of the weights). IQ1_M prefill now uses the `dense_extra_mmq` tile:
+**+3.4-5% prefill**, decode flat, other models bit-identical. Adversarially
+reviewed. See `AlreadyTried.md` and `evidence/raw/swift15/VERDICT.md`. Also
+fixed: `--dir-steering-file` was size-checked against the default shape.
 
 ---
 
@@ -996,6 +1004,7 @@ Authoritative detail and per-item "reconsider_if" live in
 | `RavenX-35B-Q36-IQ2XXS.gguf` | 11194M | qwen35moe 40 blk | 717.36 / 89.47 | 545.46 / 77.96 |
 | `Qwen3.8-35B-A3B-IQ2_M.gguf` | 11977M | qwen35moe **41 blk** | 116.51 / 29.29 | 529.90 / 91.53 |
 | `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` | 6873M | qwen35 dense 27B + MTP head | **211.08 / 32.97** at ctx 512 | not measured |
+| `Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf` | 11226M | qwen35 dense 27B, per-tensor mixed quant | **176.98 / ~19.8** (IQ1_M mmq, 2026-09-26; was 168.54) | not measured |
 
 - The guard is the no-regression reference; `Qwen3.6-35B-A3B-AntirezExperts-
   …gguf` is a **symlink** to it, and `q36moe.gguf` points at the *dense* 27B.

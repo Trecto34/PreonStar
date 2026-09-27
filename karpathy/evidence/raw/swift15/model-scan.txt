@@ -1,0 +1,11 @@
+Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf                               qwen35     {'IQ2_XS': 9, 'IQ2_XXS': 5, 'IQ1_M': 1}
+Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf                     qwen35     {'IQ2_XS': 9, 'IQ2_XXS': 5, 'IQ1_M': 1}
+TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf                     qwen35     {}
+Ternary-Bonsai-2-27B-PQ2_0.gguf                              qwen35     {}
+Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf           qwen35moe  {}
+MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf                        qwen35     {}
+Occamy-1.0-Q36-IQ2XXS-gateup-Q2K-down-Q8rest.gguf            qwen35moe  {}
+Penjing-27B-IQ2_XXS.gguf                                     qwen35     {'IQ2_XXS': 344, 'IQ1_S': 152}
+Qwen3.8-35B-A3B-IQ2_M.gguf                                   qwen35moe  {}
+RavenX-35B-Q36-IQ2XXS.gguf                                   qwen35moe  {}
+Swift-Qwen3.8-27B-IQ3_XXS.gguf                               qwen35     {}
