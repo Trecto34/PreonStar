@@ -86,6 +86,8 @@ static void *xrealloc(void *p, size_t n) {
     return p;
 }
 
+#include "q36_loopguard.h"
+
 static char *xstrdup(const char *s) {
     size_t n = strlen(s);
     char *p = xmalloc(n + 1);
@@ -817,6 +819,12 @@ typedef struct {
     bool ignore_eos;
     q36_think_mode think_mode;
     int thinking_budget;
+    /* Agent-control extensions (chat only, all off by default). */
+    bool thinking_budget_hard;   /* top-level thinking_budget: force </think> at the cap */
+    int action_budget;           /* post-think content tokens before the leak check; 0 = off */
+    bool stop_after_tool_call;   /* end decode at the first complete tool call */
+    int reasoning_tokens;        /* filled after decode, reported in usage */
+    double prefill_s, decode_s;
     bool has_tools;
     bool kat_coder;
     bool qwen38;
@@ -3225,6 +3233,22 @@ static bool parse_chat_request(q36_engine *e, server *s, const char *body, int d
                 free(key);
                 goto bad;
             }
+        } else if (!strcmp(key, "thinking_budget")) {
+            if (!json_int(&p, &r->thinking_budget)) {
+                free(key);
+                goto bad;
+            }
+            r->thinking_budget_hard = r->thinking_budget > 0;
+        } else if (!strcmp(key, "action_budget")) {
+            if (!json_int(&p, &r->action_budget)) {
+                free(key);
+                goto bad;
+            }
+        } else if (!strcmp(key, "stop_after_tool_call")) {
+            if (!json_bool(&p, &r->stop_after_tool_call)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "temperature")) {
             double v = 0.0;
             if (!json_number(&p, &v)) {
@@ -4792,6 +4816,17 @@ static bool sse_chunk(int fd, const request *r, const char *id, const char *text
     return ok;
 }
 
+/* OpenAI-standard reasoning_tokens plus q36 timings, appended inside "usage". */
+static void append_usage_ext(buf *b, const request *r, int completion_tokens) {
+    if (r->kind != REQ_CHAT) return;
+    int content = completion_tokens - r->reasoning_tokens;
+    buf_printf(b,
+        ",\"completion_tokens_details\":{\"reasoning_tokens\":%d,\"content_tokens\":%d}"
+        ",\"timings\":{\"prefill_ms\":%.1f,\"decode_ms\":%.1f}",
+        r->reasoning_tokens, content < 0 ? 0 : content,
+        r->prefill_s * 1000.0, r->decode_s * 1000.0);
+}
+
 static bool sse_usage_chunk(int fd, const request *r, const char *id,
                             int prompt_tokens, int completion_tokens) {
     if (!r->stream_include_usage) return true;
@@ -4808,8 +4843,10 @@ static bool sse_usage_chunk(int fd, const request *r, const char *id,
         buf_puts(&b, ",\"choices\":[],\"usage\":");
     }
     buf_printf(&b,
-               "{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d,\"prompt_tokens_details\":{\"cached_tokens\":%d}}}\n\n",
+               "{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d,\"prompt_tokens_details\":{\"cached_tokens\":%d}",
                prompt_tokens, completion_tokens, prompt_tokens + completion_tokens, r->cached_tokens);
+    append_usage_ext(&b, r, completion_tokens);
+    buf_puts(&b, "}}\n\n");
 
     bool ok = send_all(fd, b.ptr, b.len);
     buf_free(&b);
@@ -5717,8 +5754,10 @@ static bool final_response(int fd, const request *r, const char *id, const char 
         json_escape(&b, finish);
         buf_puts(&b, "}],\"usage\":");
     }
-    buf_printf(&b, "{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d,\"prompt_tokens_details\":{\"cached_tokens\":%d}}}\n",
+    buf_printf(&b, "{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d,\"prompt_tokens_details\":{\"cached_tokens\":%d}",
                prompt_tokens, completion_tokens, prompt_tokens + completion_tokens, r->cached_tokens);
+    append_usage_ext(&b, r, completion_tokens);
+    buf_puts(&b, "}}\n");
     bool ok = http_response(fd, 200, "application/json", b.ptr);
     buf_free(&b);
     return ok;
@@ -8846,7 +8885,8 @@ static bool should_canonicalize_thinking_checkpoint(const request *r,
     if (r->has_tools && !r->kat_coder) return false;
     if (r->prompt_preserves_reasoning) return false;
     if (!q36_think_mode_enabled(r->think_mode)) return false;
-    if (finish && (!strcmp(finish, "error") || !strcmp(finish, "length"))) return false;
+    if (finish && (!strcmp(finish, "error") || !strcmp(finish, "length") ||
+                   !strcmp(finish, "action_budget"))) return false;
     if (thinking && thinking->inside) return false;
     return true;
 }
@@ -9756,6 +9796,10 @@ static void generate_job(server *s, server_slot *slot, job *j) {
     double last_decode_log_t = decode_t0;
     int last_decode_log_completion = 0;
     thinking_state thinking = thinking_state_from_prompt(&j->req);
+    /* Agent controls: independent thinking and action phases, and an
+     * execution boundary at the first complete tool call. */
+    agent_action_leak *leak = calloc(1, sizeof(*leak));
+    int thinking_tokens = 0;
     int think_close_id = -1;
     if (j->req.thinking_budget > 0) {
         q36_tokens close = {0};
@@ -9793,7 +9837,9 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             frequency_penalty = 0.0f;
         }
         int close_rank = 0;
-        if (think_close_id >= 0 && q36_session_in_think(slot->session)) {
+        const bool hard_think_close = think_close_id >= 0 && j->req.thinking_budget_hard &&
+            q36_session_in_think(slot->session) && thinking_tokens >= j->req.thinking_budget;
+        if (!hard_think_close && think_close_id >= 0 && q36_session_in_think(slot->session)) {
             int limit = q36_think_close_rank_limit(completion, j->req.thinking_budget);
             if (limit > 0 && completion == j->req.thinking_budget)
                 trace_event(s, trace_id, "thinking closure ranking starts at token=%d",
@@ -9801,12 +9847,15 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             if (limit > 0)
                 close_rank = q36_session_token_rank(slot->session, think_close_id, limit);
         }
-        int token = close_rank > 0 ? think_close_id :
+        int token = close_rank > 0 || hard_think_close ? think_close_id :
             q36_session_sample_penalized(
                 slot->session, temperature, top_k, top_p, min_p,
                 generated_tokens.v, generated_tokens.len,
                 presence_penalty, frequency_penalty, &rng);
-        if (close_rank > 0)
+        if (hard_think_close)
+            trace_event(s, trace_id, "hard thinking budget close at thinking_tokens=%d",
+                        thinking_tokens);
+        else if (close_rank > 0)
             trace_event(s, trace_id, "closing thinking at token=%d rank=%d",
                         completion, close_rank);
         if (j->req.ignore_eos && token == q36_token_eos(s->engine))
@@ -9879,6 +9928,16 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             bool was_thinking = thinking.inside;
             if (!qwen_tool_decode_state_is_tool(qwen_tool_tracker.decode))
                 thinking_state_feed(&thinking, piece, piece_len);
+            if (was_thinking) thinking_tokens++;
+            else if (j->req.action_budget > 0 && j->req.kind == REQ_CHAT &&
+                     !thinking.inside && !saw_tool_start &&
+                     !qwen_tool_decode_state_is_tool(qwen_tool_tracker.decode) &&
+                     agent_action_leak_feed(leak, j->req.action_budget, piece, piece_len)) {
+                finish = "action_budget";
+                stop_decode = true;
+                trace_event(s, trace_id, "action_budget leak abort after %d content tokens",
+                            leak->tokens);
+            }
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
                 if (thinking.inside) {
                     qwen_tool_decode_tracker_init(&qwen_tool_tracker);
@@ -9941,6 +10000,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             }
             free(piece);
 
+            if (stop_decode) break;
             if (hit_stop) {
                 (void)stop_len;
                 finish = "stop";
@@ -10001,6 +10061,11 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                     }
                     if (saw_tool_end && !old_end) {
                         trace_event(s, trace_id, "closed tool-call block after %d generated tokens", completion);
+                        if (j->req.stop_after_tool_call) {
+                            finish = "stop";
+                            stop_decode = true;
+                            break;
+                        }
                     }
                     const size_t marker_hold = 80;
                     tool_scan_from = text.len > marker_hold ? text.len - marker_hold : 0;
@@ -10047,6 +10112,10 @@ static void generate_job(server *s, server_slot *slot, job *j) {
     }
 
     server_generation_leave(s);
+    free(leak);
+    j->req.reasoning_tokens = thinking_tokens;
+    j->req.prefill_s = decode_t0 - t0;
+    j->req.decode_s = now_sec() - decode_t0;
     if (g_stop_requested && strcmp(finish, "error") != 0) {
         finish = "error";
         snprintf(err, sizeof(err), "shutdown requested");
@@ -13536,6 +13605,16 @@ static void test_json_owned_replacement_is_atomic(void) {
     TEST_ASSERT(!json_number(&p, &number));
 }
 
+static void test_chat_agent_budget_fields_parse(void) {
+    request r;
+    char err[160];
+    /* Malformed extension values are rejected; valid ones are exercised live. */
+    TEST_ASSERT(!parse_chat_request(NULL, NULL,
+        "{\"messages\":[],\"action_budget\":\"x\"}", 128, 4096, &r, err, sizeof(err)));
+    TEST_ASSERT(!parse_chat_request(NULL, NULL,
+        "{\"messages\":[],\"stop_after_tool_call\":3}", 128, 4096, &r, err, sizeof(err)));
+}
+
 static void test_api_parsers_reject_nonfinite_numbers(void) {
     request r;
     char err[160];
@@ -15286,6 +15365,7 @@ static void q36_server_unit_tests_run(void) {
     test_reasoning_effort_mapping();
     test_qwen38_effort_prompt();
     test_api_thinking_controls_parse();
+    test_chat_agent_budget_fields_parse();
     test_render_think_max_prompt_prefix();
     test_render_non_thinking_prompt_closes_think();
     test_render_drops_old_reasoning_without_tools();

@@ -618,13 +618,13 @@ q36_metal.o: q36_metal.m q36_gpu.h q36_quant.h q36_ssd.h $(METAL_SRCS)
 q36_cli.o: q36_prompt_prefix.h q36_cli.c q36.h q36_cli_args.h q36_ssd.h linenoise.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_cli.c
 
-q36_server.o: q36_server.c q36.h q36_cli_args.h rax.h q36_tool_text.h
+q36_server.o: q36_loopguard.h q36_server.c q36.h q36_cli_args.h rax.h q36_tool_text.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_server.c
 
 q36_bench.o: q36_bench.c q36.h q36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_bench.c
 
-q36_agent.o: q36_prompt_prefix.h q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
+q36_agent.o: q36_loopguard.h q36_prompt_prefix.h q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ q36_agent.c
 
 q36_eval.o: q36_eval_cases.h q36_eval.c q36.h q36_cli_args.h q36_help.h q36_ssd.h
@@ -698,13 +698,13 @@ q36_image.o: q36_image.c q36_image.h third_party/iris/jpeg.h third_party/iris/pn
 q36_cli_cpu.o: q36_prompt_prefix.h q36_cli.c q36.h q36_cli_args.h q36_ssd.h linenoise.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_cli.c
 
-q36_server_cpu.o: q36_server.c q36.h q36_cli_args.h rax.h q36_tool_text.h
+q36_server_cpu.o: q36_loopguard.h q36_server.c q36.h q36_cli_args.h rax.h q36_tool_text.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_server.c
 
 q36_bench_cpu.o: q36_bench.c q36.h q36_cli_args.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_bench.c
 
-q36_agent_cpu.o: q36_prompt_prefix.h q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
+q36_agent_cpu.o: q36_loopguard.h q36_prompt_prefix.h q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ q36_agent.c
 
 q36_eval_cpu.o: q36_eval_cases.h q36_eval.c q36.h q36_cli_args.h q36_help.h q36_ssd.h
@@ -925,7 +925,7 @@ q36_llama_test: q36_llama_test.o rax_cpu.o q36_ssd_cpu.o q36_prompt_prefix.o $(C
 q36_reference_test: q36_test_cpu.o rax_cpu.o q36_ssd_cpu.o q36_prompt_prefix.o $(CPU_CORE_OBJS)
 	$(CC) $(CPU_CFLAGS) -o $@ q36_test_cpu.o rax_cpu.o q36_ssd_cpu.o q36_prompt_prefix.o $(CPU_CORE_OBJS) $(LDLIBS)
 
-q36_agent_test.o: q36_prompt_prefix.h tests/q36_agent_test.c q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
+q36_agent_test.o: q36_loopguard.h q36_prompt_prefix.h tests/q36_agent_test.c q36_agent.c q36.h q36_cli_args.h q36_help.h q36_kvstore.h q36_ssd.h q36_web.h linenoise.h q36_tool_text.h
 	$(CC) $(GPU_CFLAGS) -Wno-unused-function -c -o $@ tests/q36_agent_test.c
 
 q36_agent_test: q36_agent_test.o q36_help.o q36_kvstore.o q36_ssd.o q36_prompt_prefix.o q36_web.o linenoise.o $(CORE_OBJS)
