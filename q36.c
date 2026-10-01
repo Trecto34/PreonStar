@@ -11227,6 +11227,14 @@ int q36_engine_model_id(q36_engine *e) {
     return e && e->variant == Q36_VARIANT_27B ? 3 : 1;
 }
 
+uint32_t q36_engine_prefill_chunk(q36_engine *e) {
+    if (!e) return 0;
+#ifndef Q36_NO_GPU
+    if (q36_engine_uses_vulkan_runtime(e)) return q36_engine_gpu_prefill_cap(e);
+#endif
+    return e->cpu_prefill_cap;
+}
+
 bool q36_engine_is_qwen38(q36_engine *e) {
     return e && e->variant == Q36_VARIANT_27B;
 }

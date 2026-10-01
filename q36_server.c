@@ -820,6 +820,7 @@ typedef struct {
     q36_think_mode think_mode;
     int thinking_budget;
     /* Agent-control extensions (chat only, all off by default). */
+    struct { bool enabled, hit; int tokens; double restore_ms, build_ms; } sys_ckpt;
     bool incomplete_tool_call;   /* a truncated tool call was discarded (never returned as text) */
     bool thinking_budget_hard;   /* top-level thinking_budget: force </think> at the cap */
     int action_budget;           /* post-think content tokens before the leak check; 0 = off */
@@ -4902,6 +4903,11 @@ static void append_usage_ext(buf *b, const request *r, int completion_tokens) {
         ",\"timings\":{\"prefill_ms\":%.1f,\"decode_ms\":%.1f}",
         r->reasoning_tokens, content < 0 ? 0 : content,
         r->prefill_s * 1000.0, r->decode_s * 1000.0);
+    if (r->sys_ckpt.enabled)
+        buf_printf(b,
+            ",\"system_checkpoint\":{\"hit\":%s,\"tokens\":%d,\"restore_ms\":%.1f,\"build_ms\":%.1f}",
+            r->sys_ckpt.hit ? "true" : "false", r->sys_ckpt.tokens,
+            r->sys_ckpt.restore_ms, r->sys_ckpt.build_ms);
 }
 
 static bool sse_usage_chunk(int fd, const request *r, const char *id,
@@ -6523,6 +6529,7 @@ typedef struct {
     int continued_interval_tokens;
     int boundary_trim_tokens;
     int boundary_align_tokens;
+    bool system_checkpoint;   /* --kv-system-checkpoint: store the system+tools prefix once */
 } kv_cache_options;
 
 typedef struct {
@@ -6531,6 +6538,7 @@ typedef struct {
     uint64_t budget_bytes;
     bool reject_different_quant;
     kv_cache_options opt;
+    char ident[41];        /* model/tokenizer/state fingerprint folded into every key; empty = legacy */
     int continued_last_store_tokens;
     kv_entry *entry;
     int len;
@@ -7224,6 +7232,7 @@ typedef enum {
     KV_REASON_CONTINUED = 2,
     KV_REASON_EVICT     = 3,
     KV_REASON_SHUTDOWN  = 4,
+    KV_REASON_SYSTEM    = 5,   /* system+tools boundary checkpoint */
 } kv_cache_reason;
 
 static uint8_t kv_reason_code(const char *reason) {
@@ -7232,6 +7241,7 @@ static uint8_t kv_reason_code(const char *reason) {
     if (!strcmp(reason, "continued")) return KV_REASON_CONTINUED;
     if (!strcmp(reason, "evict")) return KV_REASON_EVICT;
     if (!strcmp(reason, "shutdown")) return KV_REASON_SHUTDOWN;
+    if (!strcmp(reason, "system")) return KV_REASON_SYSTEM;
     return KV_REASON_UNKNOWN;
 }
 
@@ -7381,6 +7391,75 @@ static void sha1_bytes_hex(const void *ptr, size_t len, char out[41]) {
     uint8_t digest[20];
     sha1_final(&c, digest);
     hex20(digest, out);
+}
+
+/* Cache key of a rendered prefix: sha1(identity || sha1(text)).  The rendered
+ * text already pins the system prompt, tool schemas, template flags and think
+ * mode; the identity pins everything the text cannot: the weights, tokenizer
+ * and any steering that shape the saved graph state.  A different identity
+ * never matches an existing file (clean miss).  An empty identity is the legacy
+ * plain-text key, kept only for tests that build files by hand. */
+static void kv_cache_text_sha(const char *ident, const char *text, size_t len, char out[41]) {
+    char plain[41];
+    sha1_bytes_hex(text, len, plain);
+    if (!ident || !ident[0]) { memcpy(out, plain, 41); return; }
+    char both[80];
+    memcpy(both, ident, 40);
+    memcpy(both + 40, plain, 40);
+    sha1_bytes_hex(both, sizeof(both), out);
+}
+
+#define KV_KEY_VERSION "q36-kvkey-v2/chatml-template-v1"
+
+static void sha1_update_file_range(sha1_ctx *c, FILE *fp, uint64_t off, size_t n) {
+    char buf_[65536];
+    if (fseeko(fp, (off_t)off, SEEK_SET) != 0) return;
+    while (n) {
+        size_t want = n < sizeof(buf_) ? n : sizeof(buf_);
+        size_t got = fread(buf_, 1, want, fp);
+        if (!got) break;
+        sha1_update(c, buf_, got);
+        n -= got;
+    }
+}
+
+/* Content fingerprint of a GGUF without reading all of it: size, the first
+ * 16 MiB (metadata incl. tokenizer and tensor table), 32 spread 64 KiB samples
+ * of the weights and the last MiB, plus an optional steering file in full.
+ * Any re-quantization, fine-tune or tokenizer edit changes it. */
+static bool kv_model_fingerprint(const char *model_path, const char *steering_path,
+                                 char out[41]) {
+    FILE *fp = model_path ? fopen(model_path, "rb") : NULL;
+    if (!fp) return false;
+    if (fseeko(fp, 0, SEEK_END) != 0) { fclose(fp); return false; }
+    const uint64_t size = (uint64_t)ftello(fp);
+    sha1_ctx c;
+    sha1_init(&c);
+    sha1_update(&c, KV_KEY_VERSION, strlen(KV_KEY_VERSION));
+    sha1_update(&c, &size, sizeof(size));
+    const size_t head = size < (16u << 20) ? (size_t)size : (16u << 20);
+    sha1_update_file_range(&c, fp, 0, head);
+    if (size > head + (1u << 20)) {
+        for (int i = 0; i < 32; i++) {
+            uint64_t off = head + (size - head - 65536) / 31 * (uint64_t)i;
+            sha1_update_file_range(&c, fp, off, 65536);
+        }
+        sha1_update_file_range(&c, fp, size - (1u << 20), 1u << 20);
+    }
+    fclose(fp);
+    if (steering_path && steering_path[0]) {
+        FILE *sp = fopen(steering_path, "rb");
+        if (!sp) return false;
+        sha1_update(&c, "steer", 5);
+        char b[65536];
+        size_t n;
+        while ((n = fread(b, 1, sizeof(b), sp)) > 0) sha1_update(&c, b, n);
+        fclose(sp);
+    }
+    uint8_t digest[20];
+    sha1_final(&c, digest);
+    hex20(digest, out);
+    return true;
 }
 
 typedef struct {
@@ -7679,7 +7758,7 @@ static bool kv_read_header(FILE *fp, kv_entry *e, uint32_t *text_bytes) {
     if (h[0] != KV_CACHE_MAGIC0 || h[1] != KV_CACHE_MAGIC1 ||
         h[2] != KV_CACHE_MAGIC2 || h[3] != KV_CACHE_VERSION) return false;
     e->quant_bits = h[4];
-    e->reason = h[5] <= KV_REASON_SHUTDOWN ? h[5] : KV_REASON_UNKNOWN;
+    e->reason = h[5] <= KV_REASON_SYSTEM ? h[5] : KV_REASON_UNKNOWN;
     e->ext_flags = h[6];
     e->tokens = le_get32(h + 8);
     e->hits = le_get32(h + 12);
@@ -7969,7 +8048,7 @@ static int kv_cache_continued_store_target(const kv_disk_cache *kc,
  * smaller one: the payload was validated against the context capacity recorded
  * in the file.  If the existing file cannot be used by this server, replace it
  * so this context can still populate its own cache. */
-static bool kv_cache_file_text_matches(const char *path, const char sha[41],
+static bool kv_cache_file_text_matches(const char *path, const char *ident, const char sha[41],
                                        const char *text, size_t text_len) {
     if (text_len > UINT32_MAX) return false;
     FILE *fp = fopen(path, "rb");
@@ -7991,7 +8070,7 @@ static bool kv_cache_file_text_matches(const char *path, const char sha[41],
     }
 
     char stored_sha[41];
-    sha1_bytes_hex(stored, text_bytes, stored_sha);
+    kv_cache_text_sha(ident, stored, text_bytes, stored_sha);
     ok = !strcmp(stored_sha, sha) &&
          (text_len == 0 || memcmp(stored, text, text_len) == 0);
     free(stored);
@@ -8007,7 +8086,7 @@ static bool kv_cache_existing_compatible(kv_disk_cache *kc, const char *path,
     if (!kv_read_entry_file(path, sha, &e)) return false;
     bool compatible = (!kc->reject_different_quant || e.quant_bits == (uint8_t)quant_bits) &&
                       e.ctx_size <= (uint32_t)ctx_size &&
-                      kv_cache_file_text_matches(path, sha, text, text_len);
+                      kv_cache_file_text_matches(path, kc->ident, sha, text, text_len);
     kv_entry_free(&e);
     if (!compatible) {
         if (unlink(path) == 0) {
@@ -8098,7 +8177,7 @@ static bool kv_cache_store_live_prefix(server *s, server_slot *slot,
     }
 
     char sha[41];
-    sha1_bytes_hex(text, text_len, sha);
+    kv_cache_text_sha(kc->ident, text, text_len, sha);
     char *path = kv_path_for_sha(kc, sha);
 
     if (kv_cache_existing_compatible(kc, path, sha, text, text_len,
@@ -8221,7 +8300,7 @@ static int kv_cache_find_text_prefix(kv_disk_cache *kc, const char *prompt_text,
             if (e->text_bytes == b->text_bytes && e->tokens <= b->tokens) continue;
         }
         char sha[41];
-        sha1_bytes_hex(prompt_text, (size_t)e->text_bytes, sha);
+        kv_cache_text_sha(kc->ident, prompt_text, (size_t)e->text_bytes, sha);
         if (!strcmp(sha, e->sha)) best = i;
     }
     return best;
@@ -8341,7 +8420,7 @@ static int kv_cache_try_load_text(server *s, server_slot *slot,
         } else {
             cached_text[text_bytes] = '\0';
             char text_sha[41];
-            sha1_bytes_hex(cached_text, text_bytes, text_sha);
+            kv_cache_text_sha(kc->ident, cached_text, text_bytes, text_sha);
             if (strcmp(text_sha, e.sha)) {
                 header_ok = false;
                 fail_reason = "cached text hash mismatch";
@@ -9668,6 +9747,39 @@ static void slot_remember_vision_tools(server *s, server_slot *slot,
     slot->pending_tools = xstrdup(r->tool_schema_key ? r->tool_schema_key : "");
 }
 
+/* Token count of the leading "<|im_start|>system ... <|im_end|>\n" turn, or 0 when
+ * the prompt does not begin with a system turn that is followed by more text.
+ * Tools are rendered inside this turn, so it is the stable system+tools prefix.
+ * Every delimiter is a special token, so the prefix tokenizes identically on
+ * its own and inside any longer prompt. */
+static int system_boundary_tokens(const q36_tokens *t, int im_start, int system_word,
+                                  int im_end, int newline) {
+    if (!t || t->len < 6 || t->v[0] != im_start || t->v[1] != system_word) return 0;
+    for (int i = 2; i + 2 < t->len; i++) {
+        if (t->v[i] == im_end) return t->v[i + 1] == newline ? i + 2 : 0;
+        if (t->v[i] == im_start) return 0;
+    }
+    return 0;
+}
+
+static int request_system_boundary(server *s, const request *r) {
+    q36_tokens head = {0}, tail = {0};
+    q36_tokenize_rendered_chat(s->engine, "<|im_start|>system\n", &head);
+    q36_tokenize_rendered_chat(s->engine, "<|im_end|>\n", &tail);
+    int n = 0;
+    if (head.len == 3 && tail.len == 2)
+        n = system_boundary_tokens(&r->prompt, head.v[0], head.v[1], tail.v[0], tail.v[1]);
+    q36_tokens_free(&head);
+    q36_tokens_free(&tail);
+    /* Land on a prefill-chunk multiple.  A cold prompt prefills in fixed chunks
+     * from position 0; a checkpoint inside a chunk would split that schedule
+     * differently and the restored state would differ in the last bits (greedy
+     * replies then diverge).  On a multiple, restored == cold exactly. */
+    const uint32_t chunk = q36_engine_prefill_chunk(s->engine);
+    if (n > 0 && chunk > 1) n -= n % (int)chunk;
+    return n;
+}
+
 /* Execute one request on the worker-owned session.
  *
  * Clients resend full prompts as text.  The worker first tries the old exact
@@ -9729,9 +9841,18 @@ static void generate_job(server *s, server_slot *slot, job *j) {
          * would silently discard the newer conversation state. */
         server_kv_store_current(s, slot, "evict");
     }
+    const int sys_len = (!multimodal && s->kv.enabled && s->kv.opt.system_checkpoint &&
+                         j->req.kind == REQ_CHAT) ? request_system_boundary(s, &j->req) : 0;
+    j->req.sys_ckpt.enabled = s->kv.enabled && s->kv.opt.system_checkpoint && j->req.kind == REQ_CHAT;
+    j->req.sys_ckpt.tokens = sys_len;
     if (!multimodal && cached == 0) {
+        const double restore_t0 = now_sec();
         disk_cached = server_kv_try_load(s, slot, &j->req, &effective_prompt,
                                         &disk_cache_path);
+        if (disk_cached > 0 && sys_len > 0 && disk_cached == sys_len) {
+            j->req.sys_ckpt.hit = true;
+            j->req.sys_ckpt.restore_ms = (now_sec() - restore_t0) * 1000.0;
+        }
         if (disk_cached > 0) {
             cached = disk_cached;
             cache_source = "disk-text";
@@ -9766,6 +9887,32 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                req_flags);
     q36_session_set_progress(slot->session, server_progress_cb, &progress);
 
+    /* System+tools checkpoint: prefill to the end of the system turn, store it,
+     * then keep going (same forward-only pattern as the cold store below).  A
+     * conversation that restored anything from disk or memory skips this. */
+    int sys_built_len = 0;
+    if (cached == 0 && sys_len > 0 && s->kv.enabled && sys_len >= s->kv.opt.min_tokens &&
+        sys_len < prompt_for_sync->len &&
+        prompt_for_sync == &j->req.prompt)
+    {
+        const double build_t0 = now_sec();
+        q36_tokens prefix = {0};
+        tokens_copy_prefix(&prefix, prompt_for_sync, sys_len);
+        if (server_session_sync(s, slot, &prefix, err, sizeof(err)) != 0) {
+            q36_tokens_free(&prefix);
+            q36_tokens_free(&effective_prompt);
+            q36_session_set_progress(slot->session, NULL, NULL);
+            trace_event(s, trace_id, "prefill failed: %s", err);
+            http_error(j->fd, 500, err);
+            return;
+        }
+        if (server_kv_store_live_prefix(s, slot, prompt_for_sync, sys_len, "system"))
+            kv_cache_note_store(slot, sys_len);
+        j->req.sys_ckpt.build_ms = (now_sec() - build_t0) * 1000.0;
+        sys_built_len = sys_len;
+        q36_tokens_free(&prefix);
+    }
+
     int cold_store_len = 0;
     if (!multimodal && cached == 0 &&
         s->kv.enabled &&
@@ -9774,6 +9921,9 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         prompt_for_sync->len <= s->kv.opt.cold_max_tokens)
     {
         cold_store_len = kv_cache_store_len(&s->kv, prompt_for_sync->len);
+        /* The live graph only moves forward: a cold prefix shorter than the
+         * system checkpoint we just built would force a full re-prefill. */
+        if (sys_built_len && cold_store_len <= sys_built_len) cold_store_len = 0;
     }
 
     if (s->kv.enabled &&
@@ -10880,12 +11030,27 @@ static void server_models_free(server *s) {
     s->kv_root = NULL;
 }
 
+/* Fold the model content fingerprint into every cache key.  If the model file
+ * cannot be read the cache is switched off rather than keyed by a guess. */
+static void server_kv_set_identity(server *s, const char *model_path) {
+    if (!s->kv.enabled) return;
+    if (!kv_model_fingerprint(model_path, s->engine_opt.directional_steering_file, s->kv.ident)) {
+        server_log(Q36_LOG_DEFAULT,
+                   "q36-server: KV disk cache disabled: cannot fingerprint model %s",
+                   model_path ? model_path : "(none)");
+        kv_cache_close(&s->kv);
+        return;
+    }
+    server_log(Q36_LOG_KVCACHE, "q36-server: KV cache identity %s", s->kv.ident);
+}
+
 static void server_kv_open_for_model(server *s, int idx) {
     if (!s->kv_root) return;
     buf db = {0};
     buf_printf(&db, "%s/%s", s->kv_root, s->models[idx].id);
     char *dir = buf_take(&db);
     kv_cache_open(&s->kv, dir, s->kv_budget_mb, s->kv_reject_different_quant, s->kv_opt);
+    server_kv_set_identity(s, s->models[idx].path);
     free(dir);
 }
 
@@ -11354,6 +11519,8 @@ static void usage(FILE *fp) {
         "      Enable disk KV checkpoints in DIR. The directory is created if needed.\n"
         "  --kv-disk-space-mb N\n"
         "      Disk budget for checkpoint files. Default when enabled: 4096\n"
+        "  --kv-system-checkpoint\n"
+        "      Store the system-prompt+tools prefix once so new conversations skip its prefill.\n"
         "  --kv-cache-min-tokens N\n"
         "      Do not save or load checkpoints shorter than N tokens. Default: 512\n"
         "  --kv-cache-cold-max-tokens N\n"
@@ -11494,6 +11661,8 @@ static server_config parse_options(int argc, char **argv) {
             c.models_dir = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--kv-disk-space-mb")) {
             c.kv_disk_space_mb = (uint64_t)parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--kv-system-checkpoint")) {
+            c.kv_cache.system_checkpoint = true;
         } else if (!strcmp(arg, "--kv-cache-min-tokens")) {
             c.kv_cache.min_tokens = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-cache-cold-max-tokens")) {
@@ -11671,6 +11840,7 @@ int main(int argc, char **argv) {
     } else if (cfg.kv_disk_dir) {
         kv_cache_open(&s.kv, cfg.kv_disk_dir, cfg.kv_disk_space_mb,
                       cfg.kv_cache_reject_different_quant, cfg.kv_cache);
+        server_kv_set_identity(&s, cfg.engine.model_path);
     }
     if (s.disable_exact_tool_replay) {
         server_log(Q36_LOG_DEFAULT,
@@ -14077,6 +14247,77 @@ static void test_canonical_rewrite_rebuilds_when_live_tail_changes(void) {
     TEST_ASSERT(!q36_session_rewrite_requires_rebuild(1024, 1100, 1024));
 }
 
+static void test_kv_key_includes_identity(void) {
+    char plain[41], a1[41], a2[41], b[41], legacy[41];
+    sha1_bytes_hex("system text", 11, plain);
+    kv_cache_text_sha("", "system text", 11, legacy);
+    TEST_ASSERT(!strcmp(plain, legacy));                        /* empty identity = legacy key */
+    kv_cache_text_sha("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "system text", 11, a1);
+    kv_cache_text_sha("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "system text", 11, a2);
+    kv_cache_text_sha("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "system text", 11, b);
+    TEST_ASSERT(!strcmp(a1, a2));                               /* deterministic */
+    TEST_ASSERT(strcmp(a1, b) != 0 && strcmp(a1, plain) != 0);  /* other model => other key */
+    kv_cache_text_sha("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "system texu", 11, b);
+    TEST_ASSERT(strcmp(a1, b) != 0);                            /* other prompt/tools => other key */
+}
+
+static void write_fake_model(const char *path, size_t size, size_t flip_at, bool flip) {
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL);
+    if (!fp) return;
+    for (size_t i = 0; i < size; i++) {
+        unsigned char c = (unsigned char)((i * 2654435761u) >> 13);
+        if (flip && i == flip_at) c ^= 0xff;
+        fputc(c, fp);
+    }
+    fclose(fp);
+}
+
+static void test_kv_model_fingerprint_detects_changes(void) {
+    char dir[] = "/tmp/q36fpXXXXXX";
+    TEST_ASSERT(mkdtemp(dir) != NULL);
+    char m1[128], m2[128], m3[128], m4[128], st1[128], st2[128];
+    snprintf(m1, sizeof(m1), "%s/a.gguf", dir); snprintf(m2, sizeof(m2), "%s/b.gguf", dir);
+    snprintf(m3, sizeof(m3), "%s/c.gguf", dir); snprintf(m4, sizeof(m4), "%s/d.gguf", dir);
+    snprintf(st1, sizeof(st1), "%s/s1", dir); snprintf(st2, sizeof(st2), "%s/s2", dir);
+    const size_t size = 18u << 20;
+    write_fake_model(m1, size, 0, false);
+    write_fake_model(m2, size, 5000, true);              /* metadata region differs */
+    write_fake_model(m3, size, size - 10, true);         /* tail differs */
+    write_fake_model(m4, size + 1024, 0, false);         /* size differs */
+    char f1[41], f1b[41], f2[41], f3[41], f4[41], fs1[41], fs2[41];
+    TEST_ASSERT(kv_model_fingerprint(m1, NULL, f1) && kv_model_fingerprint(m1, NULL, f1b));
+    TEST_ASSERT(!strcmp(f1, f1b));
+    TEST_ASSERT(kv_model_fingerprint(m2, NULL, f2) && strcmp(f1, f2) != 0);
+    TEST_ASSERT(kv_model_fingerprint(m3, NULL, f3) && strcmp(f1, f3) != 0);
+    TEST_ASSERT(kv_model_fingerprint(m4, NULL, f4) && strcmp(f1, f4) != 0);
+    FILE *fp = fopen(st1, "wb"); fputs("vector-one", fp); fclose(fp);
+    fp = fopen(st2, "wb"); fputs("vector-two", fp); fclose(fp);
+    TEST_ASSERT(kv_model_fingerprint(m1, st1, fs1) && kv_model_fingerprint(m1, st2, fs2));
+    TEST_ASSERT(strcmp(fs1, fs2) != 0 && strcmp(fs1, f1) != 0);   /* steering is part of the identity */
+    TEST_ASSERT(!kv_model_fingerprint("/nonexistent/model.gguf", NULL, f1));
+    unlink(m1); unlink(m2); unlink(m3); unlink(m4); unlink(st1); unlink(st2); rmdir(dir);
+}
+
+static void test_system_boundary_tokens(void) {
+    enum { START = 1, SYS = 2, END = 3, NL = 4, USER = 5, X = 9 };
+    int ok[] = {START, SYS, NL, X, X, X, END, NL, START, USER, NL, X};
+    q36_tokens t = {.v = ok, .len = (int)(sizeof(ok) / sizeof(ok[0])), .cap = 12};
+    TEST_ASSERT(system_boundary_tokens(&t, START, SYS, END, NL) == 8);   /* up to and incl. "<|im_end|>\n" */
+    int no_sys[] = {START, USER, NL, X, X, END, NL, X};
+    t.v = no_sys; t.len = 8;
+    TEST_ASSERT(system_boundary_tokens(&t, START, SYS, END, NL) == 0);   /* first turn is not system */
+    int only_sys[] = {START, SYS, NL, X, X, END, NL};
+    t.v = only_sys; t.len = 7;
+    TEST_ASSERT(system_boundary_tokens(&t, START, SYS, END, NL) == 0);   /* nothing follows: no checkpoint */
+    int open_sys[] = {START, SYS, NL, X, X, X, X, X};
+    t.v = open_sys; t.len = 8;
+    TEST_ASSERT(system_boundary_tokens(&t, START, SYS, END, NL) == 0);   /* unterminated */
+    int nested[] = {START, SYS, NL, X, START, USER, END, NL, X};
+    t.v = nested; t.len = 9;
+    TEST_ASSERT(system_boundary_tokens(&t, START, SYS, END, NL) == 0);   /* malformed: new turn before end */
+}
+
 static void test_kv_cache_store_len_uses_configured_boundary(void) {
     kv_disk_cache kc = {0};
     kc.opt = kv_cache_default_options();
@@ -15679,6 +15920,9 @@ static void q36_server_unit_tests_run(void) {
     test_kv_cache_store_len_uses_configured_boundary();
     test_kv_cache_continued_uses_aligned_frontiers();
     test_sha1_bytes_hex_matches_known_vector();
+    test_kv_key_includes_identity();
+    test_kv_model_fingerprint_detects_changes();
+    test_system_boundary_tokens();
     test_tool_id_set_handles_large_history();
     test_kv_cache_lookup_uses_longest_text_prefix();
     test_kv_cache_lookup_matches_stripped_reasoning();

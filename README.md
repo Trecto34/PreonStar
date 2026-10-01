@@ -1047,6 +1047,36 @@ behavior looks suspicious. Files use plain `read`/`write` I/O (not `mmap`)
 and store the verbatim cached prompt text, so `hexdump` can inspect them
 directly.
 
+
+### System+tools checkpoint (`--kv-system-checkpoint`)
+
+Agents start every session with the same system prompt and tool schemas
+(~1.6-1.8k tokens). With `--kv-disk-dir` and `--kv-system-checkpoint`, the first
+request prefills the system turn on its own, stores that state, and every later
+conversation with the same prefix restores it instead of recomputing it.
+
+- **Identity.** Every cache key is `sha1(model fingerprint || sha1(rendered prefix text))`.
+  The rendered text already pins the system prompt, tool schemas, template flags and
+  think mode; the model fingerprint pins the weights, tokenizer and any
+  `--directional-steering-file` (size, the first 16 MiB, 32 spread 64 KiB samples, the
+  last MiB, plus the steering file) together with a key-format version. A changed prompt, tool schema,
+  model or steering file is a clean miss. Entries written by older builds never match
+  and age out through the normal disk budget. If the model cannot be read the cache is
+  disabled rather than keyed by a guess. Limitation: a patch confined to unsampled
+  bytes of an equal-size file would not change the fingerprint.
+- **Exactness.** The checkpoint is floored to a multiple of the prefill chunk, so a
+  restored session continues on exactly the chunk schedule of a cold prompt. Measured:
+  restored and cold greedy replies (reasoning, content, tool-call arguments) were
+  identical in 12 of 12 sessions, at chunk 1024 and at 512; a checkpoint inside a chunk
+  diverged in 2 of 12 and is therefore not used. With the default 1024 chunk a
+  ~1.7k-token prefix caches 1024 tokens; `--prefill-chunk 512` caches 1536.
+- **Cost.** About 80 MiB per checkpoint on disk (dominated by fixed recurrent state, not
+  token count), bounded by `--kv-disk-space-mb` with the usual eviction. The first
+  session pays one extra save (~0.1 s); a disk-full store fails quietly and the request
+  runs cold.
+- **Metrics.** Chat usage gains
+  `timings.system_checkpoint: {hit, tokens, restore_ms, build_ms}` when enabled.
+
 ## Backends
 
 Q36 is multi-runtime at the source and API level, but Metal and Vulkan are

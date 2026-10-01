@@ -163,6 +163,9 @@ int q36_engine_power(q36_engine *e);
 int q36_engine_set_power(q36_engine *e, int power_percent);
 const char *q36_engine_model_name(q36_engine *e);
 int q36_engine_model_id(q36_engine *e);
+/* Effective prefill chunk (tokens per forward pass): chunk boundaries decide the
+ * floating-point schedule, so cache checkpoints must land on multiples of it. */
+uint32_t q36_engine_prefill_chunk(q36_engine *e);
 bool q36_engine_is_qwen38(q36_engine *e);
 bool q36_engine_is_kat_coder(q36_engine *e);
 const char *q36_qwen38_effort_instruction(q36_think_mode mode);
