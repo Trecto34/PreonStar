@@ -290,6 +290,7 @@ static void print_agent_specific(FILE *fp, const help_colors *c) {
     opt(fp, c, "--max-repeat-tool N", "Identical read-only calls allowed against an unchanged workspace. Default: 1.");
     opt(fp, c, "--max-stagnant-turns N", "Blocked or identically failing calls before a recovery. Default: 2.");
     opt(fp, c, "--max-recoveries N", "Controller recoveries per user turn before the turn ends BLOCKED. Default: 3.");
+    opt(fp, c, "--compact-llm", "Write compaction summaries with the model instead of the harness-maintained task state.");
     opt(fp, c, "--frequency-penalty F", "Optional sampler aid, -2..2 (alias: --default-frequency-penalty). Default: 0.");
     opt(fp, c, "--think-low, --think-medium, --think, --think-xhigh", "Select the initial dense thinking mode without changing the budget.");
     opt(fp, c, "Tab", "Cycle dense low/medium/high/xhigh or MoE off/on; keep the current thinking budget.");

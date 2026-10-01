@@ -1,5 +1,6 @@
 #define Q36_AGENT_TEST
 #define Q36_AGENT_TEST_NO_MAIN
+#include <stdarg.h>
 #include "../q36_agent.c"
 #include <sys/resource.h>
 
@@ -937,6 +938,133 @@ static void test_action_leak_and_watchdog(void) {
     AGENT_TEST_ASSERT(!agent_watchdog_blocks(&w, &rd, 1));
 }
 
+/* Deterministic replay of the recovery protocol: scripted "model" rounds go
+ * through the same leak detector and recovery counter the worker loop uses. */
+static void test_leak_recovery_protocol(void) {
+    const char *leaky[] = {"Wait, let me reconsider.\n", "Actually, let me read it again.\n",
+                           "Hmm, let me check once more.\n"};
+    const char *good = "Done: index.html written.\n";
+    static agent_action_leak l;
+    agent_recovery rec = {.max = 2};
+    /* Rounds 0..2 leak (round 2 exceeds max -> BLOCKED); a healthy round after
+     * a recovery passes and a retry round never starts with thinking. */
+    int blocked_at = -1;
+    for (int round = 0; round < 3; round++) {
+        memset(&l, 0, sizeof(l));
+        bool leaked = false;
+        for (int i = 0; i < 300 && !leaked; i++)
+            leaked = agent_action_leak_feed(&l, 16, leaky[i % 3], strlen(leaky[i % 3]));
+        AGENT_TEST_ASSERT(leaked);
+        AGENT_TEST_ASSERT(l.tokens > 16 && l.tokens < 120); /* aborted promptly */
+        if (!agent_recovery_next(&rec)) { blocked_at = round; break; }
+        AGENT_TEST_ASSERT(rec.nothink_next);
+    }
+    AGENT_TEST_ASSERT(blocked_at == 2);
+    agent_recovery ok = {.max = 2};
+    AGENT_TEST_ASSERT(agent_recovery_next(&ok));
+    memset(&l, 0, sizeof(l));
+    for (int i = 0; i < 200; i++) {
+        char line[96];
+        snprintf(line, sizeof(line), "%s step %d wrote section %d of the report. ", good, i, i * 7);
+        AGENT_TEST_ASSERT(!agent_action_leak_feed(&l, 16, line, strlen(line)));
+    }
+    /* Past 4x budget a lone restart marker is enough. */
+    memset(&l, 0, sizeof(l));
+    bool hit = false;
+    for (int i = 0; i < 200 && !hit; i++) {
+        char buf[96];
+        if (i == 150) snprintf(buf, sizeof(buf), "Wait, one more thing.\n");
+        else snprintf(buf, sizeof(buf), "Point %d: the answer is in file %d. ", i, i * 13);
+        hit = agent_action_leak_feed(&l, 16, buf, strlen(buf));
+    }
+    AGENT_TEST_ASSERT(hit);
+}
+
+static char *test_call(const char *name, ...) {
+    agent_tool_arg args[6];
+    int n = 0;
+    va_list ap;
+    va_start(ap, name);
+    const char *k;
+    while (n < 6 && (k = va_arg(ap, const char *))) {
+        args[n].name = (char *)k;
+        args[n].value = (char *)va_arg(ap, const char *);
+        n++;
+    }
+    va_end(ap);
+    agent_tool_call c = {(char *)name, args, n, n};
+    if (!strcmp(name, "write")) return agent_tool_write(NULL, &c);
+    return agent_tool_edit(NULL, &c);
+}
+
+static void test_write_append_and_edit_lines(void) {
+    char dir[] = "/tmp/q36agentXXXXXX";
+    AGENT_TEST_ASSERT(mkdtemp(dir) != NULL);
+    char path[256];
+    snprintf(path, sizeof(path), "%s/f.txt", dir);
+    char *r = test_call("write", "path", path, "content", "one\n", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "OK write") && strstr(r, "total=4"));
+    free(r);
+    r = test_call("write", "path", path, "content", "two\nthree\n", "append", "true", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "total=14") && strstr(r, "append=1"));
+    free(r);
+    char *big = xmalloc(AGENT_WRITE_PAYLOAD_MAX + 2);
+    memset(big, 'x', AGENT_WRITE_PAYLOAD_MAX + 1);
+    big[AGENT_WRITE_PAYLOAD_MAX + 1] = 0;
+    r = test_call("write", "path", path, "content", big, NULL);
+    AGENT_TEST_ASSERT(strstr(r, "WRITE_PAYLOAD_TOO_LARGE") && strstr(r, "max_bytes=12288"));
+    free(r);
+    free(big);
+    /* whitespace-sensitive edit: model's old text has the wrong indentation */
+    r = test_call("write", "path", path, "content", "int f(void) {\n        return 1;\n}\n", NULL);
+    free(r);
+    r = test_call("edit", "path", path, "old", "return  1 ;", "new", "x", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "EDIT_MATCH_NOT_FOUND") && strstr(r, "hint=whitespace_differs") &&
+                      strstr(r, "actual_matches=0") && strstr(r, "path="));
+    free(r);
+    r = test_call("edit", "path", path, "start_line", "2", "end_line", "2",
+                  "new", "    return 2;", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "Tool error") == NULL);
+    free(r);
+    char *data = NULL; size_t len = 0; char err[128];
+    AGENT_TEST_ASSERT(agent_read_file_bytes(path, &data, &len, err, sizeof(err)) == 0);
+    AGENT_TEST_ASSERT(data && !strcmp(data, "int f(void) {\n    return 2;\n}\n"));
+    free(data);
+    r = test_call("edit", "path", path, "start_line", "4", "end_line", "3", "new", "// end", NULL);
+    free(r);   /* insert at EOF keeps one line per line */
+    AGENT_TEST_ASSERT(agent_read_file_bytes(path, &data, &len, err, sizeof(err)) == 0);
+    AGENT_TEST_ASSERT(data && !strcmp(data, "int f(void) {\n    return 2;\n}\n// end\n"));
+    free(data);
+    r = test_call("edit", "path", path, "start_line", "9", "new", "z", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "EDIT_LINE_RANGE_INVALID") && strstr(r, "lines=4"));
+    free(r);
+    unlink(path);
+    rmdir(dir);
+}
+
+static void test_task_state_render(void) {
+    static agent_task_state st;
+    memset(&st, 0, sizeof(st));
+    agent_st_note_goal(&st, "Fix the cube spin.\nWait, maybe not");
+    agent_tool_arg pa = {"path", "index.html"};
+    agent_tool_call rd = {"read", &pa, 1, 1}, ed = {"edit", &pa, 1, 1};
+    agent_st_note_tool(&st, &rd, "1 <html>");
+    char *r = agent_st_render(&st);
+    AGENT_TEST_ASSERT(strstr(r, "- already read index.html"));
+    free(r);
+    agent_st_note_tool(&st, &ed, "Edited index.html using line-range replacement\nTouched old lines 3-3");
+    r = agent_st_render(&st);
+    AGENT_TEST_ASSERT(!strstr(r, "already read"));          /* edit invalidates the read */
+    AGENT_TEST_ASSERT(strstr(r, "CURRENT EDIT STATE:\n- index.html: Edited index.html"));
+    AGENT_TEST_ASSERT(strstr(r, "- edit index.html"));
+    free(r);
+    agent_st_note_tool(&st, &ed, "Tool error: EDIT_MATCH_NOT_FOUND part=old text expected_matches=1");
+    r = agent_st_render(&st);
+    AGENT_TEST_ASSERT(strstr(r, "fix and retry: edit index.html: EDIT_MATCH_NOT_FOUND"));
+    free(r);
+    AGENT_TEST_ASSERT(!agent_st_empty(&st));
+}
+
 static void test_repetitive_tool_aborted_before_execution(void) {
     char path[] = "/tmp/q36-agent-repetition-XXXXXX";
     int fd = mkstemp(path);
@@ -1056,6 +1184,9 @@ int main(int argc, char **argv) {
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();
     test_action_leak_and_watchdog();
+    test_task_state_render();
+    test_write_append_and_edit_lines();
+    test_leak_recovery_protocol();
     test_agent_frequency_penalty_sampling_path();
     test_observation_error_is_not_context_exhaustion();
     test_atomic_file_tools();

@@ -46,6 +46,7 @@ int linenoiseEditInsert(struct linenoiseState *l, const char *c, size_t clen);
 #define AGENT_STREAMING_CTX 100000
 #define AGENT_THINKING_BUDGET_DEFAULT 50000
 #define AGENT_ACTION_BUDGET_DEFAULT 384
+#define AGENT_WRITE_PAYLOAD_MAX 12288 /* bytes of content per write call */
 #define AGENT_MAX_REPEAT_TOOL_DEFAULT 1
 #define AGENT_MAX_STAGNANT_DEFAULT 2
 #define AGENT_MAX_RECOVERIES_DEFAULT 3
@@ -82,6 +83,7 @@ typedef struct {
     int max_repeat_tool;    /* identical calls allowed per unchanged workspace */
     int max_stagnant_turns; /* blocked/identically-failing calls before recovery */
     int max_recoveries;     /* controller recoveries per user turn before BLOCKED */
+    bool compact_llm;       /* write compaction summaries with the model, not harness state */
     int ctx_size;
     float temperature;
     int top_k;
@@ -132,6 +134,31 @@ typedef struct {
     bool qwen38;
     char error[256];
 } agent_status;
+
+/* Durable task state maintained by the harness (never by the model), so
+ * compaction can preserve facts instead of prose.  Fixed-size on purpose. */
+#define AGENT_ST_GOALS 4
+#define AGENT_ST_FILES 32
+#define AGENT_ST_LINES 24
+typedef struct {
+    char path[200];
+    char ranges[80];  /* "read 1-200; 300-340" while unchanged since */
+    char note[100];   /* last write/edit outcome; empty if never modified */
+} agent_st_file;
+
+typedef struct {
+    char *goals[AGENT_ST_GOALS];
+    int ngoals;
+    agent_st_file files[AGENT_ST_FILES];
+    int nfiles;
+    char *done[AGENT_ST_LINES];    /* completed actions */
+    int ndone;
+    char *facts[AGENT_ST_LINES];   /* command outcomes */
+    int nfacts;
+    char *failed[AGENT_ST_LINES];  /* failed attempts */
+    int nfailed;
+    bool last_failed;
+} agent_task_state;
 
 typedef struct agent_bash_job agent_bash_job;
 
@@ -225,6 +252,7 @@ typedef struct {
     int wd_blocked;     /* duplicate calls refused this user turn */
     int wd_stagnant;    /* consecutive blocked / identically failing calls */
     uint64_t wd_last_err;
+    agent_task_state st;
 } agent_worker;
 
 static unsigned agent_next_prefill_label(void);
@@ -763,6 +791,8 @@ static agent_config parse_options(int argc, char **argv) {
             c.gen.max_repeat_tool = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--max-stagnant-turns")) {
             c.gen.max_stagnant_turns = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--compact-llm")) {
+            c.gen.compact_llm = true;
         } else if (!strcmp(arg, "--max-recoveries")) {
             c.gen.max_recoveries = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--thinking-budget")) {
@@ -1103,7 +1133,8 @@ static bool agent_tool_response_is_error(const char *content) {
     "context is 0-5, max_results is 1-500. The search skips .git and nested symlinks, and reports incomplete coverage.\n" \
     "bash timeout_sec defaults to 3600; refresh_sec defaults to 60 and waits up to that many seconds. " \
     "bash_status returns immediately unless refresh_sec is given. Jobs keep running and timeouts remain active between calls.\n" \
-    "Write and edit replace complete files atomically, follow existing symlink targets, and reject hard-linked files.\n\n"
+    "write content is limited to 12 KiB per call: write the first part, then call write with append=true for each next part. " \
+    "To edit by line numbers (safe for whitespace), call edit with start_line, end_line and new, without old.\n\n"
 
 static const char agent_tools_prompt_intro[] =
     "You are a coding agent running in a local workspace. Use tools for local file and system work. "
@@ -1309,7 +1340,8 @@ static const char agent_tools_prompt_after_edit[] =
     "      \"type\": \"object\",\n"
     "      \"properties\": {\n"
     "        \"path\": {\"type\": \"string\"},\n"
-    "        \"content\": {\"type\": \"string\"}\n"
+    "        \"content\": {\"type\": \"string\"},\n"
+    "        \"append\": {\"type\": \"boolean\"}\n"
     "      },\n"
     "      \"required\": [\"path\", \"content\"]\n"
     "    }\n"
@@ -1325,9 +1357,11 @@ static const char agent_tools_prompt_after_edit[] =
     "      \"properties\": {\n"
     "        \"path\": {\"type\": \"string\"},\n"
     "        \"old\": {\"type\": \"string\"},\n"
-    "        \"new\": {\"type\": \"string\"}\n"
+    "        \"new\": {\"type\": \"string\"},\n"
+    "        \"start_line\": {\"type\": \"integer\"},\n"
+    "        \"end_line\": {\"type\": \"integer\"}\n"
     "      },\n"
-    "      \"required\": [\"path\", \"old\", \"new\"]\n"
+    "      \"required\": [\"path\", \"new\"]\n"
     "    }\n"
     "  }\n"
     "}\n\n"
@@ -6573,16 +6607,38 @@ static char *agent_tool_write(agent_worker *w, const agent_tool_call *call) {
     if (!path || !path[0]) return xstrdup("Tool error: write requires path\n");
     if (!content) return xstrdup("Tool error: write requires content\n");
     size_t len = strlen(content);
+    char msg[PATH_MAX + 200];
+    if (len > AGENT_WRITE_PAYLOAD_MAX) {
+        snprintf(msg, sizeof(msg),
+                 "Tool error: WRITE_PAYLOAD_TOO_LARGE path=%s bytes=%zu max_bytes=%d "
+                 "next=write the first part, then write append=true for the rest\n",
+                 path, len, AGENT_WRITE_PAYLOAD_MAX);
+        return xstrdup(msg);
+    }
+    bool append = agent_parse_bool_default(agent_tool_arg_value(call, "append"), false);
     char err[256];
-    if (agent_replace_file(path, content, len, NULL, 0, err, sizeof(err)) != 0) {
+    char *old = NULL;
+    size_t old_len = 0;
+    char *out = (char *)content;
+    size_t out_len = len;
+    if (append && agent_read_file_bytes(path, &old, &old_len, err, sizeof(err)) == 0) {
+        out = xmalloc(old_len + len + 1);
+        memcpy(out, old, old_len);
+        memcpy(out + old_len, content, len + 1);
+        out_len = old_len + len;
+    }
+    int rc = agent_replace_file(path, out, out_len, old, old_len, err, sizeof(err));
+    if (out != content) free(out);
+    free(old);
+    if (rc != 0) {
         agent_buf b = {0};
         agent_buf_puts(&b, "Tool error: ");
         agent_buf_puts(&b, err);
         agent_buf_puts(&b, "\n");
         return agent_buf_take(&b);
     }
-    char msg[PATH_MAX + 160];
-    snprintf(msg, sizeof(msg), "Wrote %zu bytes to %s\n", len, path);
+    snprintf(msg, sizeof(msg), "OK write path=%s bytes=%zu total=%zu append=%d max_payload=%d\n",
+             path, len, out_len, append, AGENT_WRITE_PAYLOAD_MAX);
     return xstrdup(msg);
 }
 
@@ -6867,25 +6923,51 @@ static const char *agent_memmem_simple(const char *hay, size_t hay_len,
     return NULL;
 }
 
+/* Needle differs from the file only in whitespace?  Say so, so the model
+ * switches to start_line/end_line instead of re-counting spaces. */
+static const char *agent_whitespace_hint(const char *data, size_t len,
+                                         const char *needle, size_t needle_len) {
+    char *a = xmalloc(len + 1), *b = xmalloc(needle_len + 1);
+    size_t an = 0, bn = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (!isspace((unsigned char)data[i])) a[an++] = data[i];
+    }
+    for (size_t i = 0; i < needle_len; i++) {
+        if (!isspace((unsigned char)needle[i])) b[bn++] = needle[i];
+    }
+    bool hit = bn && agent_memmem_simple(a, an, b, bn);
+    free(a);
+    free(b);
+    return hit ? " hint=whitespace_differs use=start_line/end_line" : "";
+}
+
 static bool agent_find_unique(const char *data, size_t len,
                               const char *needle, size_t needle_len,
                               const char **match, const char *label,
                               char *err, size_t err_len) {
     if (!needle || needle_len == 0) {
-        snprintf(err, err_len, "%s anchor is empty", label);
+        snprintf(err, err_len, "EDIT_%s_EMPTY", label);
         return false;
     }
     const char *first = agent_memmem_simple(data, len, needle, needle_len);
     if (!first) {
-        snprintf(err, err_len, "%s anchor not found", label);
+        snprintf(err, err_len,
+                 "EDIT_MATCH_NOT_FOUND part=%s expected_matches=1 actual_matches=0%s",
+                 label, agent_whitespace_hint(data, len, needle, needle_len));
         return false;
     }
-    size_t after_first = (size_t)(first - data) + 1;
-    const char *second = after_first <= len ?
-        agent_memmem_simple(data + after_first, len - after_first,
-                            needle, needle_len) : NULL;
-    if (second) {
-        snprintf(err, err_len, "%s anchor is not unique", label);
+    int found = 1;
+    const char *at = first;
+    while (found < 9) {
+        size_t off = (size_t)(at - data) + 1;
+        at = off <= len ? agent_memmem_simple(data + off, len - off, needle, needle_len) : NULL;
+        if (!at) break;
+        found++;
+    }
+    if (found > 1) {
+        snprintf(err, err_len,
+                 "EDIT_MATCH_NOT_UNIQUE part=%s expected_matches=1 actual_matches=%d%s",
+                 label, found, found == 9 ? "+" : "");
         return false;
     }
     *match = first;
@@ -6905,7 +6987,7 @@ static bool agent_find_unique_after(const char *data, size_t len,
                                     const char **match, const char *label,
                                     char *err, size_t err_len) {
     if (!needle || needle_len == 0) {
-        snprintf(err, err_len, "%s anchor is empty", label);
+        snprintf(err, err_len, "EDIT_%s_EMPTY", label);
         return false;
     }
     if (start < data || start > data + len) {
@@ -6916,7 +6998,9 @@ static bool agent_find_unique_after(const char *data, size_t len,
     const char *first = agent_memmem_simple(data + off, len - off,
                                             needle, needle_len);
     if (!first) {
-        snprintf(err, err_len, "%s anchor not found after old head", label);
+        snprintf(err, err_len,
+                 "EDIT_MATCH_NOT_FOUND part=%s expected_matches=1 actual_matches=0 after=head",
+                 label);
         return false;
     }
     size_t after_first = (size_t)(first - data) + 1;
@@ -6924,7 +7008,9 @@ static bool agent_find_unique_after(const char *data, size_t len,
         agent_memmem_simple(data + after_first, len - after_first,
                             needle, needle_len) : NULL;
     if (second) {
-        snprintf(err, err_len, "%s anchor is not unique after old head", label);
+        snprintf(err, err_len,
+                 "EDIT_MATCH_NOT_UNIQUE part=%s expected_matches=1 actual_matches=2+ after=head",
+                 label);
         return false;
     }
     *match = first;
@@ -7155,7 +7241,7 @@ static void test_agent_edit_upto_tail_newline_is_not_part_of_anchor(void) {
     AGENT_TEST_ASSERT(!agent_edit_find_old_span(data, strlen(data), old, false,
                                                 &match, &match_len, &anchored,
                                                 err, sizeof(err)));
-    AGENT_TEST_ASSERT(strstr(err, "not found") != NULL);
+    AGENT_TEST_ASSERT(strstr(err, "EDIT_MATCH_NOT_FOUND") != NULL);
     err[0] = '\0';
     AGENT_TEST_ASSERT(agent_edit_find_old_span(data, strlen(data), old, true,
                                                &match, &match_len, &anchored,
@@ -7646,13 +7732,65 @@ static char *agent_apply_file_splice(const char *path,
  * For large replacements, old may contain one [upto] marker: the head must be
  * unique, and the tail must be unique after that head before the whole span is
  * replaced. */
+/* Replace lines [start,end] (1-based, inclusive) of path with new_text.  end =
+ * start-1 inserts before start.  Needs no exact old text, so indentation never
+ * has to be reproduced by the model. */
+static char *agent_tool_edit_lines(const char *path, const char *start_arg,
+                                   const char *end_arg, const char *new_text) {
+    char err[256], msg[PATH_MAX + 160];
+    char *data = NULL;
+    size_t len = 0;
+    if (agent_read_file_bytes(path, &data, &len, err, sizeof(err)) != 0) {
+        snprintf(msg, sizeof(msg), "Tool error: %s\n", err);
+        return xstrdup(msg);
+    }
+    int lines = 0;
+    for (size_t i = 0; i < len; i++) if (data[i] == '\n') lines++;
+    if (len && data[len - 1] != '\n') lines++;
+    int start = agent_parse_int_default(start_arg, -1, -1, INT_MAX);
+    int end = agent_parse_int_default(end_arg, start, -1, INT_MAX);
+    if (start < 1 || start > lines + 1 || end < start - 1 || end > lines) {
+        snprintf(msg, sizeof(msg),
+                 "Tool error: EDIT_LINE_RANGE_INVALID path=%s start=%s end=%s lines=%d\n",
+                 path, start_arg, end_arg ? end_arg : start_arg, lines);
+        free(data);
+        return xstrdup(msg);
+    }
+    size_t off, end_off;
+    int cur = 1;
+    off = (start == 1) ? 0 : len;
+    end_off = len;
+    for (size_t i = 0; i < len; i++) {
+        if (data[i] != '\n') continue;
+        cur++;
+        if (cur == start) off = i + 1;
+        if (cur == end + 1) { end_off = i + 1; break; }
+    }
+    if (end < start) end_off = off;
+    size_t nl = strlen(new_text);
+    char *ins = xmalloc(nl + 2);
+    memcpy(ins, new_text, nl);
+    bool eof_no_nl = end_off == len && (!len || data[len - 1] != '\n');
+    if (nl && new_text[nl - 1] != '\n' && !eof_no_nl) ins[nl++] = '\n';
+    ins[nl] = '\0';
+    char *result = agent_apply_file_splice(path, data, len, off, end_off - off,
+                                           ins, "line-range replacement");
+    free(ins);
+    free(data);
+    return result;
+}
+
 static char *agent_tool_edit(agent_worker *w, const agent_tool_call *call) {
     const char *path = agent_tool_arg_value(call, "path");
     if (!path || !path[0]) return xstrdup("Tool error: edit requires path\n");
     const char *old = agent_tool_arg_value(call, "old");
     const char *new_text = agent_tool_arg_value(call, "new");
-    if (!old || !old[0]) return xstrdup("Tool error: edit requires non-empty old text\n");
+    const char *start_arg = agent_tool_arg_value(call, "start_line");
     if (!new_text) return xstrdup("Tool error: edit requires new text\n");
+    if (start_arg && start_arg[0] && (!old || !old[0]))
+        return agent_tool_edit_lines(path, start_arg,
+                                     agent_tool_arg_value(call, "end_line"), new_text);
+    if (!old || !old[0]) return xstrdup("Tool error: EDIT_OLD_EMPTY use=old or start_line/end_line\n");
 
     char err[256];
     char *data = NULL;
@@ -7677,6 +7815,8 @@ static char *agent_tool_edit(agent_worker *w, const agent_tool_call *call) {
         agent_buf b = {0};
         agent_buf_puts(&b, "Tool error: ");
         agent_buf_puts(&b, err);
+        agent_buf_puts(&b, " path=");
+        agent_buf_puts(&b, path);
         agent_buf_puts(&b, "\n");
         return agent_buf_take(&b);
     }
@@ -8815,6 +8955,159 @@ static pid_t agent_tool_pid(const agent_tool_call *call) {
 /* Execute one parsed Qwen tool call and return the text that will be appended as
  * the tool-role result.  UI visualization already happened while streaming; this
  * function is only about side effects and the model-visible observation. */
+
+/* ---- Deterministic task state (Phase 5) ---- */
+static char *agent_st_clip(const char *s, size_t max) {
+    size_t n = s ? strlen(s) : 0;
+    while (n && isspace((unsigned char)s[n - 1])) n--;
+    bool cut = n > max;
+    if (cut) n = max;
+    char *out = xmalloc(n + 4);
+    memcpy(out, s ? s : "", n);
+    for (size_t i = 0; i < n; i++) if (out[i] == '\n' || out[i] == '\r') out[i] = ' ';
+    if (cut) memcpy(out + n, "...", 4); else out[n] = 0;
+    return out;
+}
+
+static void agent_st_push(char **v, int *n, char *owned) {
+    if (*n && !strcmp(v[*n - 1], owned)) { free(owned); return; }
+    if (*n == AGENT_ST_LINES) {
+        free(v[0]);
+        memmove(v, v + 1, (AGENT_ST_LINES - 1) * sizeof(v[0]));
+        (*n)--;
+    }
+    v[(*n)++] = owned;
+}
+
+static agent_st_file *agent_st_file_get(agent_task_state *st, const char *path) {
+    for (int i = 0; i < st->nfiles; i++)
+        if (!strcmp(st->files[i].path, path)) return &st->files[i];
+    if (st->nfiles == AGENT_ST_FILES) {
+        memmove(st->files, st->files + 1, (AGENT_ST_FILES - 1) * sizeof(st->files[0]));
+        st->nfiles--;
+    }
+    agent_st_file *f = &st->files[st->nfiles++];
+    memset(f, 0, sizeof(*f));
+    snprintf(f->path, sizeof(f->path), "%s", path);
+    return f;
+}
+
+static void agent_st_note_goal(agent_task_state *st, const char *user_text) {
+    if (!user_text || !user_text[0]) return;
+    if (st->ngoals == AGENT_ST_GOALS) {
+        free(st->goals[0]);
+        memmove(st->goals, st->goals + 1, (AGENT_ST_GOALS - 1) * sizeof(st->goals[0]));
+        st->ngoals--;
+    }
+    st->goals[st->ngoals++] = agent_st_clip(user_text, 600);
+}
+
+static void agent_st_note_tool(agent_task_state *st, const agent_tool_call *c,
+                               const char *res) {
+    const char *name = c->name ? c->name : "?";
+    const char *path = NULL;
+    for (int i = 0; i < c->argc; i++)
+        if (c->args[i].name && !strcmp(c->args[i].name, "path")) path = c->args[i].value;
+    char line[320];
+    st->last_failed = !strncmp(res, "Tool error", 10);
+    if (st->last_failed) {
+        char *e = agent_st_clip(res + 12, 140);
+        snprintf(line, sizeof(line), "%s%s%s: %s", name, path ? " " : "", path ? path : "", e);
+        free(e);
+        agent_st_push(st->failed, &st->nfailed, xstrdup(line));
+        return;
+    }
+    if (!strcmp(name, "read") && path) {
+        agent_st_file *f = agent_st_file_get(st, path);
+        const char *a = agent_tool_arg_value(c, "start_line");
+        const char *m = agent_tool_arg_value(c, "max_lines");
+        char r[40];
+        if (agent_tool_arg_value(c, "whole")) snprintf(r, sizeof(r), "all");
+        else snprintf(r, sizeof(r), "%s+%s", a ? a : "1", m ? m : "500");
+        if (!strstr(f->ranges, r) && strlen(f->ranges) + strlen(r) + 3 < sizeof(f->ranges)) {
+            if (f->ranges[0]) strcat(f->ranges, "; ");
+            strcat(f->ranges, r);
+        }
+    } else if ((!strcmp(name, "write") || !strcmp(name, "edit")) && path) {
+        agent_st_file *f = agent_st_file_get(st, path);
+        f->ranges[0] = 0;   /* earlier reads are stale now */
+        char *first = agent_st_clip(res, 90);
+        snprintf(f->note, sizeof(f->note), "%s", first);
+        snprintf(line, sizeof(line), "%s %s", name, path);
+        free(first);
+        agent_st_push(st->done, &st->ndone, xstrdup(line));
+    } else if (!strcmp(name, "bash")) {
+        const char *cmd = agent_tool_arg_value(c, "command");
+        char *cc = agent_st_clip(cmd, 120);
+        const char *ex = strstr(res, "exit code: ");
+        char code[24] = "ok";
+        if (ex) snprintf(code, sizeof(code), "exit %d", atoi(ex + 11));
+        snprintf(line, sizeof(line), "`%s` -> %s", cc, code);
+        free(cc);
+        agent_st_push(st->facts, &st->nfacts, xstrdup(line));
+        for (int i = 0; i < st->nfiles; i++) st->files[i].ranges[0] = 0; /* shell may change anything */
+    } else if (!strcmp(name, "search") || !strcmp(name, "list")) {
+        const char *q = agent_tool_arg_value(c, "query");
+        snprintf(line, sizeof(line), "%s %s%s%s", name, q ? q : "", q && path ? " in " : "", path ? path : "");
+        agent_st_push(st->done, &st->ndone, xstrdup(line));
+    }
+}
+
+static char *agent_st_render(const agent_task_state *st) {
+    agent_buf b = {0};
+    char tmp[512];
+    agent_buf_puts(&b, "GOAL:\n");
+    for (int i = 0; i < st->ngoals; i++) {
+        snprintf(tmp, sizeof(tmp), "- %s\n", st->goals[i]);
+        agent_buf_puts(&b, tmp);
+    }
+    agent_buf_puts(&b, "\nVERIFIED FACTS:\n");
+    for (int i = 0; i < st->nfacts; i++) {
+        snprintf(tmp, sizeof(tmp), "- %s\n", st->facts[i]);
+        agent_buf_puts(&b, tmp);
+    }
+    agent_buf_puts(&b, "\nCOMPLETED:\n");
+    for (int i = 0; i < st->ndone; i++) {
+        snprintf(tmp, sizeof(tmp), "- %s\n", st->done[i]);
+        agent_buf_puts(&b, tmp);
+    }
+    agent_buf_puts(&b, "\nFILES / LOCATIONS:\n");
+    for (int i = 0; i < st->nfiles; i++) {
+        snprintf(tmp, sizeof(tmp), "- %s%s%s\n", st->files[i].path,
+                 st->files[i].note[0] ? " (modified)" : "",
+                 st->files[i].ranges[0] ? " (read)" : "");
+        agent_buf_puts(&b, tmp);
+    }
+    agent_buf_puts(&b, "\nFAILED ATTEMPTS:\n");
+    for (int i = 0; i < st->nfailed; i++) {
+        snprintf(tmp, sizeof(tmp), "- %s\n", st->failed[i]);
+        agent_buf_puts(&b, tmp);
+    }
+    agent_buf_puts(&b, "\nCURRENT EDIT STATE:\n");
+    for (int i = 0; i < st->nfiles; i++) {
+        if (!st->files[i].note[0]) continue;
+        snprintf(tmp, sizeof(tmp), "- %s: %s\n", st->files[i].path, st->files[i].note);
+        agent_buf_puts(&b, tmp);
+    }
+    agent_buf_puts(&b, "\nNEXT REQUIRED ACTION:\n");
+    if (st->last_failed && st->nfailed) {
+        snprintf(tmp, sizeof(tmp), "- fix and retry: %s\n", st->failed[st->nfailed - 1]);
+        agent_buf_puts(&b, tmp);
+    } else {
+        agent_buf_puts(&b, "- continue the GOAL from CURRENT EDIT STATE; act, or give the final answer\n");
+    }
+    agent_buf_puts(&b, "\nDO NOT REPEAT:\n");
+    for (int i = 0; i < st->nfiles; i++) {
+        if (!st->files[i].ranges[0]) continue;
+        snprintf(tmp, sizeof(tmp), "- already read %s [%s], unchanged\n",
+                 st->files[i].path, st->files[i].ranges);
+        agent_buf_puts(&b, tmp);
+    }
+    return agent_buf_take(&b);
+}
+
+static bool agent_st_empty(const agent_task_state *st) { return st->ngoals == 0; }
+
 static void agent_tool_observation_init(agent_tool_observation *obs) {
     memset(obs, 0, sizeof(*obs));
     obs->parts = xmalloc(sizeof(obs->parts[0]));
@@ -9017,7 +9310,23 @@ static bool agent_action_leak_feed(agent_action_leak *l, int budget,
     if (repeated) return true;
     if (l->tokens < l->next_check) return false;
     l->next_check = l->tokens + 32;
-    return agent_leak_marker_count(l->rep.text, l->rep.len) >= 3;
+    /* Past 4x the budget with still no action, a single restart marker is
+     * enough: the model has had ample room to act or answer. */
+    int need = l->tokens > 4 * budget ? 1 : 3;
+    return agent_leak_marker_count(l->rep.text, l->rep.len) >= need;
+}
+
+/* Per-user-turn recovery state shared by the leak and stagnation paths. */
+typedef struct {
+    int recoveries;
+    int max;
+    bool nothink_next;   /* next round skips thinking: go straight to ACTION */
+} agent_recovery;
+
+/* Count one recovery; false means the turn must end BLOCKED. */
+static bool agent_recovery_next(agent_recovery *r) {
+    r->nothink_next = true;
+    return ++r->recoveries <= r->max;
 }
 
 static const char agent_action_required_msg[] =
@@ -9105,6 +9414,7 @@ static agent_tool_observation agent_execute_tool_observation(
                 w->wd_stagnant = 0;
             }
             w->wd_last_err = eh;
+            agent_st_note_tool(&w->st, &calls->v[i], res);
         }
         agent_tool_observation_puts(&obs, res);
         if (res[0] && res[strlen(res) - 1] != '\n')
@@ -9375,6 +9685,27 @@ static int agent_compact_image_boundary(const q36_vision_span *images, size_t co
  * the compacted transcript.  Any failure invalidates live KV because the model
  * may have just seen private compaction instructions that are not part of the
  * real conversation. */
+/* Copy a transcript range, dropping the content of closed <think> blocks so
+ * the retained tail carries actions and results, not deliberation. */
+static void agent_tokens_append_range_no_think(q36_engine *engine, q36_tokens *dst,
+                                               const q36_tokens *src, int from, int to) {
+    int ts = agent_special_token_id(engine, "<think>");
+    int te = agent_special_token_id(engine, "</think>");
+    for (int i = from; i < to; i++) {
+        if (src->v[i] == ts) {
+            int j = i + 1;
+            while (j < to && src->v[j] != te) j++;
+            if (j < to) {            /* closed block: keep tags, drop body */
+                q36_tokens_push(dst, ts);
+                q36_tokens_push(dst, te);
+                i = j;
+                continue;
+            }
+        }
+        q36_tokens_push(dst, src->v[i]);
+    }
+}
+
 static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
                                   int *open_assistant,
                                   char *err, size_t err_len) {
@@ -9388,6 +9719,20 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
         return true;
     }
 
+    /* Harness-maintained state replaces the model-written narrative, so no
+     * summary generation (and none of its indecision) enters the context. */
+    const bool det_state = !w->cfg->gen.compact_llm && !agent_st_empty(&w->st);
+    agent_buf summary = {0};
+    int summary_bottom = bottom;
+    const int ctx = w->cfg->gen.ctx_size;
+    if (det_state) {
+        agent_publishf(w, "\n\x1b[1;95mCOMPACTING\x1b[0m %s: keeping structured task state\n",
+                       reason && reason[0] ? reason : "context");
+        summary.ptr = agent_st_render(&w->st);
+        summary.len = strlen(summary.ptr);
+        summary.cap = summary.len + 1;
+        goto have_summary;
+    }
     agent_publishf(w,
         "\n\x1b[1;95mCOMPACTING\x1b[0m %s: summarizing durable task state\n\x1b[38;5;245m",
         reason && reason[0] ? reason : "context");
@@ -9397,9 +9742,7 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
     q36_chat_append_message(w->engine, &summary_suffix, "user", prompt_text);
     free(prompt_text);
     q36_chat_append_assistant_prefix(w->engine, &summary_suffix, Q36_THINK_NONE);
-    const int ctx = w->cfg->gen.ctx_size;
     int summary_budget = agent_compact_summary_budget(ctx);
-    int summary_bottom = bottom;
     if (summary_bottom > ctx - summary_suffix.len - summary_budget - 16)
         summary_bottom = ctx - summary_suffix.len - summary_budget - 16;
     summary_bottom = agent_compact_image_boundary(w->images, w->image_count, summary_bottom);
@@ -9500,7 +9843,6 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
      * compaction prompt/summary, while w->transcript still contains the real
      * conversation.  If anything fails, invalidate live KV so the next turn
      * cannot accidentally continue from the private compaction exchange. */
-    agent_buf summary = {0};
     char eval_err[160] = {0};
     int think_end_id = agent_special_token_id(w->engine, "</think>");
     double t0 = now_sec();
@@ -9574,6 +9916,7 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
             "use the recent transcript below and ask for missing details if needed.\n");
     }
 
+have_summary:
     agent_trace_text(w, "compaction-summary", summary.ptr, summary.len);
     int tail_start = agent_compact_tail_start(w, bottom, sys.len);
     if (tail_start > summary_bottom) tail_start = summary_bottom;
@@ -9615,7 +9958,11 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
     const int tail_dst_start = compacted.len;
     if (open_assistant && resumed_start < 0)
         resumed_start = tail_dst_start + *open_assistant - tail_start;
-    agent_tokens_append_range(&compacted, &w->transcript, tail_start, bottom);
+    if (det_state && !open_assistant && !w->image_count)
+        agent_tokens_append_range_no_think(w->engine, &compacted, &w->transcript,
+                                           tail_start, bottom);
+    else
+        agent_tokens_append_range(&compacted, &w->transcript, tail_start, bottom);
     agent_trace_tokens(w, "compacted_transcript", &compacted, 0);
     if (compacted.len >= ctx - agent_compact_reserve_tokens(w) - 128) {
         snprintf(err, err_len, "compacted conversation leaves no working room; use a larger --ctx");
@@ -9985,6 +10332,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         agent_trace_text(w, "reasoning-effort", effort_note, strlen(effort_note));
     }
     agent_trace_text(w, "user", user_content, strlen(user_content));
+    agent_st_note_goal(&w->st, user_content);
     if (!agent_worker_append_user(w, user_content, compact_err, sizeof(compact_err))) {
         free(user_content);
         if (agent_err_is_interrupted(compact_err)) {
@@ -10024,8 +10372,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
     bool resume_assistant = false, resume_in_think = false;
     int resume_start = 0;
     agent_repetition_detector thinking_repetition = {0};
-    int recoveries = 0;
-    bool recover_nothink = false;
+    agent_recovery rec = {.max = cfg->gen.max_recoveries};
     w->wd_ncalls = 0;
     w->wd_stagnant = 0;
     w->wd_last_err = 0;
@@ -10046,9 +10393,9 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             agent_worker_maybe_append_system_prompt_reminder(w);
             agent_worker_append_hints_context(w);
         }
-        q36_think_mode think_mode = w->thinking_enabled && !recover_nothink ?
+        q36_think_mode think_mode = w->thinking_enabled && !rec.nothink_next ?
             enabled_think_mode(cfg) : Q36_THINK_NONE;
-        recover_nothink = false;
+        rec.nothink_next = false;
         const bool continuing_assistant = resume_assistant;
         const int assistant_start = continuing_assistant ? resume_start : w->transcript.len;
         if (!resume_assistant)
@@ -10149,8 +10496,9 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         agent_repetition_detector tool_repetition = {0};
         agent_action_leak leak = {0};
         bool action_leak = false;
-        const bool leak_guard = cfg->gen.action_budget > 0 &&
-                                q36_think_mode_enabled(think_mode);
+        /* The action phase starts when thinking ends, or at token 0 when the
+         * round runs without thinking (including recovery retries). */
+        const bool leak_guard = cfg->gen.action_budget > 0;
         double t0 = now_sec();
 
         pthread_mutex_lock(&w->mu);
@@ -10273,6 +10621,25 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 tool_repetition_raw_seen = qwen_tool.raw_len;
             }
 
+            /* Cut an oversized write while it streams, not after the whole
+             * payload was generated and then rejected. */
+            if (!stream.tool_preflight_error &&
+                qwen_tool.state == AGENT_QWEN_TOOL_PARAM_VALUE &&
+                qwen_tool.param_name && !strcmp(qwen_tool.param_name, "content") &&
+                qwen_tool.current.name && !strcmp(qwen_tool.current.name, "write") &&
+                qwen_tool.raw_len > qwen_tool.param_value_start +
+                                    AGENT_WRITE_PAYLOAD_MAX + 64) {
+                stream.tool_preflight_error = true;
+                const char *wp = agent_tool_arg_value(&qwen_tool.current, "path");
+                snprintf(stream.tool_preflight_error_msg,
+                         sizeof(stream.tool_preflight_error_msg),
+                         "WRITE_PAYLOAD_TOO_LARGE path=%.120s max_bytes=%d "
+                         "next=write the first part, then write append=true for the rest",
+                         wp ? wp : "?", AGENT_WRITE_PAYLOAD_MAX);
+                agent_trace(w, "write payload preflight: %s",
+                            stream.tool_preflight_error_msg);
+            }
+
             greedy_sampling = agent_stream_wants_greedy_sampling(&stream);
             if (greedy_sampling != status_greedy_sampling) {
                 worker_set_greedy_sampling(w, greedy_sampling);
@@ -10358,13 +10725,12 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             agent_qwen_tool_parser_free(&qwen_tool);
             carried_generation = 0;
             carried_thinking_tokens = 0;
-            if (++recoveries > cfg->gen.max_recoveries)
+            if (!agent_recovery_next(&rec))
                 return agent_turn_blocked(w, "post-think reasoning leak, recoveries exhausted");
             agent_rollback_assistant_suffix(w, assistant_start);
             q36_chat_append_message(w->engine, &w->transcript, "user",
                                     agent_action_required_msg);
-            agent_trace(w, "recovery=%d reason=action_leak", recoveries);
-            recover_nothink = true;
+            agent_trace(w, "recovery=%d reason=action_leak", rec.recoveries);
             continue;
         }
         if (repetitive_tool) {
@@ -10475,15 +10841,14 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         free(warning);
         if (w->wd_stagnant >= cfg->gen.max_stagnant_turns) {
             w->wd_stagnant = 0;
-            if (++recoveries > cfg->gen.max_recoveries) {
+            if (!agent_recovery_next(&rec)) {
                 agent_tool_observation_free(&observation);
                 agent_qwen_tool_parser_free(&qwen_tool);
                 return agent_turn_blocked(w, "stagnation: repeated blocked/failing calls");
             }
             agent_tool_observation_puts(&observation, agent_action_required_msg);
             agent_tool_observation_puts(&observation, "\n");
-            agent_trace(w, "recovery=%d reason=stagnation", recoveries);
-            recover_nothink = true;
+            agent_trace(w, "recovery=%d reason=stagnation", rec.recoveries);
         }
         int projected_tokens = 0;
         int result_reserve = AGENT_TOOL_RESULT_RESERVE_TOKENS;
