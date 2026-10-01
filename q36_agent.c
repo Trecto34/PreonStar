@@ -9159,6 +9159,10 @@ static bool agent_recovery_next(agent_recovery *r) {
     return ++r->recoveries <= r->max;
 }
 
+static const char agent_tool_cut_msg[] =
+    "Your last tool call was cut off by the output limit and was NOT executed. "
+    "Retry with smaller arguments: write at most 12 KiB per call and use append=true for more.";
+
 static const char agent_action_required_msg[] =
     "ACTION REQUIRED. Use the verified state. Execute one tool call or give "
     "the final answer. Do not repeat analysis.";
@@ -10174,7 +10178,7 @@ static int agent_turn_blocked(agent_worker *w, const char *why) {
     char msg[160];
     snprintf(msg, sizeof(msg), "BLOCKED: %s", why);
     agent_trace(w, "%s", msg);
-    agent_publish_system_status(w, msg);
+    agent_publishf(w, "\n%s\n", msg);   /* visible in non-interactive runs too */
     agent_set_status(w, AGENT_WORKER_IDLE);
     return 0;
 }
@@ -10452,6 +10456,26 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
         }
 
         const bool has_call = res.ncalls > 0 && res.calls[0].name;
+        /* A truncated tool call (discarded by the server) or output cut off
+         * before any content/call is a failed generation, not an answer: never
+         * put it in the transcript; retry through the recovery machinery. */
+        bool blank_content = true;
+        for (const char *cp = res.content; cp && *cp; cp++)
+            if (!isspace((unsigned char)*cp)) { blank_content = false; break; }
+        const bool cut_empty = !has_call && !strcmp(res.finish, "length") && blank_content;
+        if (!has_call && (res.incomplete_tool || cut_empty)) {
+            const bool tool_cut = res.incomplete_tool;
+            q36_remote_result_free(&res);
+            w->m.recoveries++;
+            if (!agent_recovery_next(&rec))
+                return agent_turn_blocked(w, tool_cut ? "tool call keeps getting cut off, recoveries exhausted"
+                                                      : "output keeps getting cut off, recoveries exhausted");
+            agent_rmsg_push(w, agent_rmsg_text("user", tool_cut ? agent_tool_cut_msg : agent_action_required_msg, NULL));
+            agent_trace(w, "[RECOVERY] n=%d reason=%s", rec.recoveries, tool_cut ? "incomplete_tool_call" : "output_cut");
+            agent_publish_system_status(w, tool_cut ? "tool call was cut off; retrying smaller"
+                                                    : "output was cut off; requesting an action");
+            continue;
+        }
         char *extra = NULL;
         if (has_call) {
             const q36_remote_call *rcall = &res.calls[0];
@@ -10471,7 +10495,7 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
         free(extra);
         if (!has_call) {
             if (!strcmp(res.finish, "length"))
-                agent_publish_system_status(w, "Output token limit reached");
+                agent_publishf(w, "\n[output token limit reached]\n");
             agent_trace(w, "[FINAL] finish=%s", res.finish);
             q36_remote_result_free(&res);
             agent_set_status(w, AGENT_WORKER_IDLE);

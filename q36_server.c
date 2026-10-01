@@ -820,6 +820,7 @@ typedef struct {
     q36_think_mode think_mode;
     int thinking_budget;
     /* Agent-control extensions (chat only, all off by default). */
+    bool incomplete_tool_call;   /* a truncated tool call was discarded (never returned as text) */
     bool thinking_budget_hard;   /* top-level thinking_budget: force </think> at the cap */
     int action_budget;           /* post-think content tokens before the leak check; 0 = off */
     bool stop_after_tool_call;   /* end decode at the first complete tool call */
@@ -4606,6 +4607,58 @@ static const char *tool_parse_failure_recovery_finish(const char *finish) {
     return "stop";
 }
 
+/* Drop a trailing partial delimiter ("</thi", "<tool_ca") left by a cut-off. */
+static void strip_partial_suffix(char *s, const char *marker) {
+    if (!s) return;
+    size_t n = strlen(s), m = strlen(marker);
+    for (size_t k = m - 1; k >= 2; k--) {
+        if (n >= k && !strncmp(s + n - k, marker, k)) { s[n - k] = '\0'; return; }
+    }
+}
+
+static void blank_if_whitespace(char *s) {
+    if (!s) return;
+    for (char *p = s; *p; p++) if (!isspace((unsigned char)*p)) return;
+    *s = '\0';
+}
+
+/* The generation ended inside, or just after, a tool call.  Keep every complete
+ * call, discard the unfinished tail and any prose after the last complete call,
+ * and split the text before the first call into reasoning and content.  Returns
+ * false when this is not a truncation (no tool start, or a closed but malformed
+ * call, which the caller returns as text for the model to see). */
+static bool recover_truncated_tool(const char *text, bool thinking,
+                                   char **content_out, char **reasoning_out,
+                                   tool_calls *calls, bool *tail_was_partial) {
+    const char *think_end = thinking ? find_tool_structural_text(text, "</think>", true) : NULL;
+    if (thinking && !think_end) return false;
+    const char *first = find_any_tool_start(think_end ? think_end + 8 : text);
+    if (!first) return false;
+
+    size_t best_end = 0;
+    for (const char *e = find_any_tool_end(first); e; e = find_any_tool_end(e + 1)) {
+        size_t end = (size_t)(e - text) + strlen(Q36_TOOL_CALLS_END);
+        char *sub = xstrndup(first, end - (size_t)(first - text));
+        tool_calls tmp = {0};
+        char *c = NULL, *r = NULL;
+        bool ok = parse_generated_message_ex(sub, false, &c, &r, &tmp) && tmp.len > 0;
+        free(sub); free(c); free(r);
+        if (ok) { best_end = end; tool_calls_free(calls); *calls = tmp; }
+        else tool_calls_free(&tmp);
+    }
+    if (!best_end && find_any_tool_end(first)) return false;   /* closed but malformed */
+
+    const char *tail = text + best_end;
+    if (best_end) {
+        while (*tail && isspace((unsigned char)*tail)) tail++;
+        if (!*tail) { tool_calls_free(calls); return false; }  /* complete: normal path */
+    }
+    *tail_was_partial = !best_end || find_any_tool_start(tail) != NULL;
+    size_t content_len = trim_tool_separator_ws(text, 0, (size_t)(first - text));
+    split_reasoning_content(text, content_len, content_out, reasoning_out);
+    return true;
+}
+
 static bool parse_generated_message_for_response(const char *text,
                                                  bool thinking,
                                                  bool has_tools,
@@ -4616,12 +4669,36 @@ static bool parse_generated_message_for_response(const char *text,
                                                  char **content_out,
                                                  char **reasoning_out,
                                                  tool_calls *calls,
-                                                 bool *recovered_out) {
+                                                 bool *recovered_out,
+                                                 bool *incomplete_tool_out) {
     if (recovered_out) *recovered_out = false;
+    if (incomplete_tool_out) *incomplete_tool_out = false;
+    const char *fin = finish_io && *finish_io ? *finish_io : "stop";
+    const bool cut = !strcmp(fin, "length") || !strcmp(fin, "action_budget");
 
     bool parsed_ok = parse_generated_message_ex(text ? text : "", thinking,
                                                 content_out, reasoning_out, calls);
-    if (parsed_ok) return true;
+    if (!parsed_ok && has_tools && strcmp(fin, "error") != 0) {
+        free(*content_out); free(*reasoning_out);
+        *content_out = NULL; *reasoning_out = NULL;
+        tool_calls_free(calls);
+        bool partial = false;
+        if (recover_truncated_tool(text ? text : "", thinking, content_out, reasoning_out,
+                                   calls, &partial)) {
+            if (incomplete_tool_out) *incomplete_tool_out = partial;
+            parsed_ok = true;
+        } else {
+            *content_out = NULL; *reasoning_out = NULL;
+        }
+    }
+    if (parsed_ok) {
+        if (cut) {
+            if (has_tools) strip_partial_suffix(*content_out, Q36_TOOL_CALLS_START);
+            strip_partial_suffix(*reasoning_out, "</think>");
+        }
+        blank_if_whitespace(*content_out);
+        return true;
+    }
 
     free(*content_out);
     free(*reasoning_out);
@@ -4634,7 +4711,7 @@ static bool parse_generated_message_for_response(const char *text,
      * valid and gives the caller enough transcript context to retry or recover
      * on a later turn, instead of terminating the whole session on
      * finish_reason="error". */
-    const char *finish = finish_io && *finish_io ? *finish_io : "stop";
+    const char *finish = fin;
     if (has_tools && saw_tool_start && strcmp(finish, "error") != 0) {
         if (finish_io) *finish_io = tool_parse_failure_recovery_finish(finish);
         if (err && errlen) snprintf(err, errlen, "invalid tool call");
@@ -4891,6 +4968,7 @@ static bool sse_chat_finish(int fd, const request *r, const char *id, const char
     json_escape(&b, r->model);
     buf_puts(&b, ",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":");
     json_escape(&b, finish);
+    if (r->incomplete_tool_call) buf_puts(&b, ",\"incomplete_tool_call\":true");
     buf_puts(&b, "}]}\n\n");
 
     bool ok = send_all(fd, b.ptr, b.len) &&
@@ -5706,6 +5784,7 @@ static bool openai_sse_finish_live(int fd, server *s, const request *r, const ch
     json_escape(&b, r->model);
     buf_puts(&b, ",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":");
     json_escape(&b, finish);
+    if (r->incomplete_tool_call) buf_puts(&b, ",\"incomplete_tool_call\":true");
     buf_puts(&b, "}]}\n\n");
 
     bool ok = send_all(fd, b.ptr, b.len) &&
@@ -5744,6 +5823,7 @@ static bool final_response(int fd, const request *r, const char *id, const char 
         }
         buf_puts(&b, "},\"finish_reason\":");
         json_escape(&b, finish);
+        if (r->incomplete_tool_call) buf_puts(&b, ",\"incomplete_tool_call\":true");
         buf_puts(&b, "}],\"usage\":");
     } else {
         buf_printf(&b, "{\"id\":\"%s\",\"object\":\"text_completion\",\"created\":%ld,\"model\":", id, now);
@@ -10147,6 +10227,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
     char *parsed_reasoning = NULL;
     const char *final_finish = finish;
     bool recovered_tool_parse_failure = false;
+    bool incomplete_tool_call = false;
     if (j->req.kind == REQ_CHAT) {
         bool parsed_ok = parse_generated_message_for_response(
             text.ptr ? text.ptr : "",
@@ -10159,7 +10240,12 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             &parsed_content,
             &parsed_reasoning,
             &parsed_calls,
-            &recovered_tool_parse_failure);
+            &recovered_tool_parse_failure,
+            &incomplete_tool_call);
+        j->req.incomplete_tool_call = incomplete_tool_call;
+        if (incomplete_tool_call)
+            trace_event(s, trace_id, "incomplete tool call quarantined (finish=%s, complete_calls=%d)",
+                        final_finish, parsed_calls.len);
         if (!parsed_ok && recovered_tool_parse_failure) {
             server_log(Q36_LOG_WARNING,
                        "q36-server: chat ctx=%s invalid tool call returned as assistant text finish=%s",
@@ -12914,6 +13000,152 @@ static void test_qwen_tool_parser_preserves_multiline_parameters(void) {
     tool_calls_free(&calls);
 }
 
+/* ---- Truncated tool call / reasoning semantics (chat completions) ---- */
+typedef struct {
+    char *content, *reasoning;
+    tool_calls calls;
+    const char *finish;
+    bool incomplete, recovered;
+} trunc_result;
+
+static void trunc_parse(trunc_result *o, const char *text, bool thinking, bool has_tools,
+                        const char *finish) {
+    memset(o, 0, sizeof(*o));
+    o->finish = finish;
+    char err[64];
+    parse_generated_message_for_response(text, thinking, has_tools, strstr(text, Q36_TOOL_CALLS_START) != NULL,
+                                         &o->finish, err, sizeof(err), &o->content, &o->reasoning,
+                                         &o->calls, &o->recovered, &o->incomplete);
+}
+
+static void trunc_free(trunc_result *o) {
+    free(o->content); free(o->reasoning); tool_calls_free(&o->calls);
+}
+
+#define TC_CALL "<tool_call>\n<function=write>\n<parameter=path>\na.txt\n</parameter>\n" \
+                "<parameter=content>\nhello\n</parameter>\n</function>\n</tool_call>"
+
+static void test_truncated_generation_semantics(void) {
+    trunc_result o;
+    /* 1. cut inside reasoning */
+    trunc_parse(&o, "I should write the file", true, true, "length");
+    TEST_ASSERT(o.content && !o.content[0] && o.reasoning && !strcmp(o.reasoning, "I should write the file"));
+    TEST_ASSERT(o.calls.len == 0 && !o.incomplete && !strcmp(o.finish, "length"));
+    trunc_free(&o);
+    /* 2a. cut exactly after </think>; 2b. cut inside the delimiter */
+    trunc_parse(&o, "plan</think>", true, true, "length");
+    TEST_ASSERT(o.content && !o.content[0] && o.reasoning && !strcmp(o.reasoning, "plan"));
+    trunc_free(&o);
+    trunc_parse(&o, "plan</thi", true, true, "length");
+    TEST_ASSERT(o.content && !o.content[0] && o.reasoning && !strcmp(o.reasoning, "plan"));
+    trunc_free(&o);
+    /* 3. after reasoning, before the tool call starts */
+    trunc_parse(&o, "plan</think>\n\n", true, true, "length");
+    TEST_ASSERT(o.content && !o.content[0] && o.reasoning && !strcmp(o.reasoning, "plan"));
+    TEST_ASSERT(o.calls.len == 0 && !o.incomplete);
+    trunc_free(&o);
+    trunc_parse(&o, "plan</think>\n\n<tool_ca", true, true, "length");
+    TEST_ASSERT(o.content && !o.content[0] && o.calls.len == 0);
+    trunc_free(&o);
+    /* 4. halfway through the tool name; 5. halfway through the arguments */
+    const char *cuts[] = {
+        "plan</think>\n\n<tool_call>\n<function=wri",
+        "plan</think>\n\n<tool_call>\n<function=write>\n<parameter=pa",
+        "plan</think>\n\n<tool_call>\n<function=write>\n<parameter=path>\na.txt\n</parameter>\n<parameter=content>\nhel",
+    };
+    for (size_t i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+        trunc_parse(&o, cuts[i], true, true, "length");
+        TEST_ASSERT(o.incomplete && o.calls.len == 0);
+        TEST_ASSERT(o.content && !o.content[0]);
+        TEST_ASSERT(o.reasoning && !strcmp(o.reasoning, "plan"));
+        TEST_ASSERT(!strcmp(o.finish, "length") && !o.recovered);
+        trunc_free(&o);
+    }
+    /* 6. complete call that exactly fills the budget */
+    trunc_parse(&o, "plan</think>\n\n" TC_CALL, true, true, "length");
+    TEST_ASSERT(!o.incomplete && o.calls.len == 1 && !strcmp(o.calls.v[0].name, "write"));
+    TEST_ASSERT(o.content && !o.content[0]);
+    trunc_free(&o);
+    /* 7. complete call followed by attempted prose: the call wins, prose is dropped */
+    trunc_parse(&o, "plan</think>\n\n" TC_CALL "\n\nDone, the file is written.", true, true, "stop");
+    TEST_ASSERT(o.calls.len == 1 && o.content && !o.content[0] && !o.incomplete);
+    trunc_free(&o);
+    /* two calls, the second cut off: keep the first, flag the loss */
+    trunc_parse(&o, "plan</think>\n\n" TC_CALL "\n<tool_call>\n<function=wri", true, true, "length");
+    TEST_ASSERT(o.calls.len == 1 && o.incomplete);
+    trunc_free(&o);
+    /* 8. action_budget abort mid-marker never leaves a fragment in content */
+    trunc_parse(&o, "I will now do it. <tool_ca", false, true, "action_budget");
+    TEST_ASSERT(o.content && !strcmp(o.content, "I will now do it. ") && o.calls.len == 0);
+    trunc_free(&o);
+    /* non-thinking request, truncated call after prose */
+    trunc_parse(&o, "Sure.\n<tool_call>\n<function=wr", false, true, "length");
+    TEST_ASSERT(o.incomplete && o.content && !strcmp(o.content, "Sure.") && !o.reasoning);
+    trunc_free(&o);
+    /* closed but malformed call keeps the legacy text recovery */
+    trunc_parse(&o, "x\n<tool_call>\n<function=>\n</tool_call>", false, true, "tool_calls");
+    TEST_ASSERT(o.recovered && !o.incomplete && strstr(o.content, "<tool_call>"));
+    trunc_free(&o);
+    /* 10. normal chat and tool-less truncation are unchanged */
+    trunc_parse(&o, "think</think>\n\nHello world", true, false, "stop");
+    TEST_ASSERT(o.content && !strcmp(o.content, "\n\nHello world") && !strcmp(o.reasoning, "think"));
+    trunc_free(&o);
+    trunc_parse(&o, "Partial answer that was cut", false, false, "length");
+    TEST_ASSERT(o.content && !strcmp(o.content, "Partial answer that was cut") && !o.incomplete);
+    trunc_free(&o);
+    trunc_parse(&o, "Say <tool_call> literally", false, false, "length");   /* no tools: plain text */
+    TEST_ASSERT(o.content && strstr(o.content, "<tool_call>"));
+    trunc_free(&o);
+}
+
+/* 9. Streaming: whatever prefix the stream is cut at, no delimiter or tool
+ * markup reaches user-visible content, and the final chunk flags the loss. */
+static void test_truncated_stream_never_leaks_markup(void) {
+    const char *full = "plan the work</think>\n\n" TC_CALL;
+    size_t n = strlen(full);
+    for (size_t cut = 1; cut <= n; cut += 3) {
+        int sv[2];
+        TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        if (sv[0] < 0 || sv[1] < 0) return;
+        request r;
+        request_init(&r, REQ_CHAT, 128);
+        r.api = API_OPENAI;
+        r.stream = true;
+        r.think_mode = Q36_THINK_HIGH;
+        r.has_tools = true;
+        r.tool_orders = make_bash_order();
+        openai_stream st;
+        openai_stream_start(&r, &st);
+        char *raw = xstrndup(full, cut);
+        TEST_ASSERT(openai_sse_stream_update(sv[0], NULL, &r, "chatcmpl_cut", &st, raw, cut, false));
+        trunc_result o;
+        trunc_parse(&o, raw, true, true, "length");
+        r.incomplete_tool_call = o.incomplete;
+        TEST_ASSERT(openai_sse_finish_live(sv[0], NULL, &r, "chatcmpl_cut", &st, raw, cut,
+                                           &o.calls, o.calls.len ? "tool_calls" : o.finish, 10, 4));
+        shutdown(sv[0], SHUT_WR);
+        char *out = read_socket_text(sv[1]);
+        /* user-visible fields only: reasoning_content may carry text, never delimiters */
+        TEST_ASSERT(strstr(out, "</think>") == NULL);
+        TEST_ASSERT(strstr(out, "<think>") == NULL);
+        TEST_ASSERT(strstr(out, "<tool_call>") == NULL);
+        TEST_ASSERT(strstr(out, "<function=") == NULL);
+        TEST_ASSERT(strstr(out, "<parameter=") == NULL);
+        TEST_ASSERT(strstr(out, "\"content\":\"plan") == NULL);   /* reasoning never relabelled as content */
+        bool complete = cut == n;
+        TEST_ASSERT(complete || o.calls.len == 0);
+        if (o.incomplete) TEST_ASSERT(strstr(out, "\"incomplete_tool_call\":true") != NULL);
+        else TEST_ASSERT(strstr(out, "incomplete_tool_call") == NULL);
+        if (complete) TEST_ASSERT(o.calls.len == 1 && strstr(out, "\"finish_reason\":\"tool_calls\"") != NULL);
+        free(out); free(raw);
+        trunc_free(&o);
+        openai_stream_free(&st);
+        request_free(&r);
+        close(sv[0]);
+        close(sv[1]);
+    }
+}
+
 static void test_tool_parse_failure_returns_recoverable_finish(void) {
     const char *generated =
         "trying a tool\n\n"
@@ -12938,7 +13170,8 @@ static void test_tool_parse_failure_returns_recoverable_finish(void) {
                                                        &content,
                                                        &reasoning,
                                                        &calls,
-                                                       &recovered));
+                                                       &recovered,
+                                                       NULL));
     TEST_ASSERT(recovered);
     TEST_ASSERT(!strcmp(finish, "stop"));
     TEST_ASSERT(!strcmp(err, "invalid tool call"));
@@ -15366,6 +15599,8 @@ static void q36_server_unit_tests_run(void) {
     test_qwen38_effort_prompt();
     test_api_thinking_controls_parse();
     test_chat_agent_budget_fields_parse();
+    test_truncated_generation_semantics();
+    test_truncated_stream_never_leaks_markup();
     test_render_think_max_prompt_prefix();
     test_render_non_thinking_prompt_closes_think();
     test_render_drops_old_reasoning_without_tools();

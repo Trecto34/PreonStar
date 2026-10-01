@@ -519,6 +519,20 @@ All optional and ignored unless sent:
   `content_tokens`, and `usage.timings.{prefill_ms,decode_ms}` next to the
   existing `cached_tokens`.
 
+Truncation semantics (`max_tokens`, `action_budget` or end of context): reasoning
+that is cut off stays in `reasoning_content` and `content` is empty; delimiters
+(`<think>`, `</think>`, `<tool_call>` or a fragment of one) never reach `content`.
+Complete tool calls are always returned as structured `tool_calls`; a tool call
+that did not finish is discarded, never returned as text, and the choice carries
+`"incomplete_tool_call": true` (finish_reason stays `length`, or `stop` if the
+model ended inside the call). A stream may send argument fragments before the
+cut, but its final chunk then has `finish_reason: "length"` plus
+`incomplete_tool_call`, so a client must discard the assembled call. Prose after
+a complete call is dropped. The remote agent treats a flagged call, or output cut
+off before any content, as a failed generation: it is not added to the
+transcript and goes through `--max-recoveries`, ending `BLOCKED:` rather than
+retrying forever.
+
 Tests: `make test` (unit), `make test-server`, `tests/test_server_agent_controls.py URL`
 (live server), `tests/agent_regression.py --mode local|remote` (real agent runs,
 tasks A-F) and `--compare` for local/remote parity, `tests/bench_server_plain.py`

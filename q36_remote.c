@@ -479,6 +479,8 @@ static void take_chunk(chat_sink *c, const q36_jv *j) {
     if (!ch) return;
     const q36_jv *fr = q36_jv_get(ch, "finish_reason");
     if (fr && fr->type == 's') snprintf(r->finish, sizeof(r->finish), "%s", fr->s);
+    const q36_jv *inc = q36_jv_get(ch, "incomplete_tool_call");
+    if (inc && inc->type == 'b' && inc->b) r->incomplete_tool = true;
     const q36_jv *d = q36_jv_get(ch, "delta");
     if (!d) d = q36_jv_get(ch, "message");
     if (!d) return;

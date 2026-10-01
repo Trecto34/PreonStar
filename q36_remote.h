@@ -26,6 +26,7 @@ typedef struct {
     q36_remote_call *calls;
     int ncalls;
     char finish[40];
+    bool incomplete_tool;   /* server discarded a truncated tool call */
     int prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens;
     double prefill_ms, decode_ms;
     char err[300];
