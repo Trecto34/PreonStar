@@ -50,3 +50,47 @@ sampling defaults differ). Post-think leak and recovery are covered deterministi
 - `--repetition-threshold` and a nearly-identical-consecutive-output check were not added (leak detector + repetition detector cover the observed cases).
 - Leak detection is heuristic (restart markers + repetition); a prose loop with no markers and no repetition is bounded only by --tokens.
 - Apart from E and F, local and remote tool sequences differ.
+
+# Round 2 (truncation fix, system checkpoint, parity)
+
+## Truncated tool call / reasoning leak
+Root cause: a tool call cut by max_tokens fails `parse_generated_message_ex`; the fallback in
+`parse_generated_message_for_response` then returned the raw text (reasoning, `</think>`, partial
+`<tool_call>`) as `content`, and a complete call followed by prose failed the same way.
+Now (chat completions, stream and not): complete calls are kept, the unfinished tail is discarded and flagged
+`incomplete_tool_call: true`, reasoning/content are split before the first call, partial delimiters are stripped,
+whitespace-only content is empty, prose after a complete call is dropped, finish_reason stays `length`/`stop`.
+Tests: 2 server unit tests (all 10 required cases + a streaming prefix sweep; mutation-checked: 15 failures with
+the fix disabled), live sweep on the real model (60 cut points x stream/non-stream), fake-server agent test
+(bounded recovery, BLOCKED, no endless retry, nothing poisonous appended).
+
+## System+tools checkpoint: implemented (optional `--kv-system-checkpoint`)
+Cache keys now include a model content fingerprint (closes a pre-existing hole: same-shape models sharing a
+cache dir could restore each other's state). Checkpoint is floored to a prefill-chunk multiple: mid-chunk
+checkpoints diverged from cold in 2/12 sessions, chunk-aligned ones were identical 12/12 (chunk 1024 and 512).
+New-session TTFT, ~1.76k-token agent-sized prefix, Ornith 35B:
+| | cached | prefill | TTFT |
+|-|-|-|-|
+| no cache | 0 | 1.64-1.74 s | 1.63-1.73 s (1.99 at chunk 512) |
+| checkpoint, chunk 1024 | 1024 | 0.72 s | 0.86-1.41 s |
+| checkpoint, chunk 512 | 1536 | 0.31-0.32 s | 0.38-0.52 s (restore ~28 ms warm) |
+Misses (clean): different system prompt, changed tool schema, different model (Qwen3.8-27B in the same dir).
+First session pays ~0.1-1 s extra (build + save). ~80 MiB per checkpoint on disk. A full disk degrades to cold.
+Recommendation: use with `--prefill-chunk 512`.
+
+## Local vs remote parity (tasks A,C,D,E,F x3, D x9 more for R0/R2; mean steps)
+| task | local | remote before | +reasoning kept | +75% soft close |
+|-|-|-|-|-|
+| A | 3.3 | 5.7 | 3.7 | 4.0 |
+| C | 3.0 | 3.0 | 3.7 | 3.7 |
+| D | 6.0 (3,10 range) | 5.7 (n=9: 6.4) | 6.7 | 8.7 (n=9: 7.2) |
+| E | 2.3 | 2.3 | 2.3 | 2.7 |
+| F | 3.7 | 3.7 | 3.7 | 3.0 |
+Decode speed is the same (87-89 tok/s). Differences found and fixed for parity: the remote agent dropped its own
+reasoning between tool steps; the server's soft thinking close started at 100% instead of 75%. Neither moved
+step counts beyond run-to-run noise (D alone ranged 3-17 steps). Not differences: sampling defaults (same
+function), tool-response wrapper (same), tool-call format (same), decode speed. The earlier "5 vs 13 steps" on D
+was noise. Remaining real difference: A needs a post-write verification step more often remotely (pass 4/10 vs
+3/4 local at the <=3-step bound); adding the local prompt's two behavioral bullets did not change it (3/6 vs 3/6),
+so it was not adopted. Prompt: local 2750 tokens (2690 system+tools), remote 1568 (699 system text, 856 tool
+schemas); both unchanged by this round.

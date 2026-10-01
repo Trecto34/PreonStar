@@ -10491,6 +10491,13 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
             q36_remote_json_quote(&extra, &el, &ec, rcall->arguments ? rcall->arguments : "{}");
             agent_json_puts(&extra, &el, &ec, "}}]");
         }
+        /* Send the model's own reasoning back: the server keeps it for assistant
+         * turns after the last user message, exactly as the local transcript does. */
+        if (res.reasoning && res.reasoning[0]) {
+            size_t xl = extra ? strlen(extra) : 0, xc = xl + 1;
+            agent_json_puts(&extra, &xl, &xc, ",\"reasoning_content\":");
+            q36_remote_json_quote(&extra, &xl, &xc, res.reasoning);
+        }
         agent_rmsg_push(w, agent_rmsg_text("assistant", res.content, extra));
         free(extra);
         if (!has_call) {

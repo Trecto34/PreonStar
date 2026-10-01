@@ -10070,10 +10070,16 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         const bool hard_think_close = think_close_id >= 0 && j->req.thinking_budget_hard &&
             q36_session_in_think(slot->session) && thinking_tokens >= j->req.thinking_budget;
         if (!hard_think_close && think_close_id >= 0 && q36_session_in_think(slot->session)) {
-            int limit = q36_think_close_rank_limit(completion, j->req.thinking_budget);
-            if (limit > 0 && completion == j->req.thinking_budget)
+            /* A hard budget (top-level thinking_budget) follows the local agent's
+             * schedule: soft </think> bias from 75% of the budget, forced at 100%. */
+            const int hb = j->req.thinking_budget;
+            const bool hard = j->req.thinking_budget_hard;
+            const int soft_start = hard ? (hb <= 1 ? hb : (int)(((int64_t)hb * 3) / 4)) : hb;
+            const int basis = hard ? thinking_tokens : completion;
+            int limit = q36_think_close_rank_limit(basis, soft_start);
+            if (limit > 0 && basis == soft_start)
                 trace_event(s, trace_id, "thinking closure ranking starts at token=%d",
-                            completion);
+                            basis);
             if (limit > 0)
                 close_rank = q36_session_token_rank(slot->session, think_close_id, limit);
         }

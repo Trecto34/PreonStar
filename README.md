@@ -502,7 +502,7 @@ compaction state stay local. The server owns the chat template, tokenizer,
 reasoning split, KV and exact tool-call replay; the client sends OpenAI-format
 messages with structured `tools` and streams the reply. `--api-key` adds a
 Bearer header, `--server-timeout` bounds silence (default 600 s), and
-`--server-protocol` accepts `auto` or `chat`. No local model is loaded and the
+`--server-protocol` accepts `auto` or `chat`. The agent sends its own `reasoning_content` back with each assistant turn (the server keeps it for turns after the last user message, as the local transcript does), and a hard `thinking_budget` closes thinking softly from 75% of the budget and forcibly at 100%, the same schedule as the local agent. No local model is loaded and the
 context size is clamped to the server's. Limits: plain `http://` only, tool
 images (`view_image`) and saved sessions are not available remotely, and only
 the first tool call of a reply is executed (the server is asked to stop there).
