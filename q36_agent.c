@@ -79,6 +79,7 @@ typedef struct {
     int max_repeat_tool;    /* identical calls allowed per unchanged workspace */
     int max_stagnant_turns; /* blocked/identically-failing calls before recovery */
     int max_recoveries;     /* controller recoveries per user turn before BLOCKED */
+    bool think_auto;        /* deterministic per-turn thinking budget (--think auto) */
     bool compact_llm;       /* write compaction summaries with the model, not harness state */
     int ctx_size;
     float temperature;
@@ -268,6 +269,7 @@ typedef struct {
     int remote_ctx;
     int remote_used;            /* prompt+completion tokens of the last reply */
     agent_metrics m;
+    double session_t0;
 } agent_worker;
 
 static unsigned agent_next_prefill_label(void);
@@ -847,6 +849,15 @@ static agent_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--think")) {
             c.gen.think_mode = Q36_THINK_HIGH;
             c.gen.think_mode_set = true;
+            /* optional level: --think auto|low|medium|high */
+            const char *lv = i + 1 < argc ? argv[i + 1] : NULL;
+            if (lv && (!strcmp(lv, "auto") || !strcmp(lv, "low") ||
+                       !strcmp(lv, "medium") || !strcmp(lv, "high"))) {
+                i++;
+                if (!strcmp(lv, "auto")) c.gen.think_auto = true;
+                else if (!strcmp(lv, "low")) c.gen.think_mode = Q36_THINK_LOW;
+                else if (!strcmp(lv, "medium")) c.gen.think_mode = Q36_THINK_MEDIUM;
+            }
         } else if (!strcmp(arg, "--think-low")) {
             c.gen.think_mode = Q36_THINK_LOW;
             c.gen.think_mode_set = true;
@@ -9226,6 +9237,7 @@ static agent_tool_observation agent_execute_tool_observation(
             w->wd_last_err = eh;
             agent_st_note_tool(&w->st, &calls->v[i], res);
         }
+        agent_trace_text(w, "[TOOL RESULT]", res, strlen(res) > 300 ? 300 : strlen(res));
         agent_tool_observation_puts(&obs, res);
         if (res[0] && res[strlen(res) - 1] != '\n')
             agent_tool_observation_puts(&obs, "\n");
@@ -9857,7 +9869,8 @@ have_summary:
                       strlen("\x1b[90mCOMPACTING added bash job update after rebuild\x1b[0m\n"));
         free(bash_update);
     }
-    agent_trace(w, "compacted reason=\"%s\" old=%d new=%d tail_start=%d tail=%d",
+    w->m.compactions++;
+    agent_trace(w, "[COMPACTION] reason=\"%s\" old=%d new=%d tail_start=%d tail=%d",
                 reason ? reason : "", bottom, w->transcript.len,
                 tail_start, bottom - tail_start);
     if (open_assistant) *open_assistant = resumed_start;
@@ -10082,6 +10095,66 @@ static void worker_set_greedy_sampling(agent_worker *w, bool greedy) {
     pthread_mutex_unlock(&w->mu);
 }
 
+/* ---- Deterministic thinking policy (--think auto) ----
+ * Level 0 trivial / 1 normal / 2 hard, chosen from the first prompt and raised
+ * (never lowered within a user turn) by tool failures and recoveries.  No LLM
+ * router: the signals are cheap and the cost of a wrong guess is one retry. */
+static const int agent_think_level_budget[3] = {256, 1024, 2048};
+
+static int agent_think_level_for_prompt(const char *text) {
+    static const char *const hard[] = {"debug", "refactor", "architect", "design", "race",
+        "deadlock", "performance", "optimi", "migrate", "why does", "root cause",
+        "multiple files", "across"};
+    static const char *const easy[] = {"list ", "show ", "read ", "cat ", "grep ", "find ",
+        "rename ", "typo", "print ", "what is in", "open "};
+    if (!text) return 1;
+    char lower[1500];
+    size_t n = strlen(text);
+    if (n >= sizeof(lower)) n = sizeof(lower) - 1;
+    for (size_t i = 0; i < n; i++) lower[i] = (char)tolower((unsigned char)text[i]);
+    lower[n] = 0;
+    int nhard = 0, neasy = 0;
+    for (size_t i = 0; i < sizeof(hard) / sizeof(hard[0]); i++) if (strstr(lower, hard[i])) nhard++;
+    for (size_t i = 0; i < sizeof(easy) / sizeof(easy[0]); i++) if (strstr(lower, easy[i])) neasy++;
+    if (nhard >= 2 || strlen(text) > 1200) return 2;
+    if (nhard == 0 && neasy > 0 && strlen(text) < 200) return 0;
+    return 1;
+}
+
+static int agent_think_level_raise(int level, int consecutive_failures, bool recovered) {
+    int want = consecutive_failures >= 2 ? 2 : (consecutive_failures == 1 || recovered ? 1 : 0);
+    return want > level ? want : level;
+}
+
+/* Effective per-round budget: the explicit/default cap, tightened by --think auto. */
+static int agent_think_budget_for(const agent_config *cfg, int level) {
+    int cap = cfg->gen.thinking_budget;
+    if (!cfg->gen.think_auto) return cap;
+    int b = agent_think_level_budget[level < 0 ? 0 : level > 2 ? 2 : level];
+    return cap > 0 && cap < b ? cap : b;
+}
+
+/* Concise end-of-run summary (also used by the remote backend). */
+static char *agent_metrics_summary(const agent_worker *w) {
+    const agent_metrics *m = &w->m;
+    char b[900];
+    long pf_tokens = m->prompt_tokens - m->cached_tokens;
+    double pf = m->prefill_ms > 0 ? (double)pf_tokens / (m->prefill_ms / 1000.0) : 0.0;
+    long dec_tokens = m->reasoning_tokens + m->action_tokens;
+    double dc = m->decode_ms > 0 ? (double)dec_tokens / (m->decode_ms / 1000.0) : 0.0;
+    snprintf(b, sizeof(b),
+        "\n--- session summary ---\n"
+        "steps: %d\ntools: %d\nreasoning tokens: %ld\naction tokens: %ld\n"
+        "recoveries: %d\nrepeated calls blocked: %d\ncompactions: %d\n"
+        "prompt tokens: %ld (%ld cached, %.0f%%)\n"
+        "wall time: %.1fs\nprefill: %.1f tok/s\ndecode: %.1f tok/s\nlast finish: %s\n",
+        m->steps, m->tools, m->reasoning_tokens, m->action_tokens, m->recoveries,
+        m->blocked_calls, m->compactions, m->prompt_tokens, m->cached_tokens,
+        m->prompt_tokens ? 100.0 * (double)m->cached_tokens / (double)m->prompt_tokens : 0.0,
+        now_sec() - w->session_t0, pf, dc, m->finish[0] ? m->finish : "-");
+    return xstrdup(b);
+}
+
 static int agent_turn_blocked(agent_worker *w, const char *why) {
     char msg[160];
     snprintf(msg, sizeof(msg), "BLOCKED: %s", why);
@@ -10178,7 +10251,7 @@ static char *agent_remote_system_prompt(const agent_config *cfg) {
     return agent_buf_take(&b);
 }
 
-static char *agent_remote_request(agent_worker *w, bool thinking) {
+static char *agent_remote_request(agent_worker *w, bool thinking, int think_budget) {
     const agent_config *cfg = w->cfg;
     char *out = NULL, *tools = agent_remote_tools_json();
     size_t len = 0, cap = 0;
@@ -10200,8 +10273,8 @@ static char *agent_remote_request(agent_worker *w, bool thinking) {
         snprintf(num, sizeof(num), ",\"action_budget\":%d", cfg->gen.action_budget);
         agent_json_puts(&out, &len, &cap, num);
     }
-    if (thinking && cfg->gen.thinking_budget > 0) {
-        snprintf(num, sizeof(num), ",\"thinking_budget\":%d", cfg->gen.thinking_budget);
+    if (thinking && think_budget > 0) {
+        snprintf(num, sizeof(num), ",\"thinking_budget\":%d", think_budget);
         agent_json_puts(&out, &len, &cap, num);
     }
     snprintf(num, sizeof(num), ",\"chat_template_kwargs\":{\"enable_thinking\":%s}",
@@ -10294,6 +10367,7 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
 
     agent_recovery rec = {.max = cfg->gen.max_recoveries};
     int consecutive_failures = 0;
+    int think_level = agent_think_level_for_prompt(user_text);
     w->wd_ncalls = 0;
     w->wd_stagnant = 0;
     w->wd_last_err = 0;
@@ -10302,7 +10376,8 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
             agent_remote_compact(w, "soft limit before generation");
         const bool thinking = w->thinking_enabled && !rec.nothink_next;
         rec.nothink_next = false;
-        char *req = agent_remote_request(w, thinking);
+        think_level = agent_think_level_raise(think_level, consecutive_failures, rec.recoveries > 0);
+        char *req = agent_remote_request(w, thinking, agent_think_budget_for(cfg, think_level));
         const char *dump = getenv("Q36_AGENT_DUMP_REQ");   /* debugging aid: last request body */
         if (dump && dump[0]) {
             FILE *df = fopen(dump, "wb");
@@ -10438,7 +10513,6 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
             text = agent_buf_take(&more);
             agent_trace(w, "[RECOVERY] n=%d reason=stagnation", rec.recoveries);
         }
-        agent_trace_text(w, "[TOOL RESULT]", text, strlen(text) > 400 ? 400 : strlen(text));
         char *tool_extra = NULL;
         size_t tl = 0, tcap = 0;
         agent_json_puts(&tool_extra, &tl, &tcap, ",\"tool_call_id\":");
@@ -10549,10 +10623,14 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
     int resume_start = 0;
     agent_repetition_detector thinking_repetition = {0};
     agent_recovery rec = {.max = cfg->gen.max_recoveries};
+    int think_level = agent_think_level_for_prompt(user_text);
+    int think_budget = agent_think_budget_for(cfg, think_level);
     w->wd_ncalls = 0;
     w->wd_stagnant = 0;
     w->wd_last_err = 0;
     for (int tool_round = 0; ; tool_round++) {
+        think_level = agent_think_level_raise(think_level, consecutive_failures, rec.recoveries > 0);
+        think_budget = agent_think_budget_for(cfg, think_level);
         if (!resume_assistant &&
             !agent_worker_compact_if_needed(w, "soft limit before generation",
                                             compact_err, sizeof(compact_err)))
@@ -10608,9 +10686,13 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         q36_session_set_progress(w->session, worker_progress_cb, w);
         q36_session_set_display_progress(w->session, worker_progress_cb, w);
         q36_session_set_cancel(w->session, worker_cancel_session_cb, w);
+        const double prefill_t0 = now_sec();
         int sync_rc = w->image_count ?
             q36_session_sync_vision(w->session, prompt_for_sync, w->images, w->image_count, err, sizeof(err)) :
             q36_session_sync(w->session, prompt_for_sync, err, sizeof(err));
+        w->m.prefill_ms += (now_sec() - prefill_t0) * 1000.0;
+        w->m.prompt_tokens += prompt_for_sync->len;
+        w->m.cached_tokens += cached;
         q36_session_set_cancel(w->session, NULL, NULL);
         q36_session_set_progress(w->session, NULL, NULL);
         q36_session_set_display_progress(w->session, NULL, NULL);
@@ -10687,7 +10769,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         bool status_greedy_sampling = false;
         int think_close_id = agent_special_token_id(w->engine, "</think>");
         int think_soft_close_start = agent_think_soft_close_start(
-            cfg->gen.thinking_budget);
+            think_budget);
         agent_trace(w, "active_frequency_penalty=%.3f",
                     (double)cfg->gen.frequency_penalty);
         while (generated < max_tokens && !worker_should_interrupt(w)) {
@@ -10703,10 +10785,10 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                             q36_session_in_think(w->session);
             bool hard_budget_close = in_think &&
                 agent_think_hard_budget_reached(
-                    thinking_tokens, cfg->gen.thinking_budget);
+                    thinking_tokens, think_budget);
             if (in_think && !hard_budget_close && !repetition_close_thinking) {
                 close_rank_limit = agent_think_close_rank_limit(
-                    thinking_tokens, cfg->gen.thinking_budget);
+                    thinking_tokens, think_budget);
                 if (close_rank_limit > 0 && thinking_tokens == think_soft_close_start)
                     agent_trace(w, "thinking closure ranking starts at token=%d",
                                 think_soft_close_start);
@@ -10727,7 +10809,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             else if (hard_budget_close)
                 agent_trace(w,
                     "thinking_hard_budget_close thinking_tokens=%d hard_budget=%d",
-                    thinking_tokens, cfg->gen.thinking_budget);
+                    thinking_tokens, think_budget);
             else if (output_hard_close)
                 agent_trace(w, "closing thinking at hard token budget=%d",
                             max_tokens);
@@ -10850,6 +10932,20 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
 
         agent_trace(w, "generation finished tool_round=%d generated=%d carried=%d context_limited=%d",
                     tool_round, generated, carried_generation, context_limited);
+        {
+            const char *fin = got_tool ? "tool_calls" : action_leak ? "action_budget" :
+                repetitive_tool ? "repetition_abort" : malformed_tool || early_tool_error ? "tool_error" :
+                model_stopped ? "stop" : context_limited ? "length" : "stop";
+            int action_tok = generated - thinking_tokens;
+            w->m.steps++;
+            w->m.reasoning_tokens += thinking_tokens;
+            w->m.action_tokens += action_tok > 0 ? action_tok : 0;
+            w->m.decode_ms += (now_sec() - t0) * 1000.0;
+            snprintf(w->m.finish, sizeof(w->m.finish), "%s", fin);
+            agent_trace(w, "[THINK] tokens=%d budget=%d", thinking_tokens, think_budget);
+            agent_trace(w, "[ACTION] tokens=%d finish=%s ctx=%d/%d", action_tok > 0 ? action_tok : 0,
+                        fin, q36_session_pos(w->session), q36_session_ctx(w->session));
+        }
         bool interrupted = worker_should_interrupt(w);
         const bool partial_tool = agent_stream_has_partial_tool(&stream);
         agent_stream_text(&stream, NULL, 0, true);
@@ -10901,12 +10997,13 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             agent_qwen_tool_parser_free(&qwen_tool);
             carried_generation = 0;
             carried_thinking_tokens = 0;
+            w->m.recoveries++;
             if (!agent_recovery_next(&rec))
                 return agent_turn_blocked(w, "post-think reasoning leak, recoveries exhausted");
             agent_rollback_assistant_suffix(w, assistant_start);
             q36_chat_append_message(w->engine, &w->transcript, "user",
                                     agent_action_required_msg);
-            agent_trace(w, "recovery=%d reason=action_leak", rec.recoveries);
+            agent_trace(w, "[RECOVERY] n=%d reason=action_leak", rec.recoveries);
             continue;
         }
         if (repetitive_tool) {
@@ -10977,6 +11074,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
 
         if (!got_tool && !malformed_tool && !early_tool_error) {
             agent_qwen_tool_parser_free(&qwen_tool);
+            agent_trace(w, "[FINAL] finish=%s", w->m.finish);
             agent_set_status(w, AGENT_WORKER_IDLE);
             return 0;
         }
@@ -11003,7 +11101,12 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 &observation, agent_qwen_tool_syntax_reminder);
         } else {
             agent_tool_observation_free(&observation);
+            for (int ci = 0; ci < qwen_tool.calls.len; ci++)
+                agent_trace(w, "[TOOL CALL] %s", qwen_tool.calls.v[ci].name ? qwen_tool.calls.v[ci].name : "?");
+            const int blocked_before = w->wd_blocked;
             observation = agent_execute_tool_observation(w, &qwen_tool.calls);
+            w->m.tools += qwen_tool.calls.len;
+            w->m.blocked_calls += w->wd_blocked - blocked_before;
         }
         agent_buf observed_text = {0};
         for (size_t i = 0; i < observation.part_count; i++)
@@ -11017,6 +11120,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         free(warning);
         if (w->wd_stagnant >= cfg->gen.max_stagnant_turns) {
             w->wd_stagnant = 0;
+            w->m.recoveries++;
             if (!agent_recovery_next(&rec)) {
                 agent_tool_observation_free(&observation);
                 agent_qwen_tool_parser_free(&qwen_tool);
@@ -11024,7 +11128,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             }
             agent_tool_observation_puts(&observation, agent_action_required_msg);
             agent_tool_observation_puts(&observation, "\n");
-            agent_trace(w, "recovery=%d reason=stagnation", rec.recoveries);
+            agent_trace(w, "[RECOVERY] n=%d reason=stagnation", rec.recoveries);
         }
         int projected_tokens = 0;
         int result_reserve = AGENT_TOOL_RESULT_RESERVE_TOKENS;
@@ -11296,6 +11400,12 @@ static void *worker_main(void *arg) {
 
         worker_run_turn(w, cmd);
         free(cmd);
+        if (w->cfg->non_interactive && w->m.steps) {
+            char *sum = agent_metrics_summary(w);
+            agent_trace_text(w, "[SUMMARY]", sum, strlen(sum));
+            agent_publish(w, sum, strlen(sum));
+            free(sum);
+        }
         worker_apply_pending_power(w);
         worker_run_deferred_compact(w);
         worker_run_deferred_save(w);
@@ -12745,6 +12855,7 @@ static int agent_worker_init(agent_worker *w, q36_engine *engine, agent_config *
     pthread_cond_init(&w->cond, NULL);
     w->status.state = AGENT_WORKER_IDLE;
     w->active = true;
+    w->session_t0 = now_sec();
     if (pipe(w->wake_fd) != 0) return -1;
     int old_flags;
     set_nonblock(w->wake_fd[0], true, &old_flags);
@@ -12788,6 +12899,11 @@ static int agent_worker_init(agent_worker *w, q36_engine *engine, agent_config *
  * process groups. */
 static void agent_worker_free(agent_worker *w) {
     worker_stop(w);
+    if (!w->cfg->non_interactive && w->m.steps) {
+        char *sum = agent_metrics_summary(w);
+        fputs(sum, stderr);
+        free(sum);
+    }
     if (w->thread) pthread_join(w->thread, NULL);
     agent_bash_jobs_free(w);
     q36_web_free(w->web);

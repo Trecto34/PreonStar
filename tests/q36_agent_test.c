@@ -1169,6 +1169,39 @@ static void test_remote_errors_and_json(void) {
     AGENT_TEST_ASSERT(q36_jv_parse("{} x") == NULL);
 }
 
+static void test_think_policy_and_flags(void) {
+    char *a1[] = {"q36-agent", "--think", "auto", "--action-budget", "100", "--max-recoveries", "5"};
+    agent_config c = parse_options(7, a1);
+    AGENT_TEST_ASSERT(c.gen.think_auto && c.gen.think_mode == Q36_THINK_HIGH);
+    AGENT_TEST_ASSERT(c.gen.action_budget == 100 && c.gen.max_recoveries == 5);
+    char *a2[] = {"q36-agent", "--think", "low"};
+    c = parse_options(3, a2);
+    AGENT_TEST_ASSERT(!c.gen.think_auto && c.gen.think_mode == Q36_THINK_LOW);
+    char *a3[] = {"q36-agent", "--think", "--vulkan"};
+    c = parse_options(3, a3);
+    AGENT_TEST_ASSERT(!c.gen.think_auto && c.gen.think_mode == Q36_THINK_HIGH);
+    AGENT_TEST_ASSERT(c.gen.action_budget == AGENT_ACTION_BUDGET_DEFAULT &&
+                      c.gen.max_repeat_tool == 1 && c.gen.max_stagnant_turns == 2);
+    char *a4[] = {"q36-agent", "--server", "http://h:1", "--server-model", "m", "--think", "auto"};
+    c = parse_options(7, a4);
+    AGENT_TEST_ASSERT(c.server_url && !strcmp(c.server_model, "m"));
+
+    AGENT_TEST_ASSERT(agent_think_level_for_prompt("list the files in src/") == 0);
+    AGENT_TEST_ASSERT(agent_think_level_for_prompt("Implement a feature that parses dates") == 1);
+    AGENT_TEST_ASSERT(agent_think_level_for_prompt("debug the race and refactor the locking across files") == 2);
+    AGENT_TEST_ASSERT(agent_think_level_raise(0, 0, false) == 0);
+    AGENT_TEST_ASSERT(agent_think_level_raise(0, 1, false) == 1);
+    AGENT_TEST_ASSERT(agent_think_level_raise(1, 2, false) == 2);
+    AGENT_TEST_ASSERT(agent_think_level_raise(2, 0, true) == 2);       /* never lowered */
+    c.gen.thinking_budget = 50000;
+    c.gen.think_auto = true;
+    AGENT_TEST_ASSERT(agent_think_budget_for(&c, 0) == 256 && agent_think_budget_for(&c, 2) == 2048);
+    c.gen.thinking_budget = 500;                                       /* explicit cap wins */
+    AGENT_TEST_ASSERT(agent_think_budget_for(&c, 2) == 500);
+    c.gen.think_auto = false;
+    AGENT_TEST_ASSERT(agent_think_budget_for(&c, 0) == 500);
+}
+
 static void test_repetitive_tool_aborted_before_execution(void) {
     char path[] = "/tmp/q36-agent-repetition-XXXXXX";
     int fd = mkstemp(path);
@@ -1288,6 +1321,7 @@ int main(int argc, char **argv) {
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();
     test_action_leak_and_watchdog();
+    test_think_policy_and_flags();
     test_remote_client_sse();
     test_remote_errors_and_json();
     test_task_state_render();
