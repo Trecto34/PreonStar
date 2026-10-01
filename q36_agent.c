@@ -11377,6 +11377,8 @@ static void *worker_main(void *arg) {
                 w->cfg->gen.trace_path ? w->cfg->gen.trace_path : "");
     char init_err[160] = {0};
     if (w->cfg->server_url) {
+        w->thinking_enabled = agent_initial_thinking_enabled(w->cfg);
+        w->remote_ctx = w->cfg->gen.ctx_size;   /* clamped to the server's context in main() */
         char *sys = agent_remote_system_prompt(w->cfg);
         agent_rmsg_push(w, agent_rmsg_text("system", sys, NULL));
         agent_trace_text(w, "initial_system_prompt", sys, strlen(sys));
