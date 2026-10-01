@@ -297,7 +297,8 @@ static void print_agent_specific(FILE *fp, const help_colors *c) {
     opt(fp, c, "--server-protocol P", "auto or chat (chat completions). Default: auto.");
     opt(fp, c, "--compact-llm", "Write compaction summaries with the model instead of the harness-maintained task state.");
     opt(fp, c, "--frequency-penalty F", "Optional sampler aid, -2..2 (alias: --default-frequency-penalty). Default: 0.");
-    opt(fp, c, "--think-low, --think-medium, --think, --think-xhigh", "Select the initial dense thinking mode without changing the budget.");
+    opt(fp, c, "--think [auto|low|medium|high]", "Thinking on. auto picks a per-turn budget (256/1024/2048) from the prompt and raises it after tool failures or recoveries; never above --thinking-budget.");
+    opt(fp, c, "--think-low, --think-medium, --think-xhigh", "Select the initial dense thinking mode without changing the budget.");
     opt(fp, c, "Tab", "Cycle dense low/medium/high/xhigh or MoE off/on; keep the current thinking budget.");
     para(fp, c, "User and system messages accept persistent <|think_on|> and <|think_off|> controls.");
     fputc('\n', fp);
@@ -336,6 +337,8 @@ static void print_server_thinking(FILE *fp, const help_colors *c) {
     title(fp, c, "Server Thinking Defaults");
     para(fp, c, "Qwen3.8 chat requests default to xhigh; Qwen3.6 uses thinking on/off.");
     para(fp, c, "thinking.budget_tokens starts adaptive thinking closure; Qwen3.8 maps budgets through 8k/16k/24k to low/medium/high, then xhigh.");
+    para(fp, c, "Agent controls on /v1/chat/completions: thinking_budget (hard cap, soft close from 75%), action_budget (post-think leak abort, finish_reason=action_budget), stop_after_tool_call.");
+    para(fp, c, "A truncated tool call is discarded and flagged incomplete_tool_call=true; it is never returned as assistant text.");
     para(fp, c, "reasoning_effort=max or output_config.effort=max requests Think Max.");
     para(fp, c, "Think Max requires --ctx >= 98304; smaller contexts use high.");
     para(fp, c, "thinking={type:disabled}, think=false, or chat_template_kwargs.enable_thinking=false selects non-thinking mode.");
@@ -347,6 +350,7 @@ static void print_kv_cache(FILE *fp, const help_colors *c) {
     title(fp, c, "Disk KV Cache");
     opt(fp, c, "--kv-disk-dir DIR", "Enable disk KV checkpoints in DIR.");
     opt(fp, c, "--kv-disk-space-mb N", "Disk budget. Default when enabled: 4096");
+    opt(fp, c, "--kv-system-checkpoint", "Store the system-prompt+tools prefix once so new conversations skip its prefill. Needs --kv-disk-dir; use with --prefill-chunk 512.");
     opt(fp, c, "--kv-cache-min-tokens N", "Do not save/load checkpoints shorter than N. Default: 512");
     opt(fp, c, "--kv-cache-cold-max-tokens N", "Save cold first prompts up to N tokens. 0 disables. Default: 30000");
     opt(fp, c, "--kv-cache-continued-interval-tokens N", "Save aligned continued frontiers. 0 disables. Default: 10000");
@@ -537,6 +541,11 @@ static void print_topic(FILE *fp, const help_colors *c, q36_help_tool tool, cons
         para(fp, c, "The agent can read, search, write, edit, run bash, and browse through browser-backed web tools.");
         para(fp, c, "Tool calls use Qwen's native function and parameter tags and render live in the terminal.");
         para(fp, c, "Edit uses exact old/new replacement. --edit-upto enables unique head/tail anchored edits.");
+        para(fp, c, "Edit also takes start_line/end_line (no old text) to replace whole lines, which avoids reproducing whitespace.");
+        para(fp, c, "Write is limited to 12 KiB per call; use append=true for later parts. An oversize call is cut off while streaming.");
+        para(fp, c, "Tool errors are coded and carry counts, e.g. EDIT_MATCH_NOT_FOUND, EDIT_NO_CHANGE, WRITE_PAYLOAD_TOO_LARGE, REPEAT_CALL_BLOCKED.");
+        para(fp, c, "Identical read-only calls on an unchanged workspace, and the same call repeated back to back, are blocked (--max-repeat-tool).");
+        para(fp, c, "With --server the agent runs tools locally while a q36-server does inference; no local model is loaded.");
         fputc('\n', fp);
     } else if (tool == Q36_HELP_BENCH && streq(topic, "benchmark")) print_bench_specific(fp, c);
     else if (tool == Q36_HELP_EVAL && streq(topic, "evaluation")) print_eval_specific(fp, c);
