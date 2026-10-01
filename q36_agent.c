@@ -45,6 +45,10 @@ int linenoiseEditInsert(struct linenoiseState *l, const char *c, size_t clen);
 #define AGENT_RESIDENT_CTX 100000
 #define AGENT_STREAMING_CTX 100000
 #define AGENT_THINKING_BUDGET_DEFAULT 50000
+#define AGENT_ACTION_BUDGET_DEFAULT 384
+#define AGENT_MAX_REPEAT_TOOL_DEFAULT 1
+#define AGENT_MAX_STAGNANT_DEFAULT 2
+#define AGENT_MAX_RECOVERIES_DEFAULT 3
 #define AGENT_REPETITION_WINDOW_BYTES 32768
 #define AGENT_REPETITION_EXACT_LINE_RUN 12
 #define AGENT_REPETITION_NEAR_LINE_RUN 32
@@ -74,6 +78,10 @@ typedef struct {
     const char *trace_path;
     int n_predict;
     int thinking_budget;
+    int action_budget;      /* post-think content tokens before a leak check; 0 = off */
+    int max_repeat_tool;    /* identical calls allowed per unchanged workspace */
+    int max_stagnant_turns; /* blocked/identically-failing calls before recovery */
+    int max_recoveries;     /* controller recoveries per user turn before BLOCKED */
     int ctx_size;
     float temperature;
     int top_k;
@@ -211,6 +219,12 @@ typedef struct {
     agent_bash_job *bash_jobs;
     int next_bash_job_id;
     bool raw_mode_needs_restore;
+    /* Watchdog: calls executed since the last workspace mutation. */
+    struct { uint64_t hash; int count; } wd_calls[32];
+    int wd_ncalls;
+    int wd_blocked;     /* duplicate calls refused this user turn */
+    int wd_stagnant;    /* consecutive blocked / identically failing calls */
+    uint64_t wd_last_err;
 } agent_worker;
 
 static unsigned agent_next_prefill_label(void);
@@ -671,6 +685,10 @@ static agent_config parse_options(int argc, char **argv) {
             .system = "You are a helpful coding assistant running inside q36-agent.",
             .n_predict = 100000,
             .thinking_budget = AGENT_THINKING_BUDGET_DEFAULT,
+            .action_budget = AGENT_ACTION_BUDGET_DEFAULT,
+            .max_repeat_tool = AGENT_MAX_REPEAT_TOOL_DEFAULT,
+            .max_stagnant_turns = AGENT_MAX_STAGNANT_DEFAULT,
+            .max_recoveries = AGENT_MAX_RECOVERIES_DEFAULT,
             .ctx_size = AGENT_RESIDENT_CTX,
             .temperature = Q36_DEFAULT_TEMPERATURE,
             .top_k = 0,
@@ -739,6 +757,14 @@ static agent_config parse_options(int argc, char **argv) {
             cache_type_v_set = true;
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) {
             c.gen.n_predict = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--action-budget")) {
+            c.gen.action_budget = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--max-repeat-tool")) {
+            c.gen.max_repeat_tool = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--max-stagnant-turns")) {
+            c.gen.max_stagnant_turns = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--max-recoveries")) {
+            c.gen.max_recoveries = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--thinking-budget")) {
             c.gen.thinking_budget = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--temp")) {
@@ -8941,6 +8967,114 @@ static char *agent_execute_tool_call(agent_worker *w, const agent_tool_call *cal
 
 /* Execute all tool calls from one Qwen tool block, preserving per-call labels in the
  * combined result so the model can associate observations with calls. */
+/* ---- Execution controller (deterministic; invisible to the model) ----
+ * Post-think leak: after </think> the model must act (tool call) or answer.
+ * Once more than action_budget content tokens were produced with no tool
+ * started, the content is scanned for reasoning-style restarts ("Wait,",
+ * "Actually,", "Let me re...") or repeated text.  A real final answer has
+ * neither, so it is never cut; a second reasoning channel is aborted. */
+typedef struct {
+    int tokens;
+    int next_check;
+    agent_repetition_detector rep;
+} agent_action_leak;
+
+static bool agent_leak_marker_at(const char *p, size_t n) {
+    static const char *const m[] = {
+        "Wait", "Actually", "Hmm", "Let me re", "Let me think", "Let me check",
+        "Let me look", "Let me read", "Let me see", "Let me verify",
+        "But wait", "Hold on", "Alternatively", "Maybe I", "I need to re",
+        "On second thought", "Okay, so", "OK, so",
+    };
+    for (size_t i = 0; i < sizeof(m) / sizeof(m[0]); i++) {
+        size_t l = strlen(m[i]);
+        if (n >= l && !strncmp(p, m[i], l)) return true;
+    }
+    return false;
+}
+
+static int agent_leak_marker_count(const char *t, size_t len) {
+    int count = 0;
+    bool at_start = true;
+    for (size_t i = 0; i < len; i++) {
+        if (at_start && t[i] != ' ' && t[i] != '\n' && t[i] != '-' && t[i] != '*') {
+            if (agent_leak_marker_at(t + i, len - i)) count++;
+            at_start = false;
+        }
+        if (t[i] == '\n' || ((t[i] == '.' || t[i] == '?' || t[i] == '!') &&
+                             i + 1 < len && t[i + 1] == ' '))
+            at_start = true;
+    }
+    return count;
+}
+
+/* Feed one post-think content token; true when the content is a reasoning leak. */
+static bool agent_action_leak_feed(agent_action_leak *l, int budget,
+                                   const char *text, size_t len) {
+    l->tokens++;
+    bool repeated = agent_repetition_detector_feed(&l->rep, text, len);
+    if (budget <= 0 || l->tokens <= budget) return false;
+    if (repeated) return true;
+    if (l->tokens < l->next_check) return false;
+    l->next_check = l->tokens + 32;
+    return agent_leak_marker_count(l->rep.text, l->rep.len) >= 3;
+}
+
+static const char agent_action_required_msg[] =
+    "ACTION REQUIRED. Use the verified state. Execute one tool call or give "
+    "the final answer. Do not repeat analysis.";
+
+static uint64_t agent_fnv1a(uint64_t h, const char *s) {
+    for (; s && *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+    return h;
+}
+
+static bool agent_tool_is_readonly(const char *name) {
+    static const char *const ro[] = {"read", "more", "list", "search",
+        "google_search", "visit_page", "bash_status", "view_image"};
+    for (size_t i = 0; name && i < sizeof(ro) / sizeof(ro[0]); i++)
+        if (!strcmp(name, ro[i])) return true;
+    return false;
+}
+
+static uint64_t agent_tool_call_hash(const agent_tool_call *c) {
+    uint64_t h = agent_fnv1a(1469598103934665603ULL, c->name);
+    for (int i = 0; i < c->argc; i++) {
+        h = agent_fnv1a(h, c->args[i].name);
+        h = agent_fnv1a(h, "=");
+        h = agent_fnv1a(h, c->args[i].value);
+        h = agent_fnv1a(h, ";");
+    }
+    return h;
+}
+
+/* True when this call repeats an identical one already executed against an
+ * unchanged workspace more than max_repeat times.  Any mutating tool resets
+ * the table (state changed, so a re-read is legitimate). */
+static bool agent_watchdog_blocks(agent_worker *w, const agent_tool_call *c,
+                                  int max_repeat) {
+    if (!agent_tool_is_readonly(c->name)) {
+        w->wd_ncalls = 0;
+        return false;
+    }
+    uint64_t h = agent_tool_call_hash(c);
+    for (int i = 0; i < w->wd_ncalls; i++) {
+        if (w->wd_calls[i].hash != h) continue;
+        if (w->wd_calls[i].count >= max_repeat) return true;
+        w->wd_calls[i].count++;
+        return false;
+    }
+    if (w->wd_ncalls == 32) {
+        memmove(w->wd_calls, w->wd_calls + 1, 31 * sizeof(w->wd_calls[0]));
+        w->wd_ncalls--;
+    }
+    w->wd_calls[w->wd_ncalls].hash = h;
+    w->wd_calls[w->wd_ncalls].count = 1;
+    w->wd_ncalls++;
+    return false;
+}
+
+
 static agent_tool_observation agent_execute_tool_observation(
         agent_worker *w, const agent_tool_calls *calls) {
     agent_tool_observation obs;
@@ -8954,7 +9088,24 @@ static agent_tool_observation agent_execute_tool_observation(
             agent_tool_view_image(w, &calls->v[i], &obs);
             continue;
         }
-        char *res = agent_execute_tool_call(w, &calls->v[i]);
+        char *res;
+        if (agent_watchdog_blocks(w, &calls->v[i], w->cfg->gen.max_repeat_tool)) {
+            w->wd_blocked++;
+            w->wd_stagnant++;
+            res = xstrdup("Tool error: REPEAT_CALL_BLOCKED\n"
+                          "reason=identical call, workspace unchanged since last result\n"
+                          "next=use the earlier result; edit/write/run, or give the final answer\n");
+        } else {
+            res = agent_execute_tool_call(w, &calls->v[i]);
+            uint64_t eh = 0;
+            if (!strncmp(res, "Tool error", 10)) {
+                eh = agent_fnv1a(1469598103934665603ULL, res);
+                w->wd_stagnant = eh == w->wd_last_err ? w->wd_stagnant + 1 : 0;
+            } else {
+                w->wd_stagnant = 0;
+            }
+            w->wd_last_err = eh;
+        }
         agent_tool_observation_puts(&obs, res);
         if (res[0] && res[strlen(res) - 1] != '\n')
             agent_tool_observation_puts(&obs, "\n");
@@ -9746,6 +9897,7 @@ static const char agent_tool_repetition_warning[] =
     "executed. Preserve the intended change, but rewrite it compactly using "
     "loops, arrays, helpers, or data-driven construction.";
 
+
 static void agent_rollback_assistant_suffix(agent_worker *w,
                                             int assistant_start) {
     if (assistant_start < 0) assistant_start = 0;
@@ -9771,6 +9923,15 @@ static void worker_set_greedy_sampling(agent_worker *w, bool greedy) {
         agent_wake_locked(w);
     }
     pthread_mutex_unlock(&w->mu);
+}
+
+static int agent_turn_blocked(agent_worker *w, const char *why) {
+    char msg[160];
+    snprintf(msg, sizeof(msg), "BLOCKED: %s", why);
+    agent_trace(w, "%s", msg);
+    agent_publish_system_status(w, msg);
+    agent_set_status(w, AGENT_WORKER_IDLE);
+    return 0;
 }
 
 /* Run one user turn until the assistant stops or returns a tool call.  Tool
@@ -9863,6 +10024,11 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
     bool resume_assistant = false, resume_in_think = false;
     int resume_start = 0;
     agent_repetition_detector thinking_repetition = {0};
+    int recoveries = 0;
+    bool recover_nothink = false;
+    w->wd_ncalls = 0;
+    w->wd_stagnant = 0;
+    w->wd_last_err = 0;
     for (int tool_round = 0; ; tool_round++) {
         if (!resume_assistant &&
             !agent_worker_compact_if_needed(w, "soft limit before generation",
@@ -9880,8 +10046,9 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             agent_worker_maybe_append_system_prompt_reminder(w);
             agent_worker_append_hints_context(w);
         }
-        q36_think_mode think_mode = w->thinking_enabled ?
+        q36_think_mode think_mode = w->thinking_enabled && !recover_nothink ?
             enabled_think_mode(cfg) : Q36_THINK_NONE;
+        recover_nothink = false;
         const bool continuing_assistant = resume_assistant;
         const int assistant_start = continuing_assistant ? resume_start : w->transcript.len;
         if (!resume_assistant)
@@ -9980,6 +10147,10 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         int generated = 0;
         size_t tool_repetition_raw_seen = 0;
         agent_repetition_detector tool_repetition = {0};
+        agent_action_leak leak = {0};
+        bool action_leak = false;
+        const bool leak_guard = cfg->gen.action_budget > 0 &&
+                                q36_think_mode_enabled(think_mode);
         double t0 = now_sec();
 
         pthread_mutex_lock(&w->mu);
@@ -10076,6 +10247,13 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                             "repetition_detected_thinking thinking_tokens=%d",
                             thinking_tokens);
                     }
+                } else if (leak_guard && !in_think && token != think_close_id &&
+                           qwen_tool.state == AGENT_QWEN_TOOL_SEARCH &&
+                           agent_action_leak_feed(&leak, cfg->gen.action_budget,
+                                                  text, text_len)) {
+                    action_leak = true;
+                    agent_trace(w, "action_leak content_tokens=%d budget=%d",
+                                leak.tokens, cfg->gen.action_budget);
                 }
                 free(text);
             }
@@ -10105,7 +10283,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 got_tool = true;
                 break;
             }
-            if (repetitive_tool) break;
+            if (repetitive_tool || action_leak) break;
             if (stream.tool_preflight_error) {
                 early_tool_error = true;
                 break;
@@ -10173,6 +10351,21 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             worker_clear_interrupt(w);
             agent_set_status(w, AGENT_WORKER_IDLE);
             return 0;
+        }
+        if (action_leak) {
+            /* Drop the whole failed round (thinking + monologue); retry once
+             * with thinking off so the model goes straight to an action. */
+            agent_qwen_tool_parser_free(&qwen_tool);
+            carried_generation = 0;
+            carried_thinking_tokens = 0;
+            if (++recoveries > cfg->gen.max_recoveries)
+                return agent_turn_blocked(w, "post-think reasoning leak, recoveries exhausted");
+            agent_rollback_assistant_suffix(w, assistant_start);
+            q36_chat_append_message(w->engine, &w->transcript, "user",
+                                    agent_action_required_msg);
+            agent_trace(w, "recovery=%d reason=action_leak", recoveries);
+            recover_nothink = true;
+            continue;
         }
         if (repetitive_tool) {
             agent_rollback_partial_tool(
@@ -10280,6 +10473,18 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             if (start) agent_tool_observation_puts(&observation, start);
         }
         free(warning);
+        if (w->wd_stagnant >= cfg->gen.max_stagnant_turns) {
+            w->wd_stagnant = 0;
+            if (++recoveries > cfg->gen.max_recoveries) {
+                agent_tool_observation_free(&observation);
+                agent_qwen_tool_parser_free(&qwen_tool);
+                return agent_turn_blocked(w, "stagnation: repeated blocked/failing calls");
+            }
+            agent_tool_observation_puts(&observation, agent_action_required_msg);
+            agent_tool_observation_puts(&observation, "\n");
+            agent_trace(w, "recovery=%d reason=stagnation", recoveries);
+            recover_nothink = true;
+        }
         int projected_tokens = 0;
         int result_reserve = AGENT_TOOL_RESULT_RESERVE_TOKENS;
         char append_err[160] = {0};

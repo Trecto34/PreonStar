@@ -905,6 +905,38 @@ static void test_partial_tool_interrupt_rollback(void) {
     unlink(path);
 }
 
+static void test_action_leak_and_watchdog(void) {
+    /* A real final answer past the budget is not a leak. */
+    static agent_action_leak l;
+    memset(&l, 0, sizeof(l));
+    bool hit = false;
+    for (int i = 0; i < 200 && !hit; i++)
+        hit = agent_action_leak_feed(&l, 8, "The file was updated and tests pass. ", 37) && i < 3;
+    AGENT_TEST_ASSERT(!hit);
+    /* Reasoning restarts past the budget are. */
+    memset(&l, 0, sizeof(l));
+    const char *chunks[] = {"Wait, let me reconsider the file.\n", "Actually, I should read it again.\n",
+                            "Let me read the file once more.\n", "Hmm, maybe not.\n"};
+    hit = false;
+    for (int i = 0; i < 400 && !hit; i++)
+        hit = agent_action_leak_feed(&l, 8, chunks[i % 4], strlen(chunks[i % 4]));
+    AGENT_TEST_ASSERT(hit);
+    /* Under budget never trips. */
+    memset(&l, 0, sizeof(l));
+    for (int i = 0; i < 8; i++)
+        AGENT_TEST_ASSERT(!agent_action_leak_feed(&l, 8, chunks[i % 4], strlen(chunks[i % 4])));
+
+    /* Watchdog: second identical read blocked; mutation resets. */
+    static agent_worker w;
+    memset(&w, 0, sizeof(w));
+    agent_tool_arg a = {"path", "x.c"};
+    agent_tool_call rd = {"read", &a, 1, 1}, wr = {"write", &a, 1, 1};
+    AGENT_TEST_ASSERT(!agent_watchdog_blocks(&w, &rd, 1));
+    AGENT_TEST_ASSERT(agent_watchdog_blocks(&w, &rd, 1));
+    AGENT_TEST_ASSERT(!agent_watchdog_blocks(&w, &wr, 1));
+    AGENT_TEST_ASSERT(!agent_watchdog_blocks(&w, &rd, 1));
+}
+
 static void test_repetitive_tool_aborted_before_execution(void) {
     char path[] = "/tmp/q36-agent-repetition-XXXXXX";
     int fd = mkstemp(path);
@@ -1023,6 +1055,7 @@ int main(int argc, char **argv) {
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();
+    test_action_leak_and_watchdog();
     test_agent_frequency_penalty_sampling_path();
     test_observation_error_is_not_context_exhaustion();
     test_atomic_file_tools();

@@ -286,6 +286,10 @@ static void print_agent_specific(FILE *fp, const help_colors *c) {
     opt(fp, c, "--chdir DIR", "Set the agent tool working directory; runtime assets load first.");
     opt(fp, c, "-n, --tokens N", "Hard output limit per assistant generation. Default: 100000.");
     opt(fp, c, "--thinking-budget N", "Hard maximum tokens per thinking block; soft closing starts at 75%. Default: 50000.");
+    opt(fp, c, "--action-budget N", "Post-think content tokens before a reasoning-leak check aborts and recovers the round (0 = off). Default: 384.");
+    opt(fp, c, "--max-repeat-tool N", "Identical read-only calls allowed against an unchanged workspace. Default: 1.");
+    opt(fp, c, "--max-stagnant-turns N", "Blocked or identically failing calls before a recovery. Default: 2.");
+    opt(fp, c, "--max-recoveries N", "Controller recoveries per user turn before the turn ends BLOCKED. Default: 3.");
     opt(fp, c, "--frequency-penalty F", "Optional sampler aid, -2..2 (alias: --default-frequency-penalty). Default: 0.");
     opt(fp, c, "--think-low, --think-medium, --think, --think-xhigh", "Select the initial dense thinking mode without changing the budget.");
     opt(fp, c, "Tab", "Cycle dense low/medium/high/xhigh or MoE off/on; keep the current thinking budget.");
