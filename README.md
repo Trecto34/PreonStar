@@ -462,6 +462,68 @@ Exiting during generation stops the worker before asking whether to save.
 Sessions containing images cannot be saved yet; declining to exit after a save
 failure returns to the current chat.
 
+### Agent execution control
+
+These controls live in the harness and server, not in the prompt; none of them
+adds prompt text. Defaults are conservative and every control can be turned off.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--action-budget N` | 384 | After thinking ends (or from token 0 without thinking) the model must act or answer. Once N content tokens pass with no tool call started, the content is scanned for reasoning restarts (`Wait,` `Actually,` `Let me re...`, 3 or more) or repetition; past 4N a single restart is enough. A real final answer has neither and is never cut. `0` disables. |
+| `--max-recoveries N` | 3 | A leaked round is dropped (the monologue is never fed back), `ACTION REQUIRED...` is added and the retry runs with thinking off. After N recoveries the turn ends `BLOCKED:`. |
+| `--max-repeat-tool N` | 1 | Identical read-only calls allowed against an unchanged workspace. Any write/edit/bash resets the memory. The same call back to back is blocked for every tool. Blocked calls return `REPEAT_CALL_BLOCKED`. |
+| `--max-stagnant-turns N` | 2 | Blocked or identically failing calls in a row before a recovery. |
+| `--think auto\|low\|medium\|high` | off | `auto` picks the thinking budget per turn (256/1024/2048) from the prompt and raises it after tool failures or recoveries; never lowered within a turn. Explicit `--thinking-budget` stays a ceiling. The bare `--think*` flags are unchanged. |
+| `--compact-llm` | off | Compaction renders harness-tracked task state (GOAL, VERIFIED FACTS, COMPLETED, FILES, FAILED ATTEMPTS, CURRENT EDIT STATE, NEXT REQUIRED ACTION, DO NOT REPEAT) instead of asking the model for a narrative, and strips closed thinking from the retained tail. `--compact-llm` restores the model-written summary. A restored session with no tracked state also falls back to it. |
+
+Tool changes: `write` takes `append=true` and is limited to 12 KiB per call (an
+oversized call is cut while streaming and answered with
+`WRITE_PAYLOAD_TOO_LARGE`; the result reports `total=` and `max_payload=`);
+`edit` takes `start_line`/`end_line` without `old` (whitespace-safe) and
+reports `EDIT_MATCH_NOT_FOUND` / `EDIT_MATCH_NOT_UNIQUE` / `EDIT_NO_CHANGE` /
+`EDIT_LINE_RANGE_INVALID` with counts, plus `hint=whitespace_differs` when only
+whitespace differs.
+
+With `--trace FILE` the trace tags `[THINK]`, `[ACTION]`, `[TOOL CALL]`,
+`[TOOL RESULT]`, `[RECOVERY]`, `[COMPACTION]`, `[FINAL]` and `[SUMMARY]`;
+non-interactive runs end with a session summary (steps, tools, reasoning and
+action tokens, recoveries, repeated calls blocked, compactions, cached prompt
+share, prefill/decode tok/s).
+
+#### Remote agent
+
+```sh
+q36-agent --server http://192.168.3.50:8000 --server-model MODEL \
+  --think --thinking-budget 768 --action-budget 384 --chdir repo
+```
+
+Inference runs on a `q36-server`; tools, shell, watchdog, recovery and
+compaction state stay local. The server owns the chat template, tokenizer,
+reasoning split, KV and exact tool-call replay; the client sends OpenAI-format
+messages with structured `tools` and streams the reply. `--api-key` adds a
+Bearer header, `--server-timeout` bounds silence (default 600 s), and
+`--server-protocol` accepts `auto` or `chat`. No local model is loaded and the
+context size is clamped to the server's. Limits: plain `http://` only, tool
+images (`view_image`) and saved sessions are not available remotely, and only
+the first tool call of a reply is executed (the server is asked to stop there).
+
+#### Server extension fields (`/v1/chat/completions`)
+
+All optional and ignored unless sent:
+
+- `thinking_budget` (int): hard cap; `</think>` is forced at N reasoning tokens.
+- `action_budget` (int): leak abort as above; the reply ends with
+  `finish_reason: "action_budget"`.
+- `stop_after_tool_call` (bool): decoding ends at the first complete tool call.
+- Replies carry `usage.completion_tokens_details.reasoning_tokens` and
+  `content_tokens`, and `usage.timings.{prefill_ms,decode_ms}` next to the
+  existing `cached_tokens`.
+
+Tests: `make test` (unit), `make test-server`, `tests/test_server_agent_controls.py URL`
+(live server), `tests/agent_regression.py --mode local|remote` (real agent runs,
+tasks A-F) and `--compare` for local/remote parity, `tests/bench_server_plain.py`
+and `tests/bench_agent_loop.py` for overhead checks.
+
 ## Benchmarking
 
 `q36-bench` measures instantaneous prefill and generation throughput at
