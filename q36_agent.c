@@ -262,6 +262,8 @@ typedef struct {
     int wd_blocked;     /* duplicate calls refused this user turn */
     int wd_stagnant;    /* consecutive blocked / identically failing calls */
     uint64_t wd_last_err;
+    uint64_t wd_prev_hash;   /* previous executed call, for back-to-back repeats */
+    int wd_prev_run;
     agent_task_state st;
     /* Remote backend: OpenAI-format message objects (JSON text), system first. */
     char **rmsg;
@@ -7586,6 +7588,13 @@ static char *agent_apply_file_splice(const char *path,
            len - offset - remove_len);
     out[out_len] = '\0';
 
+    if (out_len == len && !memcmp(out, data, len)) {
+        char msg[PATH_MAX + 80];
+        snprintf(msg, sizeof(msg), "Tool error: EDIT_NO_CHANGE path=%s reason=%s\n", path,
+                 "replacement is identical to the existing text");
+        free(out);
+        return xstrdup(msg);
+    }
     int rc = agent_replace_file(path, out, out_len, data, len, err, sizeof(err));
     if (rc != 0) {
         free(out);
@@ -9183,11 +9192,17 @@ static uint64_t agent_tool_call_hash(const agent_tool_call *c) {
  * the table (state changed, so a re-read is legitimate). */
 static bool agent_watchdog_blocks(agent_worker *w, const agent_tool_call *c,
                                   int max_repeat) {
+    uint64_t h = agent_tool_call_hash(c);
+    /* Any tool: the same call again and again back to back is a loop (an edit
+     * whose result does not change, a polling bash, ...). */
+    int run = h == w->wd_prev_hash ? w->wd_prev_run + 1 : 1;
+    if (run > max_repeat) return true;
+    w->wd_prev_hash = h;
+    w->wd_prev_run = run;
     if (!agent_tool_is_readonly(c->name)) {
         w->wd_ncalls = 0;
         return false;
     }
-    uint64_t h = agent_tool_call_hash(c);
     for (int i = 0; i < w->wd_ncalls; i++) {
         if (w->wd_calls[i].hash != h) continue;
         if (w->wd_calls[i].count >= max_repeat) return true;
@@ -10371,6 +10386,8 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
     w->wd_ncalls = 0;
     w->wd_stagnant = 0;
     w->wd_last_err = 0;
+    w->wd_prev_hash = 0;
+    w->wd_prev_run = 0;
     for (;;) {
         if (w->remote_ctx > 0 && agent_context_should_compact(w->remote_ctx, w->remote_used))
             agent_remote_compact(w, "soft limit before generation");
@@ -10628,6 +10645,8 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
     w->wd_ncalls = 0;
     w->wd_stagnant = 0;
     w->wd_last_err = 0;
+    w->wd_prev_hash = 0;
+    w->wd_prev_run = 0;
     for (int tool_round = 0; ; tool_round++) {
         think_level = agent_think_level_raise(think_level, consecutive_failures, rec.recoveries > 0);
         think_budget = agent_think_budget_for(cfg, think_level);

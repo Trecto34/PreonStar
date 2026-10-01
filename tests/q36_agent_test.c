@@ -939,6 +939,13 @@ static void test_action_leak_and_watchdog(void) {
     AGENT_TEST_ASSERT(agent_watchdog_blocks(&w, &rd, 1));
     AGENT_TEST_ASSERT(!agent_watchdog_blocks(&w, &wr, 1));
     AGENT_TEST_ASSERT(!agent_watchdog_blocks(&w, &rd, 1));
+    /* Back-to-back identical mutating calls are loops too. */
+    memset(&w, 0, sizeof(w));
+    AGENT_TEST_ASSERT(!agent_watchdog_blocks(&w, &wr, 1));
+    AGENT_TEST_ASSERT(agent_watchdog_blocks(&w, &wr, 1));
+    AGENT_TEST_ASSERT(agent_watchdog_blocks(&w, &wr, 1));
+    AGENT_TEST_ASSERT(!agent_watchdog_blocks(&w, &rd, 1));   /* different call resets the run */
+    AGENT_TEST_ASSERT(!agent_watchdog_blocks(&w, &wr, 1));
 }
 
 /* Deterministic replay of the recovery protocol: scripted "model" rounds go
@@ -1038,6 +1045,9 @@ static void test_write_append_and_edit_lines(void) {
     AGENT_TEST_ASSERT(agent_read_file_bytes(path, &data, &len, err, sizeof(err)) == 0);
     AGENT_TEST_ASSERT(data && !strcmp(data, "int f(void) {\n    return 2;\n}\n// end\n"));
     free(data);
+    r = test_call("edit", "path", path, "start_line", "2", "end_line", "2", "new", "    return 2;", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "EDIT_NO_CHANGE") != NULL);
+    free(r);
     r = test_call("edit", "path", path, "start_line", "9", "new", "z", NULL);
     AGENT_TEST_ASSERT(strstr(r, "EDIT_LINE_RANGE_INVALID") && strstr(r, "lines=4"));
     free(r);
