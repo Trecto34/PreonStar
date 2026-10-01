@@ -290,6 +290,11 @@ static void print_agent_specific(FILE *fp, const help_colors *c) {
     opt(fp, c, "--max-repeat-tool N", "Identical read-only calls allowed against an unchanged workspace. Default: 1.");
     opt(fp, c, "--max-stagnant-turns N", "Blocked or identically failing calls before a recovery. Default: 2.");
     opt(fp, c, "--max-recoveries N", "Controller recoveries per user turn before the turn ends BLOCKED. Default: 3.");
+    opt(fp, c, "--server URL", "Run inference on a q36-server (http://host:port) instead of loading a model; tools, watchdog and compaction stay local.");
+    opt(fp, c, "--server-model NAME", "Model id to request from the server. Default: the server's first model.");
+    opt(fp, c, "--api-key KEY", "Bearer token sent to the server (for reverse proxies).");
+    opt(fp, c, "--server-timeout S", "Seconds of server silence before giving up. Default: 600.");
+    opt(fp, c, "--server-protocol P", "auto or chat (chat completions). Default: auto.");
     opt(fp, c, "--compact-llm", "Write compaction summaries with the model instead of the harness-maintained task state.");
     opt(fp, c, "--frequency-penalty F", "Optional sampler aid, -2..2 (alias: --default-frequency-penalty). Default: 0.");
     opt(fp, c, "--think-low, --think-medium, --think, --think-xhigh", "Select the initial dense thinking mode without changing the budget.");

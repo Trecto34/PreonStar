@@ -1,6 +1,9 @@
 #define Q36_AGENT_TEST
 #define Q36_AGENT_TEST_NO_MAIN
 #include <stdarg.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include "../q36_agent.c"
 #include <sys/resource.h>
 
@@ -1065,6 +1068,107 @@ static void test_task_state_render(void) {
     AGENT_TEST_ASSERT(!agent_st_empty(&st));
 }
 
+/* In-process fake server: replies to one request with a canned body. */
+typedef struct { int fd; const char *reply; size_t reply_len; } fake_srv;
+
+static void *fake_srv_thread(void *arg) {
+    fake_srv *f = arg;
+    int c = accept(f->fd, NULL, NULL);
+    char buf[16384];
+    ssize_t n = 0, total = 0;
+    while (total < (ssize_t)sizeof(buf) - 1 && (n = recv(c, buf + total, sizeof(buf) - 1 - (size_t)total, 0)) > 0) {
+        total += n;
+        buf[total] = 0;
+        if (strstr(buf, "\r\n\r\n") && strstr(buf, "stream")) break;
+    }
+    size_t off = 0;
+    while (off < f->reply_len) {   /* dribble to exercise reassembly across reads */
+        size_t chunk = f->reply_len - off < 37 ? f->reply_len - off : 37;
+        if (send(c, f->reply + off, chunk, MSG_NOSIGNAL) < 0) break;
+        off += chunk;
+        usleep(200);
+    }
+    close(c);
+    close(f->fd);
+    return NULL;
+}
+
+static void fake_remote_roundtrip(const char *reply, bool chunked) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t al = sizeof(a);
+    AGENT_TEST_ASSERT(bind(fd, (struct sockaddr *)&a, sizeof(a)) == 0);
+    AGENT_TEST_ASSERT(listen(fd, 1) == 0);
+    getsockname(fd, (struct sockaddr *)&a, &al);
+    fake_srv f = {fd, reply, strlen(reply)};
+    pthread_t th;
+    pthread_create(&th, NULL, fake_srv_thread, &f);
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", ntohs(a.sin_port));
+    q36_remote_cfg cfg = {url, "k", 5};
+    q36_remote_result r;
+    int rc = q36_remote_chat(&cfg, "{\"stream\":true}", NULL, NULL, NULL, &r);
+    pthread_join(th, NULL);
+    AGENT_TEST_ASSERT(rc == 0);
+    AGENT_TEST_ASSERT(r.content && !strcmp(r.content, "Hello wörld"));
+    AGENT_TEST_ASSERT(r.reasoning && !strcmp(r.reasoning, "think"));
+    AGENT_TEST_ASSERT(r.ncalls == 1 && r.calls[0].name && !strcmp(r.calls[0].name, "read"));
+    AGENT_TEST_ASSERT(r.calls[0].arguments && !strcmp(r.calls[0].arguments, "{\"path\":\"a.c\"}"));
+    AGENT_TEST_ASSERT(r.calls[0].id && !strcmp(r.calls[0].id, "call_7"));
+    AGENT_TEST_ASSERT(!strcmp(r.finish, "tool_calls"));
+    AGENT_TEST_ASSERT(r.prompt_tokens == 100 && r.cached_tokens == 90 && r.reasoning_tokens == 3);
+    AGENT_TEST_ASSERT(r.decode_ms > 11.0 && r.decode_ms < 13.0);
+    q36_remote_result_free(&r);
+    (void)chunked;
+}
+
+static void test_remote_client_sse(void) {
+    const char *body =
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thi\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"nk\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hello w\\u00f6rld\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_7\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"a.c\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":9,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":90},\"completion_tokens_details\":{\"reasoning_tokens\":3},"
+        "\"timings\":{\"prefill_ms\":5.5,\"decode_ms\":12.0}}}\n\n"
+        "data: [DONE]\n\n";
+    char plain[4096], chunked[4600];
+    snprintf(plain, sizeof(plain), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n%s", body);
+    fake_remote_roundtrip(plain, false);
+    /* same stream, chunk-framed in uneven pieces */
+    size_t bl = strlen(body), off = 0, n = (size_t)snprintf(chunked, sizeof(chunked),
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/event-stream\r\n\r\n");
+    size_t piece = 61;
+    while (off < bl) {
+        size_t c = bl - off < piece ? bl - off : piece;
+        n += (size_t)snprintf(chunked + n, sizeof(chunked) - n, "%zx\r\n", c);
+        memcpy(chunked + n, body + off, c);
+        n += c;
+        memcpy(chunked + n, "\r\n", 2);
+        n += 2;
+        off += c;
+    }
+    memcpy(chunked + n, "0\r\n\r\n", 6);
+    fake_remote_roundtrip(chunked, true);
+}
+
+static void test_remote_errors_and_json(void) {
+    q36_remote_cfg cfg = {"https://x", NULL, 1};
+    q36_remote_result r;
+    AGENT_TEST_ASSERT(q36_remote_chat(&cfg, "{}", NULL, NULL, NULL, &r) != 0);
+    AGENT_TEST_ASSERT(strstr(r.err, "http://"));
+    q36_jv *j = q36_jv_parse("{\"a\":[1,2.5,true,null,\"x\\n\\ud83d\\ude00\"],\"b\":{}}");
+    AGENT_TEST_ASSERT(j && q36_jv_count(q36_jv_get(j, "a")) == 5);
+    char sc[40];
+    AGENT_TEST_ASSERT(!strcmp(q36_jv_text(q36_jv_at(q36_jv_get(j, "a"), 0), sc, sizeof(sc)), "1"));
+    AGENT_TEST_ASSERT(!strcmp(q36_jv_text(q36_jv_at(q36_jv_get(j, "a"), 4), sc, sizeof(sc)), "x\n\xf0\x9f\x98\x80"));
+    q36_jv_free(j);
+    AGENT_TEST_ASSERT(q36_jv_parse("{\"a\":") == NULL);
+    AGENT_TEST_ASSERT(q36_jv_parse("{} x") == NULL);
+}
+
 static void test_repetitive_tool_aborted_before_execution(void) {
     char path[] = "/tmp/q36-agent-repetition-XXXXXX";
     int fd = mkstemp(path);
@@ -1184,6 +1288,8 @@ int main(int argc, char **argv) {
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();
     test_action_leak_and_watchdog();
+    test_remote_client_sse();
+    test_remote_errors_and_json();
     test_task_state_render();
     test_write_append_and_edit_lines();
     test_leak_recovery_protocol();

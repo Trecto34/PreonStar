@@ -4,6 +4,7 @@
 #include "q36_help.h"
 #include "q36_kvstore.h"
 #include "q36_web.h"
+#include "q36_remote.h"
 #include "linenoise.h"
 #include "q36_cli_args.h"
 
@@ -98,6 +99,11 @@ typedef struct {
     q36_engine_options engine;
     agent_generation_options gen;
     const char *chdir_path;
+    /* Remote mode: inference on a q36-server, tools/watchdog/compaction local. */
+    const char *server_url;
+    const char *server_model;
+    const char *api_key;
+    int server_timeout;
     bool non_interactive;
     bool edit_upto;
 } agent_config;
@@ -154,6 +160,14 @@ typedef struct {
     int nfailed;
     bool last_failed;
 } agent_task_state;
+
+/* Session metrics, reported by the end-of-run summary. */
+typedef struct {
+    int steps, tools, recoveries, blocked_calls, compactions;
+    long reasoning_tokens, action_tokens, prompt_tokens, cached_tokens;
+    double prefill_ms, decode_ms, wall_s;
+    char finish[40];
+} agent_metrics;
 
 typedef struct agent_bash_job agent_bash_job;
 
@@ -248,6 +262,12 @@ typedef struct {
     int wd_stagnant;    /* consecutive blocked / identically failing calls */
     uint64_t wd_last_err;
     agent_task_state st;
+    /* Remote backend: OpenAI-format message objects (JSON text), system first. */
+    char **rmsg;
+    int nrmsg, rmsg_cap;
+    int remote_ctx;
+    int remote_used;            /* prompt+completion tokens of the last reply */
+    agent_metrics m;
 } agent_worker;
 
 static unsigned agent_next_prefill_label(void);
@@ -786,6 +806,20 @@ static agent_config parse_options(int argc, char **argv) {
             c.gen.max_repeat_tool = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--max-stagnant-turns")) {
             c.gen.max_stagnant_turns = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--server")) {
+            c.server_url = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--server-model")) {
+            c.server_model = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--api-key")) {
+            c.api_key = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--server-timeout")) {
+            c.server_timeout = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--server-protocol")) {
+            const char *proto = need_arg(&i, argc, argv, arg);
+            if (strcmp(proto, "auto") && strcmp(proto, "chat")) {
+                fprintf(stderr, "q36-agent: --server-protocol %s is not supported (use auto or chat)\n", proto);
+                exit(2);
+            }
         } else if (!strcmp(arg, "--compact-llm")) {
             c.gen.compact_llm = true;
         } else if (!strcmp(arg, "--max-recoveries")) {
@@ -10057,10 +10091,376 @@ static int agent_turn_blocked(agent_worker *w, const char *why) {
     return 0;
 }
 
+
+/* ============================================================================
+ * Remote backend (--server): the model, template and KV live on a q36-server;
+ * tools, watchdog, recovery and compaction state stay here.  Messages are kept
+ * as OpenAI-format JSON so the server's canonical template and exact tool-call
+ * replay stay in charge of the token stream.
+ * ============================================================================
+ */
+
+static void agent_json_puts(char **out, size_t *len, size_t *cap, const char *s) {
+    size_t n = strlen(s);
+    if (*len + n + 1 > *cap) {
+        *cap = (*len + n + 1) * 2;
+        *out = xrealloc(*out, *cap);
+    }
+    memcpy(*out + *len, s, n + 1);
+    *len += n;
+}
+
+static void agent_rmsg_push(agent_worker *w, char *json) {
+    if (w->nrmsg == w->rmsg_cap) {
+        w->rmsg_cap = w->rmsg_cap ? w->rmsg_cap * 2 : 32;
+        w->rmsg = xrealloc(w->rmsg, (size_t)w->rmsg_cap * sizeof(w->rmsg[0]));
+    }
+    w->rmsg[w->nrmsg++] = json;
+}
+
+static char *agent_rmsg_text(const char *role, const char *content, const char *extra) {
+    char *out = NULL;
+    size_t len = 0, cap = 0;
+    agent_json_puts(&out, &len, &cap, "{\"role\":");
+    q36_remote_json_quote(&out, &len, &cap, role);
+    agent_json_puts(&out, &len, &cap, ",\"content\":");
+    q36_remote_json_quote(&out, &len, &cap, content ? content : "");
+    if (extra) agent_json_puts(&out, &len, &cap, extra);
+    agent_json_puts(&out, &len, &cap, "}");
+    return out;
+}
+
+/* Tool schemas are the JSON blocks already embedded in the local prompt, so the
+ * remote and local agents can never drift apart. */
+static char *agent_remote_tools_json(void) {
+    const char *a = strstr(agent_tools_prompt_after_edit, "<tools>\n");
+    const char *b = strstr(agent_tools_prompt_after_edit, "</tools>");
+    if (!a || !b) return xstrdup("[]");
+    a += 8;
+    char *out = NULL;
+    size_t len = 0, cap = 0;
+    agent_json_puts(&out, &len, &cap, "[");
+    for (const char *p = a; p < b; p++) {
+        if (p[0] == '\n' && p + 1 < b && p[1] == '\n') {
+            agent_json_puts(&out, &len, &cap, ",");
+            p++;
+        } else {
+            char c[2] = {*p, 0};
+            agent_json_puts(&out, &len, &cap, c);
+        }
+    }
+    agent_json_puts(&out, &len, &cap, "]");
+    return out;
+}
+
+/* Same guidance as the local prompt minus the Qwen tool-call syntax, which the
+ * server's template renders itself. */
+static char *agent_remote_system_prompt(const agent_config *cfg) {
+    agent_buf b = {0};
+    const char *intro = agent_tools_prompt_intro;
+    const char *first_end = strstr(intro, "\n\n");
+    if (first_end) agent_buf_append(&b, intro, (size_t)(first_end - intro) + 2);
+    const char *read_help = strstr(intro, "</IMPORTANT>\n\n");
+    if (read_help) agent_buf_puts(&b, read_help + strlen("</IMPORTANT>\n\n"));
+    agent_buf_puts(&b, cfg->edit_upto ? agent_tools_prompt_edit_upto : agent_tools_prompt_edit_exact);
+    const char *tools = strstr(agent_tools_prompt_after_edit, "<tools>");
+    if (tools) agent_buf_append(&b, agent_tools_prompt_after_edit,
+                                (size_t)(tools - agent_tools_prompt_after_edit));
+    const char *rules = strstr(agent_tools_prompt_after_edit, "- This system runs");
+    if (rules) { agent_buf_puts(&b, "# Rules\n\n"); agent_buf_puts(&b, rules); }
+    if (cfg->gen.system && cfg->gen.system[0]) {
+        bool t = true;
+        char *plain = agent_chat_control_text(cfg->gen.system, &t);
+        agent_buf_puts(&b, "\n\n");
+        agent_buf_puts(&b, plain);
+        free(plain);
+    }
+    return agent_buf_take(&b);
+}
+
+static char *agent_remote_request(agent_worker *w, bool thinking) {
+    const agent_config *cfg = w->cfg;
+    char *out = NULL, *tools = agent_remote_tools_json();
+    size_t len = 0, cap = 0;
+    char num[256];
+    agent_json_puts(&out, &len, &cap, "{\"model\":");
+    q36_remote_json_quote(&out, &len, &cap, cfg->server_model ? cfg->server_model : "");
+    agent_json_puts(&out, &len, &cap, ",\"messages\":[");
+    for (int i = 0; i < w->nrmsg; i++) {
+        if (i) agent_json_puts(&out, &len, &cap, ",");
+        agent_json_puts(&out, &len, &cap, w->rmsg[i]);
+    }
+    agent_json_puts(&out, &len, &cap, "],\"tools\":");
+    agent_json_puts(&out, &len, &cap, tools);
+    free(tools);
+    snprintf(num, sizeof(num), ",\"stream\":true,\"stream_options\":{\"include_usage\":true},"
+             "\"stop_after_tool_call\":true,\"max_tokens\":%d", cfg->gen.n_predict);
+    agent_json_puts(&out, &len, &cap, num);
+    if (cfg->gen.action_budget > 0) {
+        snprintf(num, sizeof(num), ",\"action_budget\":%d", cfg->gen.action_budget);
+        agent_json_puts(&out, &len, &cap, num);
+    }
+    if (thinking && cfg->gen.thinking_budget > 0) {
+        snprintf(num, sizeof(num), ",\"thinking_budget\":%d", cfg->gen.thinking_budget);
+        agent_json_puts(&out, &len, &cap, num);
+    }
+    snprintf(num, sizeof(num), ",\"chat_template_kwargs\":{\"enable_thinking\":%s}",
+             thinking ? "true" : "false");
+    agent_json_puts(&out, &len, &cap, num);
+    if (cfg->gen.temperature_set) {
+        snprintf(num, sizeof(num), ",\"temperature\":%g", (double)cfg->gen.temperature);
+        agent_json_puts(&out, &len, &cap, num);
+    }
+    if (cfg->gen.top_k_set) {
+        snprintf(num, sizeof(num), ",\"top_k\":%d", cfg->gen.top_k);
+        agent_json_puts(&out, &len, &cap, num);
+    }
+    if (cfg->gen.top_p_set) {
+        snprintf(num, sizeof(num), ",\"top_p\":%g", (double)cfg->gen.top_p);
+        agent_json_puts(&out, &len, &cap, num);
+    }
+    if (cfg->gen.min_p_set) {
+        snprintf(num, sizeof(num), ",\"min_p\":%g", (double)cfg->gen.min_p);
+        agent_json_puts(&out, &len, &cap, num);
+    }
+    if (cfg->gen.frequency_penalty != 0.0f) {
+        snprintf(num, sizeof(num), ",\"frequency_penalty\":%g", (double)cfg->gen.frequency_penalty);
+        agent_json_puts(&out, &len, &cap, num);
+    }
+    if (cfg->gen.seed) {
+        snprintf(num, sizeof(num), ",\"seed\":%llu", (unsigned long long)cfg->gen.seed);
+        agent_json_puts(&out, &len, &cap, num);
+    }
+    agent_json_puts(&out, &len, &cap, "}");
+    return out;
+}
+
+typedef struct {
+    agent_worker *w;
+    int last_kind;
+} agent_remote_stream;
+
+static void agent_remote_delta(void *ud, int kind, const char *s, size_t n) {
+    agent_remote_stream *rs = ud;
+    if (kind != rs->last_kind) {
+        if (kind == 1) agent_publish(rs->w, "\x1b[38;5;245m", 11);
+        else agent_publish(rs->w, "\x1b[0m\n", 5);
+        rs->last_kind = kind;
+    }
+    agent_publish(rs->w, s, n);
+}
+
+static bool agent_remote_cancelled(void *ud) {
+    return worker_should_interrupt(((agent_remote_stream *)ud)->w);
+}
+
+/* Compaction without a model call: system prompt + harness state + the last
+ * few messages (never splitting an assistant/tool pair). */
+static void agent_remote_compact(agent_worker *w, const char *reason) {
+    if (w->nrmsg < 4 || agent_st_empty(&w->st)) return;
+    int keep = w->nrmsg - 4;
+    if (keep < 1) keep = 1;
+    while (keep > 1 && strstr(w->rmsg[keep], "\"role\":\"tool\"")) keep--;
+    char *state = agent_st_render(&w->st);
+    agent_buf msg = {0};
+    agent_buf_puts(&msg, "[q36-agent compacted earlier conversation. Durable task state follows.]\n");
+    agent_buf_puts(&msg, state);
+    agent_buf_puts(&msg, "[End compacted state. Recent conversation continues verbatim below.]\n");
+    free(state);
+    char *state_msg = agent_rmsg_text("user", msg.ptr, NULL);
+    free(msg.ptr);
+    int old = w->nrmsg;
+    for (int i = 1; i < keep; i++) free(w->rmsg[i]);
+    w->rmsg[keep - 1] = state_msg;
+    memmove(w->rmsg + 1, w->rmsg + keep - 1, (size_t)(w->nrmsg - keep + 1) * sizeof(w->rmsg[0]));
+    w->nrmsg -= keep - 2;
+    w->m.compactions++;
+    agent_trace(w, "[COMPACTION] reason=\"%s\" messages=%d->%d", reason, old, w->nrmsg);
+    agent_publishf(w, "\n\x1b[1;95mCOMPACTING\x1b[0m %s: kept structured task state (%d -> %d messages)\n",
+                   reason, old, w->nrmsg);
+}
+
+static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
+    agent_config *cfg = w->cfg;
+    q36_remote_cfg rc = {cfg->server_url, cfg->api_key, cfg->server_timeout};
+    bool next_thinking = w->thinking_enabled;
+    char *user_content = agent_chat_control_text(user_text, &next_thinking);
+    w->thinking_enabled = next_thinking;
+    agent_st_note_goal(&w->st, user_content);
+    agent_trace_text(w, "user", user_content, strlen(user_content));
+    agent_rmsg_push(w, agent_rmsg_text("user", user_content, NULL));
+    free(user_content);
+    agent_set_status(w, AGENT_WORKER_GENERATING);
+
+    agent_recovery rec = {.max = cfg->gen.max_recoveries};
+    int consecutive_failures = 0;
+    w->wd_ncalls = 0;
+    w->wd_stagnant = 0;
+    w->wd_last_err = 0;
+    for (;;) {
+        if (w->remote_ctx > 0 && agent_context_should_compact(w->remote_ctx, w->remote_used))
+            agent_remote_compact(w, "soft limit before generation");
+        const bool thinking = w->thinking_enabled && !rec.nothink_next;
+        rec.nothink_next = false;
+        char *req = agent_remote_request(w, thinking);
+        const char *dump = getenv("Q36_AGENT_DUMP_REQ");   /* debugging aid: last request body */
+        if (dump && dump[0]) {
+            FILE *df = fopen(dump, "wb");
+            if (df) { fputs(req, df); fclose(df); }
+        }
+        agent_remote_stream rs = {w, 0};
+        q36_remote_result res;
+        double t0 = now_sec();
+        int rcode = q36_remote_chat(&rc, req, agent_remote_delta, agent_remote_cancelled, &rs, &res);
+        free(req);
+        if (rs.last_kind) agent_publish(w, "\x1b[0m", 4);
+        agent_publish(w, "\n", 1);
+        if (rcode != 0) {
+            bool interrupted = worker_should_interrupt(w);
+            if (interrupted) {
+                worker_clear_interrupt(w);
+                agent_publish_system_status(w, "Stopped by user");
+                agent_set_status(w, AGENT_WORKER_IDLE);
+            } else if (strstr(res.err, "context") && w->nrmsg > 4 && !agent_st_empty(&w->st)) {
+                agent_remote_compact(w, "server rejected the context size");
+                q36_remote_result_free(&res);
+                continue;
+            } else {
+                agent_set_error(w, res.err);
+            }
+            q36_remote_result_free(&res);
+            return interrupted ? 0 : 1;
+        }
+        int action_tokens = res.completion_tokens - res.reasoning_tokens;
+        w->m.steps++;
+        w->m.reasoning_tokens += res.reasoning_tokens;
+        w->m.action_tokens += action_tokens > 0 ? action_tokens : 0;
+        w->m.prompt_tokens += res.prompt_tokens;
+        w->m.cached_tokens += res.cached_tokens;
+        w->m.prefill_ms += res.prefill_ms;
+        w->m.decode_ms += res.decode_ms;
+        w->m.wall_s += now_sec() - t0;
+        snprintf(w->m.finish, sizeof(w->m.finish), "%s", res.finish);
+        w->remote_used = res.prompt_tokens + res.completion_tokens;
+        agent_trace(w, "[STEP] finish=%s prompt=%d cached=%d reasoning=%d action=%d prefill_ms=%.0f decode_ms=%.0f",
+                    res.finish, res.prompt_tokens, res.cached_tokens, res.reasoning_tokens,
+                    action_tokens, res.prefill_ms, res.decode_ms);
+        if (res.reasoning) agent_trace_text(w, "[THINK]", res.reasoning, strlen(res.reasoning));
+
+        if (!strcmp(res.finish, "action_budget")) {
+            /* Drop the round; ask for an action with thinking off. */
+            q36_remote_result_free(&res);
+            w->m.recoveries++;
+            if (!agent_recovery_next(&rec))
+                return agent_turn_blocked(w, "post-think reasoning leak, recoveries exhausted");
+            agent_rmsg_push(w, agent_rmsg_text("user", agent_action_required_msg, NULL));
+            agent_trace(w, "[RECOVERY] n=%d reason=action_leak", rec.recoveries);
+            agent_publish_system_status(w, "reasoning leak aborted; requesting an action");
+            continue;
+        }
+
+        const bool has_call = res.ncalls > 0 && res.calls[0].name;
+        char *extra = NULL;
+        if (has_call) {
+            const q36_remote_call *rcall = &res.calls[0];
+            char idbuf[32];
+            snprintf(idbuf, sizeof(idbuf), "call_%d", w->m.tools + 1);
+            const char *cid = rcall->id ? rcall->id : idbuf;
+            size_t el = 0, ec = 0;
+            agent_json_puts(&extra, &el, &ec, ",\"tool_calls\":[{\"id\":");
+            q36_remote_json_quote(&extra, &el, &ec, cid);
+            agent_json_puts(&extra, &el, &ec, ",\"type\":\"function\",\"function\":{\"name\":");
+            q36_remote_json_quote(&extra, &el, &ec, rcall->name);
+            agent_json_puts(&extra, &el, &ec, ",\"arguments\":");
+            q36_remote_json_quote(&extra, &el, &ec, rcall->arguments ? rcall->arguments : "{}");
+            agent_json_puts(&extra, &el, &ec, "}}]");
+        }
+        agent_rmsg_push(w, agent_rmsg_text("assistant", res.content, extra));
+        free(extra);
+        if (!has_call) {
+            if (!strcmp(res.finish, "length"))
+                agent_publish_system_status(w, "Output token limit reached");
+            agent_trace(w, "[FINAL] finish=%s", res.finish);
+            q36_remote_result_free(&res);
+            agent_set_status(w, AGENT_WORKER_IDLE);
+            return 0;
+        }
+
+        /* Convert the structured call into the local tool representation. */
+        agent_tool_calls calls = {0};
+        agent_tool_call tc = {0};
+        tc.name = xstrdup(res.calls[0].name);
+        q36_jv *args = q36_jv_parse(res.calls[0].arguments ? res.calls[0].arguments : "{}");
+        for (int i = 0; i < q36_jv_count(args); i++) {
+            char scratch[40];
+            const char *val = q36_jv_text(q36_jv_at(args, i), scratch, sizeof(scratch));
+            if (tc.argc == tc.argcap) {
+                tc.argcap = tc.argcap ? tc.argcap * 2 : 4;
+                tc.args = xrealloc(tc.args, (size_t)tc.argcap * sizeof(tc.args[0]));
+            }
+            tc.args[tc.argc].name = xstrdup(q36_jv_key(args, i));
+            tc.args[tc.argc].value = xstrdup(val ? val : "");
+            tc.argc++;
+        }
+        q36_jv_free(args);
+        calls.v = xmalloc(sizeof(calls.v[0]));
+        calls.v[0] = tc;
+        calls.len = calls.cap = 1;
+        char *tool_id = xstrdup(res.calls[0].id ? res.calls[0].id : "");
+        if (!tool_id[0]) { free(tool_id); char idbuf[32]; snprintf(idbuf, sizeof(idbuf), "call_%d", w->m.tools + 1); tool_id = xstrdup(idbuf); }
+        agent_trace(w, "[TOOL CALL] %s", tc.name);
+        q36_remote_result_free(&res);
+
+        int blocked_before = w->wd_blocked;
+        agent_tool_observation obs = agent_execute_tool_observation(w, &calls);
+        w->m.tools++;
+        w->m.blocked_calls += w->wd_blocked - blocked_before;
+        agent_buf joined = {0};
+        for (size_t i = 0; i < obs.part_count; i++)
+            agent_buf_puts(&joined, obs.parts[i].text ? obs.parts[i].text : "");
+        agent_tool_observation_free(&obs);
+        agent_tool_calls_free(&calls);
+        char *text = agent_tool_response_add_warning(agent_buf_take(&joined), &consecutive_failures);
+        if (w->wd_stagnant >= cfg->gen.max_stagnant_turns) {
+            w->wd_stagnant = 0;
+            w->m.recoveries++;
+            if (!agent_recovery_next(&rec)) {
+                free(text);
+                free(tool_id);
+                return agent_turn_blocked(w, "stagnation: repeated blocked/failing calls");
+            }
+            agent_buf more = {0};
+            agent_buf_puts(&more, text);
+            agent_buf_puts(&more, "\n");
+            agent_buf_puts(&more, agent_action_required_msg);
+            agent_buf_puts(&more, "\n");
+            free(text);
+            text = agent_buf_take(&more);
+            agent_trace(w, "[RECOVERY] n=%d reason=stagnation", rec.recoveries);
+        }
+        agent_trace_text(w, "[TOOL RESULT]", text, strlen(text) > 400 ? 400 : strlen(text));
+        char *tool_extra = NULL;
+        size_t tl = 0, tcap = 0;
+        agent_json_puts(&tool_extra, &tl, &tcap, ",\"tool_call_id\":");
+        q36_remote_json_quote(&tool_extra, &tl, &tcap, tool_id);
+        agent_rmsg_push(w, agent_rmsg_text("tool", text, tool_extra));
+        free(tool_extra);
+        free(tool_id);
+        free(text);
+        if (worker_should_interrupt(w)) {
+            worker_clear_interrupt(w);
+            agent_publish_system_status(w, "Stopped by user");
+            agent_set_status(w, AGENT_WORKER_IDLE);
+            return 0;
+        }
+    }
+}
+
 /* Run one user turn until the assistant stops or returns a tool call.  Tool
  * results are appended to the transcript and the loop continues, which gives
  * the model-native Qwen tool iteration without a client/server protocol. */
 static int worker_run_turn(agent_worker *w, const char *user_text) {
+    if (w->cfg->server_url) return worker_run_turn_remote(w, user_text);
     agent_config *cfg = w->cfg;
     pthread_mutex_lock(&w->mu);
     w->status.error[0] = '\0';
@@ -10795,6 +11195,10 @@ static void worker_run_deferred_save(agent_worker *w) {
 
 static void worker_run_deferred_compact(agent_worker *w) {
     if (!worker_take_compact_requested(w)) return;
+    if (w->cfg->server_url) {
+        agent_remote_compact(w, "user requested compaction");
+        return;
+    }
     if (!agent_worker_has_user_session(w)) {
         agent_publishf(w, "\ncompact skipped: nothing to compact\n");
         return;
@@ -10849,10 +11253,17 @@ static void *worker_main(void *arg) {
                 w->cfg->engine.model_path ? w->cfg->engine.model_path : "",
                 w->cfg->gen.trace_path ? w->cfg->gen.trace_path : "");
     char init_err[160] = {0};
-    if (!agent_worker_reset_to_sysprompt(w, init_err, sizeof(init_err))) {
-        agent_set_error(w, init_err[0] ? init_err : "failed to initialize system prompt");
+    if (w->cfg->server_url) {
+        char *sys = agent_remote_system_prompt(w->cfg);
+        agent_rmsg_push(w, agent_rmsg_text("system", sys, NULL));
+        agent_trace_text(w, "initial_system_prompt", sys, strlen(sys));
+        free(sys);
+    } else {
+        if (!agent_worker_reset_to_sysprompt(w, init_err, sizeof(init_err))) {
+            agent_set_error(w, init_err[0] ? init_err : "failed to initialize system prompt");
+        }
+        agent_trace_tokens(w, "initial_system_prompt", &w->transcript, 0);
     }
-    agent_trace_tokens(w, "initial_system_prompt", &w->transcript, 0);
     pthread_mutex_lock(&w->mu);
     w->initialized = true;
     agent_wake_locked(w);
@@ -12338,7 +12749,8 @@ static int agent_worker_init(agent_worker *w, q36_engine *engine, agent_config *
     int old_flags;
     set_nonblock(w->wake_fd[0], true, &old_flags);
     set_nonblock(w->wake_fd[1], true, &old_flags);
-    if (q36_session_create(&w->session, engine, cfg->gen.ctx_size) != 0) {
+    if (!cfg->server_url &&
+        q36_session_create(&w->session, engine, cfg->gen.ctx_size) != 0) {
         fprintf(stderr, "q36-agent: session backend is required\n");
         return -1;
     }
@@ -12379,7 +12791,9 @@ static void agent_worker_free(agent_worker *w) {
     if (w->thread) pthread_join(w->thread, NULL);
     agent_bash_jobs_free(w);
     q36_web_free(w->web);
-    q36_session_free(w->session);
+    if (w->session) q36_session_free(w->session);
+    for (int i = 0; i < w->nrmsg; i++) free(w->rmsg[i]);
+    free(w->rmsg);
     q36_tokens_free(&w->transcript);
     agent_worker_images_clear(w);
     free(w->cache_dir);
@@ -13294,8 +13708,22 @@ int main(int argc, char **argv) {
     }
     q36_engine *engine = NULL;
     cfg.engine.context_size = cfg.gen.ctx_size;
+    if (cfg.server_url) {
+        /* No local model: the server owns weights, template and KV. */
+        char err[300] = {0}, *model = NULL;
+        int server_ctx = 0;
+        q36_remote_cfg rc = {cfg.server_url, cfg.api_key, cfg.server_timeout};
+        if (q36_remote_models(&rc, &model, &server_ctx, err, sizeof(err)) != 0) {
+            fprintf(stderr, "q36-agent: cannot reach %s: %s\n", cfg.server_url, err);
+            return 1;
+        }
+        if (!cfg.server_model) cfg.server_model = model;
+        if (server_ctx > 0 && server_ctx < cfg.gen.ctx_size) cfg.gen.ctx_size = server_ctx;
+        agent_resolve_thinking_config(&cfg, false);
+    } else {
     if (q36_engine_open(&engine, &cfg.engine) != 0) return 1;
     agent_resolve_thinking_config(&cfg, q36_engine_is_qwen38(engine));
+    }
     if (cfg.chdir_path) {
         if (chdir(workdir) != 0) {
             fprintf(stderr, "q36-agent: failed to chdir to %s: %s\n",
@@ -13304,12 +13732,14 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    agent_apply_sampling_defaults(&cfg, engine);
-    log_context_memory(cfg.engine.backend,
-                       cfg.gen.ctx_size,
-                       cfg.engine.prefill_chunk,
-                       cfg.engine.cache_type_k,
-                       cfg.engine.cache_type_v);
+    if (!cfg.server_url) {
+        agent_apply_sampling_defaults(&cfg, engine);
+        log_context_memory(cfg.engine.backend,
+                           cfg.gen.ctx_size,
+                           cfg.engine.prefill_chunk,
+                           cfg.engine.cache_type_k,
+                           cfg.engine.cache_type_v);
+    }
 
     struct sigaction old_int;
     struct sigaction sa;
@@ -13324,7 +13754,7 @@ int main(int argc, char **argv) {
         run_agent(engine, &cfg);
 
     if (sigint_installed) sigaction(SIGINT, &old_int, NULL);
-    q36_engine_close(engine);
+    if (engine) q36_engine_close(engine);
     q36_prompt_prefix_free(&cfg.gen.prefix);
     return rc;
 }
