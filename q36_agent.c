@@ -146,6 +146,7 @@ typedef struct {
     char path[200];
     char ranges[80];  /* "read 1-200; 300-340" while unchanged since */
     char note[100];   /* last write/edit outcome; empty if never modified */
+    char blob[80];    /* "line 216, 615601 bytes" omitted by read; survives compaction */
 } agent_st_file;
 
 typedef struct {
@@ -1169,7 +1170,7 @@ static bool agent_tool_response_is_error(const char *content) {
  */
 
 #define AGENT_TOOL_CONTRACTS \
-    "Read output is limited to 128 KiB. Use more to continue, including within an oversized line; " \
+    "Read output is limited to 16 KiB and 4 KiB per line; longer lines are omitted as blobs, so use search or targeted ranges for them. Use more to continue; " \
     "whole=true fails rather than returning an excerpt. raw=true omits line numbers but still reports truncation.\n" \
     "Search mode is literal (default) or regex (POSIX extended). Defaults: path=., case_sensitive=true, context=0, max_results=50. " \
     "context is 0-5, max_results is 1-500. The search skips .git and nested symlinks, and reports incomplete coverage.\n" \
@@ -6163,6 +6164,12 @@ static bool agent_parse_bool_default(const char *s, bool def) {
 
 #define AGENT_FILE_MAX_BYTES (16*1024*1024)
 #define AGENT_READ_DEFAULT_LINES 500
+/* Deterministic read caps (~4k tokens total).  A line longer than
+ * AGENT_READ_LINE_MAX is treated as a minified/vendor blob: only
+ * AGENT_READ_BLOB_KEEP bytes of it reach the model, plus an omission marker. */
+#define AGENT_READ_MAX_BYTES (16 * 1024)
+#define AGENT_READ_LINE_MAX 4096
+#define AGENT_READ_BLOB_KEEP 256
 #define AGENT_TOOL_RESULT_RESERVE_TOKENS 1024
 #define AGENT_EDIT_UPTO_MIN_PREFIX_BYTES 64
 #define AGENT_EDIT_UPTO_MIN_PREFIX_LINES 2
@@ -6373,9 +6380,13 @@ static char *agent_read_range_from(agent_worker *w, const char *path, int start_
     }
     bool beginning = !mid_line, prefix = true;
     int last_line = 0;
+    size_t line_start = 0, line_bytes = 0, blob_bytes = 0;
+    int blob_line = 0;
+    bool in_blob = false;
     while ((whole_file || lines < max_lines) && (c = fgetc(fp)) != EOF) {
-        if (body.len >= AGENT_TOOL_MAX_BYTES - 4096 &&
-            ((c & 0xc0) != 0x80 || body.len >= AGENT_TOOL_MAX_BYTES - 4096 + 3)) {
+        if (in_blob && c != '\n' && c != '\r') { line_bytes++; continue; }
+        if (!in_blob && body.len >= AGENT_READ_MAX_BYTES &&
+            ((c & 0xc0) != 0x80 || body.len >= AGENT_READ_MAX_BYTES + 3)) {
             ungetc(c, fp);
             break;
         }
@@ -6389,9 +6400,32 @@ static char *agent_read_range_from(agent_worker *w, const char *path, int start_
             snprintf(label, sizeof(label), "%d%s ", line, beginning ? "" : " (continued)");
             agent_buf_puts(&body, label);
         }
+        if (prefix) { line_start = body.len; line_bytes = 0; }
         prefix = false;
         beginning = false;
         char ch = (char)c;
+        if (c != '\n' && c != '\r' && ++line_bytes > AGENT_READ_LINE_MAX) {
+            /* Keep a short head of the line, drop the rest until its newline. */
+            size_t keep = line_start + AGENT_READ_BLOB_KEEP;
+            if (!bare) { char *nl = memchr(body.ptr + line_start, ' ', body.len - line_start);
+                         if (nl) keep = (size_t)(nl - body.ptr) + 1 + AGENT_READ_BLOB_KEEP; }
+            if (keep < body.len) {
+                while (keep > line_start && ((unsigned char)body.ptr[keep] & 0xc0) == 0x80) keep--;
+                body.len = keep;
+            }
+            body.ptr[body.len] = '\0';
+            in_blob = true;
+            if (!blob_line) blob_line = line;
+            continue;
+        }
+        if (in_blob) {
+            /* Newline closing a blob line: marker goes before the line break. */
+            char marker[96];
+            snprintf(marker, sizeof(marker), "\n[MINIFIED_OR_VENDOR_BLOB OMITTED: %zu bytes]", line_bytes);
+            if (!blob_bytes) blob_bytes = line_bytes;
+            agent_buf_puts(&body, marker);
+            in_blob = false;
+        }
         if (c == '\r') {
             int next = fgetc(fp);
             if (bare) agent_buf_append(&body, &ch, 1);
@@ -6411,6 +6445,12 @@ static char *agent_read_range_from(agent_worker *w, const char *path, int start_
             beginning = prefix = true;
         }
     }
+    if (in_blob) {
+        char marker[96];
+        snprintf(marker, sizeof(marker), "\n[MINIFIED_OR_VENDOR_BLOB OMITTED: %zu bytes]", line_bytes);
+        if (!blob_bytes) blob_bytes = line_bytes;
+        agent_buf_puts(&body, marker);
+    }
     if (ferror(fp)) goto failed;
     off_t next_offset = ftello(fp);
     if (next_offset < 0) goto failed;
@@ -6418,7 +6458,7 @@ static char *agent_read_range_from(agent_worker *w, const char *path, int start_
     bool more = c != EOF;
     if (ferror(fp)) goto failed;
     if (whole_file && more) {
-        agent_buf_puts(&out, "Tool error: whole read exceeds the 128 KiB output limit; use read and more for chunks\n");
+        agent_buf_puts(&out, "Tool error: whole read exceeds the 16 KiB output limit; use read and more for chunks\n");
         goto done;
     }
     if (!bare) {
@@ -6428,6 +6468,15 @@ static char *agent_read_range_from(agent_worker *w, const char *path, int start_
         agent_buf_puts(&out, header);
     }
     agent_buf_append(&out, body.ptr, body.len);
+    if (blob_line) {
+        char meta[PATH_MAX + 320];
+        snprintf(meta, sizeof(meta),
+                 "\nREAD_OUTPUT_TRUNCATED\npath=%s\nrequested_lines=%d-%d\noffending_line=%d\n"
+                 "line_bytes=%zu\nreturned_bytes=%zu\n"
+                 "next=do not read that line again; use search or a line range that excludes it\n",
+                 path, start_line, last_line, blob_line, blob_bytes, body.len);
+        agent_buf_puts(&out, meta);
+    }
     if (more) {
         char note[256];
         snprintf(note, sizeof(note), "\n[Read truncated. continue_offset=%d; continue_byte_offset=%lld%s. Call more to continue.]\n",
@@ -7770,7 +7819,17 @@ static void agent_search_emit_line(agent_search_ctx *ctx, const char *data,
     char prefix[64];
     snprintf(prefix, sizeof(prefix), "  %d ", line_no);
     agent_buf_puts(&ctx->out, prefix);
-    agent_buf_puts(&ctx->out, data);
+    size_t n = strlen(data);
+    if (n > AGENT_READ_LINE_MAX) {
+        char marker[96];
+        size_t keep = AGENT_READ_BLOB_KEEP;
+        while (keep && ((unsigned char)data[keep] & 0xc0) == 0x80) keep--;
+        agent_buf_append(&ctx->out, data, keep);
+        snprintf(marker, sizeof(marker), "\n[MINIFIED_OR_VENDOR_BLOB OMITTED: %zu bytes]", n);
+        agent_buf_puts(&ctx->out, marker);
+    } else {
+        agent_buf_append(&ctx->out, data, n);
+    }
     agent_buf_puts(&ctx->out, "\n");
 }
 
@@ -8905,6 +8964,9 @@ static void agent_st_note_tool(agent_task_state *st, const agent_tool_call *c,
     }
     if (!strcmp(name, "read") && path) {
         agent_st_file *f = agent_st_file_get(st, path);
+        const char *ol = strstr(res, "\noffending_line="), *lb = strstr(res, "\nline_bytes=");
+        if (ol && lb) snprintf(f->blob, sizeof(f->blob), "line %d, %lld bytes",
+                               atoi(ol + 16), atoll(lb + 12));
         const char *a = agent_tool_arg_value(c, "start_line");
         const char *m = agent_tool_arg_value(c, "max_lines");
         char r[40];
@@ -8987,6 +9049,13 @@ static char *agent_st_render(const agent_task_state *st) {
         if (!st->files[i].ranges[0]) continue;
         snprintf(tmp, sizeof(tmp), "- already read %s [%s], unchanged\n",
                  st->files[i].path, st->files[i].ranges);
+        agent_buf_puts(&b, tmp);
+    }
+    for (int i = 0; i < st->nfiles; i++) {
+        if (!st->files[i].blob[0]) continue;
+        snprintf(tmp, sizeof(tmp), "- do not read the minified/vendor blob in %s (%s) again; "
+                 "use search/grep or targeted ranges excluding it\n",
+                 st->files[i].path, st->files[i].blob);
         agent_buf_puts(&b, tmp);
     }
     return agent_buf_take(&b);

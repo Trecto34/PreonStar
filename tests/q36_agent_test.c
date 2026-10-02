@@ -136,18 +136,17 @@ static void test_streaming_file_tools(void) {
     fp = fopen(path, "wb");
     for (int i = 0; i < 256 * 1024; i++) fputc('x', fp);
     fclose(fp);
-    size_t total = 0;
+    /* A 256 KiB single line is a blob: bounded output, no continuation. */
     text = agent_read_range(&w, path, 1, 1, false, true, true);
-    do {
-        size_t n = strspn(text, "x");
-        total += n;
-        AGENT_TEST_ASSERT(n > 0 && n < AGENT_TOOL_MAX_BYTES);
-        if (w.more_valid) AGENT_TEST_ASSERT(strstr(text, "Read truncated") != NULL);
-        free(text);
-        if (!w.more_valid) break;
-        text = agent_tool_more(&w, &more);
-    } while (total < 512 * 1024);
-    AGENT_TEST_ASSERT(total == 256 * 1024 && !w.more_valid);
+    AGENT_TEST_ASSERT(strlen(text) < AGENT_READ_MAX_BYTES && !w.more_valid);
+    AGENT_TEST_ASSERT(strstr(text, "MINIFIED_OR_VENDOR_BLOB OMITTED: 262144 bytes"));
+    free(text);
+    text = agent_read_range(&w, path, 1, INT_MAX, true, true, true);
+    AGENT_TEST_ASSERT(strstr(text, "READ_OUTPUT_TRUNCATED") && !strstr(text, "Tool error"));
+    free(text);
+    fp = fopen(path, "wb");
+    for (int i = 0; i < 4096; i++) fputs("0123456789abcdef\n", fp);
+    fclose(fp);
     text = agent_read_range(&w, path, 1, INT_MAX, true, true, true);
     AGENT_TEST_ASSERT(strstr(text, "Tool error: whole read") && !w.more_valid);
     free(text);
@@ -155,7 +154,7 @@ static void test_streaming_file_tools(void) {
     for (int i = 0; i < 256 * 1024; i++) fputc(0x80, fp);
     fclose(fp);
     text = agent_read_range(&w, path, 1, 1, false, true, true);
-    AGENT_TEST_ASSERT(strlen(text) < AGENT_TOOL_MAX_BYTES && w.more_valid);
+    AGENT_TEST_ASSERT(strlen(text) < AGENT_READ_MAX_BYTES);
     free(text);
     unlink(path);
     AGENT_TEST_ASSERT(mkfifo(path, 0600) == 0);
@@ -189,6 +188,60 @@ static void test_streaming_file_tools(void) {
     text = agent_buf_take(&b);
     AGENT_TEST_ASSERT(!strncmp(text, "a\n[Output truncated", 19));
     free(text);
+}
+
+/* index.html with a 600 KB minified line in the middle (the real-world bug). */
+static void test_read_blob_cap(void) {
+    char path[] = "/tmp/q36-agent-blob-XXXXXX";
+    int fd = mkstemp(path);
+    AGENT_TEST_ASSERT(fd >= 0);
+    FILE *fp = fdopen(fd, "wb");
+    for (int i = 1; i <= 215; i++) fprintf(fp, "<p>normal line %d</p>\n", i);
+    fputs("<script>", fp);
+    for (int i = 0; i < 600 * 1024 / 8; i++) fputs("var a=1;", fp);
+    fputs("</script>\n<p>after blob</p>\n", fp);
+    fclose(fp);
+    agent_worker w = {0};
+    for (int bare = 0; bare < 2; bare++) {
+        char *text = agent_read_range(&w, path, 210, 11, false, bare, true);
+        AGENT_TEST_ASSERT(strlen(text) < AGENT_READ_MAX_BYTES);
+        AGENT_TEST_ASSERT(strstr(text, "normal line 215") && strstr(text, "after blob"));
+        AGENT_TEST_ASSERT(strstr(text, "[MINIFIED_OR_VENDOR_BLOB OMITTED: 614417 bytes]"));
+        AGENT_TEST_ASSERT(strstr(text, "READ_OUTPUT_TRUNCATED\npath="));
+        AGENT_TEST_ASSERT(strstr(text, "offending_line=216\nline_bytes=614417\nreturned_bytes="));
+        AGENT_TEST_ASSERT(strstr(text, "requested_lines=210-217"));
+        if (!bare) {
+            /* Compaction state remembers it and forbids a re-read. */
+            agent_task_state st = {0};
+            agent_tool_call rd = {0};
+            rd.name = xstrdup("read");
+            test_tool_arg(&rd, "path", path);
+            agent_st_note_goal(&st, "fix spin");
+            agent_st_note_tool(&st, &rd, text);
+            char *r = agent_st_render(&st);
+            AGENT_TEST_ASSERT(strstr(r, "do not read the minified/vendor blob") && strstr(r, "line 216"));
+            free(r);
+            agent_tool_call_free(&rd);
+        }
+        free(text);
+    }
+    /* search clips the matching blob line too */
+    agent_tool_call call = {0};
+    test_tool_arg(&call, "path", path);
+    test_tool_arg(&call, "query", "var a=1;");
+    char *text = agent_tool_search(&w, &call);
+    AGENT_TEST_ASSERT(strlen(text) < AGENT_READ_MAX_BYTES && strstr(text, "exceeds"));
+    free(text);
+    fp = fopen(path, "wb");
+    fputs("var a=1;", fp);
+    for (int i = 0; i < 10000; i++) fputc('y', fp);
+    fputc('\n', fp);
+    fclose(fp);
+    text = agent_tool_search(&w, &call);
+    AGENT_TEST_ASSERT(strlen(text) < AGENT_READ_MAX_BYTES && strstr(text, "BLOB OMITTED: 10008"));
+    free(text);
+    agent_tool_call_free(&call);
+    unlink(path);
 }
 
 static void test_background_jobs(void) {
@@ -1341,6 +1394,7 @@ int main(int argc, char **argv) {
     test_observation_error_is_not_context_exhaustion();
     test_atomic_file_tools();
     test_streaming_file_tools();
+    test_read_blob_cap();
     test_background_jobs();
     test_shell_terminal_controls();
     test_fragmented_terminal_input();
