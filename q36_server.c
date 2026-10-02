@@ -11755,6 +11755,10 @@ static server_config parse_options(int argc, char **argv) {
             exit(2);
         }
     }
+    if (c.kv_cache.system_checkpoint && !c.kv_disk_dir && !show_help) {
+        server_log(Q36_LOG_DEFAULT, "q36-server: --kv-system-checkpoint requires --kv-disk-dir DIR");
+        exit(2);
+    }
     if (show_help) {
         usage(stdout);
         exit(0);
