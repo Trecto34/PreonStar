@@ -290,8 +290,8 @@ static void print_agent_specific(FILE *fp, const help_colors *c) {
     opt(fp, c, "--max-repeat-tool N", "Identical read-only calls allowed against an unchanged workspace. Default: 1.");
     opt(fp, c, "--max-stagnant-turns N", "Blocked or identically failing calls before a recovery. Default: 2.");
     opt(fp, c, "--max-recoveries N", "Controller recoveries per user turn before the turn ends BLOCKED. Default: 3.");
-    opt(fp, c, "--max-verify-steps N", "Non-mutating steps allowed after the last target edit before the agent must give a final answer (0 = off). Edits to disposable verification helpers do not reset it. Default: 8.");
-    opt(fp, c, "--max-no-progress-steps N", "Hard ceiling of the same, ignoring the double cost of repeated checks (0 = off). Default: 16.");
+    opt(fp, c, "--max-verify-steps N", "Steps spent VERIFYING a plausibly finished target (known test/check commands, helper runs, page visits) before the agent must give a final answer (0 = off). Reads and searches while implementing, or recovering after compaction, never count. A target edit returns to IMPLEMENT and resets it; helper edits do not. Default: 8.");
+    opt(fp, c, "--max-no-progress-steps N", "Hard ceiling on verification steps ignoring the double cost of repeated checks; 4x this applies to non-check steps while implementing (0 = off). Default: 16.");
     opt(fp, c, "--server URL", "Run inference on a q36-server (http://host:port) instead of loading a model; tools, watchdog and compaction stay local.");
     opt(fp, c, "--server-model NAME", "Model id to request from the server. Default: the server's first model.");
     opt(fp, c, "--api-key KEY", "Bearer token sent to the server (for reverse proxies).");

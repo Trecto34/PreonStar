@@ -160,7 +160,12 @@ typedef struct {
  * scripts and never count as progress.  See agent_vw_note(). */
 #define AGENT_VW_SIGS 24
 #define AGENT_VW_HELPERS 8
+#define AGENT_VW_IMPL_CEILING 4   /* IMPLEMENT-phase no-progress ceiling = this x max_noprog */
+enum { AGENT_PH_IMPLEMENT = 0, AGENT_PH_VERIFY };   /* zero value = IMPLEMENT: default after task start */
 typedef struct {
+    int phase;              /* IMPLEMENT until strong evidence of checking a finished target */
+    int npending;           /* concrete evidence that required work is missing; blocks VERIFY/finalize */
+    char pending[100];      /* first such item */
     bool armed;             /* a target mutation happened this user turn */
     bool finalize;          /* FINALIZE_REQUIRED: further tool calls are refused */
     int step;               /* tool calls seen this user turn */
@@ -203,6 +208,7 @@ typedef struct {
     /* verification watchdog */
     int target_mutations, helper_mutations, verify_steps, verify_exhaustions;
     int no_progress_steps, forced_finalizations;
+    int ph_iv, ph_vi, ph_vf;   /* controller phase transitions: IMPLEMENT->VERIFY, VERIFY->IMPLEMENT, VERIFY->FINALIZE_REQUIRED */
     long reasoning_tokens, action_tokens, prompt_tokens, cached_tokens;
     double prefill_ms, decode_ms, wall_s;
     char finish[40];
@@ -9048,6 +9054,10 @@ static void agent_st_note_tool(agent_task_state *st, const agent_tool_call *c,
 
 static bool agent_vw_stagnant(const agent_verify_state *v);
 
+static const char *agent_vw_phase(const agent_verify_state *v) {
+    return v->finalize ? "FINALIZE_REQUIRED" : v->phase == AGENT_PH_VERIFY ? "VERIFY" : "IMPLEMENT";
+}
+
 static char *agent_st_render(const agent_task_state *st) {
     agent_buf b = {0};
     char tmp[512];
@@ -9088,6 +9098,12 @@ static char *agent_st_render(const agent_task_state *st) {
     if (vw->armed) {
         /* Counters live on the worker, so compaction renders them but never resets them. */
         agent_buf_puts(&b, "\nVERIFICATION STATE:\n");
+        snprintf(tmp, sizeof(tmp), "- CURRENT_PHASE: %s\n", agent_vw_phase(vw));
+        agent_buf_puts(&b, tmp);
+        if (vw->npending) {
+            snprintf(tmp, sizeof(tmp), "- IMPLEMENTATION_PENDING: %s%s\n", vw->pending, vw->npending > 1 ? " (+more)" : "");
+            agent_buf_puts(&b, tmp);
+        }
         if (vw->last_target_step)
             snprintf(tmp, sizeof(tmp), "- LAST_TARGET_MUTATION: step %d (%s)\n",
                      vw->last_target_step, vw->last_target);
@@ -9096,9 +9112,9 @@ static char *agent_st_render(const agent_task_state *st) {
         agent_buf_puts(&b, tmp);
         snprintf(tmp, sizeof(tmp),
                  "- VERIFY_STEPS_USED: %d\n- MAX_VERIFY_STEPS: %d\n- NO_PROGRESS_STEPS: %d (ceiling %d)\n"
-                 "- PHASE: %s\n",
+                 "- STAGNANT: %s\n",
                  vw->verify_used, vw->max_verify, vw->no_progress, vw->max_noprog,
-                 vw->finalize ? "FINALIZE_REQUIRED" : agent_vw_stagnant(vw) ? "VERIFY_STAGNANT" : "VERIFY");
+                 agent_vw_stagnant(vw) ? "yes" : "no");
         agent_buf_puts(&b, tmp);
     }
     if (st->nunresolved) {
@@ -9112,6 +9128,9 @@ static char *agent_st_render(const agent_task_state *st) {
     if (vw->finalize) {
         agent_buf_puts(&b, "- verification budget exhausted: give the final answer now, no more tools; "
                            "report what is confirmed working, confirmed failing and unresolved\n");
+    } else if (vw->npending) {
+        snprintf(tmp, sizeof(tmp), "- implement what is missing: %s\n", vw->pending);
+        agent_buf_puts(&b, tmp);
     } else if (st->last_failed && st->nfailed) {
         snprintf(tmp, sizeof(tmp), "- fix and retry: %s\n", st->failed[st->nfailed - 1]);
         agent_buf_puts(&b, tmp);
@@ -9372,8 +9391,11 @@ static bool agent_watchdog_blocks(agent_worker *w, const agent_tool_call *c,
 
 
 /* ---- Verification-convergence watchdog ----------------------------------
- * After the last TARGET mutation of a user turn the agent gets a bounded number
- * of non-mutating steps (--max-verify-steps) to check its work.  Edits to
+ * Phases: IMPLEMENT (default; target edits always return here), VERIFY, then
+ * FINALIZE_REQUIRED.  Only strong evidence (a known check command, a helper run,
+ * a page visit after a target edit) enters VERIFY; reads and searches never do,
+ * since they are also how the agent recovers after compaction.  In VERIFY the
+ * agent gets a bounded number of steps (--max-verify-steps) to check its work.  Edits to
  * disposable verification helpers (/tmp scripts, files named like verify, probe
  * or mock that the agent itself created) never count as progress, near-identical re-checks cost
  * double, and --max-no-progress-steps is a ceiling that ignores that weighting.
@@ -9477,7 +9499,7 @@ static void agent_vw_remember_helper(agent_verify_state *v, const char *p) {
 }
 
 static bool agent_vw_stagnant(const agent_verify_state *v) {
-    return v->armed && !v->finalize && (v->dups >= 3 || v->helper_since >= 3);
+    return v->armed && !v->finalize && v->phase == AGENT_PH_VERIFY && (v->dups >= 3 || v->helper_since >= 3);
 }
 
 /* Order-insensitive-ish fingerprint of what a non-mutating call looks at, with
@@ -9524,6 +9546,27 @@ static uint64_t agent_vw_signature(const agent_verify_state *v, const agent_tool
     return h;
 }
 
+/* Strong, deterministic "the agent is checking a finished target" signal: a known
+ * test/syntax/lint/browser command, or a run of a verification helper.  Plain
+ * reads, greps, listings and wc are implementation tools too, so never count. */
+static bool agent_vw_check_command(const char *cmd) {
+    static const char *const pat[] = {
+        "node --check", "node -c ", "pytest", "unittest", "make test", "make check", "npm test",
+        "npm run test", "npm run lint", "npm run build", "cargo test", "cargo check", "go test",
+        "go vet", "ctest", "py_compile", "tsc", "eslint", "ruff", "flake8", "mypy", "shellcheck",
+        "playwright", "puppeteer", "headless", "chromium", "google-chrome", "firefox"};
+    for (size_t i = 0; cmd && i < sizeof(pat) / sizeof(pat[0]); i++)
+        if (strstr(cmd, pat[i])) return true;
+    return false;
+}
+
+/* "MISSING:" followed by a "- item" line in a tool result is concrete evidence that
+ * required work is still absent.  Returns the first item (clipped) or NULL. */
+static const char *agent_vw_missing_item(const char *res) {
+    const char *p = strstr(res, "MISSING:\n- ");
+    return p ? p + 11 : NULL;
+}
+
 static bool agent_vw_bash_writes(const char *cmd) {
     static const char *const ops[] = {">", "tee ", "sed -i", " mv ", " cp ", " rm ", "touch ", "mkdir ", "install "};
     for (size_t i = 0; cmd && i < sizeof(ops) / sizeof(ops[0]); i++)
@@ -9551,7 +9594,7 @@ static void agent_vw_before(const agent_task_state *st, const agent_tool_call *c
 /* Advance the counters for one tool call.  Returns true exactly once per turn:
  * on the call that exhausts the budget.  dup_out reports a repeated check. */
 static bool agent_vw_step(agent_verify_state *v, agent_metrics *m, agent_vw_kind kind,
-                          uint64_t sig, const char *path, bool *dup_out) {
+                          uint64_t sig, const char *path, bool check, bool *dup_out) {
     bool dup = false;
     v->step++;
     if (dup_out) *dup_out = false;
@@ -9561,10 +9604,34 @@ static bool agent_vw_step(agent_verify_state *v, agent_metrics *m, agent_vw_kind
         snprintf(v->last_target, sizeof(v->last_target), "%s", path ? path : "?");
         v->verify_used = v->no_progress = v->dups = v->helper_since = 0;
         v->nsigs = 0;
+        v->npending = 0;
+        v->pending[0] = 0;
+        if (v->phase == AGENT_PH_VERIFY) m->ph_vi++;
+        v->phase = AGENT_PH_IMPLEMENT;
         m->target_mutations++;
         return false;
     }
     if (kind == AGENT_VW_HELPER) { v->helper_since++; m->helper_mutations++; }
+    if (!v->armed) return false;
+    if (v->phase == AGENT_PH_IMPLEMENT) {
+        /* Reads, searches and listings are how an agent recovers after compaction, so
+         * they never move it to VERIFY; only a check command (or a helper run) does.
+         * Uncertain means IMPLEMENT: just a generous ceiling against pathological loops. */
+        if (check && !v->npending) {
+            v->phase = AGENT_PH_VERIFY;
+            m->ph_iv++;
+            v->no_progress = v->dups = v->helper_since = 0;
+            v->nsigs = 0;
+        } else {
+            v->no_progress++;
+            m->no_progress_steps++;
+            if (v->finalize || v->max_noprog <= 0 ||
+                v->no_progress < v->max_noprog * AGENT_VW_IMPL_CEILING) return false;
+            v->finalize = true;
+            m->verify_exhaustions++;
+            return true;
+        }
+    }
     for (int i = 0; i < v->nsigs; i++)
         if (v->sigs[i] == sig) { dup = true; break; }
     if (dup) {
@@ -9577,7 +9644,6 @@ static bool agent_vw_step(agent_verify_state *v, agent_metrics *m, agent_vw_kind
         v->sigs[v->nsigs++] = sig;
     }
     if (dup_out) *dup_out = dup;
-    if (!v->armed) return false;
     v->verify_used += (dup || agent_vw_stagnant(v)) ? 2 : 1;
     v->no_progress++;
     m->verify_steps++;
@@ -9587,6 +9653,7 @@ static bool agent_vw_step(agent_verify_state *v, agent_metrics *m, agent_vw_kind
           (v->max_noprog > 0 && v->no_progress >= v->max_noprog)))
         return false;
     v->finalize = true;
+    m->ph_vf++;
     m->verify_exhaustions++;
     return true;
 }
@@ -9683,7 +9750,23 @@ static char *agent_vw_after(agent_worker *w, const agent_tool_call *c,
     bool helperish = false;
     uint64_t sig = agent_vw_signature(v, c, &helperish);
     bool dup = false;
-    const bool exhausted = agent_vw_step(v, &w->m, kind, sig, tpath, &dup);
+    const bool check = executed && kind == AGENT_VW_VERIFY &&
+        ((!strcmp(name, "bash") && (helperish || agent_vw_check_command(agent_tool_arg_value(c, "command")))) ||
+         !strcmp(name, "visit_page"));
+    bool exhausted = agent_vw_step(v, &w->m, kind, sig, tpath, check, &dup);
+    const char *miss = executed && !err ? agent_vw_missing_item(res) : NULL;
+    if (miss && v->armed) {
+        if (!v->npending) {
+            size_t n = strcspn(miss, "\n");
+            snprintf(v->pending, sizeof(v->pending), "%.*s", (int)(n < sizeof(v->pending) - 1 ? n : sizeof(v->pending) - 1), miss);
+        }
+        v->npending++;
+        if (v->phase == AGENT_PH_VERIFY) {   /* work is missing: back to implementing, never finalize */
+            if (exhausted) { v->finalize = false; exhausted = false; w->m.verify_exhaustions--; w->m.ph_vf--; }
+            v->phase = AGENT_PH_IMPLEMENT;
+            w->m.ph_vi++;
+        }
+    }
 
     if (kind == AGENT_VW_VERIFY) {
         /* A failing check is either a product bug or the agent's own probe being
@@ -9768,7 +9851,7 @@ static agent_tool_observation agent_execute_tool_observation(
             /* Screenshots are verification too: they spend the same budget. */
             bool img_dup = false;
             if (agent_vw_step(&w->st.vw, &w->m, AGENT_VW_VERIFY,
-                              agent_vw_signature(&w->st.vw, &calls->v[i], NULL), NULL, &img_dup)) {
+                              agent_vw_signature(&w->st.vw, &calls->v[i], NULL), NULL, true, &img_dup)) {
                 char *note = agent_vw_notice(&w->st.vw);
                 agent_tool_observation_puts(&obs, "\n");
                 agent_tool_observation_puts(&obs, note);
@@ -10701,7 +10784,7 @@ static int agent_think_budget_for(const agent_config *cfg, int level) {
 /* Concise end-of-run summary (also used by the remote backend). */
 static char *agent_metrics_summary(const agent_worker *w) {
     const agent_metrics *m = &w->m;
-    char b[1300];
+    char b[1600];
     long pf_tokens = m->prompt_tokens - m->cached_tokens;
     double pf = m->prefill_ms > 0 ? (double)pf_tokens / (m->prefill_ms / 1000.0) : 0.0;
     long dec_tokens = m->reasoning_tokens + m->action_tokens;
@@ -10712,12 +10795,15 @@ static char *agent_metrics_summary(const agent_worker *w) {
         "recoveries: %d\nrepeated calls blocked: %d\ncompactions: %d\n"
         "target mutations: %d\nverification helper mutations: %d\nverification steps: %d\n"
         "verification budget exhaustions: %d\nno-progress steps: %d\nforced finalizations: %d\n"
+        "controller phase transitions: IMPLEMENT->VERIFY %d, VERIFY->IMPLEMENT %d, VERIFY->FINALIZE_REQUIRED %d\n"
+        "final controller phase: %s\n"
         "prompt tokens: %ld (%ld cached, %.0f%%)\n"
         "wall time: %.1fs\nprefill: %.1f tok/s\ndecode: %.1f tok/s\nlast finish: %s\n",
         m->steps, m->tools, m->reasoning_tokens, m->action_tokens, m->recoveries,
         m->blocked_calls, m->compactions,
         m->target_mutations, m->helper_mutations, m->verify_steps, m->verify_exhaustions,
         m->no_progress_steps, m->forced_finalizations,
+        m->ph_iv, m->ph_vi, m->ph_vf, agent_vw_phase(&w->st.vw),
         m->prompt_tokens, m->cached_tokens,
         m->prompt_tokens ? 100.0 * (double)m->cached_tokens / (double)m->prompt_tokens : 0.0,
         now_sec() - w->session_t0, pf, dc, m->finish[0] ? m->finish : "-");

@@ -27,10 +27,10 @@ def sse(delta, finish=None):
 
 def reply(action):
     usage = "data: " + json.dumps({"choices": [], "usage": {
-        "prompt_tokens": 100, "completion_tokens": 10,
+        "prompt_tokens": action[4] if len(action) > 4 else 100, "completion_tokens": 10,
         "completion_tokens_details": {"reasoning_tokens": 2}}}) + "\n\n"
     if action[0] == "tool":
-        _, name, args, n = action
+        name, args, n = action[1:4]
         tc = {"tool_calls": [{"index": 0, "id": "call_%d" % n,
                               "function": {"name": name, "arguments": json.dumps(args)}}]}
         body = sse(tc, "tool_calls")
@@ -92,7 +92,7 @@ def checker(obey, limit=20):
             return ("final", "Fixed main.html. Confirmed working: the page loads. Unresolved: none.")
         if n == 1:
             return ("tool", "write", {"path": "main.html", "content": "<html>ok</html>\n"}, n)
-        return ("tool", "bash", {"command": "echo check%s" % chr(96 + n)}, n)
+        return ("tool", "bash", {"command": "echo check%s # pytest" % chr(96 + n)}, n)
     return policy
 
 
@@ -117,6 +117,50 @@ check("ignore: the call after the notice is refused with it again",
 check("ignore: controller stop report, not BLOCKED", "Stopping:" in p.stdout and "BLOCKED" not in out and p.returncode == 0, out[-300:])
 check("ignore: report is not a success claim", "not a claim that every check passed" in p.stdout)
 check("ignore: summary counts the forced finalization", "forced finalizations: 1" in out and "target mutations: 1" in out, out[-400:])
+
+# 2b. false positive from a real run: edits, compaction, then reads/searches that rebuild state are
+# IMPLEMENT recovery.  The verify budget (3) must not be touched until a check command runs.
+def recover(reqs):
+    n = len(reqs)
+    big = 30000                      # pushes the remote context past the compaction threshold
+    script = [
+        ("tool", "write", {"path": "main.html", "content": "<html>function buildFallenPetals(){}\n</html>\n"}, 1),
+        ("tool", "edit", {"path": "main.html", "old": "buildFallenPetals(){}", "new": "buildFallenPetals(){}//1"}, 2, big),
+        ("tool", "read", {"path": "main.html"}, 3),                      # after compaction: reconstruct state
+        ("tool", "read", {"path": "main.html", "start_line": 1, "end_line": 1}, 4),
+        ("tool", "search", {"query": "requestAnimationFrame", "path": "."}, 5),
+        ("tool", "edit", {"path": "main.html", "old": "//1", "new": "requestAnimationFrame(loop);"}, 6),
+    ]
+    if n <= len(script):
+        return script[n - 1]
+    return ("final", "Implemented the render loop.")
+
+
+p, reqs = run(recover)
+out = p.stdout + p.stderr
+check("recover: reached the final edit and the answer", len(reqs) == 7 and "Implemented the render loop." in p.stdout, "requests=%d %s" % (len(reqs), out[-300:]))
+check("recover: compaction really happened", "compactions: 1" in out, out[-500:])
+check("recover: verify_steps stays 0, nothing finalized",
+      "verification steps: 0" in out and "verification budget exhaustions: 0" in out and
+      "forced finalizations: 0" in out and all(NOTICE not in json.dumps(r) for r in reqs), out[-500:])
+check("recover: final edit executed (write + 2 edits)", "target mutations: 3" in out, out[-500:])
+check("recover: phase never left IMPLEMENT", "IMPLEMENT->VERIFY 0" in out and "final controller phase: IMPLEMENT" in out, out[-500:])
+
+
+def recover_then_check(reqs):
+    n = len(reqs)
+    if n <= 6:
+        return recover(reqs)
+    if NOTICE in last_tool_text(reqs[-1]):
+        return ("final", "Done.")
+    return ("tool", "bash", {"command": "echo v%s # node --check" % chr(96 + n)}, n)
+
+
+p, reqs = run(recover_then_check)
+out = p.stdout + p.stderr
+check("recover+verify: checking after the edit enters VERIFY and the budget applies",
+      "IMPLEMENT->VERIFY 1" in out and "verification budget exhaustions: 1" in out and
+      "VERIFY->FINALIZE_REQUIRED 1" in out and "verification steps: 3" in out, out[-600:])
 
 # 3. read-only investigation before the first edit is never limited
 def investigate(reqs):

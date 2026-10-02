@@ -1209,8 +1209,8 @@ static void test_vw_replays_the_observed_pathology(void) {
     AGENT_TEST_ASSERT(strstr(r, "OK write")); free(r);
     AGENT_TEST_ASSERT(v->armed && v->last_target_step == 1 && f.w.m.target_mutations == 1);
 
-    r = vw_run(&f.w, "bash", "command", "echo overlayHidden:true", NULL); free(r);   /* strong evidence */
-    r = vw_run(&f.w, "bash", "command", "echo pageerrors:none", NULL); free(r);
+    r = vw_run(&f.w, "bash", "command", "echo overlayHidden:true # pytest", NULL); free(r);   /* strong evidence */
+    r = vw_run(&f.w, "bash", "command", "echo pageerrors:none # pytest", NULL); free(r);
     AGENT_TEST_ASSERT(v->verify_used == 2 && !v->finalize);
 
     /* Harness edits are not progress: the target counters do not move. */
@@ -1256,7 +1256,7 @@ static void test_vw_target_repair_resets_budget(void) {
     vw_start(&f, 8, 16);
     agent_verify_state *v = &f.w.st.vw;
     char *r = vw_run(&f.w, "write", "path", f.target, "content", "<html>v1</html>\n", NULL); free(r);
-    r = vw_run(&f.w, "bash", "command", "echo check one", NULL); free(r);
+    r = vw_run(&f.w, "bash", "command", "echo check one # pytest", NULL); free(r);
     r = vw_run(&f.w, "bash", "command", "test -s /no/such/file/at/all", NULL);   /* fails */
     free(r);
     AGENT_TEST_ASSERT(v->verify_used == 2 && f.w.st.nunresolved == 1);
@@ -1265,7 +1265,8 @@ static void test_vw_target_repair_resets_budget(void) {
     AGENT_TEST_ASSERT(v->last_target_step == 4 && f.w.m.target_mutations == 2 && !v->finalize);
     /* A rewrite with identical content is not a mutation. */
     r = vw_run(&f.w, "write", "path", f.target, "content", "<html>v2</html>\n", NULL); free(r);
-    AGENT_TEST_ASSERT(f.w.m.target_mutations == 2 && v->last_target_step == 4 && v->verify_used == 1);
+    AGENT_TEST_ASSERT(f.w.m.target_mutations == 2 && v->last_target_step == 4 && v->verify_used == 0 &&
+                      v->no_progress == 1);   /* back in IMPLEMENT: not a verification step */
     vw_finish(&f);
 }
 
@@ -1277,7 +1278,7 @@ static void test_vw_repeated_verification_finalizes(void) {
     bool hit = false;
     for (int i = 1; i <= 12 && !hit; i++) {
         char cmd[64];
-        snprintf(cmd, sizeof(cmd), "echo run %d", i);   /* digits are masked: same check */
+        snprintf(cmd, sizeof(cmd), "echo run %d # make test", i);   /* digits are masked: same check */
         r = vw_run(&f.w, "bash", "command", cmd, NULL);
         hit = strstr(r, "VERIFICATION_BUDGET_EXHAUSTED") != NULL;
         free(r);
@@ -1389,7 +1390,7 @@ static void test_vw_classification_edges(void) {
     vw_start(&f, 100, 5);
     r = vw_run(&f.w, "write", "path", f.target, "content", "x\n", NULL); free(r);
     for (int i = 0; i < 5; i++) {
-        snprintf(cmd, sizeof(cmd), "echo distinct%c", 'a' + i);
+        snprintf(cmd, sizeof(cmd), "echo distinct%c # pytest", 'a' + i);
         r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);
     }
     AGENT_TEST_ASSERT(f.w.st.vw.finalize && f.w.st.vw.no_progress == 5);
@@ -1440,11 +1441,11 @@ static void test_vw_failed_bash_fact_and_image_budget(void) {
     agent_tool_call img = {"view_image", &ia, 1, 1};
     uint64_t sig = agent_vw_signature(&v, &img, NULL);
     bool dup = false;
-    AGENT_TEST_ASSERT(!agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, &dup) && !dup);
-    AGENT_TEST_ASSERT(!agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, &dup) && dup);   /* repeat costs 2 */
-    AGENT_TEST_ASSERT(agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, &dup) && v.finalize);
+    AGENT_TEST_ASSERT(!agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, true, &dup) && !dup);
+    AGENT_TEST_ASSERT(!agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, true, &dup) && dup);   /* repeat costs 2 */
+    AGENT_TEST_ASSERT(agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, true, &dup) && v.finalize);
     AGENT_TEST_ASSERT(m.verify_exhaustions == 1 && m.verify_steps == 3);
-    AGENT_TEST_ASSERT(!agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, &dup));        /* fires once */
+    AGENT_TEST_ASSERT(!agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, true, &dup));        /* fires once */
 }
 
 static void test_vw_flags_and_summary(void) {
@@ -1461,11 +1462,90 @@ static void test_vw_flags_and_summary(void) {
     agent_worker w = {0};
     w.m.target_mutations = 2; w.m.helper_mutations = 3; w.m.verify_steps = 7;
     w.m.verify_exhaustions = 1; w.m.no_progress_steps = 7; w.m.forced_finalizations = 1;
+    w.m.ph_iv = 2; w.m.ph_vi = 1; w.m.ph_vf = 1;
+    w.st.vw.phase = AGENT_PH_VERIFY;
     char *s = agent_metrics_summary(&w);
+    AGENT_TEST_ASSERT(strstr(s, "IMPLEMENT->VERIFY 2, VERIFY->IMPLEMENT 1, VERIFY->FINALIZE_REQUIRED 1") &&
+                      strstr(s, "final controller phase: VERIFY"));
     AGENT_TEST_ASSERT(strstr(s, "target mutations: 2") && strstr(s, "verification helper mutations: 3") &&
                       strstr(s, "verification steps: 7") && strstr(s, "verification budget exhaustions: 1") &&
                       strstr(s, "no-progress steps: 7") && strstr(s, "forced finalizations: 1"));
     free(s);
+}
+
+/* The false positive seen in a real run: edits, compaction, then reads and searches that
+ * rebuild state.  That is IMPLEMENT recovery, never VERIFY, and never finalizes. */
+static void test_vw_compaction_recovery_stays_in_implement(void) {
+    static vw_fixture f;
+    vw_start(&f, 3, 16);                       /* tiny verify budget: any leak would show */
+    agent_verify_state *v = &f.w.st.vw;
+    agent_st_note_goal(&f.w.st, "Build the Three.js scene.");
+    char *r = vw_run(&f.w, "write", "path", f.target,
+                     "content", "<html>function buildFallenPetals(){}\n</html>\n", NULL); free(r);
+    r = vw_run(&f.w, "edit", "path", f.target, "old", "buildFallenPetals(){}", "new", "buildFallenPetals(){ /*2*/ }", NULL);
+    free(r);
+    AGENT_TEST_ASSERT(f.w.m.target_mutations == 2 && v->phase == AGENT_PH_IMPLEMENT);
+
+    /* Deterministic compaction renders the state and must keep IMPLEMENT. */
+    char *s = agent_st_render(&f.w.st);
+    AGENT_TEST_ASSERT(strstr(s, "CURRENT_PHASE: IMPLEMENT") && strstr(s, "LAST_TARGET_MUTATION: step 2") &&
+                      !strstr(s, "FINALIZE_REQUIRED"));
+    free(s);
+
+    /* Post-compaction recovery: two reads, a search, more reads. */
+    r = vw_run(&f.w, "read", "path", f.target, NULL); free(r);
+    r = vw_run(&f.w, "read", "path", f.target, "start_line", "1", "end_line", "1", NULL); free(r);
+    r = vw_run(&f.w, "search", "query", "requestAnimationFrame", "path", f.wd, NULL); free(r);
+    char cmd[200];
+    snprintf(cmd, sizeof(cmd), "grep -c requestAnimationFrame %s; wc -l %s", f.target, f.target);
+    r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);
+    AGENT_TEST_ASSERT(v->phase == AGENT_PH_IMPLEMENT && f.w.m.verify_steps == 0 && v->verify_used == 0 &&
+                      !v->finalize && f.w.m.verify_exhaustions == 0 && f.w.m.ph_iv == 0);
+
+    /* The missing implementation is then added and succeeds. */
+    r = vw_run(&f.w, "edit", "path", f.target, "old", "/*2*/", "new", "requestAnimationFrame(loop);", NULL);
+    AGENT_TEST_ASSERT(!strstr(r, "Tool error")); free(r);
+    AGENT_TEST_ASSERT(f.w.m.target_mutations == 3 && v->phase == AGENT_PH_IMPLEMENT);
+
+    /* Now checking starts: VERIFY, and the budget applies normally. */
+    r = vw_run(&f.w, "bash", "command", "echo ok # node --check", NULL); free(r);
+    AGENT_TEST_ASSERT(v->phase == AGENT_PH_VERIFY && f.w.m.ph_iv == 1 && v->verify_used == 1);
+    r = vw_run(&f.w, "bash", "command", "echo other # pytest", NULL); free(r);
+    AGENT_TEST_ASSERT(!v->finalize && v->verify_used == 2);
+    r = vw_run(&f.w, "bash", "command", "echo third # make test", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "VERIFICATION_BUDGET_EXHAUSTED") && v->finalize && f.w.m.ph_vf == 1); free(r);
+    vw_finish(&f);
+}
+
+/* A target edit during VERIFY goes back to IMPLEMENT; concrete MISSING evidence does too and
+ * is never finalized from the verify budget. */
+static void test_vw_incomplete_evidence_and_reentry(void) {
+    static vw_fixture f;
+    vw_start(&f, 2, 16);
+    agent_verify_state *v = &f.w.st.vw;
+    char *r = vw_run(&f.w, "write", "path", f.target, "content", "<html>a</html>\n", NULL); free(r);
+    r = vw_run(&f.w, "bash", "command", "echo a # pytest", NULL); free(r);
+    AGENT_TEST_ASSERT(v->phase == AGENT_PH_VERIFY);
+    r = vw_run(&f.w, "write", "path", f.target, "content", "<html>b</html>\n", NULL); free(r);
+    AGENT_TEST_ASSERT(v->phase == AGENT_PH_IMPLEMENT && f.w.m.ph_vi == 1 && v->verify_used == 0);
+    r = vw_run(&f.w, "bash", "command", "echo b # pytest", NULL); free(r);
+    /* This check spends the last unit but reports missing work: no finalization. */
+    r = vw_run(&f.w, "bash", "command", "printf 'MISSING:\\n- render loop\\n' # make test", NULL);
+    AGENT_TEST_ASSERT(!strstr(r, "VERIFICATION_BUDGET_EXHAUSTED") && !v->finalize && v->npending == 1 &&
+                      v->phase == AGENT_PH_IMPLEMENT && f.w.m.verify_exhaustions == 0);
+    free(r);
+    char *s = agent_st_render(&f.w.st);
+    AGENT_TEST_ASSERT(strstr(s, "IMPLEMENTATION_PENDING: render loop") && strstr(s, "implement what is missing"));
+    free(s);
+    for (int i = 0; i < 6; i++) {            /* checks cannot enter VERIFY while work is pending */
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "echo c%c # pytest", 'a' + i);
+        r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);
+    }
+    AGENT_TEST_ASSERT(v->phase == AGENT_PH_IMPLEMENT && !v->finalize);
+    r = vw_run(&f.w, "write", "path", f.target, "content", "<html>c</html>\n", NULL); free(r);
+    AGENT_TEST_ASSERT(v->npending == 0 && v->phase == AGENT_PH_IMPLEMENT);
+    vw_finish(&f);
 }
 
 /* In-process fake server: replies to one request with a canned body. */
@@ -1734,6 +1814,8 @@ int main(int argc, char **argv) {
     test_vw_workspace_under_tmp();
     test_vw_failed_bash_fact_and_image_budget();
     test_vw_flags_and_summary();
+    test_vw_compaction_recovery_stays_in_implement();
+    test_vw_incomplete_evidence_and_reentry();
     test_write_append_and_edit_lines();
     test_leak_recovery_protocol();
     test_agent_frequency_penalty_sampling_path();
