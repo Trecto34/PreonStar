@@ -752,6 +752,7 @@ test: all q36_agent_test $(SAMPLING_TEST) $(TOPK8_TEST) test-quality test-cli
 	./q36_agent_test
 	python3 tests/test_agent_password.py ./q36_agent_test
 	python3 tests/test_agent_terminal.py ./q36_agent_test
+	python3 tests/test_agent_verify_watchdog.py ./q36-agent
 	./tests/test_sampling
 	./$(TOPK8_TEST)
 	./q36_test --quant-primitives --ssd-cache-shrink --qwen-tool-call-format --vector-fixtures --server

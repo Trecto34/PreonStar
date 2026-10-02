@@ -1078,6 +1078,343 @@ static void test_task_state_render(void) {
     AGENT_TEST_ASSERT(!agent_st_empty(&st));
 }
 
+/* ---- Verification-convergence watchdog ----
+ * These run the real tools through agent_execute_tool_observation, the one
+ * place both agent loops execute tools, so the kind of each call is decided by
+ * the same file/hash logic as in production.  The "target" lives in a dir under
+ * the cwd (a /tmp path would be a helper by definition). */
+typedef struct {
+    agent_config cfg;
+    agent_worker w;
+    char wd[64];     /* workspace under cwd */
+    char hd[64];     /* helper dir under /tmp */
+    char target[160];
+} vw_fixture;
+
+static char *vw_run(agent_worker *w, const char *name, ...) {
+    agent_tool_arg args[6];
+    int n = 0;
+    va_list ap;
+    va_start(ap, name);
+    const char *k;
+    while (n < 6 && (k = va_arg(ap, const char *))) {
+        args[n].name = (char *)k;
+        args[n].value = (char *)va_arg(ap, const char *);
+        n++;
+    }
+    va_end(ap);
+    agent_tool_call c = {(char *)name, args, n, n};
+    agent_tool_calls calls = {&c, 1, 1};
+    agent_tool_observation obs = agent_execute_tool_observation(w, &calls);
+    agent_buf b = {0};
+    for (size_t i = 0; i < obs.part_count; i++)
+        agent_buf_puts(&b, obs.parts[i].text ? obs.parts[i].text : "");
+    agent_tool_observation_free(&obs);
+    return agent_buf_take(&b);
+}
+
+static void vw_start(vw_fixture *f, int max_verify, int max_noprog) {
+    memset(f, 0, sizeof(*f));
+    f->cfg.non_interactive = true;
+    f->cfg.gen.max_repeat_tool = 2;
+    f->cfg.gen.max_verify_steps = max_verify;
+    f->cfg.gen.max_no_progress_steps = max_noprog;
+    test_worker_init(&f->w, &f->cfg);
+    snprintf(f->wd, sizeof(f->wd), "q36-vwtest-XXXXXX");
+    AGENT_TEST_ASSERT(mkdtemp(f->wd) != NULL);
+    snprintf(f->hd, sizeof(f->hd), "/tmp/q36vwh-XXXXXX");
+    AGENT_TEST_ASSERT(mkdtemp(f->hd) != NULL);
+    snprintf(f->target, sizeof(f->target), "%s/main.html", f->wd);
+    agent_vw_begin_turn(&f->w.st, &f->cfg.gen);
+}
+
+static void vw_finish(vw_fixture *f) {
+    char cmd[200];
+    test_worker_free(&f->w);
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s' '%s'", f->wd, f->hd);
+    AGENT_TEST_ASSERT(system(cmd) == 0);
+}
+
+static void vw_helper_path(const vw_fixture *f, const char *name, char *out, size_t n) {
+    snprintf(out, n, "%s/%s", f->hd, name);
+}
+
+/* The observed failure, replayed: the target is fixed once, then the agent keeps
+ * rebuilding its own verification harness.  It must end in FINALIZE_REQUIRED
+ * (not BLOCKED) long before the 157 steps of the real run. */
+static void test_vw_replays_the_observed_pathology(void) {
+    static vw_fixture f;
+    vw_start(&f, 8, 16);
+    agent_verify_state *v = &f.w.st.vw;
+    char h1[200], h2[200], cmd1[400], cmd2[400];
+    vw_helper_path(&f, "verify.sh", h1, sizeof(h1));
+    vw_helper_path(&f, "verify_mock2.sh", h2, sizeof(h2));
+    snprintf(cmd1, sizeof(cmd1), "sh %s", h1);
+    snprintf(cmd2, sizeof(cmd2), "sh %s", h2);
+
+    char *r = vw_run(&f.w, "write", "path", f.target, "content", "<html>fixed</html>\n", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "OK write")); free(r);
+    AGENT_TEST_ASSERT(v->armed && v->last_target_step == 1 && f.w.m.target_mutations == 1);
+
+    r = vw_run(&f.w, "bash", "command", "echo overlayHidden:true", NULL); free(r);   /* strong evidence */
+    r = vw_run(&f.w, "bash", "command", "echo pageerrors:none", NULL); free(r);
+    AGENT_TEST_ASSERT(v->verify_used == 2 && !v->finalize);
+
+    /* Harness edits are not progress: the target counters do not move. */
+    r = vw_run(&f.w, "write", "path", h1, "content", "exit 0\n", NULL); free(r);
+    AGENT_TEST_ASSERT(f.w.m.target_mutations == 1 && f.w.m.helper_mutations == 1);
+    AGENT_TEST_ASSERT(v->last_target_step == 1 && v->verify_used == 3);
+    r = vw_run(&f.w, "read", "path", h1, NULL); free(r);          /* inspect the helper */
+    r = vw_run(&f.w, "bash", "command", cmd1, NULL); free(r);     /* alternate verification */
+    r = vw_run(&f.w, "write", "path", h2, "content", "exit 0\n", NULL); free(r);  /* new harness */
+    AGENT_TEST_ASSERT(f.w.m.target_mutations == 1 && f.w.m.helper_mutations == 2);
+    AGENT_TEST_ASSERT(v->verify_used == 6 && !v->finalize);
+
+    /* Same check through another harness file: a near-identical re-check costs double. */
+    r = vw_run(&f.w, "bash", "command", cmd2, NULL);
+    AGENT_TEST_ASSERT(v->finalize && f.w.m.verify_exhaustions == 1);
+    AGENT_TEST_ASSERT(strstr(r, "VERIFICATION_BUDGET_EXHAUSTED") &&
+                      strstr(r, "No target files changed since step 1.") &&
+                      strstr(r, "Do not call additional tools."));
+    AGENT_TEST_ASSERT(strstr(r, "confirmed failing"));      /* asks for all three outcomes */
+    free(r);
+    AGENT_TEST_ASSERT(v->step == 8 && f.w.m.target_mutations == 1);
+
+    /* Further tools are refused, not executed. */
+    r = vw_run(&f.w, "read", "path", f.target, NULL);
+    AGENT_TEST_ASSERT(strstr(r, "VERIFICATION_BUDGET_EXHAUSTED") && !strstr(r, "fixed"));
+    free(r);
+    AGENT_TEST_ASSERT(v->rejected == 1 && !agent_vw_force_final(&f.w));
+    r = vw_run(&f.w, "bash", "command", "echo again", NULL); free(r);
+    AGENT_TEST_ASSERT(v->rejected == 2);
+
+    /* The model ignored the notice twice: the controller answers, never BLOCKED. */
+    AGENT_TEST_ASSERT(agent_vw_force_final(&f.w));
+    AGENT_TEST_ASSERT(f.w.m.forced_finalizations == 1 && !strcmp(f.w.m.finish, "verify_budget"));
+    AGENT_TEST_ASSERT(f.w.out && strstr(f.w.out, "verification budget is exhausted") &&
+                      strstr(f.w.out, "not a claim") && !strstr(f.w.out, "BLOCKED"));
+    AGENT_TEST_ASSERT(f.w.m.verify_steps + f.w.m.target_mutations + f.w.m.helper_mutations < 20);
+    vw_finish(&f);
+}
+
+/* A: a real failure that is then repaired resets the budget. */
+static void test_vw_target_repair_resets_budget(void) {
+    static vw_fixture f;
+    vw_start(&f, 8, 16);
+    agent_verify_state *v = &f.w.st.vw;
+    char *r = vw_run(&f.w, "write", "path", f.target, "content", "<html>v1</html>\n", NULL); free(r);
+    r = vw_run(&f.w, "bash", "command", "echo check one", NULL); free(r);
+    r = vw_run(&f.w, "bash", "command", "test -s /no/such/file/at/all", NULL);   /* fails */
+    free(r);
+    AGENT_TEST_ASSERT(v->verify_used == 2 && f.w.st.nunresolved == 1);
+    r = vw_run(&f.w, "write", "path", f.target, "content", "<html>v2</html>\n", NULL); free(r);
+    AGENT_TEST_ASSERT(v->verify_used == 0 && v->no_progress == 0 && v->dups == 0);
+    AGENT_TEST_ASSERT(v->last_target_step == 4 && f.w.m.target_mutations == 2 && !v->finalize);
+    /* A rewrite with identical content is not a mutation. */
+    r = vw_run(&f.w, "write", "path", f.target, "content", "<html>v2</html>\n", NULL); free(r);
+    AGENT_TEST_ASSERT(f.w.m.target_mutations == 2 && v->last_target_step == 4 && v->verify_used == 1);
+    vw_finish(&f);
+}
+
+/* B: repeating the same check with nothing changed is forced to finalize quickly. */
+static void test_vw_repeated_verification_finalizes(void) {
+    static vw_fixture f;
+    vw_start(&f, 8, 16);
+    char *r = vw_run(&f.w, "write", "path", f.target, "content", "<html>ok</html>\n", NULL); free(r);
+    bool hit = false;
+    for (int i = 1; i <= 12 && !hit; i++) {
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "echo run %d", i);   /* digits are masked: same check */
+        r = vw_run(&f.w, "bash", "command", cmd, NULL);
+        hit = strstr(r, "VERIFICATION_BUDGET_EXHAUSTED") != NULL;
+        free(r);
+    }
+    AGENT_TEST_ASSERT(hit && f.w.st.vw.finalize && f.w.st.vw.step <= 6);
+    AGENT_TEST_ASSERT(f.w.st.vw.dups >= 3);   /* VERIFY_STAGNANT territory */
+    AGENT_TEST_ASSERT(f.w.m.verify_exhaustions == 1);
+    vw_finish(&f);
+}
+
+/* C: the agent's own probe fails while the target is fine. */
+static void test_vw_harness_failure_is_bounded_and_reported(void) {
+    static vw_fixture f;
+    vw_start(&f, 6, 16);
+    char h[200], cmd[400];
+    vw_helper_path(&f, "fps_probe.sh", h, sizeof(h));
+    snprintf(cmd, sizeof(cmd), "sh %s", h);
+    char *r = vw_run(&f.w, "write", "path", f.target, "content", "<html>ok</html>\n", NULL); free(r);
+    r = vw_run(&f.w, "write", "path", h, "content", "echo fps=21; exit 1\n", NULL); free(r);
+    bool hit = false;
+    for (int i = 0; i < 8 && !hit; i++) {
+        r = vw_run(&f.w, "bash", "command", cmd, NULL);   /* the probe's >40 FPS assumption fails */
+        hit = strstr(r, "VERIFICATION_BUDGET_EXHAUSTED") != NULL;
+        free(r);
+    }
+    AGENT_TEST_ASSERT(hit && f.w.st.vw.finalize && f.w.m.target_mutations == 1);
+    AGENT_TEST_ASSERT(f.w.st.nunresolved >= 1 && strstr(f.w.st.unresolved[0], "[TEST_HARNESS_FAILURE_OR_ASSUMPTION]"));
+    char *fin = agent_vw_final_text(&f.w.st);
+    AGENT_TEST_ASSERT(strstr(fin, "Unresolved:") && strstr(fin, "TEST_HARNESS_FAILURE_OR_ASSUMPTION") &&
+                      strstr(fin, "not a claim that every check passed"));
+    free(fin);
+    vw_finish(&f);
+}
+
+/* D: compaction renders the counters and the lists; it cannot reset them. */
+static void test_vw_state_survives_compaction_render(void) {
+    static vw_fixture f;
+    vw_start(&f, 8, 16);
+    char h[200], cmd[400];
+    vw_helper_path(&f, "verify.sh", h, sizeof(h));
+    snprintf(cmd, sizeof(cmd), "sh %s", h);
+    agent_st_note_goal(&f.w.st, "Fix the loading overlay.");
+    char *r = vw_run(&f.w, "write", "path", f.target, "content", "<html>ok</html>\n", NULL); free(r);
+    r = vw_run(&f.w, "write", "path", h, "content", "exit 1\n", NULL); free(r);
+    r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);
+    r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);       /* repeated check */
+    const agent_verify_state before = f.w.st.vw;
+    char *s = agent_st_render(&f.w.st);
+    AGENT_TEST_ASSERT(strstr(s, "LAST_TARGET_MUTATION: step 1") && strstr(s, "VERIFY_STEPS_USED:") &&
+                      strstr(s, "MAX_VERIFY_STEPS: 8") && strstr(s, "NO_PROGRESS_STEPS:") &&
+                      strstr(s, "UNRESOLVED:") && strstr(s, "DO NOT REPEAT:") &&
+                      strstr(s, "do not repeat: bash") && strstr(s, "PHASE: VERIFY"));
+    free(s);
+    AGENT_TEST_ASSERT(!memcmp(&before, &f.w.st.vw, sizeof(before)));   /* rendering is read-only */
+    /* Nothing but a new user turn resets the counters. */
+    agent_st_note_goal(&f.w.st, "second goal");
+    AGENT_TEST_ASSERT(f.w.st.vw.verify_used == before.verify_used && f.w.st.vw.step == before.step);
+    agent_vw_begin_turn(&f.w.st, &f.cfg.gen);
+    AGENT_TEST_ASSERT(f.w.st.vw.verify_used == 0 && !f.w.st.vw.armed && f.w.st.nunresolved == 0);
+    vw_finish(&f);
+}
+
+/* Classification edges: bash mutations, product files named like helpers, limits off. */
+static void test_vw_classification_edges(void) {
+    static vw_fixture f;
+    vw_start(&f, 8, 16);
+    agent_verify_state *v = &f.w.st.vw;
+    char *r = vw_run(&f.w, "write", "path", f.target, "content", "<html>a</html>\n", NULL); free(r);
+    r = vw_run(&f.w, "read", "path", f.target, NULL); free(r);
+    /* A shell edit of a file the agent already touched is a target mutation. */
+    char cmd[400];
+    snprintf(cmd, sizeof(cmd), "printf '<!-- x -->' >> %s", f.target);
+    r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);
+    AGENT_TEST_ASSERT(f.w.m.target_mutations == 2 && v->verify_used == 0);
+    /* A shell write into a helper dir is a helper mutation. */
+    snprintf(cmd, sizeof(cmd), "echo 1 > %s/probe.txt", f.hd);
+    r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);
+    AGENT_TEST_ASSERT(f.w.m.helper_mutations == 1 && f.w.m.target_mutations == 2);
+    /* A pre-existing product file with "verify" in its name is a target, not a helper. */
+    char prod[200];
+    snprintf(prod, sizeof(prod), "%s/verifyToken.js", f.wd);
+    AGENT_TEST_ASSERT(test_write_file(prod, "old\n", 4, cmd, sizeof(cmd)) == 0);
+    r = vw_run(&f.w, "write", "path", prod, "content", "new\n", NULL); free(r);
+    AGENT_TEST_ASSERT(f.w.m.target_mutations == 3);
+    /* ...but one the agent creates under that name is a helper, and so are its later edits. */
+    snprintf(prod, sizeof(prod), "%s/verify_run.mjs", f.wd);
+    r = vw_run(&f.w, "write", "path", prod, "content", "1\n", NULL); free(r);
+    r = vw_run(&f.w, "write", "path", prod, "content", "2\n", NULL); free(r);
+    AGENT_TEST_ASSERT(f.w.m.target_mutations == 3 && f.w.m.helper_mutations == 3);
+    vw_finish(&f);
+
+    /* Before the first target edit the budget is not armed; 0 disables it entirely. */
+    vw_start(&f, 8, 16);
+    for (int i = 0; i < 30; i++) {
+        snprintf(cmd, sizeof(cmd), "echo probe-a%c", 'a' + i % 20);
+        r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);
+    }
+    AGENT_TEST_ASSERT(!f.w.st.vw.armed && !f.w.st.vw.finalize && f.w.m.verify_steps == 0);
+    vw_finish(&f);
+    vw_start(&f, 0, 0);
+    r = vw_run(&f.w, "write", "path", f.target, "content", "x\n", NULL); free(r);
+    for (int i = 0; i < 30; i++) {
+        snprintf(cmd, sizeof(cmd), "echo run %c", 'a' + i % 20);
+        r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);
+    }
+    AGENT_TEST_ASSERT(!f.w.st.vw.finalize && f.w.m.verify_exhaustions == 0);
+    vw_finish(&f);
+    /* The no-progress ceiling still bites when the verify budget is raised. */
+    vw_start(&f, 100, 5);
+    r = vw_run(&f.w, "write", "path", f.target, "content", "x\n", NULL); free(r);
+    for (int i = 0; i < 5; i++) {
+        snprintf(cmd, sizeof(cmd), "echo distinct%c", 'a' + i);
+        r = vw_run(&f.w, "bash", "command", cmd, NULL); free(r);
+    }
+    AGENT_TEST_ASSERT(f.w.st.vw.finalize && f.w.st.vw.no_progress == 5);
+    vw_finish(&f);
+}
+
+/* An agent whose workspace is itself under /tmp still edits real targets there;
+ * only temp paths outside the workspace are helpers. */
+static void test_vw_workspace_under_tmp(void) {
+    char ws[] = "/tmp/q36vwws-XXXXXX", other[] = "/tmp/q36vwot-XXXXXX";
+    AGENT_TEST_ASSERT(mkdtemp(ws) != NULL && mkdtemp(other) != NULL);
+    char old[PATH_MAX];
+    AGENT_TEST_ASSERT(getcwd(old, sizeof(old)) != NULL && chdir(ws) == 0);
+    agent_config cfg = {.non_interactive = true};
+    cfg.gen.max_repeat_tool = 2;
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    agent_vw_begin_turn(&w.st, &cfg.gen);
+    char inside[PATH_MAX], outside[PATH_MAX];
+    snprintf(inside, sizeof(inside), "%s/main.c", ws);
+    snprintf(outside, sizeof(outside), "%s/check.sh", other);
+    char *r = vw_run(&w, "write", "path", "rel.c", "content", "int x;\n", NULL); free(r);
+    r = vw_run(&w, "write", "path", inside, "content", "int y;\n", NULL); free(r);
+    AGENT_TEST_ASSERT(w.m.target_mutations == 2 && w.m.helper_mutations == 0 && w.st.vw.armed);
+    r = vw_run(&w, "write", "path", outside, "content", "exit 0\n", NULL); free(r);
+    AGENT_TEST_ASSERT(w.m.target_mutations == 2 && w.m.helper_mutations == 1);
+    test_worker_free(&w);
+    AGENT_TEST_ASSERT(chdir(old) == 0);
+    char cmd[200];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s' '%s'", ws, other);
+    AGENT_TEST_ASSERT(system(cmd) == 0);
+}
+
+/* The task state must not record a failed shell command as "ok", and image views
+ * (browser screenshots) spend the same budget as other checks. */
+static void test_vw_failed_bash_fact_and_image_budget(void) {
+    static agent_task_state st;
+    memset(&st, 0, sizeof(st));
+    agent_tool_arg ca = {"command", "node probe.mjs"};
+    agent_tool_call bash = {"bash", &ca, 1, 1};
+    agent_st_note_tool(&st, &bash, "status=done\nexit_status=1\nfps=21\n");
+    agent_st_note_tool(&st, &bash, "status=done\nexit_status=0\nfine\n");
+    AGENT_TEST_ASSERT(st.nfacts == 2 && strstr(st.facts[0], "-> exit 1") && strstr(st.facts[1], "-> ok"));
+
+    agent_verify_state v = {.armed = true, .max_verify = 4, .max_noprog = 16};
+    agent_metrics m = {0};
+    agent_tool_arg ia = {"path", "shot.png"};
+    agent_tool_call img = {"view_image", &ia, 1, 1};
+    uint64_t sig = agent_vw_signature(&v, &img, NULL);
+    bool dup = false;
+    AGENT_TEST_ASSERT(!agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, &dup) && !dup);
+    AGENT_TEST_ASSERT(!agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, &dup) && dup);   /* repeat costs 2 */
+    AGENT_TEST_ASSERT(agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, &dup) && v.finalize);
+    AGENT_TEST_ASSERT(m.verify_exhaustions == 1 && m.verify_steps == 3);
+    AGENT_TEST_ASSERT(!agent_vw_step(&v, &m, AGENT_VW_VERIFY, sig, NULL, &dup));        /* fires once */
+}
+
+static void test_vw_flags_and_summary(void) {
+    char *a[] = {"q36-agent", "--max-verify-steps", "3", "--max-no-progress-steps", "9"};
+    agent_config c = parse_options(5, a);
+    AGENT_TEST_ASSERT(c.gen.max_verify_steps == 3 && c.gen.max_no_progress_steps == 9);
+    char *z[] = {"q36-agent", "--max-verify-steps", "0", "--max-no-progress-steps", "0"};
+    c = parse_options(5, z);                                       /* 0 turns the budget off */
+    AGENT_TEST_ASSERT(c.gen.max_verify_steps == 0 && c.gen.max_no_progress_steps == 0);
+    char *b[] = {"q36-agent"};
+    c = parse_options(1, b);
+    AGENT_TEST_ASSERT(c.gen.max_verify_steps == AGENT_MAX_VERIFY_DEFAULT &&
+                      c.gen.max_no_progress_steps == AGENT_MAX_NOPROGRESS_DEFAULT);
+    agent_worker w = {0};
+    w.m.target_mutations = 2; w.m.helper_mutations = 3; w.m.verify_steps = 7;
+    w.m.verify_exhaustions = 1; w.m.no_progress_steps = 7; w.m.forced_finalizations = 1;
+    char *s = agent_metrics_summary(&w);
+    AGENT_TEST_ASSERT(strstr(s, "target mutations: 2") && strstr(s, "verification helper mutations: 3") &&
+                      strstr(s, "verification steps: 7") && strstr(s, "verification budget exhaustions: 1") &&
+                      strstr(s, "no-progress steps: 7") && strstr(s, "forced finalizations: 1"));
+    free(s);
+}
+
 /* In-process fake server: replies to one request with a canned body. */
 typedef struct { int fd; const char *reply; size_t reply_len; } fake_srv;
 
@@ -1335,6 +1672,15 @@ int main(int argc, char **argv) {
     test_remote_client_sse();
     test_remote_errors_and_json();
     test_task_state_render();
+    test_vw_replays_the_observed_pathology();
+    test_vw_target_repair_resets_budget();
+    test_vw_repeated_verification_finalizes();
+    test_vw_harness_failure_is_bounded_and_reported();
+    test_vw_state_survives_compaction_render();
+    test_vw_classification_edges();
+    test_vw_workspace_under_tmp();
+    test_vw_failed_bash_fact_and_image_budget();
+    test_vw_flags_and_summary();
     test_write_append_and_edit_lines();
     test_leak_recovery_protocol();
     test_agent_frequency_penalty_sampling_path();

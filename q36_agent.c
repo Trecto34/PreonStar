@@ -51,6 +51,9 @@ int linenoiseEditInsert(struct linenoiseState *l, const char *c, size_t clen);
 #define AGENT_MAX_REPEAT_TOOL_DEFAULT 1
 #define AGENT_MAX_STAGNANT_DEFAULT 2
 #define AGENT_MAX_RECOVERIES_DEFAULT 3
+#define AGENT_MAX_VERIFY_DEFAULT 8       /* non-mutating steps after the last target edit */
+#define AGENT_MAX_NOPROGRESS_DEFAULT 16  /* hard ceiling on the same, ignoring step cost */
+#define AGENT_VW_MAX_REJECTS 2           /* refused tool calls before the controller answers */
 
 static int set_nonblock(int fd, bool on, int *old_flags);
 static int agent_replace_file(const char *path, const char *data, size_t len,
@@ -79,7 +82,9 @@ typedef struct {
     int max_repeat_tool;    /* identical calls allowed per unchanged workspace */
     int max_stagnant_turns; /* blocked/identically-failing calls before recovery */
     int max_recoveries;     /* controller recoveries per user turn before BLOCKED */
-    bool think_auto;        /* deterministic per-turn thinking budget (--think auto) */
+    int max_verify_steps;   /* non-mutating steps allowed after the last target edit; 0 = off */
+    int max_no_progress_steps; /* absolute ceiling of the same; 0 = off */
+    bool think_auto;       /* deterministic per-turn thinking budget (--think auto) */
     bool compact_llm;       /* write compaction summaries with the model, not harness state */
     int ctx_size;
     float temperature;
@@ -148,6 +153,30 @@ typedef struct {
     char note[100];   /* last write/edit outcome; empty if never modified */
 } agent_st_file;
 
+/* Verification-convergence state.  Harness-owned, per user turn, and part of
+ * the task state so compaction cannot reset it.  "Target" mutations change the
+ * artifact being built; "helper" mutations touch disposable verification
+ * scripts and never count as progress.  See agent_vw_note(). */
+#define AGENT_VW_SIGS 24
+#define AGENT_VW_HELPERS 8
+typedef struct {
+    bool armed;             /* a target mutation happened this user turn */
+    bool finalize;          /* FINALIZE_REQUIRED: further tool calls are refused */
+    int step;               /* tool calls seen this user turn */
+    int last_target_step;   /* step of the last target mutation; 0 = none */
+    char last_target[200];
+    int verify_used;        /* budget units since the last target mutation */
+    int no_progress;        /* raw non-mutating steps since then (no step cost) */
+    int dups;               /* near-identical re-checks since then */
+    int helper_since;       /* helper mutations since then */
+    int rejected;           /* tool calls refused while FINALIZE_REQUIRED */
+    int max_verify, max_noprog;
+    uint64_t sigs[AGENT_VW_SIGS];
+    int nsigs;
+    char helpers[AGENT_VW_HELPERS][200];  /* helper files this turn created */
+    int nhelpers;
+} agent_verify_state;
+
 typedef struct {
     char *goals[AGENT_ST_GOALS];
     int ngoals;
@@ -159,12 +188,20 @@ typedef struct {
     int nfacts;
     char *failed[AGENT_ST_LINES];  /* failed attempts */
     int nfailed;
+    char *unresolved[AGENT_ST_LINES];  /* failures not (yet) shown to be product bugs */
+    int nunresolved;
+    char *dnr[AGENT_ST_LINES];     /* re-checks the controller saw repeated */
+    int ndnr;
     bool last_failed;
+    agent_verify_state vw;
 } agent_task_state;
 
 /* Session metrics, reported by the end-of-run summary. */
 typedef struct {
     int steps, tools, recoveries, blocked_calls, compactions;
+    /* verification watchdog */
+    int target_mutations, helper_mutations, verify_steps, verify_exhaustions;
+    int no_progress_steps, forced_finalizations;
     long reasoning_tokens, action_tokens, prompt_tokens, cached_tokens;
     double prefill_ms, decode_ms, wall_s;
     char finish[40];
@@ -736,6 +773,8 @@ static agent_config parse_options(int argc, char **argv) {
             .max_repeat_tool = AGENT_MAX_REPEAT_TOOL_DEFAULT,
             .max_stagnant_turns = AGENT_MAX_STAGNANT_DEFAULT,
             .max_recoveries = AGENT_MAX_RECOVERIES_DEFAULT,
+            .max_verify_steps = AGENT_MAX_VERIFY_DEFAULT,
+            .max_no_progress_steps = AGENT_MAX_NOPROGRESS_DEFAULT,
             .ctx_size = AGENT_RESIDENT_CTX,
             .temperature = Q36_DEFAULT_TEMPERATURE,
             .top_k = 0,
@@ -828,6 +867,10 @@ static agent_config parse_options(int argc, char **argv) {
             c.gen.compact_llm = true;
         } else if (!strcmp(arg, "--max-recoveries")) {
             c.gen.max_recoveries = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--max-verify-steps")) {
+            c.gen.max_verify_steps = parse_nonnegative_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--max-no-progress-steps")) {
+            c.gen.max_no_progress_steps = parse_nonnegative_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--thinking-budget")) {
             c.gen.thinking_budget = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--temp")) {
@@ -8926,8 +8969,10 @@ static void agent_st_note_tool(agent_task_state *st, const agent_tool_call *c,
         const char *cmd = agent_tool_arg_value(c, "command");
         char *cc = agent_st_clip(cmd, 120);
         const char *ex = strstr(res, "exit code: ");
+        const char *es = strstr(res, "exit_status=");   /* what bash jobs actually report */
         char code[24] = "ok";
         if (ex) snprintf(code, sizeof(code), "exit %d", atoi(ex + 11));
+        else if (es && atoi(es + 12) != 0) snprintf(code, sizeof(code), "exit %d", atoi(es + 12));
         snprintf(line, sizeof(line), "`%s` -> %s", cc, code);
         free(cc);
         agent_st_push(st->facts, &st->nfacts, xstrdup(line));
@@ -8938,6 +8983,8 @@ static void agent_st_note_tool(agent_task_state *st, const agent_tool_call *c,
         agent_st_push(st->done, &st->ndone, xstrdup(line));
     }
 }
+
+static bool agent_vw_stagnant(const agent_verify_state *v);
 
 static char *agent_st_render(const agent_task_state *st) {
     agent_buf b = {0};
@@ -8975,8 +9022,35 @@ static char *agent_st_render(const agent_task_state *st) {
         snprintf(tmp, sizeof(tmp), "- %s: %s\n", st->files[i].path, st->files[i].note);
         agent_buf_puts(&b, tmp);
     }
+    const agent_verify_state *vw = &st->vw;
+    if (vw->armed) {
+        /* Counters live on the worker, so compaction renders them but never resets them. */
+        agent_buf_puts(&b, "\nVERIFICATION STATE:\n");
+        if (vw->last_target_step)
+            snprintf(tmp, sizeof(tmp), "- LAST_TARGET_MUTATION: step %d (%s)\n",
+                     vw->last_target_step, vw->last_target);
+        else
+            snprintf(tmp, sizeof(tmp), "- LAST_TARGET_MUTATION: none\n");
+        agent_buf_puts(&b, tmp);
+        snprintf(tmp, sizeof(tmp),
+                 "- VERIFY_STEPS_USED: %d\n- MAX_VERIFY_STEPS: %d\n- NO_PROGRESS_STEPS: %d (ceiling %d)\n"
+                 "- PHASE: %s\n",
+                 vw->verify_used, vw->max_verify, vw->no_progress, vw->max_noprog,
+                 vw->finalize ? "FINALIZE_REQUIRED" : agent_vw_stagnant(vw) ? "VERIFY_STAGNANT" : "VERIFY");
+        agent_buf_puts(&b, tmp);
+    }
+    if (st->nunresolved) {
+        agent_buf_puts(&b, "\nUNRESOLVED:\n");
+        for (int i = 0; i < st->nunresolved; i++) {
+            snprintf(tmp, sizeof(tmp), "- %s\n", st->unresolved[i]);
+            agent_buf_puts(&b, tmp);
+        }
+    }
     agent_buf_puts(&b, "\nNEXT REQUIRED ACTION:\n");
-    if (st->last_failed && st->nfailed) {
+    if (vw->finalize) {
+        agent_buf_puts(&b, "- verification budget exhausted: give the final answer now, no more tools; "
+                           "report what is confirmed working, confirmed failing and unresolved\n");
+    } else if (st->last_failed && st->nfailed) {
         snprintf(tmp, sizeof(tmp), "- fix and retry: %s\n", st->failed[st->nfailed - 1]);
         agent_buf_puts(&b, tmp);
     } else {
@@ -8987,6 +9061,10 @@ static char *agent_st_render(const agent_task_state *st) {
         if (!st->files[i].ranges[0]) continue;
         snprintf(tmp, sizeof(tmp), "- already read %s [%s], unchanged\n",
                  st->files[i].path, st->files[i].ranges);
+        agent_buf_puts(&b, tmp);
+    }
+    for (int i = 0; i < st->ndnr; i++) {
+        snprintf(tmp, sizeof(tmp), "- %s\n", st->dnr[i]);
         agent_buf_puts(&b, tmp);
     }
     return agent_buf_take(&b);
@@ -9224,6 +9302,380 @@ static bool agent_watchdog_blocks(agent_worker *w, const agent_tool_call *c,
 }
 
 
+/* ---- Verification-convergence watchdog ----------------------------------
+ * After the last TARGET mutation of a user turn the agent gets a bounded number
+ * of non-mutating steps (--max-verify-steps) to check its work.  Edits to
+ * disposable verification helpers (/tmp scripts, files named like verify, probe
+ * or mock that the agent itself created) never count as progress, near-identical re-checks cost
+ * double, and --max-no-progress-steps is a ceiling that ignores that weighting.
+ * When the budget is spent the state flips to FINALIZE_REQUIRED: further tool
+ * calls are refused with a short notice and the model must give a final answer.
+ * Nothing here adds to the system prompt; the notice is only injected when it
+ * fires.  The budget is armed by the first target mutation, so pure
+ * read-only investigations are not limited by it.
+ *
+ * Mutation detection is path based for write/edit and content-hash based for
+ * bash (files the agent already touched).  A bash command that creates a brand
+ * new file outside those is treated as non-mutating: the bounded fallback. */
+typedef enum { AGENT_VW_VERIFY, AGENT_VW_TARGET, AGENT_VW_HELPER } agent_vw_kind;
+
+typedef struct {
+    bool existed;
+    uint64_t hash;
+    char path[200];
+    int nfiles;
+    uint64_t fhash[AGENT_ST_FILES];
+    char fpath[AGENT_ST_FILES][200];
+} agent_vw_pre;
+
+static uint64_t agent_vw_file_hash(const char *path) {
+    FILE *fp = path && path[0] ? fopen(path, "rb") : NULL;
+    if (!fp) return 0;
+    uint64_t h = 1469598103934665603ULL;
+    unsigned char buf[65536];
+    size_t n, total = 0;
+    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
+        for (size_t i = 0; i < n; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
+        total += n;
+        if (total > (8u << 20)) break;   /* bounded cost; huge files hash their first 8 MiB */
+    }
+    fclose(fp);
+    return h ? h : 1;
+}
+
+/* A temp-dir path is a helper only when it is outside the workspace: an agent
+ * working in /tmp/project still edits real targets there. */
+static bool agent_vw_tmp_path(const char *p) {
+    static const char *const roots[] = {"/tmp/", "/var/tmp/", "/dev/shm/"};
+    if (!p || p[0] != '/') return false;     /* relative paths are inside the workspace */
+    bool tmp = false;
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]) && !tmp; i++)
+        tmp = !strncmp(p, roots[i], strlen(roots[i]));
+    if (!tmp) {
+        const char *t = getenv("TMPDIR");
+        size_t n = t ? strlen(t) : 0;
+        while (n > 1 && t[n - 1] == '/') n--;
+        tmp = n > 1 && !strncmp(p, t, n) && p[n] == '/';
+    }
+    if (!tmp) return false;
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd))) {
+        size_t n = strlen(cwd);
+        if (!strncmp(p, cwd, n) && (p[n] == '/' || p[n] == '\0')) return false;
+    }
+    return true;
+}
+
+static bool agent_vw_helper_name(const char *p) {
+    static const char *const pat[] = {"verif", "probe", "mock", "harness", "scratch",
+                                      "repro", "smoke", "sanity", "tmp_", "_tmp", "debug_"};
+    if (!p) return false;
+    const char *base = strrchr(p, '/');
+    base = base ? base + 1 : p;
+    char lower[160];
+    size_t n = strlen(base);
+    if (n >= sizeof(lower)) n = sizeof(lower) - 1;
+    for (size_t i = 0; i < n; i++) lower[i] = (char)tolower((unsigned char)base[i]);
+    lower[n] = 0;
+    for (size_t i = 0; i < sizeof(pat) / sizeof(pat[0]); i++)
+        if (strstr(lower, pat[i])) return true;
+    return false;
+}
+
+static bool agent_vw_known_helper(const agent_verify_state *v, const char *p) {
+    for (int i = 0; i < v->nhelpers; i++)
+        if (!strcmp(v->helpers[i], p)) return true;
+    return false;
+}
+
+/* A path is a verification helper when it lives in a temp dir, was created by
+ * the agent this turn under a helper-looking name, or is such a file edited
+ * again.  An existing product file that merely has "verify" in its name is a
+ * target: only files the agent created itself can be helpers by name. */
+static bool agent_vw_path_is_helper(const agent_verify_state *v, const char *p, bool existed) {
+    if (!p || !p[0]) return false;
+    return agent_vw_tmp_path(p) || agent_vw_known_helper(v, p) ||
+           (!existed && agent_vw_helper_name(p));
+}
+
+static void agent_vw_remember_helper(agent_verify_state *v, const char *p) {
+    if (!p || !p[0] || agent_vw_known_helper(v, p)) return;
+    if (v->nhelpers == AGENT_VW_HELPERS) {
+        memmove(v->helpers[0], v->helpers[1], (AGENT_VW_HELPERS - 1) * sizeof(v->helpers[0]));
+        v->nhelpers--;
+    }
+    snprintf(v->helpers[v->nhelpers++], sizeof(v->helpers[0]), "%s", p);
+}
+
+static bool agent_vw_stagnant(const agent_verify_state *v) {
+    return v->armed && !v->finalize && (v->dups >= 3 || v->helper_since >= 3);
+}
+
+/* Order-insensitive-ish fingerprint of what a non-mutating call looks at, with
+ * helper script names and numbers masked so `node /tmp/verify.mjs` and
+ * `node /tmp/verify2.mjs --n 7` count as the same check.  helperish reports
+ * whether the call runs or reads a verification helper. */
+static uint64_t agent_vw_signature(const agent_verify_state *v, const agent_tool_call *c,
+                                   bool *helperish) {
+    const char *name = c->name ? c->name : "?";
+    uint64_t h = agent_fnv1a(1469598103934665603ULL, name);
+    bool helper = false;
+    if (!strcmp(name, "bash")) {
+        const char *cmd = agent_tool_arg_value(c, "command");
+        char tok[256];
+        size_t tl = 0;
+        for (const char *p = cmd ? cmd : "";; p++) {
+            if (*p && !isspace((unsigned char)*p)) {
+                if (tl + 1 < sizeof(tok) && *p != '"' && *p != '\'')
+                    tok[tl++] = (char)(isdigit((unsigned char)*p) ? '#' : *p);
+                continue;
+            }
+            if (tl) {
+                tok[tl] = 0;
+                const bool is_h = agent_vw_tmp_path(tok) || agent_vw_known_helper(v, tok) ||
+                                  (strchr(tok, '.') && agent_vw_helper_name(tok));
+                helper = helper || is_h;
+                h = agent_fnv1a(h, is_h ? "<H>" : tok);
+                h = agent_fnv1a(h, " ");
+                tl = 0;
+            }
+            if (!*p) break;
+        }
+    } else {
+        static const char *const keys[] = {"path", "query", "url"};
+        for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+            const char *a = agent_tool_arg_value(c, keys[k]);
+            if (!a) continue;
+            helper = helper || agent_vw_tmp_path(a) || agent_vw_known_helper(v, a);
+            h = agent_fnv1a(h, a);
+            h = agent_fnv1a(h, ";");
+        }
+    }
+    if (helperish) *helperish = helper;
+    return h;
+}
+
+static bool agent_vw_bash_writes(const char *cmd) {
+    static const char *const ops[] = {">", "tee ", "sed -i", " mv ", " cp ", " rm ", "touch ", "mkdir ", "install "};
+    for (size_t i = 0; cmd && i < sizeof(ops) / sizeof(ops[0]); i++)
+        if (strstr(cmd, ops[i])) return true;
+    return false;
+}
+
+static void agent_vw_before(const agent_task_state *st, const agent_tool_call *c, agent_vw_pre *pre) {
+    memset(pre, 0, sizeof(*pre));
+    const char *name = c->name ? c->name : "";
+    const char *path = agent_tool_arg_value(c, "path");
+    if ((!strcmp(name, "write") || !strcmp(name, "edit")) && path) {
+        snprintf(pre->path, sizeof(pre->path), "%s", path);
+        pre->hash = agent_vw_file_hash(path);
+        pre->existed = pre->hash != 0;
+    } else if (!strcmp(name, "bash")) {
+        pre->nfiles = st->nfiles;
+        for (int i = 0; i < st->nfiles; i++) {
+            snprintf(pre->fpath[i], sizeof(pre->fpath[i]), "%s", st->files[i].path);
+            pre->fhash[i] = agent_vw_file_hash(pre->fpath[i]);
+        }
+    }
+}
+
+/* Advance the counters for one tool call.  Returns true exactly once per turn:
+ * on the call that exhausts the budget.  dup_out reports a repeated check. */
+static bool agent_vw_step(agent_verify_state *v, agent_metrics *m, agent_vw_kind kind,
+                          uint64_t sig, const char *path, bool *dup_out) {
+    bool dup = false;
+    v->step++;
+    if (dup_out) *dup_out = false;
+    if (kind == AGENT_VW_TARGET) {
+        v->armed = true;
+        v->last_target_step = v->step;
+        snprintf(v->last_target, sizeof(v->last_target), "%s", path ? path : "?");
+        v->verify_used = v->no_progress = v->dups = v->helper_since = 0;
+        v->nsigs = 0;
+        m->target_mutations++;
+        return false;
+    }
+    if (kind == AGENT_VW_HELPER) { v->helper_since++; m->helper_mutations++; }
+    for (int i = 0; i < v->nsigs; i++)
+        if (v->sigs[i] == sig) { dup = true; break; }
+    if (dup) {
+        v->dups++;
+    } else {
+        if (v->nsigs == AGENT_VW_SIGS) {
+            memmove(v->sigs, v->sigs + 1, (AGENT_VW_SIGS - 1) * sizeof(v->sigs[0]));
+            v->nsigs--;
+        }
+        v->sigs[v->nsigs++] = sig;
+    }
+    if (dup_out) *dup_out = dup;
+    if (!v->armed) return false;
+    v->verify_used += (dup || agent_vw_stagnant(v)) ? 2 : 1;
+    v->no_progress++;
+    m->verify_steps++;
+    m->no_progress_steps++;
+    if (v->finalize) return false;
+    if (!((v->max_verify > 0 && v->verify_used >= v->max_verify) ||
+          (v->max_noprog > 0 && v->no_progress >= v->max_noprog)))
+        return false;
+    v->finalize = true;
+    m->verify_exhaustions++;
+    return true;
+}
+
+static void agent_vw_begin_turn(agent_task_state *st, const agent_generation_options *g) {
+    memset(&st->vw, 0, sizeof(st->vw));
+    st->vw.max_verify = g ? g->max_verify_steps : AGENT_MAX_VERIFY_DEFAULT;
+    st->vw.max_noprog = g ? g->max_no_progress_steps : AGENT_MAX_NOPROGRESS_DEFAULT;
+    for (int i = 0; i < st->nunresolved; i++) free(st->unresolved[i]);
+    for (int i = 0; i < st->ndnr; i++) free(st->dnr[i]);
+    st->nunresolved = st->ndnr = 0;
+}
+
+static const char agent_vw_notice_tail[] =
+    "Verification/investigation budget exhausted.\n"
+    "Summarize the current result and unresolved limitations: say what is confirmed "
+    "working, what is confirmed failing, and what is inconclusive.\n"
+    "Do not call additional tools.\n";
+
+static char *agent_vw_notice(const agent_verify_state *v) {
+    char b[512];
+    snprintf(b, sizeof(b), "VERIFICATION_BUDGET_EXHAUSTED\nNo target files changed since step %d.\n%s",
+             v->last_target_step, agent_vw_notice_tail);
+    return xstrdup(b);
+}
+
+/* Controller-written answer, used only when the model keeps calling tools
+ * after being told not to.  It reports tracked facts, not success. */
+static char *agent_vw_final_text(const agent_task_state *st) {
+    agent_buf b = {0};
+    char tmp[400];
+    snprintf(tmp, sizeof(tmp),
+             "Stopping: the verification budget is exhausted (no target change since step %d%s%s).\n",
+             st->vw.last_target_step, st->vw.last_target[0] ? ", last edit " : "", st->vw.last_target);
+    agent_buf_puts(&b, tmp);
+    agent_buf_puts(&b, "Checks that ran:\n");
+    for (int i = st->nfacts > 3 ? st->nfacts - 3 : 0; i < st->nfacts; i++) {
+        snprintf(tmp, sizeof(tmp), "- %s\n", st->facts[i]);
+        agent_buf_puts(&b, tmp);
+    }
+    if (!st->nfacts) agent_buf_puts(&b, "- none recorded\n");
+    agent_buf_puts(&b, "Unresolved:\n");
+    for (int i = st->nunresolved > 3 ? st->nunresolved - 3 : 0; i < st->nunresolved; i++) {
+        snprintf(tmp, sizeof(tmp), "- %s\n", st->unresolved[i]);
+        agent_buf_puts(&b, tmp);
+    }
+    if (!st->nunresolved) agent_buf_puts(&b, "- none recorded\n");
+    agent_buf_puts(&b, "This is a stop, not a claim that every check passed.\n");
+    return agent_buf_take(&b);
+}
+
+/* Classify the call that just ran, advance the budget, record what the
+ * controller learned, and append the exhaustion notice when this call spent
+ * the budget.  Takes ownership of res.  executed is false for calls the repeat
+ * watchdog refused: those still burn budget as duplicate checks. */
+static char *agent_vw_after(agent_worker *w, const agent_tool_call *c,
+                            const agent_vw_pre *pre, bool executed, char *res) {
+    agent_task_state *st = &w->st;
+    agent_verify_state *v = &st->vw;
+    const char *name = c->name ? c->name : "";
+    const bool err = !strncmp(res, "Tool error", 10);
+    agent_vw_kind kind = AGENT_VW_VERIFY;
+    const char *tpath = NULL;
+    char changed[200] = {0};
+
+    if (executed && !err) {
+        if ((!strcmp(name, "write") || !strcmp(name, "edit")) && pre->path[0]) {
+            if (agent_vw_file_hash(pre->path) != pre->hash) {
+                if (agent_vw_path_is_helper(v, pre->path, pre->existed)) {
+                    kind = AGENT_VW_HELPER;
+                    agent_vw_remember_helper(v, pre->path);
+                } else {
+                    kind = AGENT_VW_TARGET;
+                }
+                tpath = pre->path;
+            }
+        } else if (!strcmp(name, "bash")) {
+            for (int i = 0; i < pre->nfiles; i++) {
+                if (agent_vw_file_hash(pre->fpath[i]) == pre->fhash[i]) continue;
+                if (agent_vw_path_is_helper(v, pre->fpath[i], true)) continue;
+                snprintf(changed, sizeof(changed), "%s", pre->fpath[i]);
+                kind = AGENT_VW_TARGET;
+                tpath = changed;
+                break;
+            }
+            const char *cmd = agent_tool_arg_value(c, "command");
+            bool hp = false;
+            if (kind == AGENT_VW_VERIFY && agent_vw_bash_writes(cmd)) {
+                (void)agent_vw_signature(v, c, &hp);
+                if (hp) kind = AGENT_VW_HELPER;
+            }
+        }
+    }
+    bool helperish = false;
+    uint64_t sig = agent_vw_signature(v, c, &helperish);
+    bool dup = false;
+    const bool exhausted = agent_vw_step(v, &w->m, kind, sig, tpath, &dup);
+
+    if (kind == AGENT_VW_VERIFY) {
+        /* A failing check is either a product bug or the agent's own probe being
+         * wrong; neither resets the budget (only a target edit does), but the
+         * label tells the final answer which one it is leaving open. */
+        const char *ex = strstr(res, "exit_status=");   /* bash job result, see agent_bash_job_tool_result */
+        const bool failed = err || (ex && atoi(ex + 12) != 0);
+        if (failed && v->armed) {
+            const char *cmd = agent_tool_arg_value(c, "command");
+            char *lab = agent_st_clip(!strcmp(name, "bash") && cmd ? cmd : name, 80);
+            char line[200];
+            snprintf(line, sizeof(line), "%s %s", helperish ? "[TEST_HARNESS_FAILURE_OR_ASSUMPTION]" : "[PRODUCT_FAILURE?]", lab);
+            free(lab);
+            agent_st_push(st->unresolved, &st->nunresolved, xstrdup(line));
+        }
+        if (dup) {
+            const char *cmd = agent_tool_arg_value(c, "command");
+            const char *p = agent_tool_arg_value(c, "path");
+            char *lab = agent_st_clip(!strcmp(name, "bash") && cmd ? cmd : p ? p : name, 80);
+            char line[200];
+            snprintf(line, sizeof(line), "do not repeat: %s %s", name, lab);
+            free(lab);
+            agent_st_push(st->dnr, &st->ndnr, xstrdup(line));
+        }
+    } else if (kind == AGENT_VW_HELPER && v->helper_since == 2) {
+        agent_st_push(st->dnr, &st->ndnr,
+            xstrdup("do not build another verification harness unless target code changes"));
+    }
+    agent_trace(w, "[VERIFY] step=%d kind=%s used=%d/%d no_progress=%d/%d dup=%d%s",
+                v->step, kind == AGENT_VW_TARGET ? "target" : kind == AGENT_VW_HELPER ? "helper" : "check",
+                v->verify_used, v->max_verify, v->no_progress, v->max_noprog, dup ? 1 : 0,
+                agent_vw_stagnant(v) ? " VERIFY_STAGNANT" : "");
+    if (exhausted) {
+        agent_trace(w, "[VERIFY] FINALIZE_REQUIRED no target change since step %d", v->last_target_step);
+        agent_buf b = {0};
+        agent_buf_puts(&b, res);
+        if (res[0] && res[strlen(res) - 1] != '\n') agent_buf_puts(&b, "\n");
+        char *notice = agent_vw_notice(v);
+        agent_buf_puts(&b, "\n");
+        agent_buf_puts(&b, notice);
+        free(notice);
+        free(res);
+        res = agent_buf_take(&b);
+    }
+    return res;
+}
+
+/* True when the model ignored the notice and kept calling tools: the turn ends
+ * with a controller-written stop report instead of BLOCKED. */
+static bool agent_vw_force_final(agent_worker *w) {
+    if (!w->st.vw.finalize || w->st.vw.rejected < AGENT_VW_MAX_REJECTS) return false;
+    char *text = agent_vw_final_text(&w->st);
+    w->m.forced_finalizations++;
+    snprintf(w->m.finish, sizeof(w->m.finish), "verify_budget");
+    agent_trace(w, "[VERIFY] forced finalization after %d refused tool calls", w->st.vw.rejected);
+    agent_publishf(w, "\n%s", text);
+    free(text);
+    agent_set_status(w, AGENT_WORKER_IDLE);
+    return true;
+}
+
 static agent_tool_observation agent_execute_tool_observation(
         agent_worker *w, const agent_tool_calls *calls) {
     agent_tool_observation obs;
@@ -9233,8 +9685,28 @@ static agent_tool_observation agent_execute_tool_observation(
         snprintf(hdr, sizeof(hdr), "Tool result %d (%s):\n", i + 1,
                  calls->v[i].name ? calls->v[i].name : "unknown");
         agent_tool_observation_puts(&obs, hdr);
+        if (w->st.vw.finalize) {
+            /* FINALIZE_REQUIRED: refuse without executing and keep it short. */
+            w->st.vw.rejected++;
+            char *note = agent_vw_notice(&w->st.vw);
+            agent_trace(w, "[VERIFY] refused tool call %d while FINALIZE_REQUIRED", w->st.vw.rejected);
+            agent_tool_observation_puts(&obs, note);
+            free(note);
+            continue;
+        }
         if (calls->v[i].name && !strcmp(calls->v[i].name, "view_image")) {
             agent_tool_view_image(w, &calls->v[i], &obs);
+            /* Screenshots are verification too: they spend the same budget. */
+            bool img_dup = false;
+            if (agent_vw_step(&w->st.vw, &w->m, AGENT_VW_VERIFY,
+                              agent_vw_signature(&w->st.vw, &calls->v[i], NULL), NULL, &img_dup)) {
+                char *note = agent_vw_notice(&w->st.vw);
+                agent_tool_observation_puts(&obs, "\n");
+                agent_tool_observation_puts(&obs, note);
+                free(note);
+                agent_trace(w, "[VERIFY] FINALIZE_REQUIRED no target change since step %d",
+                            w->st.vw.last_target_step);
+            }
             continue;
         }
         char *res;
@@ -9244,7 +9716,10 @@ static agent_tool_observation agent_execute_tool_observation(
             res = xstrdup("Tool error: REPEAT_CALL_BLOCKED\n"
                           "reason=identical call, workspace unchanged since last result\n"
                           "next=use the earlier result; edit/write/run, or give the final answer\n");
+            res = agent_vw_after(w, &calls->v[i], NULL, false, res);
         } else {
+            agent_vw_pre vwpre;
+            agent_vw_before(&w->st, &calls->v[i], &vwpre);
             res = agent_execute_tool_call(w, &calls->v[i]);
             uint64_t eh = 0;
             if (!strncmp(res, "Tool error", 10)) {
@@ -9255,6 +9730,7 @@ static agent_tool_observation agent_execute_tool_observation(
             }
             w->wd_last_err = eh;
             agent_st_note_tool(&w->st, &calls->v[i], res);
+            res = agent_vw_after(w, &calls->v[i], &vwpre, true, res);
         }
         agent_trace_text(w, "[TOOL RESULT]", res, strlen(res) > 300 ? 300 : strlen(res));
         agent_tool_observation_puts(&obs, res);
@@ -10156,7 +10632,7 @@ static int agent_think_budget_for(const agent_config *cfg, int level) {
 /* Concise end-of-run summary (also used by the remote backend). */
 static char *agent_metrics_summary(const agent_worker *w) {
     const agent_metrics *m = &w->m;
-    char b[900];
+    char b[1300];
     long pf_tokens = m->prompt_tokens - m->cached_tokens;
     double pf = m->prefill_ms > 0 ? (double)pf_tokens / (m->prefill_ms / 1000.0) : 0.0;
     long dec_tokens = m->reasoning_tokens + m->action_tokens;
@@ -10165,10 +10641,15 @@ static char *agent_metrics_summary(const agent_worker *w) {
         "\n--- session summary ---\n"
         "steps: %d\ntools: %d\nreasoning tokens: %ld\naction tokens: %ld\n"
         "recoveries: %d\nrepeated calls blocked: %d\ncompactions: %d\n"
+        "target mutations: %d\nverification helper mutations: %d\nverification steps: %d\n"
+        "verification budget exhaustions: %d\nno-progress steps: %d\nforced finalizations: %d\n"
         "prompt tokens: %ld (%ld cached, %.0f%%)\n"
         "wall time: %.1fs\nprefill: %.1f tok/s\ndecode: %.1f tok/s\nlast finish: %s\n",
         m->steps, m->tools, m->reasoning_tokens, m->action_tokens, m->recoveries,
-        m->blocked_calls, m->compactions, m->prompt_tokens, m->cached_tokens,
+        m->blocked_calls, m->compactions,
+        m->target_mutations, m->helper_mutations, m->verify_steps, m->verify_exhaustions,
+        m->no_progress_steps, m->forced_finalizations,
+        m->prompt_tokens, m->cached_tokens,
         m->prompt_tokens ? 100.0 * (double)m->cached_tokens / (double)m->prompt_tokens : 0.0,
         now_sec() - w->session_t0, pf, dc, m->finish[0] ? m->finish : "-");
     return xstrdup(b);
@@ -10387,6 +10868,7 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
     agent_recovery rec = {.max = cfg->gen.max_recoveries};
     int consecutive_failures = 0;
     int think_level = agent_think_level_for_prompt(user_text);
+    agent_vw_begin_turn(&w->st, &cfg->gen);
     w->wd_ncalls = 0;
     w->wd_stagnant = 0;
     w->wd_last_err = 0;
@@ -10569,6 +11051,7 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
         free(tool_extra);
         free(tool_id);
         free(text);
+        if (agent_vw_force_final(w)) return 0;
         if (worker_should_interrupt(w)) {
             worker_clear_interrupt(w);
             agent_publish_system_status(w, "Stopped by user");
@@ -10673,6 +11156,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
     agent_recovery rec = {.max = cfg->gen.max_recoveries};
     int think_level = agent_think_level_for_prompt(user_text);
     int think_budget = agent_think_budget_for(cfg, think_level);
+    agent_vw_begin_turn(&w->st, &cfg->gen);
     w->wd_ncalls = 0;
     w->wd_stagnant = 0;
     w->wd_last_err = 0;
@@ -11258,6 +11742,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             pthread_mutex_unlock(&w->mu);
         }
         free(queued_user);
+        if (agent_vw_force_final(w)) return 0;
         continue;
 observation_error:
         agent_tool_observation_free(&observation);
