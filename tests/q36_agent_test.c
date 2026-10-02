@@ -1548,6 +1548,173 @@ static void test_vw_incomplete_evidence_and_reentry(void) {
     vw_finish(&f);
 }
 
+/* ---- Workspace jail ---- */
+typedef struct {
+    agent_config cfg;
+    agent_worker w;
+    char ws[PATH_MAX], other[PATH_MAX], oidx[PATH_MAX], old[PATH_MAX];
+} ws_fixture;
+
+static void ws_start(ws_fixture *f, bool yolo) {
+    memset(f, 0, sizeof(*f));
+    char a[] = "/tmp/q36ws-XXXXXX", b[] = "/tmp/q36wo-XXXXXX";
+    AGENT_TEST_ASSERT(mkdtemp(a) && mkdtemp(b));
+    AGENT_TEST_ASSERT(realpath(a, f->ws) && realpath(b, f->other));
+    snprintf(f->oidx, sizeof(f->oidx), "%s/index.html", f->other);
+    char cmd[PATH_MAX + 64];
+    AGENT_TEST_ASSERT(test_write_file(f->oidx, "SECRET\n", 7, cmd, sizeof(cmd)) == 0);
+    char link[PATH_MAX + 16], dangle[PATH_MAX + 16], gone[PATH_MAX + 16];
+    snprintf(link, sizeof(link), "%s/link.html", f->ws);
+    snprintf(dangle, sizeof(dangle), "%s/dangle.html", f->ws);
+    snprintf(gone, sizeof(gone), "%s/never.txt", f->other);
+    AGENT_TEST_ASSERT(symlink(f->oidx, link) == 0 && symlink(gone, dangle) == 0);
+    AGENT_TEST_ASSERT(getcwd(f->old, sizeof(f->old)) && chdir(f->ws) == 0);
+    f->cfg.non_interactive = true;
+    f->cfg.yolo = yolo;
+    f->cfg.gen.max_repeat_tool = 2;
+    snprintf(f->cfg.ws_root, sizeof(f->cfg.ws_root), "%s", f->ws);
+    test_worker_init(&f->w, &f->cfg);
+    agent_vw_begin_turn(&f->w.st, &f->cfg.gen);
+}
+
+static void ws_finish(ws_fixture *f) {
+    test_worker_free(&f->w);
+    AGENT_TEST_ASSERT(chdir(f->old) == 0);
+    char cmd[2 * PATH_MAX + 32];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s' '%s'", f->ws, f->other);
+    AGENT_TEST_ASSERT(system(cmd) == 0);
+}
+
+static bool ws_blocked(const char *r) {
+    return strstr(r, "WORKSPACE_ESCAPE_BLOCKED") && strstr(r, "requested_path:") &&
+           strstr(r, "workspace_root:") && !strstr(r, "SECRET");
+}
+
+static void test_ws_jail_blocks_escapes_and_allows_workspace(void) {
+    static ws_fixture f;
+    ws_start(&f, false);
+    char rel[PATH_MAX + 16], gone[PATH_MAX + 16], *r;
+    snprintf(rel, sizeof(rel), "../%s/index.html", strrchr(f.other, '/') + 1);
+    snprintf(gone, sizeof(gone), "%s/never.txt", f.other);
+    r = vw_run(&f.w, "read", "path", rel, NULL);                       AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    r = vw_run(&f.w, "read", "path", f.oidx, NULL);                    AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    r = vw_run(&f.w, "read", "path", "link.html", NULL);               AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    r = vw_run(&f.w, "write", "path", f.oidx, "content", "PWNED\n", NULL); AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    r = vw_run(&f.w, "write", "path", "link.html", "content", "PWNED\n", NULL); AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    r = vw_run(&f.w, "write", "path", "dangle.html", "content", "PWNED\n", NULL); AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    r = vw_run(&f.w, "write", "path", "nosuch/../../x.txt", "content", "x\n", NULL); AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    r = vw_run(&f.w, "edit", "path", f.oidx, "old", "SECRET", "new", "PWNED", NULL); AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    r = vw_run(&f.w, "list", "path", f.other, NULL);                   AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    r = vw_run(&f.w, "search", "query", "SECRET", "path", f.other, NULL); AGENT_TEST_ASSERT(ws_blocked(r)); free(r);
+    char buf[16] = {0};
+    FILE *fp = fopen(f.oidx, "r");
+    AGENT_TEST_ASSERT(fp && fgets(buf, sizeof(buf), fp) && !strcmp(buf, "SECRET\n"));
+    fclose(fp);
+    AGENT_TEST_ASSERT(access(gone, F_OK) != 0);                         /* nothing was created outside */
+
+    /* Ordinary work inside the workspace is unaffected, including new files and subdirs. */
+    r = vw_run(&f.w, "write", "path", "index.html", "content", "<html>hello</html>\n", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "OK write")); free(r);
+    r = vw_run(&f.w, "read", "path", "index.html", NULL);              AGENT_TEST_ASSERT(strstr(r, "hello")); free(r);
+    r = vw_run(&f.w, "edit", "path", "index.html", "old", "hello", "new", "world", NULL);
+    AGENT_TEST_ASSERT(!strstr(r, "Tool error")); free(r);
+    r = vw_run(&f.w, "search", "query", "world", "path", ".", NULL);   AGENT_TEST_ASSERT(strstr(r, "index.html")); free(r);
+    r = vw_run(&f.w, "list", NULL);                                    AGENT_TEST_ASSERT(strstr(r, "index.html")); free(r);
+    r = vw_run(&f.w, "write", "path", "sub/new.js", "content", "1\n", NULL);
+    AGENT_TEST_ASSERT(!strstr(r, "WORKSPACE_ESCAPE_BLOCKED")); free(r);
+
+    /* WORKSPACE_ROOT is controller state: rendered for compaction, and re-asserted on every
+     * call even if something overwrote it. */
+    snprintf(f.w.st.ws_root, sizeof(f.w.st.ws_root), "%s", "/home/server/pagoda-garden");
+    r = vw_run(&f.w, "read", "path", "index.html", NULL); free(r);
+    char want[PATH_MAX + 32];
+    snprintf(want, sizeof(want), "WORKSPACE_ROOT: %s", f.ws);
+    char *st = agent_st_render(&f.w.st);
+    AGENT_TEST_ASSERT(strstr(st, want) && !strstr(st, "pagoda-garden"));
+    free(st);
+
+    /* The shell cannot see or touch the outside fixture or enumerate the host. */
+    char cmd[2 * PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "cat %s; echo PWNED > %s; ls %s; find / -name index.html -path '*q36wo*'; echo done", f.oidx, f.oidx, f.other);
+    r = vw_run(&f.w, "bash", "command", cmd, NULL);
+    AGENT_TEST_ASSERT(strstr(r, "done") && !strstr(r, "SECRET") && strstr(r, "No such file"));   /* error text names the path; contents never appear */
+    free(r);
+    fp = fopen(f.oidx, "r");
+    AGENT_TEST_ASSERT(fp && fgets(buf, sizeof(buf), fp) && !strcmp(buf, "SECRET\n"));
+    fclose(fp);
+    r = vw_run(&f.w, "bash", "command", "pwd; echo hi > made.txt; cat made.txt", NULL);
+    AGENT_TEST_ASSERT(strstr(r, f.ws) && strstr(r, "hi")); free(r);          /* cwd = root, writable */
+    ws_finish(&f);
+}
+
+static void test_ws_yolo_and_unsafe_filesystem_allow_outside(void) {
+    static ws_fixture f;
+    ws_start(&f, true);                                                /* --yolo */
+    char *r = vw_run(&f.w, "read", "path", f.oidx, NULL);
+    AGENT_TEST_ASSERT(strstr(r, "SECRET") && !strstr(r, "WORKSPACE_ESCAPE_BLOCKED")); free(r);
+    r = vw_run(&f.w, "write", "path", f.oidx, "content", "PWNED\n", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "OK write")); free(r);
+    char cmd[PATH_MAX + 16];
+    snprintf(cmd, sizeof(cmd), "cat %s", f.oidx);
+    r = vw_run(&f.w, "bash", "command", cmd, NULL);
+    AGENT_TEST_ASSERT(strstr(r, "PWNED")); free(r);
+    ws_finish(&f);
+
+    ws_start(&f, false);                                               /* --unsafe-filesystem */
+    f.cfg.unsafe_fs = true;
+    r = vw_run(&f.w, "read", "path", f.oidx, NULL);
+    AGENT_TEST_ASSERT(strstr(r, "SECRET")); free(r);
+    snprintf(cmd, sizeof(cmd), "cat %s", f.oidx);
+    r = vw_run(&f.w, "bash", "command", cmd, NULL);                    /* the shell stays confined */
+    AGENT_TEST_ASSERT(!strstr(r, "SECRET")); free(r);
+    ws_finish(&f);
+}
+
+/* Mutation thrashing: edits keep resetting the progress counters but never the ceiling.  It
+ * ends with an INCOMPLETE report, never VERIFY, never BLOCKED. */
+static void test_vw_implementation_ceiling_stops_mutation_thrash(void) {
+    static vw_fixture f;
+    vw_start(&f, 8, 16);
+    f.cfg.gen.max_implementation_steps = 6;
+    agent_vw_begin_turn(&f.w.st, &f.cfg.gen);
+    agent_verify_state *v = &f.w.st.vw;
+    bool hit = false;
+    for (int i = 0; i < 12 && !hit; i++) {
+        char content[64];
+        snprintf(content, sizeof(content), "<html>attempt %d</html>\n", i);
+        char *r = vw_run(&f.w, "write", "path", f.target, "content", content, NULL);
+        hit = strstr(r, "IMPLEMENTATION_STEP_LIMIT_REACHED") != NULL;
+        free(r);
+    }
+    AGENT_TEST_ASSERT(hit && v->finalize && v->impl_stop && v->impl_steps == 6 && v->phase == AGENT_PH_IMPLEMENT);
+    AGENT_TEST_ASSERT(f.w.m.impl_limit_hits == 1 && f.w.m.ph_iv == 0 && f.w.m.verify_steps == 0 &&
+                      f.w.m.verify_exhaustions == 0 && f.w.m.target_mutations == 6);
+    char *r = vw_run(&f.w, "read", "path", f.target, NULL);              /* refused, not executed */
+    AGENT_TEST_ASSERT(strstr(r, "IMPLEMENTATION_STEP_LIMIT_REACHED") && !strstr(r, "attempt")); free(r);
+    r = vw_run(&f.w, "read", "path", f.target, NULL); free(r);
+    AGENT_TEST_ASSERT(agent_vw_force_final(&f.w) && !strcmp(f.w.m.finish, "impl_limit"));
+    AGENT_TEST_ASSERT(f.w.out && strstr(f.w.out, "INCOMPLETE") && strstr(f.w.out, "main.html") &&
+                      strstr(f.w.out, "not a claim that the task is complete") && !strstr(f.w.out, "BLOCKED"));
+    agent_worker w = {0};
+    w.m = f.w.m;
+    char *s = agent_metrics_summary(&w);
+    AGENT_TEST_ASSERT(strstr(s, "implementation steps: 6") && strstr(s, "implementation step limit hits: 1")); free(s);
+    vw_finish(&f);
+
+    /* VERIFY steps are not implementation steps: a tiny ceiling leaves the verify budget alone. */
+    vw_start(&f, 3, 16);
+    f.cfg.gen.max_implementation_steps = 4;
+    agent_vw_begin_turn(&f.w.st, &f.cfg.gen);
+    r = vw_run(&f.w, "write", "path", f.target, "content", "<html>ok</html>\n", NULL); free(r);
+    r = vw_run(&f.w, "bash", "command", "echo a # pytest", NULL); free(r);          /* enters VERIFY */
+    r = vw_run(&f.w, "bash", "command", "echo b # pytest", NULL); free(r);
+    AGENT_TEST_ASSERT(f.w.st.vw.phase == AGENT_PH_VERIFY && f.w.st.vw.impl_steps == 2 && !f.w.st.vw.finalize);
+    r = vw_run(&f.w, "bash", "command", "echo c # pytest", NULL);
+    AGENT_TEST_ASSERT(strstr(r, "VERIFICATION_BUDGET_EXHAUSTED") && !f.w.st.vw.impl_stop &&
+                      f.w.m.impl_limit_hits == 0); free(r);
+    vw_finish(&f);
+}
+
 /* In-process fake server: replies to one request with a canned body. */
 typedef struct { int fd; const char *reply; size_t reply_len; } fake_srv;
 
@@ -1816,6 +1983,9 @@ int main(int argc, char **argv) {
     test_vw_flags_and_summary();
     test_vw_compaction_recovery_stays_in_implement();
     test_vw_incomplete_evidence_and_reentry();
+    test_ws_jail_blocks_escapes_and_allows_workspace();
+    test_ws_yolo_and_unsafe_filesystem_allow_outside();
+    test_vw_implementation_ceiling_stops_mutation_thrash();
     test_write_append_and_edit_lines();
     test_leak_recovery_protocol();
     test_agent_frequency_penalty_sampling_path();

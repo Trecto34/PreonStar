@@ -284,6 +284,10 @@ static void print_agent_specific(FILE *fp, const help_colors *c) {
     opt(fp, c, "-sys, --system TEXT", "Extra system prompt. Empty disables extra text.");
     opt(fp, c, "--trace FILE", "Write prompt, token, and native tool-call debug trace.");
     opt(fp, c, "--chdir DIR", "Set the agent tool working directory; runtime assets load first.");
+    opt(fp, c, "--workspace DIR", "Workspace root (default: the launch directory). File tools only touch paths whose real path is inside it (symlinks and .. included) and bash runs under bubblewrap with only this directory writable (scratch in DIR/.q36-tmp), so the host cannot be explored. The root is controller state and survives compaction.");
+    opt(fp, c, "--yolo", "Turn the workspace jail OFF: file tools and the shell can read and modify the whole host filesystem. Explicit opt-in; prints a warning.");
+    opt(fp, c, "--unsafe-filesystem", "Let the file tools leave the workspace; the shell stays confined. --yolo is the full opt-out.");
+    opt(fp, c, "--max-implementation-steps N", "Emergency ceiling on tool steps spent while implementing (not verifying) in one turn; target edits do not reset it. At the limit the turn ends with an INCOMPLETE report (0 = off). Default: 96.");
     opt(fp, c, "-n, --tokens N", "Hard output limit per assistant generation. Default: 100000.");
     opt(fp, c, "--thinking-budget N", "Hard maximum tokens per thinking block; soft closing starts at 75%. Default: 50000.");
     opt(fp, c, "--action-budget N", "Post-think content tokens before a reasoning-leak check aborts and recovers the round (0 = off). Default: 384.");

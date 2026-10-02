@@ -52,6 +52,7 @@ int linenoiseEditInsert(struct linenoiseState *l, const char *c, size_t clen);
 #define AGENT_MAX_STAGNANT_DEFAULT 2
 #define AGENT_MAX_RECOVERIES_DEFAULT 3
 #define AGENT_MAX_VERIFY_DEFAULT 8       /* non-mutating steps after the last target edit */
+#define AGENT_MAX_IMPL_DEFAULT 96        /* emergency ceiling on IMPLEMENT-phase steps per user turn */
 #define AGENT_MAX_NOPROGRESS_DEFAULT 16  /* hard ceiling on the same, ignoring step cost */
 #define AGENT_VW_MAX_REJECTS 2           /* refused tool calls before the controller answers */
 
@@ -84,6 +85,7 @@ typedef struct {
     int max_recoveries;     /* controller recoveries per user turn before BLOCKED */
     int max_verify_steps;   /* non-mutating steps allowed after the last target edit; 0 = off */
     int max_no_progress_steps; /* absolute ceiling of the same; 0 = off */
+    int max_implementation_steps; /* hard ceiling on IMPLEMENT-phase steps, never reset by edits; 0 = off */
     bool think_auto;       /* deterministic per-turn thinking budget (--think auto) */
     bool compact_llm;       /* write compaction summaries with the model, not harness state */
     int ctx_size;
@@ -105,6 +107,12 @@ typedef struct {
     q36_engine_options engine;
     agent_generation_options gen;
     const char *chdir_path;
+    /* Workspace jail.  ws_root is controller-owned (set once in main, never by the model);
+     * empty = jail not established (unit-test workers).  yolo lifts every restriction,
+     * unsafe_fs only the file-tool one. */
+    const char *workspace_path;
+    char ws_root[PATH_MAX];
+    bool yolo, unsafe_fs;
     /* Remote mode: inference on a q36-server, tools/watchdog/compaction local. */
     const char *server_url;
     const char *server_model;
@@ -169,6 +177,8 @@ typedef struct {
     bool armed;             /* a target mutation happened this user turn */
     bool finalize;          /* FINALIZE_REQUIRED: further tool calls are refused */
     int step;               /* tool calls seen this user turn */
+    int impl_steps, max_impl;  /* IMPLEMENT-phase steps this turn; never reset by edits */
+    bool impl_stop;         /* FINALIZE_REQUIRED came from the implementation ceiling */
     int last_target_step;   /* step of the last target mutation; 0 = none */
     char last_target[200];
     int verify_used;        /* budget units since the last target mutation */
@@ -199,6 +209,7 @@ typedef struct {
     char *dnr[AGENT_ST_LINES];     /* re-checks the controller saw repeated */
     int ndnr;
     bool last_failed;
+    char ws_root[PATH_MAX];        /* WORKSPACE_ROOT, copied from the config on every tool call */
     agent_verify_state vw;
 } agent_task_state;
 
@@ -208,6 +219,7 @@ typedef struct {
     /* verification watchdog */
     int target_mutations, helper_mutations, verify_steps, verify_exhaustions;
     int no_progress_steps, forced_finalizations;
+    int impl_steps, impl_limit_hits;
     int ph_iv, ph_vi, ph_vf;   /* controller phase transitions: IMPLEMENT->VERIFY, VERIFY->IMPLEMENT, VERIFY->FINALIZE_REQUIRED */
     long reasoning_tokens, action_tokens, prompt_tokens, cached_tokens;
     double prefill_ms, decode_ms, wall_s;
@@ -782,6 +794,7 @@ static agent_config parse_options(int argc, char **argv) {
             .max_recoveries = AGENT_MAX_RECOVERIES_DEFAULT,
             .max_verify_steps = AGENT_MAX_VERIFY_DEFAULT,
             .max_no_progress_steps = AGENT_MAX_NOPROGRESS_DEFAULT,
+            .max_implementation_steps = AGENT_MAX_IMPL_DEFAULT,
             .ctx_size = AGENT_RESIDENT_CTX,
             .temperature = Q36_DEFAULT_TEMPERATURE,
             .top_k = 0,
@@ -940,6 +953,14 @@ static agent_config parse_options(int argc, char **argv) {
             exit(2);
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--workspace")) {
+            c.workspace_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--yolo")) {
+            c.yolo = true;
+        } else if (!strcmp(arg, "--unsafe-filesystem")) {
+            c.unsafe_fs = true;
+        } else if (!strcmp(arg, "--max-implementation-steps")) {
+            c.gen.max_implementation_steps = parse_nonnegative_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--chdir")) {
             c.chdir_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--quality")) {
@@ -8510,6 +8531,132 @@ static void *agent_bash_monitor(void *arg) {
     return NULL;
 }
 
+/* ---- Workspace jail ----------------------------------------------------------
+ * WORKSPACE_ROOT is the canonical realpath of the launch directory (or --workspace),
+ * fixed in main() and read from the config on every call, so neither the model nor
+ * compaction can redefine it.  File tools are gated on the canonical path; bash runs
+ * under bubblewrap with only the workspace writable and system dirs read-only, so
+ * `find /` cannot see other projects.  --yolo lifts both, --unsafe-filesystem the
+ * file-tool gate only.  The path gate is check-then-use (TOCTOU); the sandbox is the
+ * real barrier for shell-created links. */
+static bool agent_ws_inside(const char *root, const char *p) {
+    size_t n = strlen(root);
+    if (n == 1 && root[0] == '/') return true;
+    return !strncmp(p, root, n) && (p[n] == '/' || p[n] == '\0');
+}
+
+/* Canonicalize path even when it does not exist yet: realpath() the longest existing
+ * prefix and append the missing tail.  A missing tail containing ".." or a dangling
+ * symlink cannot be proven to stay inside, so both fail. */
+static bool agent_ws_canon(const char *path, char *out, size_t out_len) {
+    char exp[PATH_MAX], head[PATH_MAX], tail[PATH_MAX] = "", res[PATH_MAX];
+    if (!agent_expand_home_path(path, exp, sizeof(exp))) return false;
+    if (exp[0] == '/') {
+        snprintf(head, sizeof(head), "%s", exp);
+    } else {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof(cwd)) ||
+            snprintf(head, sizeof(head), "%s/%s", cwd, exp) >= (int)sizeof(head)) return false;
+    }
+    for (;;) {
+        if (realpath(head, res)) break;
+        struct stat st;
+        if (lstat(head, &st) == 0 && S_ISLNK(st.st_mode)) return false;   /* dangling link */
+        char *slash = strrchr(head, '/');
+        if (!slash) return false;
+        const char *comp = slash + 1;
+        if (!strcmp(comp, "..")) return false;
+        if (comp[0] && strcmp(comp, ".")) {
+            char t[PATH_MAX];
+            snprintf(t, sizeof(t), "%s%s%s", comp, tail[0] ? "/" : "", tail);
+            snprintf(tail, sizeof(tail), "%s", t);
+        }
+        if (slash == head) { snprintf(res, sizeof(res), "/"); break; }
+        *slash = 0;
+    }
+    int n = snprintf(out, out_len, "%s%s%s", res, tail[0] && strcmp(res, "/") ? "/" : "", tail);
+    return n > 0 && (size_t)n < out_len;
+}
+
+static bool agent_ws_jailed(const agent_config *cfg) {
+    return cfg && cfg->ws_root[0] && !cfg->yolo;
+}
+
+/* NULL when the call may run; otherwise the deterministic refusal. */
+static char *agent_ws_gate(agent_worker *w, const agent_tool_call *c) {
+    const agent_config *cfg = w->cfg;
+    if (cfg && cfg->ws_root[0]) snprintf(w->st.ws_root, sizeof(w->st.ws_root), "%s", cfg->ws_root);
+    if (!agent_ws_jailed(cfg) || cfg->unsafe_fs || !c->name) return NULL;
+    static const char *const tools[] = {"read", "write", "edit", "search", "list", "view_image"};
+    bool file_tool = false;
+    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++)
+        if (!strcmp(c->name, tools[i])) file_tool = true;
+    if (!file_tool) return NULL;
+    const char *path = agent_tool_arg_value(c, "path");
+    if (!path || !path[0]) path = ".";
+    char canon[PATH_MAX];
+    if (agent_ws_canon(path, canon, sizeof(canon)) && agent_ws_inside(cfg->ws_root, canon)) return NULL;
+    char b[2 * PATH_MAX + 200];
+    snprintf(b, sizeof(b),
+             "Tool error: WORKSPACE_ESCAPE_BLOCKED\nrequested_path: %s\nworkspace_root: %s\n"
+             "next=use paths inside workspace_root; files elsewhere on the host are not part of this project\n",
+             path, cfg->ws_root);
+    return xstrdup(b);
+}
+
+/* bwrap argv for one shell command, or NULL when no jail applies.  Storage lives in
+ * st so the child can exec without allocating. */
+typedef struct { char *argv[64]; char buf[12][PATH_MAX + 16]; int n, nb; } agent_ws_argv;
+
+static const char *agent_ws_arg(agent_ws_argv *a, const char *s) {
+    snprintf(a->buf[a->nb], sizeof(a->buf[0]), "%s", s);
+    return a->argv[a->n++] = a->buf[a->nb++];
+}
+
+static bool agent_ws_sandbox_argv(const agent_config *cfg, const char *cmd, agent_ws_argv *a) {
+    if (!agent_ws_jailed(cfg)) return false;
+    memset(a, 0, sizeof(*a));
+    static const char *const fixed[] = {"bwrap", "--die-with-parent", "--unshare-pid", "--unshare-ipc",
+                                        "--unshare-uts", "--proc", "/proc", "--dev", "/dev",
+                                        "--tmpfs", "/tmp"};
+    for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++) a->argv[a->n++] = (char *)fixed[i];
+    static const char *const sys[] = {"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc"};
+    for (size_t i = 0; i < sizeof(sys) / sizeof(sys[0]); i++) {
+        char tgt[PATH_MAX];
+        ssize_t l = readlink(sys[i], tgt, sizeof(tgt) - 1);
+        if (l > 0) {
+            tgt[l] = 0;
+            a->argv[a->n++] = (char *)"--symlink";
+            agent_ws_arg(a, tgt);
+            a->argv[a->n++] = (char *)sys[i];
+        } else if (access(sys[i], F_OK) == 0) {
+            a->argv[a->n++] = (char *)"--ro-bind";
+            a->argv[a->n++] = (char *)sys[i];
+            a->argv[a->n++] = (char *)sys[i];
+        }
+    }
+    char tmpd[PATH_MAX + 16];
+    snprintf(tmpd, sizeof(tmpd), "%s/.q36-tmp", cfg->ws_root);
+    (void)mkdir(tmpd, 0700);                       /* scratch space that stays inside the workspace */
+    a->argv[a->n++] = (char *)"--bind";
+    const char *root = agent_ws_arg(a, cfg->ws_root);
+    a->argv[a->n++] = (char *)root;
+    a->argv[a->n++] = (char *)"--chdir";
+    a->argv[a->n++] = (char *)root;
+    a->argv[a->n++] = (char *)"--setenv";
+    a->argv[a->n++] = (char *)"TMPDIR";
+    const char *t = agent_ws_arg(a, tmpd);
+    a->argv[a->n++] = (char *)"--setenv";
+    a->argv[a->n++] = (char *)"HOME";
+    a->argv[a->n++] = (char *)t;
+    a->argv[a->n++] = (char *)"--";
+    a->argv[a->n++] = (char *)"sh";
+    a->argv[a->n++] = (char *)"-c";
+    a->argv[a->n++] = (char *)(cmd ? cmd : "");
+    a->argv[a->n] = NULL;
+    return true;
+}
+
 /* A separate session prevents /dev/tty readers such as sudo from stealing
  * the editor's input. Interactive jobs get a private controlling terminal. */
 static agent_bash_job *agent_bash_start(agent_worker *w, const char *cmd,
@@ -8548,6 +8695,8 @@ static agent_bash_job *agent_bash_start(agent_worker *w, const char *cmd,
     fcntl(tmpfd, F_SETFD, FD_CLOEXEC);
     fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
     fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+    agent_ws_argv sandbox;                         /* built before fork: the child must not allocate */
+    const bool jailed = agent_ws_sandbox_argv(w->cfg, cmd, &sandbox);
     pid_t pid = fork();
     if (pid < 0) {
         snprintf(err, err_len, "failed to fork: %s", strerror(errno));
@@ -8582,7 +8731,8 @@ static agent_bash_job *agent_bash_start(agent_worker *w, const char *cmd,
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
-        execl("/bin/sh", "sh", "-c", cmd ? cmd : "", (char *)NULL);
+        if (jailed) execvp("bwrap", sandbox.argv);   /* fail closed: never fall back to an open shell */
+        else execl("/bin/sh", "sh", "-c", cmd ? cmd : "", (char *)NULL);
         _exit(127);
     }
 
@@ -9060,7 +9210,11 @@ static const char *agent_vw_phase(const agent_verify_state *v) {
 
 static char *agent_st_render(const agent_task_state *st) {
     agent_buf b = {0};
-    char tmp[512];
+    char tmp[512 + PATH_MAX];
+    if (st->ws_root[0]) {
+        snprintf(tmp, sizeof(tmp), "WORKSPACE_ROOT: %s\n(controller-fixed project directory; a file found elsewhere never replaces it)\n\n", st->ws_root);
+        agent_buf_puts(&b, tmp);
+    }
     agent_buf_puts(&b, "GOAL:\n");
     for (int i = 0; i < st->ngoals; i++) {
         snprintf(tmp, sizeof(tmp), "- %s\n", st->goals[i]);
@@ -9125,7 +9279,9 @@ static char *agent_st_render(const agent_task_state *st) {
         }
     }
     agent_buf_puts(&b, "\nNEXT REQUIRED ACTION:\n");
-    if (vw->finalize) {
+    if (vw->finalize && vw->impl_stop) {
+        agent_buf_puts(&b, "- implementation step limit reached: give a concise INCOMPLETE/STOPPED report now, no more tools\n");
+    } else if (vw->finalize) {
         agent_buf_puts(&b, "- verification budget exhausted: give the final answer now, no more tools; "
                            "report what is confirmed working, confirmed failing and unresolved\n");
     } else if (vw->npending) {
@@ -9598,6 +9754,17 @@ static bool agent_vw_step(agent_verify_state *v, agent_metrics *m, agent_vw_kind
     bool dup = false;
     v->step++;
     if (dup_out) *dup_out = false;
+    /* Emergency ceiling against mutation thrashing: counts every IMPLEMENT step and, unlike
+     * the progress counters below, is not reset by target edits. */
+    bool impl_hit = false;
+    if (v->phase == AGENT_PH_IMPLEMENT && !v->finalize) {
+        v->impl_steps++;
+        m->impl_steps++;
+        if (v->max_impl > 0 && v->impl_steps >= v->max_impl) {
+            v->finalize = v->impl_stop = impl_hit = true;
+            m->impl_limit_hits++;
+        }
+    }
     if (kind == AGENT_VW_TARGET) {
         v->armed = true;
         v->last_target_step = v->step;
@@ -9609,9 +9776,10 @@ static bool agent_vw_step(agent_verify_state *v, agent_metrics *m, agent_vw_kind
         if (v->phase == AGENT_PH_VERIFY) m->ph_vi++;
         v->phase = AGENT_PH_IMPLEMENT;
         m->target_mutations++;
-        return false;
+        return impl_hit;
     }
     if (kind == AGENT_VW_HELPER) { v->helper_since++; m->helper_mutations++; }
+    if (impl_hit) return true;
     if (!v->armed) return false;
     if (v->phase == AGENT_PH_IMPLEMENT) {
         /* Reads, searches and listings are how an agent recovers after compaction, so
@@ -9662,6 +9830,7 @@ static void agent_vw_begin_turn(agent_task_state *st, const agent_generation_opt
     memset(&st->vw, 0, sizeof(st->vw));
     st->vw.max_verify = g ? g->max_verify_steps : AGENT_MAX_VERIFY_DEFAULT;
     st->vw.max_noprog = g ? g->max_no_progress_steps : AGENT_MAX_NOPROGRESS_DEFAULT;
+    st->vw.max_impl = g ? g->max_implementation_steps : AGENT_MAX_IMPL_DEFAULT;
     for (int i = 0; i < st->nunresolved; i++) free(st->unresolved[i]);
     for (int i = 0; i < st->ndnr; i++) free(st->dnr[i]);
     st->nunresolved = st->ndnr = 0;
@@ -9675,14 +9844,53 @@ static const char agent_vw_notice_tail[] =
 
 static char *agent_vw_notice(const agent_verify_state *v) {
     char b[512];
+    if (v->impl_stop) {
+        snprintf(b, sizeof(b),
+                 "IMPLEMENTATION_STEP_LIMIT_REACHED\n%d implementation steps this turn without finishing.\n"
+                 "Give a concise INCOMPLETE/STOPPED report: which files you modified, what is done, "
+                 "and what work remains unresolved. Do not claim success.\n"
+                 "Do not call additional tools.\n", v->impl_steps);
+        return xstrdup(b);
+    }
     snprintf(b, sizeof(b), "VERIFICATION_BUDGET_EXHAUSTED\nNo target files changed since step %d.\n%s",
              v->last_target_step, agent_vw_notice_tail);
     return xstrdup(b);
 }
 
+/* Implementation-ceiling variant: an INCOMPLETE report of modified files and open work. */
+static char *agent_vw_impl_text(const agent_task_state *st) {
+    agent_buf b = {0};
+    char tmp[400];
+    snprintf(tmp, sizeof(tmp),
+             "Stopping: INCOMPLETE. The implementation step limit was reached (%d steps this turn).\n"
+             "Target files modified:\n", st->vw.impl_steps);
+    agent_buf_puts(&b, tmp);
+    int n = 0;
+    for (int i = 0; i < st->nfiles; i++) {
+        if (!st->files[i].note[0]) continue;
+        snprintf(tmp, sizeof(tmp), "- %s: %s\n", st->files[i].path, st->files[i].note);
+        agent_buf_puts(&b, tmp);
+        n++;
+    }
+    if (!n) agent_buf_puts(&b, "- none recorded\n");
+    agent_buf_puts(&b, "Unresolved:\n");
+    if (st->vw.npending) {
+        snprintf(tmp, sizeof(tmp), "- %s\n", st->vw.pending);
+        agent_buf_puts(&b, tmp);
+    }
+    for (int i = st->nunresolved > 3 ? st->nunresolved - 3 : 0; i < st->nunresolved; i++) {
+        snprintf(tmp, sizeof(tmp), "- %s\n", st->unresolved[i]);
+        agent_buf_puts(&b, tmp);
+    }
+    agent_buf_puts(&b, "- the task was not shown to be complete\n");
+    agent_buf_puts(&b, "This is a stop, not a claim that the task is complete.\n");
+    return agent_buf_take(&b);
+}
+
 /* Controller-written answer, used only when the model keeps calling tools
  * after being told not to.  It reports tracked facts, not success. */
 static char *agent_vw_final_text(const agent_task_state *st) {
+    if (st->vw.impl_stop) return agent_vw_impl_text(st);
     agent_buf b = {0};
     char tmp[400];
     snprintf(tmp, sizeof(tmp),
@@ -9820,7 +10028,7 @@ static bool agent_vw_force_final(agent_worker *w) {
     if (!w->st.vw.finalize || w->st.vw.rejected < AGENT_VW_MAX_REJECTS) return false;
     char *text = agent_vw_final_text(&w->st);
     w->m.forced_finalizations++;
-    snprintf(w->m.finish, sizeof(w->m.finish), "verify_budget");
+    snprintf(w->m.finish, sizeof(w->m.finish), w->st.vw.impl_stop ? "impl_limit" : "verify_budget");
     agent_trace(w, "[VERIFY] forced finalization after %d refused tool calls", w->st.vw.rejected);
     agent_publishf(w, "\n%s", text);
     free(text);
@@ -9844,6 +10052,15 @@ static agent_tool_observation agent_execute_tool_observation(
             agent_trace(w, "[VERIFY] refused tool call %d while FINALIZE_REQUIRED", w->st.vw.rejected);
             agent_tool_observation_puts(&obs, note);
             free(note);
+            continue;
+        }
+        char *blocked = agent_ws_gate(w, &calls->v[i]);
+        if (blocked) {
+            /* Refused escapes still spend budget, so probing the host cannot loop forever. */
+            agent_trace(w, "[WORKSPACE] escape blocked: %s", calls->v[i].name);
+            blocked = agent_vw_after(w, &calls->v[i], NULL, false, blocked);
+            agent_tool_observation_puts(&obs, blocked);
+            free(blocked);
             continue;
         }
         if (calls->v[i].name && !strcmp(calls->v[i].name, "view_image")) {
@@ -10784,7 +11001,7 @@ static int agent_think_budget_for(const agent_config *cfg, int level) {
 /* Concise end-of-run summary (also used by the remote backend). */
 static char *agent_metrics_summary(const agent_worker *w) {
     const agent_metrics *m = &w->m;
-    char b[1600];
+    char b[1900];
     long pf_tokens = m->prompt_tokens - m->cached_tokens;
     double pf = m->prefill_ms > 0 ? (double)pf_tokens / (m->prefill_ms / 1000.0) : 0.0;
     long dec_tokens = m->reasoning_tokens + m->action_tokens;
@@ -10795,6 +11012,7 @@ static char *agent_metrics_summary(const agent_worker *w) {
         "recoveries: %d\nrepeated calls blocked: %d\ncompactions: %d\n"
         "target mutations: %d\nverification helper mutations: %d\nverification steps: %d\n"
         "verification budget exhaustions: %d\nno-progress steps: %d\nforced finalizations: %d\n"
+        "implementation steps: %d\nimplementation step limit hits: %d\n"
         "controller phase transitions: IMPLEMENT->VERIFY %d, VERIFY->IMPLEMENT %d, VERIFY->FINALIZE_REQUIRED %d\n"
         "final controller phase: %s\n"
         "prompt tokens: %ld (%ld cached, %.0f%%)\n"
@@ -10803,6 +11021,7 @@ static char *agent_metrics_summary(const agent_worker *w) {
         m->blocked_calls, m->compactions,
         m->target_mutations, m->helper_mutations, m->verify_steps, m->verify_exhaustions,
         m->no_progress_steps, m->forced_finalizations,
+        m->impl_steps, m->impl_limit_hits,
         m->ph_iv, m->ph_vi, m->ph_vf, agent_vw_phase(&w->st.vw),
         m->prompt_tokens, m->cached_tokens,
         m->prompt_tokens ? 100.0 * (double)m->cached_tokens / (double)m->prompt_tokens : 0.0,
@@ -14496,6 +14715,7 @@ int main(int argc, char **argv) {
     q36_cli_expand_long_equals(&argc, &argv, "q36-agent");
     agent_config cfg = parse_options(argc, argv);
     char workdir[PATH_MAX] = {0};
+    if (cfg.workspace_path && !cfg.chdir_path) cfg.chdir_path = cfg.workspace_path;
     if (cfg.chdir_path) {
         struct stat st;
         if (!agent_expand_home_path(cfg.chdir_path, workdir, sizeof(workdir))) {
@@ -14539,6 +14759,25 @@ int main(int argc, char **argv) {
             q36_engine_close(engine);
             return 1;
         }
+    }
+    /* Establish WORKSPACE_ROOT once; from here on only the config holds it. */
+    {
+        char want[PATH_MAX], cwd[PATH_MAX];
+        if (cfg.workspace_path ? !agent_expand_home_path(cfg.workspace_path, want, sizeof(want))
+                               : !getcwd(want, sizeof(want))) want[0] = 0;
+        if (!want[0] || !realpath(want, cfg.ws_root) || !getcwd(cwd, sizeof(cwd)) ||
+            !agent_ws_inside(cfg.ws_root, cwd)) {
+            fprintf(stderr, "q36-agent: cannot establish the workspace root (%s)\n",
+                    cfg.workspace_path ? cfg.workspace_path : "current directory");
+            q36_engine_close(engine);
+            return 1;
+        }
+        if (cfg.yolo)
+            fprintf(stderr, "q36-agent: WARNING --yolo: workspace jail OFF. File tools and the shell can read and "
+                            "modify the whole host filesystem.\n");
+        else if (cfg.unsafe_fs)
+            fprintf(stderr, "q36-agent: WARNING --unsafe-filesystem: file tools may access paths outside %s "
+                            "(the shell stays confined).\n", cfg.ws_root);
     }
     if (!cfg.server_url) {
         agent_apply_sampling_defaults(&cfg, engine);
