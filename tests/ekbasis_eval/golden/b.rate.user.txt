@@ -1,0 +1,1 @@
+{"evidence": "line1\nline2 é ⁣ end\t\"q\"\\", "criterion": "Rate it", "options": [{"letter": "A", "description": "0: terrible"}, {"letter": "B", "description": "1: ok"}, {"letter": "C", "description": "2: great"}]}

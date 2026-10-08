@@ -1,0 +1,1 @@
+{"evidence": [1, "a", {}, [], -0.0, 1e+100], "criterion": "hm", "options": [{"letter": "A", "description": "p: one"}, {"letter": "B", "description": "q: 2"}, {"letter": "C", "description": "r: False"}]}

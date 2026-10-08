@@ -1,0 +1,1 @@
+{"color": {"type": "choice", "choice": "blue", "probabilities": {"red": 0.2, "blue": 0.5, "green": 0.3}, "confidence": 0.5}, "ok": {"type": "noul", "noul": 0.7, "probability": 0.7, "value": true, "confidence": 0.7}}

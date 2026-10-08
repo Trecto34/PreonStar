@@ -1,0 +1,1 @@
+{"criterion": "Pick the colour: \t ok", "options": [{"letter": "A", "description": "red: warm / bright"}, {"letter": "B", "description": "blue: blue"}, {"letter": "C", "description": "green: cool\u0001x"}]}

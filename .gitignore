@@ -117,3 +117,8 @@ __pycache__/
 /salvage/
 /tests/test_dense_iq3xxs_nx
 /tests/test_dense_iq1m_mmq
+
+# ekbasis eval harness: golden/result files are JSON and must be tracked; bytecode is not
+!/tests/ekbasis_eval/golden/*.json
+!/tests/ekbasis_eval/results/**/*.json
+__pycache__/

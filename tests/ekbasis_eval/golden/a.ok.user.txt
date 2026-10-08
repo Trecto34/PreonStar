@@ -1,0 +1,1 @@
+{"evidence": {"name": "Ana \"Q\"\n", "tags": ["ação", "日本"], "n": 3, "x": 1.5, "z": null, "t": true, "obj": {"k": [1, 2500.0]}}, "criterion": "Is it ok?", "options": [{"letter": "A", "description": "true: it is fine"}, {"letter": "B", "description": "false: no"}]}

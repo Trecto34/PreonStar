@@ -1,0 +1,5 @@
+{"state": {"name": "Ana \"Q\"\n", "tags": ["ação", "日本"], "n": 3, "x": 1.50,
+ "z": null, "t": true, "obj": {"k": [1, 2.5e3]}}, "questions": {
+ "color": {"type": "choice", "instructions": "Pick the colour: \t ok",
+           "criteria": {"red": "warm / bright", "blue": null, "green": "cool\u0001x"}},
+ "ok": {"type": "noul", "instructions": "Is it ok?", "criteria": {"true": "it is fine", "false": null}}}}

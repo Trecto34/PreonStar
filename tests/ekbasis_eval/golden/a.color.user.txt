@@ -1,0 +1,1 @@
+{"evidence": {"name": "Ana \"Q\"\n", "tags": ["ação", "日本"], "n": 3, "x": 1.5, "z": null, "t": true, "obj": {"k": [1, 2500.0]}}, "criterion": "Pick the colour: \t ok", "options": [{"letter": "A", "description": "red: warm / bright"}, {"letter": "B", "description": "blue: blue"}, {"letter": "C", "description": "green: cool\u0001x"}]}

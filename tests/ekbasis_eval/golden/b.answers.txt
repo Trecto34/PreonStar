@@ -1,0 +1,1 @@
+{"rate": {"type": "score", "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}, "score": 2, "expected": 1.5999999999999999, "confidence": 0.7}, "pick": {"type": "choice", "choice": "x y", "probabilities": {"x y": 0.6, "z": 0.4}, "confidence": 0.6}}

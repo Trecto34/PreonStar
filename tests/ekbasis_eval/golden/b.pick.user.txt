@@ -1,0 +1,1 @@
+{"evidence": "line1\nline2 é ⁣ end\t\"q\"\\", "criterion": "Pick one", "options": [{"letter": "A", "description": "x y: x y"}, {"letter": "B", "description": "z: z"}]}

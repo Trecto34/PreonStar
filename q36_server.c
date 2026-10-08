@@ -6822,6 +6822,7 @@ static bool slot_pending_matches(const server_slot *slot, const request *r) {
 struct job {
     int fd;
     request req;
+    struct sys_request *sys;  /* /v1/systemone: the worker runs this instead of generate_job */
     bool done;
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -10559,6 +10560,830 @@ static void generate_job(server *s, server_slot *slot, job *j) {
     q36_tokens_free(&effective_prompt);
 }
 
+/* =========================================================================
+ * POST /v1/systemone (alias /v1/evaluate): Ekbasis consequence readout.
+ * =========================================================================
+ *
+ * Contract and prompt follow the Ekbasis serve.py / decision_core.py reference
+ * (MIT). A question is one prompt whose answer is one letter token; the
+ * probability of an option is the softmax of its letter's logit at the last
+ * prompt position, taken over the options of that question only.
+ *
+ * One-prompt mode gives every question its own full prompt. read_once (more
+ * than one question and "read_once": true) puts the evidence in the first turn
+ * and asks each further question as a follow-up user turn. Answers are read one
+ * sync at a time, each sync extending the previous checkpoint, so the evidence
+ * is prefilled once. */
+
+#define SYSONE_MAX_QUESTIONS 64      /* bounds the per-request prefill and the O(n^2) name check */
+#define SYSONE_MAX_OPTIONS 160      /* decision_config.json max_one_pass; more needs the reference tournament */
+#define SYSONE_LABEL_COUNT 588       /* decision_core.LABELS */
+#define SYSONE_TEMPERATURE 1.0       /* calib.json is the identity (b=0, w=0), so T = exp(0) = 1 */
+#define SYSONE_MAX_JSON_DEPTH 64
+#define SYSONE_SYSTEM "Apply the supplied criterion to the supplied evidence. Choose exactly one listed option. " \
+                      "Respond with only its uppercase letter, with no explanation or reasoning."
+
+/* decision_core._SPLIT: two-letter codes the tokenizer splits in two. They get no label. */
+static const char SYSONE_SPLIT[] =
+    "BQ BZ CJ CQ CZ DQ DZ EJ EY FJ FQ FV FZ GJ GK GQ GZ HJ IY JF JG JH JL JN JQ JW JX JY JZ KJ KQ KX KZ LH LJ LQ LW LX "
+    "LZ OJ OQ OY OZ PQ PZ QD QF QI QJ QK QO QV QW QX QY QZ RQ RZ TJ TQ UJ UO UQ UW VH VJ VQ VU VW VX VY VZ WJ WQ WU WV "
+    "WY WZ XG XJ XK XN XO XQ XU XV XW XZ YB YD YF YH YI YJ YK YQ YR YU YV YX ZB ZC ZD ZG ZJ ZK ZL ZM ZP ZQ ZS ZT ZU ZV";
+
+static pthread_once_t sysone_labels_once = PTHREAD_ONCE_INIT;
+static char sysone_labels[SYSONE_LABEL_COUNT][3];
+static int sysone_label_n;
+
+static bool sysone_split_pair(char a, char b) {
+    for (const char *p = SYSONE_SPLIT; *p; p++) {
+        if ((p == SYSONE_SPLIT || p[-1] == ' ') && p[0] == a && p[1] == b && (p[2] == ' ' || p[2] == '\0'))
+            return true;
+    }
+    return false;
+}
+
+static void sysone_labels_init(void) {
+    int n = 0;
+    for (int i = 0; i < 26; i++) {
+        sysone_labels[n][0] = (char)('A' + i);
+        sysone_labels[n][1] = '\0';
+        sysone_labels[n][2] = '\0';
+        n++;
+    }
+    for (int a = 0; a < 26; a++) {
+        for (int b = 0; b < 26; b++) {
+            if (sysone_split_pair((char)('A' + a), (char)('A' + b))) continue;
+            if (n >= SYSONE_LABEL_COUNT) continue;
+            sysone_labels[n][0] = (char)('A' + a);
+            sysone_labels[n][1] = (char)('A' + b);
+            sysone_labels[n][2] = '\0';
+            n++;
+        }
+    }
+    sysone_label_n = n;
+}
+
+/* Option i reads LABELS[i]: A..Z, then the two-letter codes in order. NULL past the table. */
+static const char *sysone_label(int i) {
+    pthread_once(&sysone_labels_once, sysone_labels_init);
+    return i >= 0 && i < sysone_label_n ? sysone_labels[i] : NULL;
+}
+
+typedef struct {
+    char *key;       /* answer key: criterion key, "yes"/"no", or list index */
+    char *desc;      /* description, shown as "<shown>: <desc>" */
+    char letter[3];  /* LABELS[i]: the letter the model answers with */
+    int token;       /* the letter's single token id, set by sys_tokenize */
+} sys_option;
+
+typedef struct {
+    char *name;
+    char *type;          /* "choice", "score", "noul" or "boolean" */
+    char *instructions;
+    sys_option *opt;
+    int n_opt;
+    q36_tokens tokens;   /* one-prompt mode: the whole chat prompt */
+    int read_pos;        /* read_once: index of this answer in the shared sequence */
+    double *probs;       /* set by the worker, one per option */
+} sys_question;
+
+typedef struct sys_request {
+    char *state;         /* evidence as Python json.dumps writes it */
+    sys_question *q;
+    int n_q;
+    bool read_once;      /* requested and more than one question */
+    q36_tokens ids;      /* read_once: the single shared sequence */
+    int input_tokens;
+} sys_request;
+
+/* A parsed JSON object or array: member names and the raw text of each value, in document order. */
+typedef struct {
+    char **key;   /* NULL entries for array items */
+    char **val;
+    int n;
+} sys_members;
+
+static void sys_members_free(sys_members *m) {
+    for (int i = 0; i < m->n; i++) {
+        free(m->key[i]);
+        free(m->val[i]);
+    }
+    free(m->key);
+    free(m->val);
+    memset(m, 0, sizeof(*m));
+}
+
+static void sys_members_push(sys_members *m, char *key, char *val) {
+    m->key = xrealloc(m->key, sizeof(*m->key) * (size_t)(m->n + 1));
+    m->val = xrealloc(m->val, sizeof(*m->val) * (size_t)(m->n + 1));
+    m->key[m->n] = key;
+    m->val[m->n] = val;
+    m->n++;
+}
+
+/* Parses an object (object = true) or an array. `end` (optional) receives the position after the closing bracket.
+ * The caller frees *m in every case. */
+static bool sys_members_parse(const char *raw, bool object, sys_members *m, const char **end) {
+    memset(m, 0, sizeof(*m));
+    const char *p = raw;
+    const char open = object ? '{' : '[';
+    const char close = object ? '}' : ']';
+    json_ws(&p);
+    if (*p != open) return false;
+    p++;
+    json_ws(&p);
+    if (*p == close) {
+        p++;
+        if (end) *end = p;
+        return true;
+    }
+    for (;;) {
+        char *key = NULL, *val = NULL;
+        if (object) {
+            if (!json_string(&p, &key)) return false;
+            json_ws(&p);
+            if (*p != ':') {
+                free(key);
+                return false;
+            }
+            p++;
+        }
+        if (!json_raw_value(&p, &val)) {
+            free(key);
+            return false;
+        }
+        sys_members_push(m, key, val);
+        json_ws(&p);
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == close) {
+            p++;
+            if (end) *end = p;
+            return true;
+        }
+        return false;
+    }
+}
+
+/* Last member with this name (a Python dict keeps the last of duplicate keys). NULL when absent. */
+static const char *sys_member(const sys_members *m, const char *key) {
+    const char *found = NULL;
+    for (int i = 0; i < m->n; i++)
+        if (m->key[i] && !strcmp(m->key[i], key)) found = m->val[i];
+    return found;
+}
+
+static bool sys_raw_is(const char *raw, char c) {
+    return raw && raw[0] == c;
+}
+
+/* json.dumps(s, ensure_ascii=False): only the JSON-required escapes; other bytes, UTF-8 included, pass through. */
+static void sys_put_str(buf *b, const char *s) {
+    buf_putc(b, '"');
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        switch (*p) {
+        case '"': buf_puts(b, "\\\""); break;
+        case '\\': buf_puts(b, "\\\\"); break;
+        case '\n': buf_puts(b, "\\n"); break;
+        case '\r': buf_puts(b, "\\r"); break;
+        case '\t': buf_puts(b, "\\t"); break;
+        case '\b': buf_puts(b, "\\b"); break;
+        case '\f': buf_puts(b, "\\f"); break;
+        default:
+            if (*p < 0x20) buf_printf(b, "\\u%04x", *p);
+            else buf_putc(b, (char)*p);
+        }
+    }
+    buf_putc(b, '"');
+}
+
+/* float.__repr__ (what json.dumps writes for a float): shortest round-trip digits; fixed notation for decimal
+ * exponents in [-4, 16), otherwise d.ddde+XX with at least two exponent digits. */
+static void sys_put_float(buf *b, double v) {
+    if (!isfinite(v)) {  /* callers reject non-finite logits; never emit invalid JSON */
+        buf_puts(b, "null");
+        return;
+    }
+    if (v == 0) {
+        buf_puts(b, signbit(v) ? "-0.0" : "0.0");
+        return;
+    }
+    char s[64];
+    for (int prec = 1; prec <= 17; prec++) {
+        snprintf(s, sizeof(s), "%.*e", prec - 1, v);
+        if (strtod(s, NULL) == v) break;
+    }
+    const char *p = s;
+    if (*p == '-') {
+        buf_putc(b, '-');
+        p++;
+    }
+    char digits[24];
+    int nd = 0;
+    for (; *p && *p != 'e'; p++)
+        if (*p != '.') digits[nd++] = *p;
+    const int exp10 = atoi(p + 1);
+    while (nd > 1 && digits[nd - 1] == '0') nd--;
+    if (exp10 >= -4 && exp10 < 16) {
+        if (exp10 >= 0) {
+            for (int i = 0; i <= exp10; i++) buf_putc(b, i < nd ? digits[i] : '0');
+            buf_putc(b, '.');
+            if (nd > exp10 + 1) buf_append(b, digits + exp10 + 1, (size_t)(nd - exp10 - 1));
+            else buf_putc(b, '0');
+        } else {
+            buf_puts(b, "0.");
+            for (int i = 0; i < -exp10 - 1; i++) buf_putc(b, '0');
+            buf_append(b, digits, (size_t)nd);
+        }
+    } else {
+        buf_putc(b, digits[0]);
+        if (nd > 1) {
+            buf_putc(b, '.');
+            buf_append(b, digits + 1, (size_t)(nd - 1));
+        }
+        buf_printf(b, "e%c%02d", exp10 < 0 ? '-' : '+', exp10 < 0 ? -exp10 : exp10);
+    }
+}
+
+static bool sys_canon(const char **p, buf *b, int depth);
+
+static bool sys_canon_number(const char **p, buf *b) {
+    const char *s = *p, *q = s;
+    if (*q == '-') q++;
+    if (*q < '0' || *q > '9') return false;
+    while ((*q >= '0' && *q <= '9') || *q == '.' || *q == 'e' || *q == 'E' || *q == '+' || *q == '-') q++;
+    char *t = xstrndup(s, (size_t)(q - s));
+    char *end = NULL;
+    const double d = strtod(t, &end);
+    bool ok = *end == '\0' && isfinite(d);
+    if (ok) {
+        if (strpbrk(t, ".eE")) sys_put_float(b, d);
+        else if (!strcmp(t, "-0")) buf_putc(b, '0');  /* Python int("-0") is 0 */
+        else buf_puts(b, t);  /* integers keep their digits exactly */
+    }
+    free(t);
+    if (ok) *p = q;
+    return ok;
+}
+
+/* Re-serialises one raw JSON value the way json.dumps(json.loads(x)) does: ", " and ": " separators, members in
+ * document order, floats as float repr, integers as written. */
+static bool sys_canon(const char **p, buf *b, int depth) {
+    if (depth > SYSONE_MAX_JSON_DEPTH) return false;
+    json_ws(p);
+    const char c = **p;
+    if (c == '{' || c == '[') {
+        const char close = c == '{' ? '}' : ']';
+        (*p)++;
+        buf_putc(b, c);
+        json_ws(p);
+        if (**p == close) {
+            (*p)++;
+            buf_putc(b, close);
+            return true;
+        }
+        for (bool first = true;; first = false) {
+            if (!first) buf_puts(b, ", ");
+            if (c == '{') {
+                char *key = NULL;
+                bool ok = json_string(p, &key);
+                if (ok) {
+                    json_ws(p);
+                    ok = **p == ':';
+                    if (ok) {
+                        (*p)++;
+                        sys_put_str(b, key);
+                        buf_puts(b, ": ");
+                    }
+                }
+                free(key);
+                if (!ok) return false;
+            }
+            if (!sys_canon(p, b, depth + 1)) return false;
+            json_ws(p);
+            if (**p == ',') {
+                (*p)++;
+                continue;
+            }
+            if (**p == close) {
+                (*p)++;
+                buf_putc(b, close);
+                return true;
+            }
+            return false;
+        }
+    }
+    if (c == '"') {
+        char *s = NULL;
+        const bool ok = json_string(p, &s);
+        if (ok) sys_put_str(b, s);
+        free(s);
+        return ok;
+    }
+    if (json_lit(p, "true")) {
+        buf_puts(b, "true");
+        return true;
+    }
+    if (json_lit(p, "false")) {
+        buf_puts(b, "false");
+        return true;
+    }
+    if (json_lit(p, "null")) {
+        buf_puts(b, "null");
+        return true;
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) return sys_canon_number(p, b);
+    return false;
+}
+
+/* Python str() of one JSON value, as decision_core shows option descriptions: a string as is, true/false as
+ * True/False, null or a missing value as `dflt` ("None" when dflt is NULL), numbers as Python prints them.
+ * Objects and arrays come out as canonical JSON, not as Python reprs (a deliberate difference). NULL on error. */
+static char *sys_py_str(const char *raw, const char *dflt) {
+    if (!raw || !strcmp(raw, "null")) return xstrdup(dflt ? dflt : "None");
+    if (!strcmp(raw, "true")) return xstrdup("True");
+    if (!strcmp(raw, "false")) return xstrdup("False");
+    if (raw[0] == '"') {
+        char *s = NULL;
+        const char *p = raw;
+        return json_string(&p, &s) ? s : NULL;
+    }
+    buf b = {0};
+    const char *p = raw;
+    if (!sys_canon(&p, &b, 0)) {
+        buf_free(&b);
+        return NULL;
+    }
+    return buf_take(&b);
+}
+
+static bool sys_is_int(const char *s) {
+    if (*s == '-') s++;
+    if (!*s) return false;
+    for (; *s; s++)
+        if (!isdigit((unsigned char)*s)) return false;
+    return true;
+}
+
+static void sys_add_option(sys_question *q, char *key, char *desc) {
+    q->opt = xrealloc(q->opt, sizeof(*q->opt) * (size_t)(q->n_opt + 1));
+    sys_option *o = &q->opt[q->n_opt++];
+    memset(o, 0, sizeof(*o));
+    o->key = key;
+    o->desc = desc;
+    o->token = -1;
+}
+
+static bool sys_noul_options(sys_question *q, const char *crit) {
+    sys_members m = {0};
+    const bool obj = sys_raw_is(crit, '{') && sys_members_parse(crit, true, &m, NULL);
+    const char *t = obj ? sys_member(&m, "true") : NULL;
+    const char *f = obj ? sys_member(&m, "false") : NULL;
+    char *yes = sys_py_str(t, "yes");
+    char *no = sys_py_str(f, "no");
+    sys_members_free(&m);
+    if (!yes || !no) {
+        free(yes);
+        free(no);
+        return false;
+    }
+    sys_add_option(q, xstrdup("yes"), yes);
+    sys_add_option(q, xstrdup("no"), no);
+    return true;
+}
+
+/* A criteria object: keys in document order, description = value (null shows the key). */
+static bool sys_dict_options(sys_question *q, const sys_members *m, bool int_keys, char *err, size_t errlen) {
+    if (m->n > SYSONE_MAX_OPTIONS) {  /* bound the work before the O(n^2) duplicate check */
+        snprintf(err, errlen, "%s: %d options, but one pass reads at most %d (tournament not implemented)",
+                 q->name, m->n, SYSONE_MAX_OPTIONS);
+        return false;
+    }
+    for (int i = 0; i < m->n; i++) {
+        if (int_keys && !sys_is_int(m->key[i])) {
+            snprintf(err, errlen, "%s: score options must be integers", q->name);
+            return false;
+        }
+        char *desc = sys_py_str(m->val[i], m->key[i]);
+        if (!desc) {
+            snprintf(err, errlen, "%s: option value is not valid JSON", q->name);
+            return false;
+        }
+        sys_add_option(q, xstrdup(m->key[i]), desc);
+    }
+    return true;
+}
+
+/* A list: score keys are the indices and the description is str(item); a choice list uses str(item) as both. */
+static bool sys_list_options(sys_question *q, const char *raw, bool choice, char *err, size_t errlen) {
+    if (!sys_raw_is(raw, '[')) return true;
+    sys_members m = {0};
+    bool ok = sys_members_parse(raw, false, &m, NULL);
+    if (ok && m.n > SYSONE_MAX_OPTIONS) {  /* bound the work before the O(n^2) duplicate check */
+        snprintf(err, errlen, "%s: %d options, but one pass reads at most %d (tournament not implemented)",
+                 q->name, m.n, SYSONE_MAX_OPTIONS);
+        sys_members_free(&m);
+        return false;
+    }
+    for (int i = 0; ok && i < m.n; i++) {
+        char *desc = sys_py_str(m.val[i], NULL);
+        if (!desc) ok = false;
+        else if (choice) sys_add_option(q, xstrdup(desc), desc);
+        else {
+            char idx[16];
+            snprintf(idx, sizeof(idx), "%d", i);
+            sys_add_option(q, xstrdup(idx), desc);
+        }
+    }
+    if (!ok) snprintf(err, errlen, "%s: options are not valid JSON", q->name);
+    sys_members_free(&m);
+    return ok;
+}
+
+/* Options of one question, following decision_core.options_of. Every failure writes `err`. */
+static bool sys_build_options(sys_question *q, const char *crit, const char *options, char *err, size_t errlen) {
+    bool ok;
+    err[0] = '\0';
+    if (!strcmp(q->type, "noul") || !strcmp(q->type, "boolean")) {
+        ok = sys_noul_options(q, crit);
+    } else if (sys_raw_is(crit, '{')) {
+        sys_members m = {0};
+        ok = sys_members_parse(crit, true, &m, NULL) &&
+             sys_dict_options(q, &m, !strcmp(q->type, "score"), err, errlen);
+        sys_members_free(&m);
+    } else if (!strcmp(q->type, "score")) {
+        ok = sys_list_options(q, crit, false, err, errlen);
+    } else {  /* choice: "options" when non-empty, else the criteria list */
+        sys_members om = {0};
+        const bool use_options = sys_raw_is(options, '[') && sys_members_parse(options, false, &om, NULL) && om.n > 0;
+        sys_members_free(&om);
+        ok = sys_list_options(q, use_options ? options : crit, true, err, errlen);
+    }
+    if (!ok) {
+        if (!err[0]) snprintf(err, errlen, "%s: options are not valid", q->name);
+        return false;
+    }
+    for (int i = 0; i < q->n_opt; i++)
+        for (int j = 0; j < i; j++)
+            if (!strcmp(q->opt[i].key, q->opt[j].key)) {
+                snprintf(err, errlen, "%s: duplicate option \"%s\"", q->name, q->opt[i].key);
+                return false;
+            }
+    return true;
+}
+
+static void sys_request_free(sys_request *r) {
+    free(r->state);
+    for (int i = 0; i < r->n_q; i++) {
+        sys_question *q = &r->q[i];
+        free(q->name);
+        free(q->type);
+        free(q->instructions);
+        for (int k = 0; k < q->n_opt; k++) {
+            free(q->opt[k].key);
+            free(q->opt[k].desc);
+        }
+        free(q->opt);
+        q36_tokens_free(&q->tokens);
+        free(q->probs);
+    }
+    free(r->q);
+    q36_tokens_free(&r->ids);
+    memset(r, 0, sizeof(*r));
+}
+
+/* Validates a /v1/systemone body and builds its questions (no tokenizer needed). On failure `err` says why and the
+ * caller frees *r either way. */
+static bool sys_request_parse(const char *body, sys_request *r, char *err, size_t errlen) {
+    memset(r, 0, sizeof(*r));
+    sys_members top = {0}, qs = {0}, qm = {0};
+    char msg[256];
+    const char *end = NULL;
+    bool ok = sys_members_parse(body ? body : "", true, &top, &end);
+    if (ok) {
+        json_ws(&end);
+        ok = *end == '\0';
+    }
+    if (!ok) {
+        snprintf(err, errlen, "request body must be one JSON object");
+        sys_members_free(&top);
+        return false;
+    }
+    const char *state_raw = sys_member(&top, "state");
+    const char *questions_raw = sys_member(&top, "questions");
+    const char *ro_raw = sys_member(&top, "read_once");
+    if (!state_raw) {
+        snprintf(msg, sizeof(msg), "state is required");
+        goto fail;
+    }
+    if (!questions_raw) {
+        snprintf(msg, sizeof(msg), "questions is required");
+        goto fail;
+    }
+    if (ro_raw && strcmp(ro_raw, "null") && strcmp(ro_raw, "true") && strcmp(ro_raw, "false")) {
+        snprintf(msg, sizeof(msg), "read_once must be a boolean");
+        goto fail;
+    }
+    buf sb = {0};
+    const char *sp = state_raw;
+    if (!sys_canon(&sp, &sb, 0)) {
+        buf_free(&sb);
+        snprintf(msg, sizeof(msg), "state nests too deeply");
+        goto fail;
+    }
+    r->state = buf_take(&sb);
+    if (!sys_members_parse(questions_raw, true, &qs, NULL)) {
+        snprintf(msg, sizeof(msg), "questions must be an object");
+        goto fail;
+    }
+    if (qs.n == 0) {
+        snprintf(msg, sizeof(msg), "questions must not be empty");
+        goto fail;
+    }
+    if (qs.n > SYSONE_MAX_QUESTIONS) {
+        snprintf(msg, sizeof(msg), "%d questions, but a request takes at most %d", qs.n, SYSONE_MAX_QUESTIONS);
+        goto fail;
+    }
+    r->n_q = qs.n;
+    r->q = calloc((size_t)qs.n, sizeof(*r->q));
+    if (!r->q) {
+        snprintf(msg, sizeof(msg), "out of memory");
+        goto fail;
+    }
+    r->read_once = ro_raw && !strcmp(ro_raw, "true") && qs.n > 1;
+    for (int i = 0; i < qs.n; i++) {
+        sys_question *q = &r->q[i];
+        q->name = xstrdup(qs.key[i]);
+        for (int j = 0; j < i; j++)
+            if (!strcmp(qs.key[j], qs.key[i])) {
+                snprintf(msg, sizeof(msg), "duplicate question name \"%s\"", qs.key[i]);
+                goto fail;
+            }
+        if (!sys_members_parse(qs.val[i], true, &qm, NULL)) {
+            snprintf(msg, sizeof(msg), "%s: question must be an object", q->name);
+            goto fail;
+        }
+        const char *type_raw = sys_member(&qm, "type");
+        const char *tp = type_raw;
+        if (!sys_raw_is(type_raw, '"') || !json_string(&tp, &q->type) ||
+            (strcmp(q->type, "choice") && strcmp(q->type, "score") && strcmp(q->type, "noul") &&
+             strcmp(q->type, "boolean"))) {
+            snprintf(msg, sizeof(msg), "%s: unknown type", q->name);
+            goto fail;
+        }
+        const char *ins = sys_member(&qm, "instructions");
+        if (!ins) {
+            q->instructions = xstrdup("");
+        } else {
+            const char *ip = ins;
+            if (!sys_raw_is(ins, '"') || !json_string(&ip, &q->instructions)) {
+                snprintf(msg, sizeof(msg), "%s: instructions must be a string", q->name);
+                goto fail;
+            }
+        }
+        if (!sys_build_options(q, sys_member(&qm, "criteria"), sys_member(&qm, "options"), msg, sizeof(msg))) goto fail;
+        if (q->n_opt < 2) {
+            snprintf(msg, sizeof(msg), "%s: at least 2 options are required", q->name);
+            goto fail;
+        }
+        if (q->n_opt > SYSONE_MAX_OPTIONS) {
+            if (r->read_once)
+                snprintf(msg, sizeof(msg), "read_once: every question needs 2 to %d options", SYSONE_MAX_OPTIONS);
+            else
+                snprintf(msg, sizeof(msg), "%s: %d options, but one pass reads at most %d (tournament not implemented)",
+                         q->name, q->n_opt, SYSONE_MAX_OPTIONS);
+            goto fail;
+        }
+        for (int k = 0; k < q->n_opt; k++) {
+            const char *lab = sysone_label(k);  /* k < SYSONE_MAX_OPTIONS <= table size */
+            snprintf(q->opt[k].letter, sizeof(q->opt[k].letter), "%s", lab ? lab : "?");
+        }
+        sys_members_free(&qm);
+    }
+    sys_members_free(&qs);
+    sys_members_free(&top);
+    return true;
+
+fail:
+    snprintf(err, errlen, "%s", msg);
+    sys_members_free(&qm);
+    sys_members_free(&qs);
+    sys_members_free(&top);
+    return false;
+}
+
+/* What the model sees for one question: the evidence (first turn) or the follow-up, with the options. Matches
+ * decision_core.render_user and render_followup (semif style). */
+static char *sys_user_prompt(const sys_request *r, const sys_question *q, bool followup) {
+    buf b = {0};
+    const bool noul = !strcmp(q->type, "noul") || !strcmp(q->type, "boolean");
+    if (!followup) {
+        buf_puts(&b, "{\"evidence\": ");
+        buf_puts(&b, r->state);
+        buf_puts(&b, ", \"criterion\": ");
+    } else {
+        buf_puts(&b, "{\"criterion\": ");
+    }
+    sys_put_str(&b, q->instructions);
+    buf_puts(&b, ", \"options\": [");
+    for (int k = 0; k < q->n_opt; k++) {
+        const char *key = q->opt[k].key;
+        const char *shown = key;
+        if (noul) shown = !strcmp(key, "yes") ? "true" : !strcmp(key, "no") ? "false" : key;
+        buf line = {0};
+        buf_puts(&line, shown);
+        buf_puts(&line, ": ");
+        buf_puts(&line, q->opt[k].desc);
+        char *text = buf_take(&line);
+        if (k) buf_puts(&b, ", ");
+        buf_puts(&b, "{\"letter\": ");
+        sys_put_str(&b, q->opt[k].letter);
+        buf_puts(&b, ", \"description\": ");
+        sys_put_str(&b, text);
+        buf_putc(&b, '}');
+        free(text);
+    }
+    buf_puts(&b, "]}");
+    return buf_take(&b);
+}
+
+/* Tokenizes labels and prompts. Each label must be exactly one token (bare, no BOS in the text pieces). */
+static bool sys_tokenize(q36_engine *e, sys_request *r, char *err, size_t errlen) {
+    for (int i = 0; i < r->n_q; i++) {
+        sys_question *q = &r->q[i];
+        for (int k = 0; k < q->n_opt; k++) {
+            q36_tokens t = {0};
+            q36_tokenize_text(e, q->opt[k].letter, &t);
+            if (t.len != 1) {
+                snprintf(err, errlen, "option label %s does not tokenize to exactly one token", q->opt[k].letter);
+                q36_tokens_free(&t);
+                return false;
+            }
+            q->opt[k].token = t.v[0];
+            q36_tokens_free(&t);
+        }
+    }
+    if (!r->read_once) {
+        for (int i = 0; i < r->n_q; i++) {
+            char *user = sys_user_prompt(r, &r->q[i], false);
+            q36_encode_chat_prompt(e, SYSONE_SYSTEM, user, Q36_THINK_NONE, &r->q[i].tokens);
+            free(user);
+            r->input_tokens += r->q[i].tokens.len;
+        }
+        return true;
+    }
+    char *user = sys_user_prompt(r, &r->q[0], false);
+    q36_encode_chat_prompt(e, SYSONE_SYSTEM, user, Q36_THINK_NONE, &r->ids);
+    free(user);
+    r->q[0].read_pos = r->ids.len - 1;
+    for (int i = 1; i < r->n_q; i++) {
+        /* The layout the model was trained on: the "?" closes the previous answer's position, then a new user turn. */
+        char *fu = sys_user_prompt(r, &r->q[i], true);
+        buf b = {0};
+        buf_puts(&b, "?<|im_end|>\n<|im_start|>user\n");
+        buf_puts(&b, fu);
+        buf_puts(&b, "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        free(fu);
+        char *text = buf_take(&b);
+        q36_tokens tail = {0};
+        q36_tokenize_rendered_chat(e, text, &tail);
+        free(text);
+        for (int t = 0; t < tail.len; t++) q36_tokens_push(&r->ids, tail.v[t]);
+        q36_tokens_free(&tail);
+        r->q[i].read_pos = r->ids.len - 1;
+    }
+    r->input_tokens = r->ids.len;
+    return true;
+}
+
+/* Softmax over the option logits at temperature SYSONE_TEMPERATURE, in double, max-subtracted. */
+static void sys_softmax(const double *logit, int n, double *p) {
+    double hi = logit[0] / SYSONE_TEMPERATURE;
+    for (int k = 0; k < n; k++) {
+        p[k] = logit[k] / SYSONE_TEMPERATURE;
+        if (p[k] > hi) hi = p[k];
+    }
+    double sum = 0.0;
+    for (int k = 0; k < n; k++) {
+        p[k] = exp(p[k] - hi);
+        sum += p[k];
+    }
+    for (int k = 0; k < n; k++) p[k] /= sum;
+}
+
+static void sys_put_probs(buf *b, const sys_question *q) {
+    buf_putc(b, '{');
+    for (int k = 0; k < q->n_opt; k++) {
+        if (k) buf_puts(b, ", ");
+        sys_put_str(b, q->opt[k].key);
+        buf_puts(b, ": ");
+        sys_put_float(b, q->probs[k]);
+    }
+    buf_putc(b, '}');
+}
+
+/* One answer object, as serve.py _format writes it. The top option is the first maximum, as Python max() picks. */
+static void sys_put_answer(buf *b, const sys_question *q) {
+    const bool noul = !strcmp(q->type, "noul") || !strcmp(q->type, "boolean");
+    const bool score = !strcmp(q->type, "score");
+    int top = 0;
+    for (int k = 1; k < q->n_opt; k++)
+        if (q->probs[k] > q->probs[top]) top = k;
+    if (noul) {
+        double hi = q->probs[0];
+        for (int k = 1; k < q->n_opt; k++)
+            if (q->probs[k] > hi) hi = q->probs[k];
+        buf_puts(b, "{\"type\": ");
+        sys_put_str(b, q->type);
+        buf_puts(b, ", \"noul\": ");
+        sys_put_float(b, q->probs[0]);
+        buf_puts(b, ", \"probability\": ");
+        sys_put_float(b, q->probs[0]);
+        buf_puts(b, ", \"value\": ");
+        buf_puts(b, q->probs[0] >= 0.5 ? "true" : "false");
+        buf_puts(b, ", \"confidence\": ");
+        sys_put_float(b, hi);
+        buf_putc(b, '}');
+    } else if (score) {
+        double expected = 0.0;
+        for (int k = 0; k < q->n_opt; k++) expected += strtod(q->opt[k].key, NULL) * q->probs[k];
+        buf_puts(b, "{\"type\": \"score\", \"probabilities\": ");
+        sys_put_probs(b, q);
+        buf_printf(b, ", \"score\": %ld", strtol(q->opt[top].key, NULL, 10));
+        buf_puts(b, ", \"expected\": ");
+        sys_put_float(b, expected);
+        buf_puts(b, ", \"confidence\": ");
+        sys_put_float(b, q->probs[top]);
+        buf_putc(b, '}');
+    } else {
+        buf_puts(b, "{\"type\": \"choice\", \"choice\": ");
+        sys_put_str(b, q->opt[top].key);
+        buf_puts(b, ", \"probabilities\": ");
+        sys_put_probs(b, q);
+        buf_puts(b, ", \"confidence\": ");
+        sys_put_float(b, q->probs[top]);
+        buf_putc(b, '}');
+    }
+}
+
+static void sys_put_answers(buf *b, const sys_request *r) {
+    buf_putc(b, '{');
+    for (int i = 0; i < r->n_q; i++) {
+        if (i) buf_puts(b, ", ");
+        sys_put_str(b, r->q[i].name);
+        buf_puts(b, ": ");
+        sys_put_answer(b, &r->q[i]);
+    }
+    buf_putc(b, '}');
+}
+
+/* Worker side of a /v1/systemone job: owns the session like generate_job does. One sync per answer; logits are read
+ * under inference_mu at the answer's position. */
+static void sys_run_job(server *s, server_slot *slot, job *j) {
+    sys_request *r = j->sys;
+    char err[256] = "";
+    for (int i = 0; i < r->n_q; i++) {
+        /* ponytail: one-prompt mode re-prefills the evidence for each question, because a sync only reuses the
+         * live checkpoint. Hook for later: save/restore the session payload between questions (the state is the
+         * shared leading part), if the measured latency needs it. */
+        sys_question *q = &r->q[i];
+        q36_tokens prefix = r->read_once ? r->ids : q->tokens;
+        if (r->read_once) prefix.len = q->read_pos + 1;
+        const int rc = server_session_sync(s, slot, &prefix, err, sizeof(err));
+        if (rc != 0) {
+            if (rc == Q36_SESSION_SYNC_INTERRUPTED) http_error(j->fd, 503, "server shutting down");
+            else http_error(j->fd, 500, err[0] ? err : "session sync failed");
+            return;
+        }
+        double logit[SYSONE_MAX_OPTIONS];
+        int n_vocab = 0;
+        pthread_mutex_lock(&s->inference_mu);
+        const float *row = q36_session_logits(slot->session, &n_vocab);
+        bool ok = row != NULL;
+        for (int k = 0; ok && k < q->n_opt; k++) {
+            if (q->opt[k].token < 0 || q->opt[k].token >= n_vocab || !isfinite(row[q->opt[k].token])) ok = false;
+            else logit[k] = row[q->opt[k].token];
+        }
+        pthread_mutex_unlock(&s->inference_mu);
+        if (!ok) {
+            http_error(j->fd, 500, "session has no logits for the answer labels");
+            return;
+        }
+        q->probs = xmalloc(sizeof(*q->probs) * (size_t)q->n_opt);
+        sys_softmax(logit, q->n_opt, q->probs);
+    }
+    buf b = {0};
+    buf_puts(&b, "{\"model\": ");
+    sys_put_str(&b, q36_engine_model_name(s->engine));
+    buf_puts(&b, ", \"answers\": ");
+    sys_put_answers(&b, r);
+    buf_printf(&b, ", \"usage\": {\"input_tokens\": %d, \"output_tokens\": 0}}", r->input_tokens);
+    char *body = buf_take(&b);
+    http_response(j->fd, 200, "application/json", body);
+    free(body);
+}
+
 static int job_slot_score_values(bool busy, bool assigned,
                                  int common, int live) {
     if (busy || assigned) return INT_MIN;
@@ -10650,7 +11475,8 @@ static void *worker_main(void *arg) {
     for (;;) {
         job *j = dequeue(s);
         if (!j) break;
-        generate_job(s, &s->slots[0], j);
+        if (j->sys) sys_run_job(s, &s->slots[0], j);
+        else generate_job(s, &s->slots[0], j);
         pthread_mutex_lock(&j->mu);
         j->done = true;
         pthread_cond_signal(&j->cv);
@@ -10674,7 +11500,8 @@ static void *slot_worker_main(void *arg) {
         slot->assigned = NULL;
         pthread_mutex_unlock(&s->mu);
 
-        generate_job(s, slot, j);
+        if (j->sys) sys_run_job(s, slot, j);
+        else generate_job(s, slot, j);
         pthread_mutex_lock(&j->mu);
         j->done = true;
         pthread_cond_signal(&j->cv);
@@ -11121,6 +11948,54 @@ static bool server_model_swap(server *s, int idx) {
     return ok;
 }
 
+/* POST /v1/systemone and /v1/evaluate: parse and tokenize here, then run the decision on the worker, which owns the
+ * session. The worker writes the response; this thread only waits for it. */
+static void handle_systemone(server *s, int fd, const char *body) {
+    sys_request r;
+    char err[256];
+    if (!sys_request_parse(body, &r, err, sizeof(err))) {
+        http_error(fd, 400, err);
+        sys_request_free(&r);
+        return;
+    }
+    if (!sys_tokenize(s->engine, &r, err, sizeof(err))) {
+        http_error(fd, 500, err);
+        sys_request_free(&r);
+        return;
+    }
+    const int ctx_size = q36_session_ctx(s->session);
+    int longest = r.read_once ? r.ids.len : 0;
+    for (int i = 0; !r.read_once && i < r.n_q; i++)
+        if (r.q[i].tokens.len > longest) longest = r.q[i].tokens.len;
+    if (longest >= ctx_size) {  /* same rule as request_exceeds_context: the session needs one free slot */
+        http_error_context_length_exceeded(fd, NULL, longest, ctx_size);
+        sys_request_free(&r);
+        return;
+    }
+    job j;
+    memset(&j, 0, sizeof(j));
+    j.fd = fd;
+    j.sys = &r;
+    pthread_mutex_init(&j.mu, NULL);
+    pthread_cond_init(&j.cv, NULL);
+
+    pthread_mutex_lock(&j.mu);
+    if (!enqueue(s, &j)) {
+        pthread_mutex_unlock(&j.mu);
+        http_error(fd, 503, "server shutting down");
+        pthread_cond_destroy(&j.cv);
+        pthread_mutex_destroy(&j.mu);
+        sys_request_free(&r);
+        return;
+    }
+    while (!j.done) pthread_cond_wait(&j.cv, &j.mu);
+    pthread_mutex_unlock(&j.mu);
+
+    pthread_cond_destroy(&j.cv);
+    pthread_mutex_destroy(&j.mu);
+    sys_request_free(&r);
+}
+
 static void client_done(server *s) {
     pthread_mutex_lock(&s->mu);
     if (s->clients > 0) s->clients--;
@@ -11204,6 +12079,11 @@ static void *client_main(void *arg) {
         goto done;
     }
 
+    if (!strcmp(hr.method, "POST") && (!strcmp(hr.path, "/v1/systemone") || !strcmp(hr.path, "/v1/evaluate"))) {
+        handle_systemone(s, fd, hr.body);
+        http_request_free(&hr);
+        goto done;
+    }
     request req;
     char err[160];
     bool ok = false;
@@ -15842,7 +16722,321 @@ static void test_server_image_embedding_cache(void) {
     TEST_ASSERT(cache.bytes == 0);
 }
 
+/* ---- /v1/systemone unit tests: no model. Goldens come from tests/ekbasis_eval/gen_golden.py (Python reference). ---- */
+static char *test_sysone_golden(const char *name) {
+    char path[512];
+    snprintf(path, sizeof(path), "tests/ekbasis_eval/golden/%s", name);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        fprintf(stderr, "missing golden file %s (run from the repository root)\n", path);
+        test_failures++;
+        return NULL;
+    }
+    buf b = {0};
+    char chunk[4096];
+    size_t n;
+    while ((n = fread(chunk, 1, sizeof(chunk), fp)) > 0) buf_append(&b, chunk, n);
+    fclose(fp);
+    buf_putc(&b, '\0');
+    return b.ptr;
+}
+
+static char *test_sysone_canon_text(const char *in) {
+    buf b = {0};
+    const char *p = in;
+    if (!sys_canon(&p, &b, 0)) {
+        buf_free(&b);
+        return NULL;
+    }
+    return buf_take(&b);
+}
+
+static void test_sysone_labels(void) {
+    TEST_ASSERT(sysone_label(0) && !strcmp(sysone_label(0), "A"));  /* initialises the table */
+    TEST_ASSERT(sysone_label_n == SYSONE_LABEL_COUNT);
+    TEST_ASSERT(sysone_label(25) && !strcmp(sysone_label(25), "Z"));
+    TEST_ASSERT(sysone_label(26) && !strcmp(sysone_label(26), "AA"));
+    TEST_ASSERT(sysone_label(SYSONE_LABEL_COUNT - 1) && !strcmp(sysone_label(SYSONE_LABEL_COUNT - 1), "ZZ"));
+    TEST_ASSERT(sysone_label(SYSONE_LABEL_COUNT) == NULL);
+    bool bq = false;
+    for (int i = 0; i < sysone_label_n; i++)
+        if (!strcmp(sysone_label(i), "BQ")) bq = true;
+    TEST_ASSERT(!bq);
+    /* Full table against the Python LABELS list, line by line. */
+    char *want = test_sysone_golden("labels.txt");
+    if (!want) return;
+    char *line = want;
+    for (int i = 0; i < SYSONE_LABEL_COUNT; i++) {
+        char *nl = strchr(line, '\n');
+        if (!nl) {
+            TEST_ASSERT(0);
+            break;
+        }
+        *nl = '\0';
+        if (strcmp(line, sysone_label(i))) {
+            fprintf(stderr, "label %d: python %s, C %s\n", i, line, sysone_label(i));
+            TEST_ASSERT(0);
+            break;
+        }
+        line = nl + 1;
+    }
+    free(want);
+}
+
+static void test_sysone_float_repr(void) {
+    char *want = test_sysone_golden("floatrepr.txt");
+    if (!want) return;
+    for (char *line = want; *line;) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char *tab = strchr(line, '\t');
+        if (tab) {
+            *tab = '\0';
+            buf b = {0};
+            sys_put_float(&b, strtod(line, NULL));
+            char *got = buf_take(&b);
+            if (strcmp(got, tab + 1)) {
+                fprintf(stderr, "float repr of %s: python %s, C %s\n", line, tab + 1, got);
+                TEST_ASSERT(0);
+            }
+            free(got);
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    free(want);
+}
+
+static void test_sysone_canon(void) {
+    char *c = test_sysone_canon_text("{\"a\":1,\"b\":[1,2.50,\"x\\u00e9\"],\"c\":{}, \"d\": -0.0, \"e\": 1e2, \"f\": null}");
+    TEST_ASSERT(c && !strcmp(c, "{\"a\": 1, \"b\": [1, 2.5, \"x\xc3\xa9\"], \"c\": {}, \"d\": -0.0, \"e\": 100.0, \"f\": null}"));
+    free(c);
+    c = test_sysone_canon_text("\"tab\\t quote\\\" nl\\n ctl\\u0001\"");
+    TEST_ASSERT(c && !strcmp(c, "\"tab\\t quote\\\" nl\\n ctl\\u0001\""));
+    free(c);
+    c = test_sysone_canon_text("[true, false, 1e16, 0.0001, 12345678901234567890]");
+    TEST_ASSERT(c && !strcmp(c, "[true, false, 1e+16, 0.0001, 12345678901234567890]"));
+    free(c);
+}
+
+static void test_sysone_softmax(void) {
+    const double x[3] = {1.0, 2.0, 3.0};
+    double p[3];
+    sys_softmax(x, 3, p);
+    TEST_ASSERT(fabs(p[0] - 0.09003057317038046) < 1e-9);
+    TEST_ASSERT(fabs(p[1] - 0.24472847105479764) < 1e-9);
+    TEST_ASSERT(fabs(p[2] - 0.6652409557748219) < 1e-9);
+    TEST_ASSERT(fabs(p[0] + p[1] + p[2] - 1.0) < 1e-12);
+    const double flat[2] = {0.0, 0.0};
+    double q[2];
+    sys_softmax(flat, 2, q);
+    TEST_ASSERT(q[0] == 0.5 && q[1] == 0.5);
+    const double big[2] = {1000.0, 999.0};  /* max-subtraction keeps this finite */
+    sys_softmax(big, 2, q);
+    TEST_ASSERT(fabs(q[0] - 0.7310585786300049) < 1e-9);
+}
+
+static void test_sysone_golden_prompts(void) {
+    static const char *cases[] = {"a", "b", "c"};
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        char name[64];
+        snprintf(name, sizeof(name), "%s.request.json", cases[c]);
+        char *body = test_sysone_golden(name);
+        if (!body) continue;
+        sys_request r;
+        char err[256];
+        if (!sys_request_parse(body, &r, err, sizeof(err))) {
+            fprintf(stderr, "%s: unexpected parse error: %s\n", name, err);
+            TEST_ASSERT(0);
+            sys_request_free(&r);
+            free(body);
+            continue;
+        }
+        for (int i = 0; i < r.n_q; i++) {
+            char gold[160];
+            snprintf(gold, sizeof(gold), "%s.%s.user.txt", cases[c], r.q[i].name);
+            char *want = test_sysone_golden(gold);
+            char *got = sys_user_prompt(&r, &r.q[i], false);
+            if (want && strcmp(want, got)) fprintf(stderr, "%s:\n  want %s\n  got  %s\n", gold, want, got);
+            TEST_ASSERT(want && !strcmp(want, got));
+            free(got);
+            free(want);
+            snprintf(gold, sizeof(gold), "%s.%s.followup.txt", cases[c], r.q[i].name);
+            want = test_sysone_golden(gold);
+            got = sys_user_prompt(&r, &r.q[i], true);
+            if (want && strcmp(want, got)) fprintf(stderr, "%s:\n  want %s\n  got  %s\n", gold, want, got);
+            TEST_ASSERT(want && !strcmp(want, got));
+            free(got);
+            free(want);
+        }
+        sys_request_free(&r);
+        free(body);
+    }
+}
+
+static void test_sysone_golden_answers(void) {
+    static const char *cases[] = {"a", "b", "c"};
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        char name[64];
+        snprintf(name, sizeof(name), "%s.request.json", cases[c]);
+        char *body = test_sysone_golden(name);
+        snprintf(name, sizeof(name), "%s.probs.txt", cases[c]);
+        char *probs = test_sysone_golden(name);
+        snprintf(name, sizeof(name), "%s.answers.txt", cases[c]);
+        char *want = test_sysone_golden(name);
+        if (!body || !probs || !want) {
+            free(body);
+            free(probs);
+            free(want);
+            continue;
+        }
+        sys_request r;
+        char err[256];
+        TEST_ASSERT(sys_request_parse(body, &r, err, sizeof(err)));
+        for (char *line = probs; *line;) {
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = '\0';
+            char *sp = strchr(line, ' ');
+            if (sp) {
+                *sp = '\0';
+                sys_question *q = NULL;
+                for (int i = 0; i < r.n_q; i++)
+                    if (!strcmp(r.q[i].name, line)) q = &r.q[i];
+                TEST_ASSERT(q != NULL);
+                if (q) {
+                    q->probs = xmalloc(sizeof(double) * (size_t)q->n_opt);
+                    int k = 0;
+                    for (char *tok = strtok(sp + 1, " "); tok && k < q->n_opt; tok = strtok(NULL, " "))
+                        q->probs[k++] = strtod(tok, NULL);
+                    TEST_ASSERT(k == q->n_opt);
+                }
+            }
+            if (!nl) break;
+            line = nl + 1;
+        }
+        buf b = {0};
+        sys_put_answers(&b, &r);
+        char *got = buf_take(&b);
+        if (strcmp(want, got)) fprintf(stderr, "%s answers:\n  want %s\n  got  %s\n", cases[c], want, got);
+        TEST_ASSERT(!strcmp(want, got));
+        free(got);
+        sys_request_free(&r);
+        free(body);
+        free(probs);
+        free(want);
+    }
+}
+
+/* Parse a body and return its first question's options; the caller checks the request with `ok`. */
+static bool test_sysone_parse(const char *body, sys_request *r) {
+    char err[256];
+    bool ok = sys_request_parse(body, r, err, sizeof(err));
+    if (!ok) sys_request_free(r);
+    return ok;
+}
+
+static void test_sysone_options(void) {
+    sys_request r;
+    TEST_ASSERT(test_sysone_parse("{\"state\":1,\"questions\":{\"q\":{\"type\":\"noul\",\"criteria\":"
+                                  "{\"true\":\"T\",\"false\":null}}}}", &r));
+    TEST_ASSERT(r.n_q == 1 && r.q[0].n_opt == 2);
+    TEST_ASSERT(r.n_q == 1 && !strcmp(r.q[0].opt[0].key, "yes") && !strcmp(r.q[0].opt[0].desc, "T"));
+    TEST_ASSERT(r.n_q == 1 && !strcmp(r.q[0].opt[1].key, "no") && !strcmp(r.q[0].opt[1].desc, "no"));
+    TEST_ASSERT(r.n_q == 1 && !strcmp(r.q[0].opt[0].letter, "A") && !strcmp(r.q[0].opt[1].letter, "B"));
+    sys_request_free(&r);
+
+    TEST_ASSERT(test_sysone_parse("{\"state\":1,\"questions\":{\"q\":{\"type\":\"boolean\"}}}", &r));
+    TEST_ASSERT(r.q[0].n_opt == 2 && !strcmp(r.q[0].opt[0].desc, "yes") && !strcmp(r.q[0].opt[1].desc, "no"));
+    sys_request_free(&r);
+
+    TEST_ASSERT(test_sysone_parse("{\"state\":1,\"questions\":{\"q\":{\"type\":\"score\",\"criteria\":[\"a\",\"b\"]}}}", &r));
+    TEST_ASSERT(r.q[0].n_opt == 2 && !strcmp(r.q[0].opt[1].key, "1") && !strcmp(r.q[0].opt[1].desc, "b"));
+    sys_request_free(&r);
+
+    TEST_ASSERT(test_sysone_parse("{\"state\":1,\"questions\":{\"q\":{\"type\":\"score\","
+                                  "\"criteria\":{\"2\":\"x\",\"1\":null}}}}", &r));
+    TEST_ASSERT(r.q[0].n_opt == 2 && !strcmp(r.q[0].opt[0].key, "2") && !strcmp(r.q[0].opt[0].desc, "x"));
+    TEST_ASSERT(!strcmp(r.q[0].opt[1].key, "1") && !strcmp(r.q[0].opt[1].desc, "1"));
+    sys_request_free(&r);
+
+    TEST_ASSERT(test_sysone_parse("{\"state\":1,\"questions\":{\"q\":{\"type\":\"choice\",\"criteria\":null,"
+                                  "\"options\":[\"p q\",\"r\"]}}}", &r));
+    TEST_ASSERT(r.q[0].n_opt == 2 && !strcmp(r.q[0].opt[0].key, "p q") && !strcmp(r.q[0].opt[0].desc, "p q"));
+    sys_request_free(&r);
+
+    TEST_ASSERT(test_sysone_parse("{\"state\":1,\"questions\":{\"q\":{\"type\":\"choice\","
+                                  "\"criteria\":{\"z\":3,\"a\":true}}}}", &r));
+    TEST_ASSERT(r.q[0].n_opt == 2 && !strcmp(r.q[0].opt[0].key, "z") && !strcmp(r.q[0].opt[0].desc, "3"));
+    TEST_ASSERT(!strcmp(r.q[0].opt[1].key, "a") && !strcmp(r.q[0].opt[1].desc, "True"));
+    sys_request_free(&r);
+}
+
+static void test_sysone_validation(void) {
+    static const struct {
+        const char *body;
+        const char *want;
+    } bad[] = {
+        {"[]", "request body must be one JSON object"},
+        {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"noul\"}}} x", "request body must be one JSON object"},
+        {"{\"questions\":{\"q\":{\"type\":\"noul\"}}}", "state is required"},
+        {"{\"state\":1}", "questions is required"},
+        {"{\"state\":1,\"questions\":[]}", "questions must be an object"},
+        {"{\"state\":1,\"questions\":{}}", "questions must not be empty"},
+        {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"choice\",\"criteria\":[\"only\"]}}}", "q: at least 2 options are required"},
+        {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"ranking\",\"criteria\":[\"a\",\"b\"]}}}", "q: unknown type"},
+        {"{\"state\":1,\"read_once\":\"yes\",\"questions\":{\"q\":{\"type\":\"noul\"}}}", "read_once must be a boolean"},
+        {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"choice\",\"criteria\":{\"a\":\"x\",\"a\":\"y\"}}}}", "q: duplicate option \"a\""},
+        {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"score\",\"criteria\":{\"x\":\"y\",\"1\":\"z\"}}}}", "q: score options must be integers"},
+        {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"noul\",\"instructions\":5}}}", "q: instructions must be a string"},
+        {"{\"state\":1,\"questions\":{\"q\":5}}", "q: question must be an object"},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        sys_request r;
+        char err[256] = "";
+        bool ok = sys_request_parse(bad[i].body, &r, err, sizeof(err));
+        if (ok || strcmp(err, bad[i].want)) fprintf(stderr, "case %zu: ok=%d err=\"%s\" want \"%s\"\n", i, ok, err, bad[i].want);
+        TEST_ASSERT(!ok && !strcmp(err, bad[i].want));
+        sys_request_free(&r);
+    }
+
+    /* Option-count limits: 160 is the one-pass maximum; 161 is refused, per question and under read_once. */
+    buf many = {0};
+    buf_puts(&many, "{\"state\":1,\"questions\":{\"q\":{\"type\":\"score\",\"criteria\":[");
+    for (int i = 0; i < 161; i++) buf_printf(&many, i ? ",\"o%d\"" : "\"o%d\"", i);
+    buf_puts(&many, "]}}}");
+    char *body161 = buf_take(&many);
+    sys_request r;
+    char err[256] = "";
+    bool ok = sys_request_parse(body161, &r, err, sizeof(err));
+    TEST_ASSERT(!ok && strstr(err, "q: 161 options, but one pass reads at most 160") != NULL);
+    sys_request_free(&r);
+    /* 160 options are accepted */
+    buf many160 = {0};
+    buf_puts(&many160, "{\"state\":1,\"questions\":{\"q\":{\"type\":\"score\",\"criteria\":[");
+    for (int i = 0; i < 160; i++) buf_printf(&many160, i ? ",\"o%d\"" : "\"o%d\"", i);
+    buf_puts(&many160, "]}}}");
+    char *body160 = buf_take(&many160);
+    TEST_ASSERT(sys_request_parse(body160, &r, err, sizeof(err)) && r.q[0].n_opt == 160);
+    sys_request_free(&r);
+    free(body160);
+    free(body161);
+
+    TEST_ASSERT(!sys_request_parse("{\"state\":1,\"read_once\":true,\"questions\":{"
+                                   "\"a\":{\"type\":\"noul\"},\"b\":{\"type\":\"choice\",\"criteria\":[\"x\"]}}}",
+                                   &r, err, sizeof(err)));
+    TEST_ASSERT(!strcmp(err, "b: at least 2 options are required"));
+    sys_request_free(&r);
+}
+
 static void q36_server_unit_tests_run(void) {
+    test_sysone_labels();
+    test_sysone_float_repr();
+    test_sysone_canon();
+    test_sysone_softmax();
+    test_sysone_golden_prompts();
+    test_sysone_golden_answers();
+    test_sysone_options();
+    test_sysone_validation();
     test_openai_inline_image_content();
     test_http_image_paths_and_urls_are_rejected();
     test_anthropic_inline_image_content();

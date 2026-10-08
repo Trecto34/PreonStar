@@ -1,0 +1,4 @@
+{"state": [1, "a", {}, [], -0.0, 1e100], "read_once": true, "questions": {
+ "ok2": {"type": "boolean", "instructions": "yes-ish?", "criteria": {"true": "yes-ish", "false": "no-ish"}},
+ "how": {"type": "score", "instructions": "how much?", "criteria": {"0": "none", "1": null, "2": "all"}},
+ "hm": {"type": "choice", "instructions": "hm", "criteria": {"p": "one", "q": 2, "r": false}}}}

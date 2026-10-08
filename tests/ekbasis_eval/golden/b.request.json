@@ -1,0 +1,3 @@
+{"state": "line1\nline2 é ⁣ end\t\"q\"\\", "questions": {
+ "rate": {"type": "score", "instructions": "Rate it", "criteria": ["terrible", "ok", "great"]},
+ "pick": {"type": "choice", "instructions": "Pick one", "options": ["x y", "z"]}}}

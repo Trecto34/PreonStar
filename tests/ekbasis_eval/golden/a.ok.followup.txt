@@ -1,0 +1,1 @@
+{"criterion": "Is it ok?", "options": [{"letter": "A", "description": "true: it is fine"}, {"letter": "B", "description": "false: no"}]}

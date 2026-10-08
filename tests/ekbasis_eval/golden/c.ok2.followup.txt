@@ -1,0 +1,1 @@
+{"criterion": "yes-ish?", "options": [{"letter": "A", "description": "true: yes-ish"}, {"letter": "B", "description": "false: no-ish"}]}

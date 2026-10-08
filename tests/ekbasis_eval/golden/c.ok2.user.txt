@@ -1,0 +1,1 @@
+{"evidence": [1, "a", {}, [], -0.0, 1e+100], "criterion": "yes-ish?", "options": [{"letter": "A", "description": "true: yes-ish"}, {"letter": "B", "description": "false: no-ish"}]}

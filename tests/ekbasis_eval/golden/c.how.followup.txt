@@ -1,0 +1,1 @@
+{"criterion": "how much?", "options": [{"letter": "A", "description": "0: none"}, {"letter": "B", "description": "1: 1"}, {"letter": "C", "description": "2: all"}]}
