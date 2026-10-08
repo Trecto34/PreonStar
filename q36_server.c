@@ -11338,23 +11338,104 @@ static void sys_put_answers(buf *b, const sys_request *r) {
     buf_putc(b, '}');
 }
 
-/* Worker side of a /v1/systemone job: owns the session like generate_job does. One sync per answer; logits are read
- * under inference_mu at the answer's position. */
+/* Q36_SYSTEMONE_PREFIX_REUSE=0 turns the shared-prefix path off (A/B comparison, safety valve). */
+static bool sys_prefix_reuse_enabled(void) {
+    const char *v = getenv("Q36_SYSTEMONE_PREFIX_REUSE");
+    return !(v && !strcmp(v, "0"));
+}
+
+/* Longest token prefix common to every independent question prompt (the system turn and the evidence), kept shorter
+ * than every prompt and rounded DOWN to the prefill chunk grid. Prefilling [0, P) and then the suffix from P uses the
+ * same chunk boundaries as one full prefill, so the state and the logits are the same, not merely close. */
+static int sys_shared_prefix(const sys_request *r, q36_engine *e) {
+    const q36_tokens *a = &r->q[0].tokens;
+    int common = a->len - 1;
+    for (int i = 1; i < r->n_q; i++) {
+        const q36_tokens *b = &r->q[i].tokens;
+        int n = a->len < b->len ? a->len : b->len, k = 0;
+        while (k < n && a->v[k] == b->v[k]) k++;
+        if (k > b->len - 1) k = b->len - 1;
+        if (k < common) common = k;
+    }
+    int grid = (int)q36_engine_prefill_chunk(e);
+    if (grid < 256) grid = 256;
+    return common > 0 ? common / grid * grid : 0;
+}
+
+/* The same slot hygiene generate_job applies before it replaces a checkpoint: drop a stale tool-continuation, never
+ * keep a vision checkpoint under a text prompt, and persist a warm checkpoint to the disk KV store when this job's
+ * first prompt will not extend it. */
+static void sys_slot_prepare(server *s, server_slot *slot, const q36_tokens *first) {
+    slot_pending_clear(slot);
+    if (q36_session_has_vision_state(slot->session)) {
+        pthread_mutex_lock(&s->inference_mu);
+        q36_session_invalidate(slot->session);
+        pthread_mutex_unlock(&s->inference_mu);
+    }
+    const int old_pos = q36_session_pos(slot->session);
+    const int common = q36_session_common_prefix(slot->session, first);
+    const int cached = common == old_pos && first->len >= old_pos ? common : 0;
+    if (s->kv.enabled && cached == 0 && old_pos >= s->kv.opt.min_tokens)
+        server_kv_store_current(s, slot, "evict");
+}
+
+/* Worker side of a /v1/systemone job: owns the slot's session like generate_job does. One sync per answer; logits are
+ * read under inference_mu at the answer's position. With several independent questions the shared leading prompt
+ * (system turn + evidence) is prefilled once, staged, and restored before each further question, so every question
+ * only prefills its own suffix. The staged payload is a private temp file, always removed here. */
 static void sys_run_job(server *s, server_slot *slot, job *j) {
     sys_request *r = j->sys;
     char err[256] = "";
+    q36_session_payload_file pf = {0};
+    q36_tokens head = {0};  /* view of the shared prefix inside q[0].tokens, not owned */
+    const q36_tokens *first = r->read_once ? &r->ids : &r->q[0].tokens;
+    int shared = 0;
+    if (!r->read_once && r->n_q > 1 && sys_prefix_reuse_enabled()) shared = sys_shared_prefix(r, s->engine);
+    if (shared > 0) {
+        head = r->q[0].tokens;
+        head.len = shared;
+        first = &head;
+    }
+    sys_slot_prepare(s, slot, first);
+    if (shared > 0) {
+        int rc = server_session_sync(s, slot, &head, err, sizeof(err));
+        if (rc == Q36_SESSION_SYNC_INTERRUPTED) {
+            http_error(j->fd, 503, "server shutting down");
+            return;
+        }
+        if (rc == 0) {
+            pthread_mutex_lock(&s->inference_mu);
+            rc = q36_session_stage_payload(slot->session, &pf, err, sizeof(err));
+            pthread_mutex_unlock(&s->inference_mu);
+        }
+        if (rc != 0) {  /* no staged prefix: every question syncs on its own, which is always correct */
+            q36_session_payload_file_free(&pf);
+            err[0] = '\0';
+        }
+    }
     for (int i = 0; i < r->n_q; i++) {
-        /* ponytail: one-prompt mode re-prefills the evidence for each question, because a sync only reuses the
-         * live checkpoint. Hook for later: save/restore the session payload between questions (the state is the
-         * shared leading part), if the measured latency needs it. */
         sys_question *q = &r->q[i];
+        if (pf.path && i > 0) {
+            FILE *fp = fopen(pf.path, "rb");
+            int lrc = 1;
+            if (fp) {
+                pthread_mutex_lock(&s->inference_mu);
+                lrc = q36_session_load_payload(slot->session, fp, pf.bytes, err, sizeof(err));
+                pthread_mutex_unlock(&s->inference_mu);
+                fclose(fp);
+            }
+            if (lrc != 0) {  /* a failed restore leaves no valid checkpoint, so the sync below starts clean */
+                q36_session_payload_file_free(&pf);
+                err[0] = '\0';
+            }
+        }
         q36_tokens prefix = r->read_once ? r->ids : q->tokens;
         if (r->read_once) prefix.len = q->read_pos + 1;
         const int rc = server_session_sync(s, slot, &prefix, err, sizeof(err));
         if (rc != 0) {
             if (rc == Q36_SESSION_SYNC_INTERRUPTED) http_error(j->fd, 503, "server shutting down");
             else http_error(j->fd, 500, err[0] ? err : "session sync failed");
-            return;
+            goto out;
         }
         double logit[SYSONE_MAX_OPTIONS];
         int n_vocab = 0;
@@ -11367,21 +11448,25 @@ static void sys_run_job(server *s, server_slot *slot, job *j) {
         }
         pthread_mutex_unlock(&s->inference_mu);
         if (!ok) {
-            http_error(j->fd, 500, "session has no logits for the answer labels");
-            return;
+            http_error(j->fd, 500, "session has no finite logits for the answer labels");
+            goto out;
         }
         q->probs = xmalloc(sizeof(*q->probs) * (size_t)q->n_opt);
         sys_softmax(logit, q->n_opt, q->probs);
     }
-    buf b = {0};
-    buf_puts(&b, "{\"model\": ");
-    sys_put_str(&b, q36_engine_model_name(s->engine));
-    buf_puts(&b, ", \"answers\": ");
-    sys_put_answers(&b, r);
-    buf_printf(&b, ", \"usage\": {\"input_tokens\": %d, \"output_tokens\": 0}}", r->input_tokens);
-    char *body = buf_take(&b);
-    http_response(j->fd, 200, "application/json", body);
-    free(body);
+    {
+        buf b = {0};
+        buf_puts(&b, "{\"model\": ");
+        sys_put_str(&b, q36_engine_model_name(s->engine));
+        buf_puts(&b, ", \"answers\": ");
+        sys_put_answers(&b, r);
+        buf_printf(&b, ", \"usage\": {\"input_tokens\": %d, \"output_tokens\": 0}}", r->input_tokens);
+        char *body = buf_take(&b);
+        http_response(j->fd, 200, "application/json", body);
+        free(body);
+    }
+out:
+    q36_session_payload_file_free(&pf);
 }
 
 static int job_slot_score_values(bool busy, bool assigned,
@@ -11394,6 +11479,15 @@ static int job_slot_score_values(bool busy, bool assigned,
 static int job_slot_score(server_slot *slot, const job *j) {
     if (!slot || !j) return INT_MIN;
     if (slot->busy || slot->assigned) return INT_MIN;
+    if (j->sys) {
+        /* A systemone job has no req.prompt. Prefer the slot whose checkpoint its first prompt extends; otherwise
+         * the slot holding the least warm state, so a short readout does not evict a long chat. */
+        const q36_tokens *first = j->sys->read_once ? &j->sys->ids : &j->sys->q[0].tokens;
+        const int live = q36_session_pos(slot->session);
+        const int common = q36_session_common_prefix(slot->session, first);
+        if (common == live && live > 0) return INT_MAX / 2 + live;
+        return INT_MAX / 4 - live;
+    }
     if (slot_pending_matches(slot, &j->req)) return INT_MAX;
     int common = q36_session_common_prefix(slot->session, &j->req.prompt);
     if (common && !q36_session_vision_prefix_matches(

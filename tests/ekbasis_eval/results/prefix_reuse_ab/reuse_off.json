@@ -1,0 +1,861 @@
+{
+ "s128-q2-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8856873910596843,
+    "probability": 0.8856873910596843,
+    "value": true,
+    "confidence": 0.8856873910596843
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.03408654445376471,
+    "probability": 0.03408654445376471,
+    "value": false,
+    "confidence": 0.9659134555462353
+   }
+  },
+  "usage": {
+   "input_tokens": 454,
+   "output_tokens": 0
+  },
+  "latency_s": 3.2997147870000845
+ },
+ "s128-q2-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8954785902720205,
+    "probability": 0.8954785902720205,
+    "value": true,
+    "confidence": 0.8954785902720205
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.07156654588953086,
+    "probability": 0.07156654588953086,
+    "value": false,
+    "confidence": 0.9284334541104691
+   }
+  },
+  "usage": {
+   "input_tokens": 295,
+   "output_tokens": 0
+  },
+  "latency_s": 2.813700099000016
+ },
+ "s128-q3-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8875996687873269,
+    "probability": 0.8875996687873269,
+    "value": true,
+    "confidence": 0.8875996687873269
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.03835994940744185,
+    "probability": 0.03835994940744185,
+    "value": false,
+    "confidence": 0.9616400505925581
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.044219744604152296,
+    "probability": 0.044219744604152296,
+    "value": false,
+    "confidence": 0.9557802553958475
+   }
+  },
+  "usage": {
+   "input_tokens": 681,
+   "output_tokens": 0
+  },
+  "latency_s": 6.481466609000563
+ },
+ "s128-q3-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8887400290871038,
+    "probability": 0.8887400290871038,
+    "value": true,
+    "confidence": 0.8887400290871038
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.06374640574851305,
+    "probability": 0.06374640574851305,
+    "value": false,
+    "confidence": 0.936253594251487
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.08477061774890009,
+    "probability": 0.08477061774890009,
+    "value": false,
+    "confidence": 0.9152293822511
+   }
+  },
+  "usage": {
+   "input_tokens": 363,
+   "output_tokens": 0
+  },
+  "latency_s": 4.4622598329997345
+ },
+ "s128-q5-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8912573502271093,
+    "probability": 0.8912573502271093,
+    "value": true,
+    "confidence": 0.8912573502271093
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.03441432626254942,
+    "probability": 0.03441432626254942,
+    "value": false,
+    "confidence": 0.9655856737374505
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.0334664511429466,
+    "probability": 0.0334664511429466,
+    "value": false,
+    "confidence": 0.9665335488570534
+   },
+   "q3": {
+    "type": "noul",
+    "noul": 0.8981306372184567,
+    "probability": 0.8981306372184567,
+    "value": true,
+    "confidence": 0.8981306372184567
+   },
+   "q4": {
+    "type": "noul",
+    "noul": 0.03581852695248013,
+    "probability": 0.03581852695248013,
+    "value": false,
+    "confidence": 0.9641814730475199
+   }
+  },
+  "usage": {
+   "input_tokens": 1135,
+   "output_tokens": 0
+  },
+  "latency_s": 11.092521595000107
+ },
+ "s128-q5-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8921369882528686,
+    "probability": 0.8921369882528686,
+    "value": true,
+    "confidence": 0.8921369882528686
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.06984974203519147,
+    "probability": 0.06984974203519147,
+    "value": false,
+    "confidence": 0.9301502579648085
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.05888628506142684,
+    "probability": 0.05888628506142684,
+    "value": false,
+    "confidence": 0.9411137149385732
+   },
+   "q3": {
+    "type": "noul",
+    "noul": 0.9186604330426195,
+    "probability": 0.9186604330426195,
+    "value": true,
+    "confidence": 0.9186604330426195
+   },
+   "q4": {
+    "type": "noul",
+    "noul": 0.0411998034516293,
+    "probability": 0.0411998034516293,
+    "value": false,
+    "confidence": 0.9588001965483708
+   }
+  },
+  "usage": {
+   "input_tokens": 499,
+   "output_tokens": 0
+  },
+  "latency_s": 5.902761903999817
+ },
+ "s256-q2-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.886620158696603,
+    "probability": 0.886620158696603,
+    "value": true,
+    "confidence": 0.886620158696603
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.036772438543730225,
+    "probability": 0.036772438543730225,
+    "value": false,
+    "confidence": 0.9632275614562698
+   }
+  },
+  "usage": {
+   "input_tokens": 744,
+   "output_tokens": 0
+  },
+  "latency_s": 6.057232053000007
+ },
+ "s256-q2-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8866885904095505,
+    "probability": 0.8866885904095505,
+    "value": true,
+    "confidence": 0.8866885904095505
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.05732658777338955,
+    "probability": 0.05732658777338955,
+    "value": false,
+    "confidence": 0.9426734122266104
+   }
+  },
+  "usage": {
+   "input_tokens": 440,
+   "output_tokens": 0
+  },
+  "latency_s": 4.82033322999996
+ },
+ "s256-q3-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8794709381329021,
+    "probability": 0.8794709381329021,
+    "value": true,
+    "confidence": 0.8794709381329021
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.03566969276992996,
+    "probability": 0.03566969276992996,
+    "value": false,
+    "confidence": 0.9643303072300701
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.029780588164462416,
+    "probability": 0.029780588164462416,
+    "value": false,
+    "confidence": 0.9702194118355375
+   }
+  },
+  "usage": {
+   "input_tokens": 1116,
+   "output_tokens": 0
+  },
+  "latency_s": 8.833733294000012
+ },
+ "s256-q3-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8698322134971724,
+    "probability": 0.8698322134971724,
+    "value": true,
+    "confidence": 0.8698322134971724
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.05923038788948669,
+    "probability": 0.05923038788948669,
+    "value": false,
+    "confidence": 0.9407696121105132
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.06702491172845715,
+    "probability": 0.06702491172845715,
+    "value": false,
+    "confidence": 0.9329750882715429
+   }
+  },
+  "usage": {
+   "input_tokens": 509,
+   "output_tokens": 0
+  },
+  "latency_s": 5.852352066000094
+ },
+ "s256-q5-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8828234548127387,
+    "probability": 0.8828234548127387,
+    "value": true,
+    "confidence": 0.8828234548127387
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.04195723470183874,
+    "probability": 0.04195723470183874,
+    "value": false,
+    "confidence": 0.9580427652981613
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.034302760055177337,
+    "probability": 0.034302760055177337,
+    "value": false,
+    "confidence": 0.9656972399448227
+   },
+   "q3": {
+    "type": "noul",
+    "noul": 0.9084245019098727,
+    "probability": 0.9084245019098727,
+    "value": true,
+    "confidence": 0.9084245019098727
+   },
+   "q4": {
+    "type": "noul",
+    "noul": 0.040265426647538856,
+    "probability": 0.040265426647538856,
+    "value": false,
+    "confidence": 0.959734573352461
+   }
+  },
+  "usage": {
+   "input_tokens": 1865,
+   "output_tokens": 0
+  },
+  "latency_s": 15.878604594000535
+ },
+ "s256-q5-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8806228424594573,
+    "probability": 0.8806228424594573,
+    "value": true,
+    "confidence": 0.8806228424594573
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.05563424417961559,
+    "probability": 0.05563424417961559,
+    "value": false,
+    "confidence": 0.9443657558203844
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.053562258456275956,
+    "probability": 0.053562258456275956,
+    "value": false,
+    "confidence": 0.9464377415437241
+   },
+   "q3": {
+    "type": "noul",
+    "noul": 0.9363746652963604,
+    "probability": 0.9363746652963604,
+    "value": true,
+    "confidence": 0.9363746652963604
+   },
+   "q4": {
+    "type": "noul",
+    "noul": 0.05872634934909309,
+    "probability": 0.05872634934909309,
+    "value": false,
+    "confidence": 0.9412736506509068
+   }
+  },
+  "usage": {
+   "input_tokens": 645,
+   "output_tokens": 0
+  },
+  "latency_s": 7.114758470000197
+ },
+ "s512-q2-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8982220425772183,
+    "probability": 0.8982220425772183,
+    "value": true,
+    "confidence": 0.8982220425772183
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.033255723980562715,
+    "probability": 0.033255723980562715,
+    "value": false,
+    "confidence": 0.9667442760194372
+   }
+  },
+  "usage": {
+   "input_tokens": 1242,
+   "output_tokens": 0
+  },
+  "latency_s": 11.197842464999667
+ },
+ "s512-q2-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.9066137263029382,
+    "probability": 0.9066137263029382,
+    "value": true,
+    "confidence": 0.9066137263029382
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.06257505713948561,
+    "probability": 0.06257505713948561,
+    "value": false,
+    "confidence": 0.9374249428605143
+   }
+  },
+  "usage": {
+   "input_tokens": 689,
+   "output_tokens": 0
+  },
+  "latency_s": 5.203578129000562
+ },
+ "s512-q3-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.9045972983053221,
+    "probability": 0.9045972983053221,
+    "value": true,
+    "confidence": 0.9045972983053221
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.026479931681413587,
+    "probability": 0.026479931681413587,
+    "value": false,
+    "confidence": 0.9735200683185864
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.025087059183961792,
+    "probability": 0.025087059183961792,
+    "value": false,
+    "confidence": 0.9749129408160382
+   }
+  },
+  "usage": {
+   "input_tokens": 1863,
+   "output_tokens": 0
+  },
+  "latency_s": 16.07790604099955
+ },
+ "s512-q3-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.9121319700316434,
+    "probability": 0.9121319700316434,
+    "value": true,
+    "confidence": 0.9121319700316434
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.06530213445079232,
+    "probability": 0.06530213445079232,
+    "value": false,
+    "confidence": 0.9346978655492078
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.08091436650337613,
+    "probability": 0.08091436650337613,
+    "value": false,
+    "confidence": 0.9190856334966238
+   }
+  },
+  "usage": {
+   "input_tokens": 757,
+   "output_tokens": 0
+  },
+  "latency_s": 7.445243338000182
+ },
+ "s512-q5-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.905465415133345,
+    "probability": 0.905465415133345,
+    "value": true,
+    "confidence": 0.905465415133345
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.02457792265161186,
+    "probability": 0.02457792265161186,
+    "value": false,
+    "confidence": 0.9754220773483882
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.02388199273003142,
+    "probability": 0.02388199273003142,
+    "value": false,
+    "confidence": 0.9761180072699687
+   },
+   "q3": {
+    "type": "noul",
+    "noul": 0.9227918631150933,
+    "probability": 0.9227918631150933,
+    "value": true,
+    "confidence": 0.9227918631150933
+   },
+   "q4": {
+    "type": "noul",
+    "noul": 0.030646210506539994,
+    "probability": 0.030646210506539994,
+    "value": false,
+    "confidence": 0.9693537894934601
+   }
+  },
+  "usage": {
+   "input_tokens": 3105,
+   "output_tokens": 0
+  },
+  "latency_s": 26.789282454000386
+ },
+ "s512-q5-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.8973967711142089,
+    "probability": 0.8973967711142089,
+    "value": true,
+    "confidence": 0.8973967711142089
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.07575381672918607,
+    "probability": 0.07575381672918607,
+    "value": false,
+    "confidence": 0.9242461832708139
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.09658456612399968,
+    "probability": 0.09658456612399968,
+    "value": false,
+    "confidence": 0.9034154338760003
+   },
+   "q3": {
+    "type": "noul",
+    "noul": 0.9260112117491003,
+    "probability": 0.9260112117491003,
+    "value": true,
+    "confidence": 0.9260112117491003
+   },
+   "q4": {
+    "type": "noul",
+    "noul": 0.07943723807512595,
+    "probability": 0.07943723807512595,
+    "value": false,
+    "confidence": 0.9205627619248742
+   }
+  },
+  "usage": {
+   "input_tokens": 893,
+   "output_tokens": 0
+  },
+  "latency_s": 8.55162944499989
+ },
+ "s1024-q2-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.9219329550011083,
+    "probability": 0.9219329550011083,
+    "value": true,
+    "confidence": 0.9219329550011083
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.030983803256267158,
+    "probability": 0.030983803256267158,
+    "value": false,
+    "confidence": 0.9690161967437327
+   }
+  },
+  "usage": {
+   "input_tokens": 2254,
+   "output_tokens": 0
+  },
+  "latency_s": 20.901509563999753
+ },
+ "s1024-q2-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.9054682722294003,
+    "probability": 0.9054682722294003,
+    "value": true,
+    "confidence": 0.9054682722294003
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.06693986169947297,
+    "probability": 0.06693986169947297,
+    "value": false,
+    "confidence": 0.9330601383005271
+   }
+  },
+  "usage": {
+   "input_tokens": 1195,
+   "output_tokens": 0
+  },
+  "latency_s": 10.807905291999305
+ },
+ "s1024-q3-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.9069622745489532,
+    "probability": 0.9069622745489532,
+    "value": true,
+    "confidence": 0.9069622745489532
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.02710115585831706,
+    "probability": 0.02710115585831706,
+    "value": false,
+    "confidence": 0.972898844141683
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.031994767847047745,
+    "probability": 0.031994767847047745,
+    "value": false,
+    "confidence": 0.9680052321529523
+   }
+  },
+  "usage": {
+   "input_tokens": 3381,
+   "output_tokens": 0
+  },
+  "latency_s": 28.89614094099943
+ },
+ "s1024-q3-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.9161088073680546,
+    "probability": 0.9161088073680546,
+    "value": true,
+    "confidence": 0.9161088073680546
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.059842644919873914,
+    "probability": 0.059842644919873914,
+    "value": false,
+    "confidence": 0.9401573550801261
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.06851387432763148,
+    "probability": 0.06851387432763148,
+    "value": false,
+    "confidence": 0.9314861256723684
+   }
+  },
+  "usage": {
+   "input_tokens": 1263,
+   "output_tokens": 0
+  },
+  "latency_s": 12.503593804000047
+ },
+ "s1024-q5-ro0": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.9103889842451052,
+    "probability": 0.9103889842451052,
+    "value": true,
+    "confidence": 0.9103889842451052
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.025686037056599463,
+    "probability": 0.025686037056599463,
+    "value": false,
+    "confidence": 0.9743139629434006
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.029240137988678305,
+    "probability": 0.029240137988678305,
+    "value": false,
+    "confidence": 0.9707598620113216
+   },
+   "q3": {
+    "type": "noul",
+    "noul": 0.9252217758182523,
+    "probability": 0.9252217758182523,
+    "value": true,
+    "confidence": 0.9252217758182523
+   },
+   "q4": {
+    "type": "noul",
+    "noul": 0.032660295765560995,
+    "probability": 0.032660295765560995,
+    "value": false,
+    "confidence": 0.967339704234439
+   }
+  },
+  "usage": {
+   "input_tokens": 5635,
+   "output_tokens": 0
+  },
+  "latency_s": 51.43873440799962
+ },
+ "s1024-q5-ro1": {
+  "answers": {
+   "q0": {
+    "type": "noul",
+    "noul": 0.9176324537861221,
+    "probability": 0.9176324537861221,
+    "value": true,
+    "confidence": 0.9176324537861221
+   },
+   "q1": {
+    "type": "noul",
+    "noul": 0.06152175780819177,
+    "probability": 0.06152175780819177,
+    "value": false,
+    "confidence": 0.9384782421918082
+   },
+   "q2": {
+    "type": "noul",
+    "noul": 0.056255076238357425,
+    "probability": 0.056255076238357425,
+    "value": false,
+    "confidence": 0.9437449237616427
+   },
+   "q3": {
+    "type": "noul",
+    "noul": 0.9253013103988428,
+    "probability": 0.9253013103988428,
+    "value": true,
+    "confidence": 0.9253013103988428
+   },
+   "q4": {
+    "type": "noul",
+    "noul": 0.07517096600343347,
+    "probability": 0.07517096600343347,
+    "value": false,
+    "confidence": 0.9248290339965666
+   }
+  },
+  "usage": {
+   "input_tokens": 1399,
+   "output_tokens": 0
+  },
+  "latency_s": 13.633624963999864
+ },
+ "mixed-types": {
+  "answers": {
+   "lost": {
+    "type": "noul",
+    "noul": 0.887510772909753,
+    "probability": 0.887510772909753,
+    "value": true,
+    "confidence": 0.887510772909753
+   },
+   "pick": {
+    "type": "choice",
+    "choice": "file_0001.txt",
+    "probabilities": {
+     "file_0001.txt": 0.9630873243283758,
+     "file_0002.txt": 0.01842056316647857,
+     "file_0003.txt": 0.018492112505145528
+    },
+    "confidence": 0.9630873243283758
+   },
+   "risk": {
+    "type": "score",
+    "probabilities": {
+     "0": 0.11764455671353488,
+     "1": 0.5316725308927702,
+     "2": 0.35068291239369487
+    },
+    "score": 1,
+    "expected": 1.23303835568016,
+    "confidence": 0.5316725308927702
+   }
+  },
+  "usage": {
+   "input_tokens": 1877,
+   "output_tokens": 0
+  },
+  "latency_s": 17.011485308000374
+ },
+ "short-state": {
+  "answers": {
+   "a": {
+    "type": "noul",
+    "noul": 0.696304498975626,
+    "probability": 0.696304498975626,
+    "value": true,
+    "confidence": 0.696304498975626
+   },
+   "b": {
+    "type": "noul",
+    "noul": 0.6110424914845447,
+    "probability": 0.6110424914845447,
+    "value": true,
+    "confidence": 0.6110424914845447
+   }
+  },
+  "usage": {
+   "input_tokens": 192,
+   "output_tokens": 0
+  },
+  "latency_s": 1.6706320949997462
+ },
+ "unicode": {
+  "answers": {
+   "a": {
+    "type": "noul",
+    "noul": 0.4638365086419763,
+    "probability": 0.4638365086419763,
+    "value": false,
+    "confidence": 0.5361634913580237
+   },
+   "b": {
+    "type": "noul",
+    "noul": 0.2744863831095387,
+    "probability": 0.2744863831095387,
+    "value": false,
+    "confidence": 0.7255136168904613
+   }
+  },
+  "usage": {
+   "input_tokens": 580,
+   "output_tokens": 0
+  },
+  "latency_s": 5.594715641000221
+ }
+}
