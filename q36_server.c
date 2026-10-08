@@ -10653,6 +10653,7 @@ typedef struct sys_request {
     bool read_once;      /* requested and more than one question */
     q36_tokens ids;      /* read_once: the single shared sequence */
     int input_tokens;
+    double t0;           /* request start, for latency_s */
 } sys_request;
 
 /* A parsed JSON object or array: member names and the raw text of each value, in document order. */
@@ -11055,11 +11056,22 @@ static void sys_request_free(sys_request *r) {
 
 /* Validates a /v1/systemone body and builds its questions (no tokenizer needed). On failure `err` says why and the
  * caller frees *r either way. */
+/* Python truthiness of a raw JSON value (bool(body.get("read_once"))). */
+static bool sys_truthy(const char *raw) {
+    if (!raw) return false;
+    return strcmp(raw, "null") && strcmp(raw, "false") && strcmp(raw, "0") && strcmp(raw, "0.0") &&
+           strcmp(raw, "\"\"") && strcmp(raw, "[]") && strcmp(raw, "{}");
+}
+
 static bool sys_request_parse(const char *body, sys_request *r, char *err, size_t errlen) {
     memset(r, 0, sizeof(*r));
     sys_members top = {0}, qs = {0}, qm = {0};
     char msg[256];
     const char *end = NULL;
+    if (body && strstr(body, "\\u0000")) {  /* strings are C strings here: refuse instead of truncating */
+        snprintf(err, errlen, "NUL characters (\\u0000) are not supported");
+        return false;
+    }
     bool ok = sys_members_parse(body ? body : "", true, &top, &end);
     if (ok) {
         json_ws(&end);
@@ -11070,21 +11082,17 @@ static bool sys_request_parse(const char *body, sys_request *r, char *err, size_
         sys_members_free(&top);
         return false;
     }
+    /* Defaults and truthiness follow the official serve.py: state "" , questions {} (a 200 with no answers),
+     * bool(read_once). Images (vLLM backend only upstream) are refused rather than silently dropped. */
     const char *state_raw = sys_member(&top, "state");
     const char *questions_raw = sys_member(&top, "questions");
     const char *ro_raw = sys_member(&top, "read_once");
-    if (!state_raw) {
-        snprintf(msg, sizeof(msg), "state is required");
+    if (sys_member(&top, "images") || sys_member(&top, "image_data")) {
+        snprintf(msg, sizeof(msg), "images are not supported by this server");
         goto fail;
     }
-    if (!questions_raw) {
-        snprintf(msg, sizeof(msg), "questions is required");
-        goto fail;
-    }
-    if (ro_raw && strcmp(ro_raw, "null") && strcmp(ro_raw, "true") && strcmp(ro_raw, "false")) {
-        snprintf(msg, sizeof(msg), "read_once must be a boolean");
-        goto fail;
-    }
+    if (!state_raw) state_raw = "\"\"";
+    if (!questions_raw || !strcmp(questions_raw, "null")) questions_raw = "{}";
     buf sb = {0};
     const char *sp = state_raw;
     if (!sys_canon(&sp, &sb, 0)) {
@@ -11097,21 +11105,17 @@ static bool sys_request_parse(const char *body, sys_request *r, char *err, size_
         snprintf(msg, sizeof(msg), "questions must be an object");
         goto fail;
     }
-    if (qs.n == 0) {
-        snprintf(msg, sizeof(msg), "questions must not be empty");
-        goto fail;
-    }
     if (qs.n > SYSONE_MAX_QUESTIONS) {
         snprintf(msg, sizeof(msg), "%d questions, but a request takes at most %d", qs.n, SYSONE_MAX_QUESTIONS);
         goto fail;
     }
     r->n_q = qs.n;
-    r->q = calloc((size_t)qs.n, sizeof(*r->q));
-    if (!r->q) {
+    if (qs.n > 0) r->q = calloc((size_t)qs.n, sizeof(*r->q));
+    if (qs.n > 0 && !r->q) {
         snprintf(msg, sizeof(msg), "out of memory");
         goto fail;
     }
-    r->read_once = ro_raw && !strcmp(ro_raw, "true") && qs.n > 1;
+    r->read_once = sys_truthy(ro_raw) && qs.n > 1;
     for (int i = 0; i < qs.n; i++) {
         sys_question *q = &r->q[i];
         q->name = xstrdup(qs.key[i]);
@@ -11124,13 +11128,13 @@ static bool sys_request_parse(const char *body, sys_request *r, char *err, size_
             snprintf(msg, sizeof(msg), "%s: question must be an object", q->name);
             goto fail;
         }
+        /* options_of / _format: only "noul", "boolean" and "score" are special; a missing or unknown type is a choice. */
         const char *type_raw = sys_member(&qm, "type");
         const char *tp = type_raw;
         if (!sys_raw_is(type_raw, '"') || !json_string(&tp, &q->type) ||
-            (strcmp(q->type, "choice") && strcmp(q->type, "score") && strcmp(q->type, "noul") &&
-             strcmp(q->type, "boolean"))) {
-            snprintf(msg, sizeof(msg), "%s: unknown type", q->name);
-            goto fail;
+            (strcmp(q->type, "score") && strcmp(q->type, "noul") && strcmp(q->type, "boolean"))) {
+            free(q->type);
+            q->type = xstrdup("choice");
         }
         const char *ins = sys_member(&qm, "instructions");
         if (!ins) {
@@ -11338,6 +11342,30 @@ static void sys_put_answers(buf *b, const sys_request *r) {
     buf_putc(b, '}');
 }
 
+/* Errors as serve.py writes them: {"error": "message"}; ValueError (bad request) is 422. */
+static void sys_error(int fd, int code, const char *msg) {
+    buf b = {0};
+    buf_puts(&b, "{\"error\": ");
+    sys_put_str(&b, msg);
+    buf_putc(&b, '}');
+    char *body = buf_take(&b);
+    http_response(fd, code, "application/json", body);
+    free(body);
+}
+
+static void sys_send_ok(server *s, int fd, const sys_request *r) {
+    buf b = {0};
+    buf_puts(&b, "{\"model\": ");
+    sys_put_str(&b, q36_engine_model_name(s->engine));
+    buf_puts(&b, ", \"answers\": ");
+    sys_put_answers(&b, r);
+    buf_printf(&b, ", \"usage\": {\"input_tokens\": %d, \"output_tokens\": 0}, \"latency_s\": %.6f}",
+               r->input_tokens, now_sec() - r->t0);
+    char *body = buf_take(&b);
+    http_response(fd, 200, "application/json", body);
+    free(body);
+}
+
 /* Q36_SYSTEMONE_PREFIX_REUSE=0 turns the shared-prefix path off (A/B comparison, safety valve). */
 static bool sys_prefix_reuse_enabled(void) {
     const char *v = getenv("Q36_SYSTEMONE_PREFIX_REUSE");
@@ -11436,7 +11464,7 @@ static void sys_run_job(server *s, server_slot *slot, job *j) {
     if (shared > 0) {
         int rc = sys_session_sync(s, slot, &head, err, sizeof(err));
         if (rc == Q36_SESSION_SYNC_INTERRUPTED) {
-            http_error(j->fd, 503, "server shutting down");
+            sys_error(j->fd, 503, "server shutting down");
             return;
         }
         if (rc == 0) {
@@ -11469,8 +11497,8 @@ static void sys_run_job(server *s, server_slot *slot, job *j) {
         if (r->read_once) prefix.len = q->read_pos + 1;
         const int rc = sys_session_sync(s, slot, &prefix, err, sizeof(err));
         if (rc != 0) {
-            if (rc == Q36_SESSION_SYNC_INTERRUPTED) http_error(j->fd, 503, "server shutting down");
-            else http_error(j->fd, 500, err[0] ? err : "session sync failed");
+            if (rc == Q36_SESSION_SYNC_INTERRUPTED) sys_error(j->fd, 503, "server shutting down");
+            else sys_error(j->fd, 500, err[0] ? err : "session sync failed");
             goto out;
         }
         double logit[SYSONE_MAX_OPTIONS];
@@ -11484,23 +11512,13 @@ static void sys_run_job(server *s, server_slot *slot, job *j) {
         }
         pthread_mutex_unlock(&s->inference_mu);
         if (!ok) {
-            http_error(j->fd, 500, "session has no finite logits for the answer labels");
+            sys_error(j->fd, 500, "session has no finite logits for the answer labels");
             goto out;
         }
         q->probs = xmalloc(sizeof(*q->probs) * (size_t)q->n_opt);
         sys_softmax(logit, q->n_opt, q->probs);
     }
-    {
-        buf b = {0};
-        buf_puts(&b, "{\"model\": ");
-        sys_put_str(&b, q36_engine_model_name(s->engine));
-        buf_puts(&b, ", \"answers\": ");
-        sys_put_answers(&b, r);
-        buf_printf(&b, ", \"usage\": {\"input_tokens\": %d, \"output_tokens\": 0}}", r->input_tokens);
-        char *body = buf_take(&b);
-        http_response(j->fd, 200, "application/json", body);
-        free(body);
-    }
+    sys_send_ok(s, j->fd, r);
 out:
     q36_session_payload_file_free(&pf);
 }
@@ -12083,13 +12101,20 @@ static bool server_model_swap(server *s, int idx) {
 static void handle_systemone(server *s, int fd, const char *body) {
     sys_request r;
     char err[256];
+    const double t0 = now_sec();
     if (!sys_request_parse(body, &r, err, sizeof(err))) {
-        http_error(fd, 400, err);
+        sys_error(fd, 422, err);
+        sys_request_free(&r);
+        return;
+    }
+    r.t0 = t0;
+    if (r.n_q == 0) {  /* serve.py: no questions is a 200 with no answers */
+        sys_send_ok(s, fd, &r);
         sys_request_free(&r);
         return;
     }
     if (!sys_tokenize(s->engine, &r, err, sizeof(err))) {
-        http_error(fd, 500, err);
+        sys_error(fd, 500, err);
         sys_request_free(&r);
         return;
     }
@@ -12098,7 +12123,8 @@ static void handle_systemone(server *s, int fd, const char *body) {
     for (int i = 0; !r.read_once && i < r.n_q; i++)
         if (r.q[i].tokens.len > longest) longest = r.q[i].tokens.len;
     if (longest >= ctx_size) {  /* same rule as request_exceeds_context: the session needs one free slot */
-        http_error_context_length_exceeded(fd, NULL, longest, ctx_size);
+        snprintf(err, sizeof(err), "prompt with %d tokens > %d", longest, ctx_size - 1);
+        sys_error(fd, 422, err);
         sys_request_free(&r);
         return;
     }
@@ -12112,7 +12138,7 @@ static void handle_systemone(server *s, int fd, const char *body) {
     pthread_mutex_lock(&j.mu);
     if (!enqueue(s, &j)) {
         pthread_mutex_unlock(&j.mu);
-        http_error(fd, 503, "server shutting down");
+        sys_error(fd, 503, "server shutting down");
         pthread_cond_destroy(&j.cv);
         pthread_mutex_destroy(&j.mu);
         sys_request_free(&r);
@@ -17127,6 +17153,40 @@ static void test_sysone_shared_prefix(void) {
     free(r.q);
 }
 
+/* Defaults and truthiness of the official serve.py (decision_core.options_of / _format, bool(read_once)). */
+static void test_sysone_official_defaults(void) {
+    sys_request r;
+    char err[256] = "";
+    /* no state -> "" ; no questions / null / {} -> zero questions (a 200 with no answers) */
+    TEST_ASSERT(sys_request_parse("{}", &r, err, sizeof(err)) && r.n_q == 0 && !strcmp(r.state, "\"\""));
+    sys_request_free(&r);
+    TEST_ASSERT(sys_request_parse("{\"state\":1,\"questions\":null}", &r, err, sizeof(err)) && r.n_q == 0);
+    sys_request_free(&r);
+    /* a missing, unknown or non-string type is a choice; boolean and score keep their type */
+    TEST_ASSERT(sys_request_parse("{\"state\":1,\"questions\":{\"a\":{\"criteria\":[\"x\",\"y\"]},"
+                                  "\"b\":{\"type\":\"ranking\",\"criteria\":{\"p\":\"q\",\"r\":\"s\"}},"
+                                  "\"c\":{\"type\":5,\"criteria\":[\"x\",\"y\"]},"
+                                  "\"d\":{\"type\":\"boolean\"},\"e\":{\"type\":\"score\",\"criteria\":[\"x\",\"y\"]}}}",
+                                  &r, err, sizeof(err)));
+    TEST_ASSERT(!strcmp(r.q[0].type, "choice") && !strcmp(r.q[1].type, "choice") && !strcmp(r.q[2].type, "choice"));
+    TEST_ASSERT(!strcmp(r.q[3].type, "boolean") && !strcmp(r.q[4].type, "score"));
+    sys_request_free(&r);
+    /* bool(read_once): any truthy JSON value turns it on, but only with more than one question */
+    static const struct { const char *ro; bool want; } ro[] = {
+        {"true", true}, {"1", true}, {"\"yes\"", true}, {"[0]", true}, {"\"false\"", true},
+        {"false", false}, {"null", false}, {"0", false}, {"\"\"", false}, {"[]", false}, {"{}", false},
+    };
+    for (size_t i = 0; i < sizeof(ro) / sizeof(ro[0]); i++) {
+        char body[256];
+        snprintf(body, sizeof(body), "{\"state\":1,\"read_once\":%s,\"questions\":{\"a\":{\"type\":\"noul\"},\"b\":{\"type\":\"noul\"}}}", ro[i].ro);
+        TEST_ASSERT(sys_request_parse(body, &r, err, sizeof(err)) && r.read_once == ro[i].want);
+        sys_request_free(&r);
+    }
+    TEST_ASSERT(sys_request_parse("{\"state\":1,\"read_once\":true,\"questions\":{\"a\":{\"type\":\"noul\"}}}", &r, err, sizeof(err)) &&
+                !r.read_once);
+    sys_request_free(&r);
+}
+
 static void test_sysone_validation(void) {
     static const struct {
         const char *body;
@@ -17134,13 +17194,10 @@ static void test_sysone_validation(void) {
     } bad[] = {
         {"[]", "request body must be one JSON object"},
         {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"noul\"}}} x", "request body must be one JSON object"},
-        {"{\"questions\":{\"q\":{\"type\":\"noul\"}}}", "state is required"},
-        {"{\"state\":1}", "questions is required"},
         {"{\"state\":1,\"questions\":[]}", "questions must be an object"},
-        {"{\"state\":1,\"questions\":{}}", "questions must not be empty"},
+        {"{\"state\":1,\"images\":[\"x\"],\"questions\":{}}", "images are not supported by this server"},
+        {"{\"state\":\"a\\u0000b\",\"questions\":{}}", "NUL characters (\\u0000) are not supported"},
         {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"choice\",\"criteria\":[\"only\"]}}}", "q: at least 2 options are required"},
-        {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"ranking\",\"criteria\":[\"a\",\"b\"]}}}", "q: unknown type"},
-        {"{\"state\":1,\"read_once\":\"yes\",\"questions\":{\"q\":{\"type\":\"noul\"}}}", "read_once must be a boolean"},
         {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"choice\",\"criteria\":{\"a\":\"x\",\"a\":\"y\"}}}}", "q: duplicate option \"a\""},
         {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"score\",\"criteria\":{\"x\":\"y\",\"1\":\"z\"}}}}", "q: score options must be integers"},
         {"{\"state\":1,\"questions\":{\"q\":{\"type\":\"noul\",\"instructions\":5}}}", "q: instructions must be a string"},
@@ -17193,6 +17250,7 @@ static void q36_server_unit_tests_run(void) {
     test_sysone_golden_answers();
     test_sysone_options();
     test_sysone_validation();
+    test_sysone_official_defaults();
     test_sysone_shared_prefix();
     test_openai_inline_image_content();
     test_http_image_paths_and_urls_are_rejected();

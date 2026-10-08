@@ -7,7 +7,7 @@ Needs a loaded model and a running server; uses only the standard library.
   options: --max-readonce-diff 0.25   (largest allowed |p(read_once) - p(one prompt)| per option)
 
 Checks: response shape and answer fields, probabilities sum to 1, noul value/confidence rules, the /v1/evaluate
-alias, read_once on/off agreement, and the 400 error cases. Exits 1 on any failed check.
+alias, read_once on/off agreement, and the 422 error cases. Exits 1 on any failed check.
 """
 import argparse
 import json
@@ -109,19 +109,28 @@ def main():
     code4, res4 = post(s, "/v1/systemone", one_q)
     check(code4 == 200 and list(res4.get("answers", {})) == ["colour"], "read_once with one question is ignored (200)")
 
+    # Official serve.py behaviour: defaults are accepted, validation errors are 422 with {"error": "<message>"}.
+    code_d, res_d = post(s, "/v1/systemone", {"questions": QUESTIONS})
+    check(code_d == 200 and set(res_d.get("answers", {})) == set(QUESTIONS), "state missing -> defaults to '' (200)")
+    code_d, res_d = post(s, "/v1/systemone", {"state": STATE})
+    check(code_d == 200 and res_d.get("answers") == {}, "questions missing -> 200 with no answers")
+    code_d, res_d = post(s, "/v1/systemone", {"state": STATE, "questions": {"q": {"type": "ranking", "criteria": ["a", "b"]}}})
+    check(code_d == 200 and res_d["answers"]["q"].get("type") == "choice", "unknown type is a choice (200)")
+    code_d, res_d = post(s, "/v1/systemone", one_q)
+    check(isinstance(res_d.get("latency_s"), float) and res_d["latency_s"] > 0, "latency_s is returned")
+    check(list(res_d) == ["model", "answers", "usage", "latency_s"], f"response keys in serve.py order (got {list(res_d)})")
     errors = [
-        ({"questions": QUESTIONS}, "state missing"),
-        ({"state": STATE}, "questions missing"),
         ({"state": STATE, "questions": {"q": {"type": "choice", "criteria": ["only one"]}}}, "one option"),
-        ({"state": STATE, "questions": {"q": {"type": "ranking", "criteria": ["a", "b"]}}}, "unknown type"),
-        ({"state": STATE, "questions": {"q": {"type": "choice", "criteria": [str(i) for i in range(161)]}}},
-         "161 options"),
+        ({"state": STATE, "questions": {"q": {"type": "choice", "criteria": [str(i) for i in range(161)]}}}, "161 options"),
+        ({"state": STATE, "questions": {f"q{i}": {"type": "noul"} for i in range(65)}}, "65 questions"),
+        ({"state": STATE, "images": ["x"], "questions": QUESTIONS}, "images"),
+        ({"state": "a\u0000b", "questions": QUESTIONS}, "NUL in state"),
     ]
     for payload, what in errors:
         code_e, res_e = post(s, "/v1/systemone", payload)
-        check(code_e == 400 and "error" in res_e, f"error case '{what}' -> 400 with error object (got {code_e})")
-    code_b, _ = post(s, "/v1/systemone", b"{not json", raw=True)
-    check(code_b == 400, f"malformed JSON -> 400 (got {code_b})")
+        check(code_e == 422 and isinstance(res_e.get("error"), str), f"error case '{what}' -> 422 with string error (got {code_e})")
+    code_b, res_b = post(s, "/v1/systemone", b"{not json", raw=True)
+    check(code_b == 422 and isinstance(res_b.get("error"), str), f"malformed JSON -> 422 (got {code_b})")
 
     if failures:
         print(f"{len(failures)} check(s) failed")
