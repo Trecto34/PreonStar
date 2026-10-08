@@ -1,0 +1,300 @@
+{
+ "run": {
+  "url": "http://127.0.0.1:8123",
+  "sizes": [
+   512,
+   1024
+  ],
+  "questions": [
+   1,
+   3,
+   5
+  ],
+  "reps": 5,
+  "token_mode": "server_usage",
+  "sample_interval_s": 1.0,
+  "finished_utc": "2026-10-08T20:25:52.337552+00:00"
+ },
+ "sizing": {
+  "512": {
+   "lines": 21,
+   "state_tokens": 511,
+   "prompt_tokens_1q": 614,
+   "wrapper_tokens": 103,
+   "method": "server_usage"
+  },
+  "1024": {
+   "lines": 41,
+   "state_tokens": 1017,
+   "prompt_tokens_1q": 1120,
+   "wrapper_tokens": 103,
+   "method": "server_usage"
+  }
+ },
+ "configs": [
+  {
+   "size": 512,
+   "questions": 1,
+   "read_once": false,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 0.0015127609999581182,
+    "min": 0.0014521769999191747,
+    "max": 0.0018211609999525535,
+    "p95": 0.0017686666000372496
+   },
+   "input_tokens_median": 614,
+   "memory": {
+    "gtt_used_max_mib": null,
+    "gtt_used_min_mib": null,
+    "mem_available_min_mib": null,
+    "mem_available_max_mib": null,
+    "samples": 0
+   }
+  },
+  {
+   "size": 512,
+   "questions": 1,
+   "read_once": true,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 0.0012467050000850577,
+    "min": 0.0011099849998572608,
+    "max": 0.001405668000188598,
+    "p95": 0.0013966396001706017
+   },
+   "input_tokens_median": 614,
+   "memory": {
+    "gtt_used_max_mib": null,
+    "gtt_used_min_mib": null,
+    "mem_available_min_mib": null,
+    "mem_available_max_mib": null,
+    "samples": 0
+   }
+  },
+  {
+   "size": 512,
+   "questions": 3,
+   "read_once": false,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 6.682403799999975,
+    "min": 6.664267419000225,
+    "max": 7.707610073000069,
+    "p95": 7.505013600600068
+   },
+   "input_tokens_median": 1842,
+   "memory": {
+    "gtt_used_max_mib": 11303.08984375,
+    "gtt_used_min_mib": 11303.08984375,
+    "mem_available_min_mib": 2621.390625,
+    "mem_available_max_mib": 2813.265625,
+    "samples": 35
+   }
+  },
+  {
+   "size": 512,
+   "questions": 3,
+   "read_once": true,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 7.508683453999765,
+    "min": 7.032997995000187,
+    "max": 7.918378220999784,
+    "p95": 7.867613922999771
+   },
+   "input_tokens_median": 750,
+   "memory": {
+    "gtt_used_max_mib": 11303.08984375,
+    "gtt_used_min_mib": 11303.08984375,
+    "mem_available_min_mib": 2779.65234375,
+    "mem_available_max_mib": 2783.24609375,
+    "samples": 37
+   }
+  },
+  {
+   "size": 512,
+   "questions": 5,
+   "read_once": false,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 9.37125480900022,
+    "min": 9.344897834999756,
+    "max": 9.959411439999712,
+    "p95": 9.842170164599702
+   },
+   "input_tokens_median": 3070,
+   "memory": {
+    "gtt_used_max_mib": 11303.08984375,
+    "gtt_used_min_mib": 11303.08984375,
+    "mem_available_min_mib": 2585.34765625,
+    "mem_available_max_mib": 2779.65625,
+    "samples": 48
+   }
+  },
+  {
+   "size": 512,
+   "questions": 5,
+   "read_once": true,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 9.870300244000191,
+    "min": 9.343656491000274,
+    "max": 10.149180635999983,
+    "p95": 10.113621768800021
+   },
+   "input_tokens_median": 886,
+   "memory": {
+    "gtt_used_max_mib": 11303.08984375,
+    "gtt_used_min_mib": 11303.08984375,
+    "mem_available_min_mib": 2715.6953125,
+    "mem_available_max_mib": 2774.4296875,
+    "samples": 49
+   }
+  },
+  {
+   "size": 1024,
+   "questions": 1,
+   "read_once": false,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 0.0020923170000060054,
+    "min": 0.001849454999955924,
+    "max": 0.002370070000324631,
+    "p95": 0.002322896000259789
+   },
+   "input_tokens_median": 1120,
+   "memory": {
+    "gtt_used_max_mib": null,
+    "gtt_used_min_mib": null,
+    "mem_available_min_mib": null,
+    "mem_available_max_mib": null,
+    "samples": 0
+   }
+  },
+  {
+   "size": 1024,
+   "questions": 1,
+   "read_once": true,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 0.0012707480000244686,
+    "min": 0.0009897210002236534,
+    "max": 0.0019039860003431386,
+    "p95": 0.001807480800198391
+   },
+   "input_tokens_median": 1120,
+   "memory": {
+    "gtt_used_max_mib": null,
+    "gtt_used_min_mib": null,
+    "mem_available_min_mib": null,
+    "mem_available_max_mib": null,
+    "samples": 0
+   }
+  },
+  {
+   "size": 1024,
+   "questions": 3,
+   "read_once": false,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 11.573576930999934,
+    "min": 10.345670246999816,
+    "max": 11.598640639000223,
+    "p95": 11.597821596400172
+   },
+   "input_tokens_median": 3360,
+   "memory": {
+    "gtt_used_max_mib": 11303.08984375,
+    "gtt_used_min_mib": 11303.08984375,
+    "mem_available_min_mib": 2592.71484375,
+    "mem_available_max_mib": 2771.96875,
+    "samples": 56
+   }
+  },
+  {
+   "size": 1024,
+   "questions": 3,
+   "read_once": true,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 11.505223766999734,
+    "min": 11.102757624999867,
+    "max": 12.954906875999768,
+    "p95": 12.771236654199765
+   },
+   "input_tokens_median": 1256,
+   "memory": {
+    "gtt_used_max_mib": 11303.08984375,
+    "gtt_used_min_mib": 11303.08984375,
+    "mem_available_min_mib": 2702.984375,
+    "mem_available_max_mib": 2777.55078125,
+    "samples": 59
+   }
+  },
+  {
+   "size": 1024,
+   "questions": 5,
+   "read_once": false,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 14.366516278999825,
+    "min": 12.97253022599989,
+    "max": 14.465231880000374,
+    "p95": 14.453684095600329
+   },
+   "input_tokens_median": 5600,
+   "memory": {
+    "gtt_used_max_mib": 11303.08984375,
+    "gtt_used_min_mib": 11303.08984375,
+    "mem_available_min_mib": 2586.89453125,
+    "mem_available_max_mib": 2776.94921875,
+    "samples": 71
+   }
+  },
+  {
+   "size": 1024,
+   "questions": 5,
+   "read_once": true,
+   "reps": 5,
+   "ok": 5,
+   "errors": 0,
+   "latency_s": {
+    "median": 13.959361321000415,
+    "min": 13.101635432000421,
+    "max": 14.321869031999995,
+    "p95": 14.306594760999996
+   },
+   "input_tokens_median": 1392,
+   "memory": {
+    "gtt_used_max_mib": 11303.08984375,
+    "gtt_used_min_mib": 11303.08984375,
+    "mem_available_min_mib": 2727.3359375,
+    "mem_available_max_mib": 2768.1171875,
+    "samples": 69
+   }
+  }
+ ]
+}
