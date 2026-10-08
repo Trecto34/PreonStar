@@ -35,9 +35,9 @@ def check(name, cond):
 def golden_regression():
     n = 0
     for path in sorted(glob.glob(os.path.join(HERE, "golden", "*.json"))):
-        if os.path.basename(path) == "labels.json":
-            continue
         g = json.load(open(path, encoding="utf-8"))
+        if "mode" not in g:  # labels.json and the a/b/c.request.json inputs of gen_golden.py are not golden cases
+            continue
         req = g["request"]
         questions = [(k, v) for k, v in req["questions"].items()]
         assert c.build_request(req["state"], questions, req.get("read_once", False)) == req, g["name"]
@@ -64,6 +64,7 @@ def arithmetic():
 
 
 def run(cmd):
+    cmd = [os.path.join(HERE, cmd[0])] + cmd[1:]  # the scripts live next to this file, not in the caller's cwd
     r = subprocess.run([PY] + cmd, capture_output=True, text=True, timeout=900)
     if r.returncode != 0:
         print(r.stdout[-2000:], r.stderr[-2000:])
@@ -122,6 +123,79 @@ def fixture_reproduce(source):
     check("fetch_fixtures: re-running from the same source reproduces the committed sample", same)
 
 
+GIT_FIX = os.path.join(HERE, "fixtures", "git_choice_sample.jsonl")
+
+
+def git_arithmetic():
+    import eval_git as eg
+    # two choice answers, both right, confidence 0.9 and 0.6: ECE = |1 - 0.75| with the 0.6 row in its own bin
+    items = [{"gold": "a", "pred": "a", "conf": 0.9, "p_gold": 0.9, "qtype": "stash", "split": "known"},
+             {"gold": "b", "pred": "b", "conf": 0.6, "p_gold": 0.6, "qtype": "stash", "split": "held"}]
+    m = eg.group_metrics(items)
+    check("git: accuracy 1.0 and mean confidence 0.75 on two right answers", m["accuracy"] == 1.0 and abs(m["mean_confidence"] - 0.75) < 1e-12)
+    check("git: ECE of two right answers at 0.9 and 0.6 is (0.1 + 0.4) / 2 = 0.25",
+          abs(m["ece"] - 0.25) < 1e-12)
+    check("git: Brier (gold term) is mean of (1 - P(gold))^2 = (0.01 + 0.16) / 2",
+          abs(m["brier"] - 0.085) < 1e-12)
+    a = {"type": "choice", "choice": "b", "probabilities": {"a": 0.3, "b": 0.7}, "confidence": 0.7}
+    check("git: a well-formed choice answer has no contract problem", eg.contract_violations(a, ["a", "b"]) == [])
+    bad = dict(a, choice="a")
+    check("git: a choice that is not the largest probability is flagged", eg.contract_violations(bad, ["a", "b"]) != [])
+
+
+def git_fixture_checks():
+    rows = [json.loads(x) for x in open(GIT_FIX, encoding="utf-8")]
+    check("git fixture: at most 400 rows and under 3 MB", len(rows) <= 400 and os.path.getsize(GIT_FIX) < 3 * 1024 * 1024)
+    counts = {}
+    for r in rows:
+        counts[(r["split"], r["qtype"])] = counts.get((r["split"], r["qtype"]), 0) + 1
+    check("git fixture: balanced, 66 rows in each of the 6 (split, qtype) cells", len(counts) == 6 and set(counts.values()) == {66})
+    ok = True
+    for r in rows:
+        req = r["request"]
+        q = req["questions"]["choice"]
+        labels = list(q["criteria"].keys())
+        ok = ok and set(req) == {"state", "questions"} and q["type"] == "choice" and r["gold"] in labels \
+            and r["expected_letter"] == "ABCDEFG"[labels.index(r["gold"])] \
+            and "State after" not in req["state"] and "State after" not in json.dumps(req) \
+            and "Commands, in order:" in req["state"]
+    check("git fixture: request bodies are choice questions, gold is a criteria key, state has no after-state", ok)
+
+
+def git_eval_fake(url):
+    out = os.path.join(OUT, "eval_git_fake")
+    run(["eval_git.py", "--url", url, "--out-dir", out])
+    res = json.load(open(os.path.join(out, "results.json")))
+    lines = [json.loads(x) for x in open(os.path.join(out, "responses.jsonl"), encoding="utf-8")]
+    n = len(open(GIT_FIX, encoding="utf-8").readlines())
+    check("git eval (fake): every request sent and answered", res["counts"] == {"sent": n, "answered": n, "failed": 0,
+                                                                              "contract_violations": 0})
+    check("git eval (fake): responses.jsonl has one line per row with raw text",
+          len(lines) == n and all(x["raw"] and x["response"] for x in lines))
+    g = res["metrics"]
+    check("git eval (fake): qtype and split groups add up to overall",
+          sum(g[q]["n"] for q in ("stash", "content", "branch")) == n and g["known"]["n"] + g["held"]["n"] == n)
+    check("git eval (fake): 6 qtype x split groups of 66", all(g[f"{q} / {s}"]["n"] == 66
+          for q in ("stash", "content", "branch") for s in ("known", "held")))
+    check("git eval (fake): reliability table has 15 bins", len(res["reliability"]) == 15)
+    check("git eval (fake): markdown written", os.path.getsize(os.path.join(out, "results.md")) > 200)
+
+
+def git_failure_path():
+    out = os.path.join(OUT, "eval_git_closed")
+    run(["eval_git.py", "--url", "http://127.0.0.1:9", "--limit", "2", "--timeout", "3", "--out-dir", out])
+    res = json.load(open(os.path.join(out, "results.json")))
+    check("git eval: unreachable server is counted as failed, not a crash",
+          res["counts"]["failed"] == 2 and res["counts"]["answered"] == 0)
+
+
+def git_fixture_reproduce(source):
+    tmp = os.path.join(OUT, "git_choice_sample_again.jsonl")
+    run(["fetch_fixtures_git.py", "--source-dir", source, "--out", tmp])
+    same = open(tmp, "rb").read() == open(GIT_FIX, "rb").read()
+    check("fetch_fixtures_git: re-running from the same source reproduces the committed sample", same)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fixture-source", default=os.path.join(c.CACHE, "ekbasis-data-raw"))
@@ -133,6 +207,11 @@ def main():
     with_fake_server(eval_and_bench)
     failure_path()
     fixture_reproduce(a.fixture_source)
+    git_arithmetic()
+    git_fixture_checks()
+    with_fake_server(git_eval_fake)
+    git_failure_path()
+    git_fixture_reproduce(a.fixture_source)
     print("ALL OFFLINE CHECKS PASSED")
 
 
