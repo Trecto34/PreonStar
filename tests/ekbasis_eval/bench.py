@@ -222,7 +222,8 @@ def main():
             "size": r["size"], "questions": r["questions"], "read_once": r["read_once"], "reps": args.reps,
             "ok": len(lat), "errors": r["errors"],
             "latency_s": {"median": statistics.median(lat) if lat else None, "min": min(lat) if lat else None,
-                          "max": max(lat) if lat else None},
+                          "max": max(lat) if lat else None,
+                          "p95": c.percentile(lat, 95) if lat else None},
             "input_tokens_median": statistics.median(r["tokens"]) if r["tokens"] else None,
             "memory": r["window"]})
     with open(os.path.join(out, "results.json"), "w", encoding="utf-8") as f:
@@ -243,14 +244,14 @@ def to_markdown(res):
     lines = [f"Sizing method: {res['run']['token_mode']}. Sizes (state text tokens): "
              + ", ".join(f"{s} -> {v['lines']} lines = {v['state_tokens']} tokens "
                          f"(wrapper {v['wrapper_tokens']})" for s, v in res["sizing"].items()), "",
-             "| Size | Questions | read_once | ok/err | Latency median s | min s | max s | input_tokens median "
+             "| Size | Questions | read_once | ok/err | Latency median s | p95 s | min s | max s | input_tokens median | input tok/s "
              "| GTT used max MiB | MemAvailable min MiB |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for cfg in res["configs"]:
         lat, mem = cfg["latency_s"], cfg["memory"]
         lines.append(f"| {cfg['size']} | {cfg['questions']} | {str(cfg['read_once']).lower()} | "
-                     f"{cfg['ok']}/{cfg['errors']} | {fmt(lat['median'])} | {fmt(lat['min'])} | {fmt(lat['max'])} | "
-                     f"{fmt(cfg['input_tokens_median'], 0)} | {fmt(mem['gtt_used_max_mib'], 1)} | "
+                     f"{cfg['ok']}/{cfg['errors']} | {fmt(lat['median'])} | {fmt(lat['p95'])} | {fmt(lat['min'])} | {fmt(lat['max'])} | "
+                     f"{fmt(cfg['input_tokens_median'], 0)} | {fmt((cfg['input_tokens_median'] or 0) / lat['median'] if lat['median'] else None, 0)} | {fmt(mem['gtt_used_max_mib'], 1)} | "
                      f"{fmt(mem['mem_available_min_mib'], 0)} |")
     return "\n".join(lines) + "\n"
 
