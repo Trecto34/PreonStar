@@ -11347,7 +11347,7 @@ static bool sys_prefix_reuse_enabled(void) {
 /* Longest token prefix common to every independent question prompt (the system turn and the evidence), kept shorter
  * than every prompt and rounded DOWN to the prefill chunk grid. Prefilling [0, P) and then the suffix from P uses the
  * same chunk boundaries as one full prefill, so the state and the logits are the same, not merely close. */
-static int sys_shared_prefix(const sys_request *r, q36_engine *e) {
+static int sys_shared_prefix(const sys_request *r, int grid) {
     const q36_tokens *a = &r->q[0].tokens;
     int common = a->len - 1;
     for (int i = 1; i < r->n_q; i++) {
@@ -11357,9 +11357,42 @@ static int sys_shared_prefix(const sys_request *r, q36_engine *e) {
         if (k > b->len - 1) k = b->len - 1;
         if (k < common) common = k;
     }
-    int grid = (int)q36_engine_prefill_chunk(e);
-    if (grid < 256) grid = 256;
     return common > 0 ? common / grid * grid : 0;
+}
+
+/* server_session_sync for readouts. Batched mode slices a prefill at "mixed_prefill_quantum" (128) while another slot is
+ * generating; a slice that is not a multiple of the prefill chunk shifts the chunk grid, which changes the float
+ * accumulation and so the probabilities by up to a few percent depending on what else is running. Here every slice is
+ * a whole number of chunks counted from where this sync starts, so the chunk sequence (and the result) is the same as
+ * one unsliced prefill, whatever the other slots do. Other slots still get a turn after every chunk group. */
+static int sys_session_sync(server *s, server_slot *slot, const q36_tokens *prompt, char *err, size_t errlen) {
+    if (!s->batched_mode) return server_session_sync(s, slot, prompt, err, errlen);
+    int grid = (int)q36_engine_prefill_chunk(s->engine);
+    if (grid < 256) grid = 256;
+    pthread_mutex_lock(&s->inference_mu);
+    const int live = q36_session_pos(slot->session);
+    const int common = q36_session_common_prefix(slot->session, prompt);
+    pthread_mutex_unlock(&s->inference_mu);
+    int done = common == live && prompt->len >= live ? live : 0;
+    bool called = false;
+    while (!g_stop_requested && (!called || done < prompt->len)) {
+        int target = done + grid;
+        if (target > prompt->len || target < done) target = prompt->len;
+        q36_tokens prefix = *prompt;
+        prefix.len = target;
+        if (!server_prefill_enter(s, slot)) return Q36_SESSION_SYNC_INTERRUPTED;
+        int rc = q36_session_sync(slot->session, &prefix, err, errlen);
+        if (rc == 0) done = q36_session_pos(slot->session);
+        server_prefill_leave(s);
+        called = true;
+        if (rc != 0) return rc;
+        if (done >= prompt->len) return 0;
+        if (done < target) {
+            if (err && errlen) snprintf(err, errlen, "prefill made no progress");
+            return 1;
+        }
+    }
+    return g_stop_requested ? Q36_SESSION_SYNC_INTERRUPTED : 0;
 }
 
 /* The same slot hygiene generate_job applies before it replaces a checkpoint: drop a stale tool-continuation, never
@@ -11390,7 +11423,10 @@ static void sys_run_job(server *s, server_slot *slot, job *j) {
     q36_tokens head = {0};  /* view of the shared prefix inside q[0].tokens, not owned */
     const q36_tokens *first = r->read_once ? &r->ids : &r->q[0].tokens;
     int shared = 0;
-    if (!r->read_once && r->n_q > 1 && sys_prefix_reuse_enabled()) shared = sys_shared_prefix(r, s->engine);
+    if (!r->read_once && r->n_q > 1 && sys_prefix_reuse_enabled()) {
+        int grid = (int)q36_engine_prefill_chunk(s->engine);
+        shared = sys_shared_prefix(r, grid < 256 ? 256 : grid);
+    }
     if (shared > 0) {
         head = r->q[0].tokens;
         head.len = shared;
@@ -11398,7 +11434,7 @@ static void sys_run_job(server *s, server_slot *slot, job *j) {
     }
     sys_slot_prepare(s, slot, first);
     if (shared > 0) {
-        int rc = server_session_sync(s, slot, &head, err, sizeof(err));
+        int rc = sys_session_sync(s, slot, &head, err, sizeof(err));
         if (rc == Q36_SESSION_SYNC_INTERRUPTED) {
             http_error(j->fd, 503, "server shutting down");
             return;
@@ -11431,7 +11467,7 @@ static void sys_run_job(server *s, server_slot *slot, job *j) {
         }
         q36_tokens prefix = r->read_once ? r->ids : q->tokens;
         if (r->read_once) prefix.len = q->read_pos + 1;
-        const int rc = server_session_sync(s, slot, &prefix, err, sizeof(err));
+        const int rc = sys_session_sync(s, slot, &prefix, err, sizeof(err));
         if (rc != 0) {
             if (rc == Q36_SESSION_SYNC_INTERRUPTED) http_error(j->fd, 503, "server shutting down");
             else http_error(j->fd, 500, err[0] ? err : "session sync failed");
@@ -17065,6 +17101,32 @@ static void test_sysone_options(void) {
     sys_request_free(&r);
 }
 
+static void sys_test_tokens(q36_tokens *t, int n, int diverge_at, int salt) {
+    memset(t, 0, sizeof(*t));
+    for (int i = 0; i < n; i++) q36_tokens_push(t, i < diverge_at ? 1000 + i : 5000 + salt * 100 + i);
+}
+
+static void test_sysone_shared_prefix(void) {
+    sys_request r;
+    memset(&r, 0, sizeof(r));
+    r.n_q = 3;
+    r.q = calloc(3, sizeof(*r.q));
+    /* prompts share their first 700 tokens, then differ; lengths 900, 950, 1000 */
+    sys_test_tokens(&r.q[0].tokens, 900, 700, 0);
+    sys_test_tokens(&r.q[1].tokens, 950, 700, 1);
+    sys_test_tokens(&r.q[2].tokens, 1000, 700, 2);
+    TEST_ASSERT(sys_shared_prefix(&r, 256) == 512);   /* 700 rounded down to the 256 grid */
+    TEST_ASSERT(sys_shared_prefix(&r, 128) == 640);
+    TEST_ASSERT(sys_shared_prefix(&r, 1024) == 0);    /* shorter than one chunk: no reuse */
+    /* the prefix never reaches the end of the shortest prompt, so every question keeps at least one suffix token */
+    sys_test_tokens(&r.q[0].tokens, 512, 512, 0);
+    sys_test_tokens(&r.q[1].tokens, 600, 512, 1);
+    sys_test_tokens(&r.q[2].tokens, 700, 512, 2);
+    TEST_ASSERT(sys_shared_prefix(&r, 256) == 256);
+    for (int i = 0; i < 3; i++) q36_tokens_free(&r.q[i].tokens);
+    free(r.q);
+}
+
 static void test_sysone_validation(void) {
     static const struct {
         const char *body;
@@ -17131,6 +17193,7 @@ static void q36_server_unit_tests_run(void) {
     test_sysone_golden_answers();
     test_sysone_options();
     test_sysone_validation();
+    test_sysone_shared_prefix();
     test_openai_inline_image_content();
     test_http_image_paths_and_urls_are_rejected();
     test_anthropic_inline_image_content();
