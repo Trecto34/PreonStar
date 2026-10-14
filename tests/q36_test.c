@@ -2524,6 +2524,7 @@ enum {
     TEST_QK_K = 256,
     TEST_K_SCALE_SIZE = 12,
     TEST_TENSOR_Q2_K = 10,
+    TEST_TENSOR_Q3_K = 11,
     TEST_TENSOR_Q4_K = 12,
     TEST_TENSOR_Q5_K = 13,
     TEST_TENSOR_Q6_K = 14,
@@ -2535,6 +2536,13 @@ typedef struct {
     uint16_t d;
     uint16_t dmin;
 } test_block_q2_K;
+
+typedef struct {
+    uint8_t hmask[TEST_QK_K / 8];
+    uint8_t qs[TEST_QK_K / 4];
+    uint8_t scales[12];
+    uint16_t d;
+} test_block_q3_K;
 
 typedef struct {
     uint16_t d;
@@ -2677,6 +2685,36 @@ static float test_dot_q2_k_q8_k(const test_block_q2_K *x, const test_block_q8_K 
            ((lane[1] + lane[5]) + (lane[3] + lane[7]));
 }
 
+static int test_q3_scale(const test_block_q3_K *x, uint32_t group) {
+    uint32_t lo = x->scales[group & 7u];
+    lo = group < 8u ? lo & 15u : lo >> 4u;
+    uint32_t hi = (x->scales[8u + (group & 3u)] >>
+                   (2u * (group >> 2u))) & 3u;
+    return (int)(lo | (hi << 4u)) - 32;
+}
+
+static int test_q3_value(const test_block_q3_K *x, uint32_t idx) {
+    uint32_t half_id = idx >> 7u;
+    uint32_t group = (idx & 127u) >> 4u;
+    uint32_t q = x->qs[half_id * 32u + (idx & 31u)];
+    uint32_t m = 1u << (half_id * 4u + (group >> 1u));
+    uint32_t lo = (q >> (2u * (group >> 1u))) & 3u;
+    return (int)lo - ((x->hmask[idx & 31u] & m) != 0u ? 0 : 4);
+}
+
+static float test_dot_q3_k_q8_k(const test_block_q3_K *x, const test_block_q8_K *y) {
+    int isum = 0;
+    for (uint32_t g = 0; g < 16u; g++) {
+        int group = 0;
+        for (uint32_t i = 0; i < 16u; i++) {
+            uint32_t idx = g * 16u + i;
+            group += test_q3_value(x, idx) * (int)y->qs[idx];
+        }
+        isum += test_q3_scale(x, g) * group;
+    }
+    return test_f16_to_float(x->d) * y->d * (float)isum;
+}
+
 static float test_dot_q4_k_q8_k(const test_block_q4_K *x, const test_block_q8_K *y) {
     const float d = test_f16_to_float(x->d) * y->d;
     const float dmin = test_f16_to_float(x->dmin) * y->d;
@@ -2787,6 +2825,17 @@ static void test_fill_q2_k(test_block_q2_K *b, uint32_t row) {
     b->dmin = test_float_to_f16(0.0004f * (float)(row + 2u));
 }
 
+static void test_fill_q3_k(test_block_q3_K *b, uint32_t row) {
+    memset(b, 0, sizeof(*b));
+    for (uint32_t i = 0; i < TEST_QK_K / 8; i++)
+        b->hmask[i] = (uint8_t)((row * 29u + i * 17u) & 255u);
+    for (uint32_t i = 0; i < TEST_QK_K / 4; i++)
+        b->qs[i] = (uint8_t)((row * 13u + i * 23u) & 255u);
+    for (uint32_t i = 0; i < 12u; i++)
+        b->scales[i] = (uint8_t)((row * 7u + i * 19u + 31u) & 255u);
+    b->d = test_float_to_f16(0.0009f * (float)(row + 1u));
+}
+
 static void test_fill_q4_k(test_block_q4_K *b, uint32_t row) {
     memset(b, 0, sizeof(*b));
     b->d = test_float_to_f16(0.001f * (float)(row + 1u));
@@ -2826,6 +2875,7 @@ static void test_vulkan_kquant_one(uint32_t type, uint64_t row_bytes) {
     for (uint32_t o = 0; o < out_dim; o++) {
         uint8_t *row = (uint8_t *)weights_raw + (uint64_t)o * row_bytes;
         if (type == TEST_TENSOR_Q2_K) test_fill_q2_k((test_block_q2_K *)row, o);
+        else if (type == TEST_TENSOR_Q3_K) test_fill_q3_k((test_block_q3_K *)row, o);
         else if (type == TEST_TENSOR_Q4_K) test_fill_q4_k((test_block_q4_K *)row, o);
         else if (type == TEST_TENSOR_Q5_K) test_fill_q5_k((test_block_q5_K *)row, o);
         else if (type == TEST_TENSOR_Q6_K) test_fill_q6_k((test_block_q6_K *)row, o);
@@ -2884,6 +2934,7 @@ static void test_vulkan_kquant_one(uint32_t type, uint64_t row_bytes) {
         float ref = 0.0f;
         const uint8_t *row = (const uint8_t *)weights_raw + (uint64_t)o * row_bytes;
         if (type == TEST_TENSOR_Q2_K) ref = test_dot_q2_k_q8_k((const test_block_q2_K *)row, xq);
+        else if (type == TEST_TENSOR_Q3_K) ref = test_dot_q3_k_q8_k((const test_block_q3_K *)row, xq);
         else if (type == TEST_TENSOR_Q4_K) ref = test_dot_q4_k_q8_k((const test_block_q4_K *)row, xq);
         else if (type == TEST_TENSOR_Q5_K) ref = test_dot_q5_k_q8_k((const test_block_q5_K *)row, xq);
         else if (type == TEST_TENSOR_Q6_K) ref = test_dot_q6_k_q8_k((const test_block_q6_K *)row, xq);
@@ -2902,6 +2953,7 @@ static void test_vulkan_kquant_one(uint32_t type, uint64_t row_bytes) {
         float ref = 0.0f;
         const uint8_t *row = (const uint8_t *)weights_raw + (uint64_t)o * row_bytes;
         if (type == TEST_TENSOR_Q2_K) ref = test_dot_q2_k_q8_k((const test_block_q2_K *)row, xq);
+        else if (type == TEST_TENSOR_Q3_K) ref = test_dot_q3_k_q8_k((const test_block_q3_K *)row, xq);
         else if (type == TEST_TENSOR_Q4_K) ref = test_dot_q4_k_q8_k((const test_block_q4_K *)row, xq);
         else if (type == TEST_TENSOR_Q5_K) ref = test_dot_q5_k_q8_k((const test_block_q5_K *)row, xq);
         else if (type == TEST_TENSOR_Q6_K) ref = test_dot_q6_k_q8_k((const test_block_q6_K *)row, xq);
@@ -2928,6 +2980,7 @@ static void test_vulkan_kquant_matvec(void) {
     return;
 #else
     test_vulkan_kquant_one(TEST_TENSOR_Q2_K, sizeof(test_block_q2_K));
+    test_vulkan_kquant_one(TEST_TENSOR_Q3_K, sizeof(test_block_q3_K));
     test_vulkan_kquant_one(TEST_TENSOR_Q4_K, sizeof(test_block_q4_K));
     test_vulkan_kquant_one(TEST_TENSOR_Q5_K, sizeof(test_block_q5_K));
     test_vulkan_kquant_one(TEST_TENSOR_Q6_K, sizeof(test_block_q6_K));
@@ -4161,7 +4214,7 @@ static float test_swiglu_ref(float gate, float up) {
 }
 
 #ifndef Q36_NO_GPU
-static void test_vulkan_moe_q4_one(bool streaming) {
+static void test_vulkan_moe_q4_one(bool streaming, bool q3_down) {
     enum {
         in_dim = TEST_QK_K,
         mid_dim = TEST_QK_K,
@@ -4170,9 +4223,10 @@ static void test_vulkan_moe_q4_one(bool streaming) {
         n_used = 2,
         n_tok = 2,
     };
-    const uint64_t row_bytes = sizeof(test_block_q4_K);
-    const uint64_t gate_stride = row_bytes * mid_dim;
-    const uint64_t down_stride = row_bytes * out_dim;
+    const uint64_t gate_row_bytes = sizeof(test_block_q4_K);
+    const uint64_t down_row_bytes = q3_down ? sizeof(test_block_q3_K) : sizeof(test_block_q4_K);
+    const uint64_t gate_stride = gate_row_bytes * mid_dim;
+    const uint64_t down_stride = down_row_bytes * out_dim;
     const uint64_t gate_offset = 0;
     const uint64_t up_offset = gate_offset + gate_stride * n_expert;
     const uint64_t down_offset = up_offset + gate_stride * n_expert;
@@ -4199,14 +4253,17 @@ static void test_vulkan_moe_q4_one(bool streaming) {
 
     for (uint32_t expert = 0; expert < n_expert; expert++) {
         for (uint32_t row = 0; row < mid_dim; row++) {
-            test_fill_q4_k((test_block_q4_K *)((uint8_t *)model + gate_offset + expert * gate_stride + row * row_bytes),
+            test_fill_q4_k((test_block_q4_K *)((uint8_t *)model + gate_offset + expert * gate_stride + row * gate_row_bytes),
                            (1u + expert * 1000u + row) % 89u);
-            test_fill_q4_k((test_block_q4_K *)((uint8_t *)model + up_offset + expert * gate_stride + row * row_bytes),
+            test_fill_q4_k((test_block_q4_K *)((uint8_t *)model + up_offset + expert * gate_stride + row * gate_row_bytes),
                            (2u + expert * 1000u + row) % 89u);
         }
         for (uint32_t row = 0; row < out_dim; row++) {
-            test_fill_q4_k((test_block_q4_K *)((uint8_t *)model + down_offset + expert * down_stride + row * row_bytes),
-                           (3u + expert * 1000u + row) % 89u);
+            uint8_t *dst = (uint8_t *)model + down_offset + expert * down_stride + row * down_row_bytes;
+            if (q3_down)
+                test_fill_q3_k((test_block_q3_K *)dst, (3u + expert * 1000u + row) % 89u);
+            else
+                test_fill_q4_k((test_block_q4_K *)dst, (3u + expert * 1000u + row) % 89u);
         }
     }
 
@@ -4241,8 +4298,8 @@ static void test_vulkan_moe_q4_one(bool streaming) {
         for (uint32_t u = 0; u < n_used; u++) {
             uint32_t expert = selected_host[t * n_used + u];
             for (uint32_t row = 0; row < mid_dim; row++) {
-                const uint8_t *g = (const uint8_t *)model + gate_offset + expert * gate_stride + row * row_bytes;
-                const uint8_t *up = (const uint8_t *)model + up_offset + expert * gate_stride + row * row_bytes;
+                const uint8_t *g = (const uint8_t *)model + gate_offset + expert * gate_stride + row * gate_row_bytes;
+                const uint8_t *up = (const uint8_t *)model + up_offset + expert * gate_stride + row * gate_row_bytes;
                 float gv = test_dot_q4_k_q8_k((const test_block_q4_K *)g, &xq[t]);
                 float uv = test_dot_q4_k_q8_k((const test_block_q4_K *)up, &xq[t]);
                 mid[((uint64_t)t * n_used + u) * mid_dim + row] = test_swiglu_ref(gv, uv);
@@ -4250,8 +4307,10 @@ static void test_vulkan_moe_q4_one(bool streaming) {
             test_quantize_q8_k(mid + ((uint64_t)t * n_used + u) * mid_dim,
                                &midq[t * n_used + u]);
             for (uint32_t row = 0; row < out_dim; row++) {
-                const uint8_t *down = (const uint8_t *)model + down_offset + expert * down_stride + row * row_bytes;
-                float dv = test_dot_q4_k_q8_k((const test_block_q4_K *)down, &midq[t * n_used + u]);
+                const uint8_t *down = (const uint8_t *)model + down_offset + expert * down_stride + row * down_row_bytes;
+                float dv = q3_down
+                    ? test_dot_q3_k_q8_k((const test_block_q3_K *)down, &midq[t * n_used + u])
+                    : test_dot_q4_k_q8_k((const test_block_q4_K *)down, &midq[t * n_used + u]);
                 want[(uint64_t)t * out_dim + row] += dv * weights_host[t * n_used + u];
             }
         }
@@ -4276,7 +4335,7 @@ static void test_vulkan_moe_q4_one(bool streaming) {
 
     q36_gpu_moe_weight gate = { gate_offset, 12, 0, false };
     q36_gpu_moe_weight up = { up_offset, 12, 0, false };
-    q36_gpu_moe_weight down = { down_offset, 12, 0, false };
+    q36_gpu_moe_weight down = { down_offset, q3_down ? TEST_TENSOR_Q3_K : TEST_TENSOR_Q4_K, 0, false };
     ok = q36_gpu_moe_ffn_q8_tensor(out, model, model_alloc,
                                    &gate, &up, &down,
                                    selected, weights, 0, n_used, qx, n_tok,
@@ -4299,7 +4358,8 @@ static void test_vulkan_moe_q4_one(bool streaming) {
     }
     if (max_abs >= 5.0e-2f && max_rel >= 5.0e-5f) {
         fprintf(stderr,
-                "q36-test: routed q4 %s max_abs=%g max_rel=%g idx=%u got=%g want=%g\n",
+                "q36-test: routed q4/%s %s max_abs=%g max_rel=%g idx=%u got=%g want=%g\n",
+                q3_down ? "q3k" : "q4k",
                 streaming ? "stream" : "resident",
                 (double)max_abs,
                 (double)max_rel,
@@ -4333,8 +4393,10 @@ static void test_vulkan_moe_q4(void) {
     test_skip("vulkan-kernels", "CPU-only build");
     return;
 #else
-    test_vulkan_moe_q4_one(false);
-    test_vulkan_moe_q4_one(true);
+    test_vulkan_moe_q4_one(false, false);
+    test_vulkan_moe_q4_one(true, false);
+    test_vulkan_moe_q4_one(false, true);
+    test_vulkan_moe_q4_one(true, true);
 #endif
 }
 

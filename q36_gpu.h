@@ -788,7 +788,7 @@ typedef struct {
 
 /* Routed expert FFN over n_tok rows of x with per-token expert selections,
  * mirroring the routed half of q36_forward_ffn() including all .scale
- * applications.  Supports Q2_K / Q4_K / Q5_K / Q6_K / IQ2_XXS / IQ3_XXS / IQ2_S / IQ3_S expert quants. */
+ * applications.  Supports Q2_K / Q3_K / Q4_K / Q5_K / Q6_K / IQ2_XXS / IQ3_XXS / IQ2_S / IQ3_S expert quants. */
 int q36_gpu_moe_ffn_tensor(
         q36_gpu_tensor       *out,
         const void             *model_map,

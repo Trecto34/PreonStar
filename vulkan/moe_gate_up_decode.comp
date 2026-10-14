@@ -30,7 +30,7 @@ layout(push_constant) uniform Push {
 
 const uint IQ2_U16 = 33u;
 
-#ifdef Q36_MOE_IQ2S
+#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_IQ3XXS)
 /* IQ2_S superblock: [d f16][64 qs][8 qh][8 scales] = 82 bytes; grid values are
  * unsigned magnitudes (<= 43) with 8 explicit sign bits per 8-element group. */
 const uint IQ2S_BYTES = 82u;
@@ -43,6 +43,11 @@ uint g_u8(uint off) {
 uint u_u8(uint off) {
     return (uint(uw[off >> 1u]) >> (8u * (off & 1u))) & 255u;
 }
+#endif
+#ifdef Q36_MOE_IQ3XXS
+const uint IQ3XXS_BYTES = 98u;
+const uint TAB_KSIGNS = 512u;
+const uint TAB_IQ3XXS_GRID = 3104u;
 #endif
 
 shared uint sh_grid[512];
@@ -61,8 +66,14 @@ void main(void) {
     for (uint w = tid; w < 512u; w += 64u) sh_grid[w] = tables[w];
     barrier();
 
-#ifdef Q36_MOE_IQ2S
+#if defined(Q36_MOE_IQ2S)
     uint row_bytes = pc.blocks * IQ2S_BYTES;
+    uint base_bytes = (expert * pc.mid_dim + row) * row_bytes;
+#elif defined(Q36_MOE_MIX_IQ2S_IQ2XXS)
+    uint gbase_bytes = (expert * pc.mid_dim + row) * pc.blocks * IQ2S_BYTES;
+    uint ubase_u16 = (expert * pc.mid_dim + row) * pc.blocks * IQ2_U16;
+#elif defined(Q36_MOE_IQ3XXS)
+    uint row_bytes = pc.blocks * IQ3XXS_BYTES;
     uint base_bytes = (expert * pc.mid_dim + row) * row_bytes;
 #else
     uint row_u16 = pc.blocks * IQ2_U16;
@@ -74,7 +85,78 @@ void main(void) {
     float up_acc = 0.0;
 
     for (uint i = ix; i < pc.blocks; i += 4u) {
-#ifdef Q36_MOE_IQ2S
+#ifdef Q36_MOE_IQ3XXS
+        uint bb = base_bytes + i * IQ3XXS_BYTES;
+        uint g32 = itid >> 1u;
+        uint half16 = itid & 1u;
+        uint gaux = g_u8(bb + 66u + 4u * g32) |
+                    (g_u8(bb + 67u + 4u * g32) << 8u) |
+                    (g_u8(bb + 68u + 4u * g32) << 16u) |
+                    (g_u8(bb + 69u + 4u * g32) << 24u);
+        uint uaux = u_u8(bb + 66u + 4u * g32) |
+                    (u_u8(bb + 67u + 4u * g32) << 8u) |
+                    (u_u8(bb + 68u + 4u * g32) << 16u) |
+                    (u_u8(bb + 69u + 4u * g32) << 24u);
+        float gd = unpackHalf2x16(uint(gw[bb >> 1u])).x * 0.25 * float(2u * (gaux >> 28u) + 1u);
+        float ud = unpackHalf2x16(uint(uw[bb >> 1u])).x * 0.25 * float(2u * (uaux >> 28u) + 1u);
+        uint y4 = (i * 256u + 16u * itid) >> 2u;
+        for (uint l = 0u; l < 4u; l++) {
+            uint k = 4u * half16 + l;
+            uint gentry = g_u8(bb + 2u + 8u * g32 + k);
+            uint uentry = u_u8(bb + 2u + 8u * g32 + k);
+            uint gsi = (gaux >> (7u * (k >> 1u))) & 127u;
+            uint usi = (uaux >> (7u * (k >> 1u))) & 127u;
+            uint gsign = (tables[TAB_KSIGNS + (gsi >> 2u)] >> (8u * (gsi & 3u))) & 255u;
+            uint usign = (tables[TAB_KSIGNS + (usi >> 2u)] >> (8u * (usi & 3u))) & 255u;
+            vec4 gv = vec4(unpack8(tables[TAB_IQ3XXS_GRID + gentry]));
+            vec4 uv = vec4(unpack8(tables[TAB_IQ3XXS_GRID + uentry]));
+            uint ss = 4u * (k & 1u);
+            gv = mix(gv, -gv, bvec4(((gsign >> (ss + 0u)) & 1u) != 0u,
+                                    ((gsign >> (ss + 1u)) & 1u) != 0u,
+                                    ((gsign >> (ss + 2u)) & 1u) != 0u,
+                                    ((gsign >> (ss + 3u)) & 1u) != 0u));
+            uv = mix(uv, -uv, bvec4(((usign >> (ss + 0u)) & 1u) != 0u,
+                                    ((usign >> (ss + 1u)) & 1u) != 0u,
+                                    ((usign >> (ss + 2u)) & 1u) != 0u,
+                                    ((usign >> (ss + 3u)) & 1u) != 0u));
+            vec4 bv = xv[x4 + y4 + l];
+            gate_acc = fma(gd, dot(bv, gv), gate_acc);
+            up_acc = fma(ud, dot(bv, uv), up_acc);
+        }
+#elif defined(Q36_MOE_MIX_IQ2S_IQ2XXS)
+        uint gbb = gbase_bytes + i * IQ2S_BYTES;
+        uint ub = ubase_u16 + i * IQ2_U16;
+        float gd = unpackHalf2x16(uint(gw[gbb >> 1u])).x;
+        float ud = unpackHalf2x16(uint(uw[ub])).x;
+        uint gqh = g_u8(gbb + 66u + ib32);
+        uint gsc = g_u8(gbb + 74u + ib32);
+        uint uq = ub + 1u + 4u * ib32;
+        uint uss = uint(uw[uq + 2u]) | (uint(uw[uq + 3u]) << 16u);
+        float udb = ud * 0.25 * (0.5 + float(uss >> 28u));
+        uint uidx_w = uint(uw[uq + qpair]);
+        uint y4 = (i * 256u + 16u * itid) >> 2u;
+        for (uint l = 0u; l < 2u; l++) {
+            uint p = 2u * qpair + l;
+            uint gsig = g_u8(gbb + 34u + 4u * ib32 + p);
+            uint gidx = g_u8(gbb + 2u + 4u * ib32 + p) | ((gqh << (8u - 2u * p)) & 0x300u);
+            float gdb = gd * 0.25 * (0.5 + float(p < 2u ? (gsc & 15u) : (gsc >> 4u)));
+            vec4 g0 = vec4(unpack8(tables[TAB_IQ2S + gidx * 2u]));
+            vec4 g1 = vec4(unpack8(tables[TAB_IQ2S + gidx * 2u + 1u]));
+            g0 = mix(g0, -g0, bvec4((gsig & 1u) != 0u, (gsig & 2u) != 0u, (gsig & 4u) != 0u, (gsig & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((gsig & 16u) != 0u, (gsig & 32u) != 0u, (gsig & 64u) != 0u, (gsig & 128u) != 0u));
+            uint sbit = 7u * p;
+            uint uqs = (uidx_w >> (8u * l)) & 255u;
+            uint usign = bitfieldExtract(uss, int(sbit), 7);
+            vec4 u0 = vec4(unpack8(sh_grid[uqs * 2u]));
+            vec4 u1 = vec4(unpack8(sh_grid[uqs * 2u + 1u]));
+            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
+            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (bitCount(usign) & 1) != 0));
+            vec4 b0 = xv[x4 + y4 + 2u * l];
+            vec4 b4 = xv[x4 + y4 + 2u * l + 1u];
+            gate_acc = fma(gdb, dot(b0, g0) + dot(b4, g1), gate_acc);
+            up_acc = fma(udb, dot(b0, u0) + dot(b4, u1), up_acc);
+        }
+#elif defined(Q36_MOE_IQ2S)
         uint bb = base_bytes + i * IQ2S_BYTES;
         float gd = unpackHalf2x16(uint(gw[bb >> 1u])).x;
         float ud = unpackHalf2x16(uint(uw[bb >> 1u])).x;

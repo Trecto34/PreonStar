@@ -33,6 +33,7 @@ layout(push_constant) uniform Push {
 const uint IQ2_XXS = 16u;
 const uint IQ3_XXS = 18u;
 const uint Q2_K = 10u;
+const uint Q3_K = 11u;
 const uint Q4_K = 12u;
 const uint Q5_K = 13u;
 const uint Q6_K = 14u;
@@ -107,6 +108,23 @@ uint q2_scale(uint base, uint group16) {
 
 uint q2_min(uint base, uint group16) {
     return load_u8(base + group16) >> 4;
+}
+
+int q3_scale(uint base, uint group) {
+    uint lo = load_u8(base + 96u + (group & 7u));
+    lo = group < 8u ? lo & 15u : lo >> 4u;
+    uint hi = (load_u8(base + 104u + (group & 3u)) >>
+               (2u * (group >> 2u))) & 3u;
+    return int(lo | (hi << 4u)) - 32;
+}
+
+int q3_value(uint base, uint idx) {
+    uint half_id = idx >> 7u;
+    uint group = (idx & 127u) >> 4u;
+    uint q = load_u8(base + 32u + half_id * 32u + (idx & 31u));
+    uint m = 1u << (half_id * 4u + (group >> 1u));
+    uint lo = (q >> (2u * (group >> 1u))) & 3u;
+    return int(lo) - ((load_u8(base + (idx & 31u)) & m) != 0u ? 0 : 4);
 }
 
 void k4_scale_min(uint base, uint j, out uint scale, out uint mn) {
@@ -239,6 +257,29 @@ void main(void) {
                     }
                 }
                 for (uint u = 0u; u < PAIR_TILE; u++) if (pair_live[u]) lane_acc[u] = fma(wdq * yd[u], float(lk[u]), lane_acc[u]);
+            } else if (pc.type == Q3_K) {
+                wd = load_f16(base + 108u);
+                int lk[PAIR_TILE];
+                for (uint u = 0u; u < PAIR_TILE; u++) lk[u] = 0;
+                for (uint g = 0u; g < 8u; g++) {
+                    uint e = 32u * g + 4u * lane;
+                    int qv0 = q3_value(base, e + 0u);
+                    int qv1 = q3_value(base, e + 1u);
+                    int qv2 = q3_value(base, e + 2u);
+                    int qv3 = q3_value(base, e + 3u);
+                    int wsc = q3_scale(base, 2u * g + (lane >> 2u));
+                    for (uint u = 0u; u < PAIR_TILE; u++) {
+                        if (!pair_live[u]) continue;
+                        int s4 = qv0 * q8_i8(u, e + 0u)
+                               + qv1 * q8_i8(u, e + 1u)
+                               + qv2 * q8_i8(u, e + 2u)
+                               + qv3 * q8_i8(u, e + 3u);
+                        lk[u] += wsc * s4;
+                    }
+                }
+                for (uint u = 0u; u < PAIR_TILE; u++) {
+                    if (pair_live[u]) lane_acc[u] = fma(wd * yd[u], float(lk[u]), lane_acc[u]);
+                }
             } else if (pc.type == Q4_K) {
                 uint sc[8];
                 uint mn[8];

@@ -3828,6 +3828,24 @@ static void parse_metadata(q36_model *m, q36_cursor *c) {
     }
 }
 
+/* True for a tensor of the appended NextN/MTP block (blk.<block_count-1>.*).
+ * Some third-party GGUFs store that block in types the loader has no decoder
+ * for (e.g. Q4_0); it is only read when the MTP head is bound, so such tensors
+ * are kept as zero-byte placeholders instead of rejecting the whole file. */
+static bool tensor_in_appended_nextn_block(const q36_model *m, q36_str name) {
+    q36_str arch;
+    char key[96], prefix[24];
+    uint32_t block_count = 0, nextn = 0;
+    int len;
+    if (!model_get_string(m, "general.architecture", &arch) || arch.len > 64) return false;
+    snprintf(key, sizeof(key), "%.*s.block_count", (int)arch.len, arch.ptr);
+    if (!model_get_u32(m, key, &block_count) || block_count == 0) return false;
+    snprintf(key, sizeof(key), "%.*s.nextn_predict_layers", (int)arch.len, arch.ptr);
+    if (!model_get_u32(m, key, &nextn) || nextn != 1) return false;
+    len = snprintf(prefix, sizeof(prefix), "blk.%u.", block_count - 1);
+    return len > 0 && (uint64_t)len <= name.len && memcmp(name.ptr, prefix, (size_t)len) == 0;
+}
+
 static void parse_tensors(q36_model *m, q36_cursor *c) {
     uint64_t remaining = c->size - c->pos;
     if (m->n_tensors > remaining / 32 ||
@@ -3848,6 +3866,10 @@ static void parse_tensors(q36_model *m, q36_cursor *c) {
         if (!cursor_u32(c, &t->type)) q36_die(c->error);
         if (!cursor_u64(c, &t->rel_offset)) q36_die(c->error);
         if (!tensor_nbytes(t->type, t->elements, &t->bytes)) {
+            if (tensor_in_appended_nextn_block(m, t->name)) {
+                t->bytes = 0;
+                continue;
+            }
             fprintf(stderr, "q36: unsupported tensor type %u for %.*s\n", t->type, (int)t->name.len, t->name.ptr);
             exit(1);
         }
@@ -4353,14 +4375,17 @@ static bool q36_layer_is_full_attention(uint32_t il) {
 
 static bool tensor_type_is_routed_gate_up(uint32_t type) {
     return type == Q36_TENSOR_Q4_K || type == Q36_TENSOR_IQ2_XXS ||
-           type == Q36_TENSOR_IQ2_S || type == Q36_TENSOR_IQ3_S ||
+           type == Q36_TENSOR_IQ2_S || type == Q36_TENSOR_IQ3_XXS ||
+           type == Q36_TENSOR_IQ3_S ||
            type == Q36_TENSOR_Q8_0;
 }
 
 static bool tensor_type_is_routed_down(uint32_t type) {
-    return type == Q36_TENSOR_Q2_K || type == Q36_TENSOR_Q4_K ||
+    return type == Q36_TENSOR_Q2_K || type == Q36_TENSOR_Q3_K ||
+           type == Q36_TENSOR_Q4_K ||
            type == Q36_TENSOR_Q5_K || type == Q36_TENSOR_Q6_K ||
            type == Q36_TENSOR_IQ2_S || type == Q36_TENSOR_IQ3_S ||
+           type == Q36_TENSOR_IQ3_XXS ||
            type == Q36_TENSOR_Q8_0;
 }
 
@@ -4747,8 +4772,11 @@ static void weights_bind(q36_weights *w, const q36_model *m) {
             l->ffn_down_shexp_scale = tensor_by_namef(m, "blk.%u.ffn_down_shexp.scale", il);
         }
     }
-    weights_validate_layout(w, !Q36_MODEL_DENSE &&
-                            m->n_tensors == Q36_TENSOR_COUNT + 20u);
+    /* All non-routed matrix types admitted by tensor_expect_cpu_matrix have
+     * CPU and generic GPU dispatches.  Quant recipes such as APEX vary those
+     * tensors without carrying the 20-tensor embedded NextN block, so tensor
+     * count is not a valid proxy for a mixed recipe. */
+    weights_validate_layout(w, !Q36_MODEL_DENSE);
 }
 
 #ifndef Q36_NO_GPU
@@ -5944,6 +5972,10 @@ static void config_validate_model(const q36_model *m) {
         fprintf(stderr, "q36: unsupported architecture: %.*s\n",
                 (int)arch.len, arch.ptr);
         exit(1);
+    }
+    const q36_tensor *embd = model_find_tensor(m, "token_embd.weight");
+    if (embd && embd->ndim == 2 && embd->dim[1] > 0) {
+        g_q36_shape.n_vocab = (uint32_t)embd->dim[1];
     }
     prefix = g_q36_shape.arch;
     config_expect_string("general.architecture", arch, prefix);
@@ -10985,7 +11017,8 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
                 e->mtp_draft_tokens);
 #endif
     } else if (Q36_MODEL_DENSE && q36_backend_uses_graph(opt->backend) &&
-               tensor_by_namef(&e->model, "blk.%u.nextn.eh_proj.weight", Q36_N_LAYER)) {
+               tensor_by_namef(&e->model, "blk.%u.nextn.eh_proj.weight", Q36_N_LAYER) &&
+               tensor_by_namef(&e->model, "blk.%u.nextn.eh_proj.weight", Q36_N_LAYER)->bytes != 0) {
 #ifndef Q36_NO_GPU
         e->mtp_model = e->model;
         e->mtp_model.owned = false;

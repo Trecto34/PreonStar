@@ -130,16 +130,24 @@ VULKAN_SHADERS := \
 	vulkan/moe_down_q2k_f32b_iq2s.spv \
 	vulkan/moe_gate_up_decode.spv \
 	vulkan/moe_gate_up_decode_iq2s.spv \
+	vulkan/moe_gate_up_decode_iq3xxs.spv \
+	vulkan/moe_gate_up_decode_iq2s_iq2xxs.spv \
 	vulkan/moe_down_q2k_sum_decode_iq2s.spv \
 	vulkan/moe_down_q2k_sum_decode_iq3s.spv \
+	vulkan/moe_down_q2k_sum_decode_iq3xxs.spv \
+	vulkan/moe_down_q2k_sum_decode_q3k.spv \
 	vulkan/moe_down_q2k_f32b.spv \
 	vulkan/moe_down_q2k_sum_decode.spv \
 	vulkan/moe_gate_up_q4k_f32b.spv \
 	vulkan/moe_down_q4k_sum_decode.spv \
 	vulkan/moe_gate_up_gemm.spv \
 	vulkan/moe_gate_up_gemm_iq2s.spv \
+	vulkan/moe_gate_up_gemm_iq3xxs.spv \
+	vulkan/moe_gate_up_gemm_iq2s_iq2xxs.spv \
 	vulkan/moe_down_gemm_iq2s.spv \
 	vulkan/moe_down_gemm_iq3s.spv \
+	vulkan/moe_down_gemm_iq3xxs.spv \
+	vulkan/moe_down_gemm_q3k.spv \
 	vulkan/moe_down_gemm.spv \
 	vulkan/moe_matvec.spv \
 	vulkan/moe_matvec_fast.spv \
@@ -348,6 +356,12 @@ vulkan/moe_gate_up_decode.spv: vulkan/moe_gate_up_decode.comp
 vulkan/moe_gate_up_decode_iq2s.spv: vulkan/moe_gate_up_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
 
+vulkan/moe_gate_up_decode_iq3xxs.spv: vulkan/moe_gate_up_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3XXS -o $@ $<
+
+vulkan/moe_gate_up_decode_iq2s_iq2xxs.spv: vulkan/moe_gate_up_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_MIX_IQ2S_IQ2XXS -o $@ $<
+
 vulkan/moe_down_q2k_sum_decode_iq2s.spv: vulkan/moe_down_q2k_sum_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
 
@@ -355,6 +369,12 @@ vulkan/moe_down_q2k_sum_decode_iq2s.spv: vulkan/moe_down_q2k_sum_decode.comp
 # under IQ2_S gate/up).  Same sources as the Q2_K/IQ2_S variants.
 vulkan/moe_down_q2k_sum_decode_iq3s.spv: vulkan/moe_down_q2k_sum_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3S -o $@ $<
+
+vulkan/moe_down_q2k_sum_decode_iq3xxs.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3XXS -o $@ $<
+
+vulkan/moe_down_q2k_sum_decode_q3k.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_Q3K -o $@ $<
 
 vulkan/moe_down_q2k_f32b.spv: vulkan/moe_down_q2k_f32b.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
@@ -376,11 +396,23 @@ vulkan/moe_gate_up_gemm.spv: vulkan/moe_gate_up_gemm.comp
 vulkan/moe_gate_up_gemm_iq2s.spv: vulkan/moe_gate_up_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
 
+vulkan/moe_gate_up_gemm_iq3xxs.spv: vulkan/moe_gate_up_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3XXS -o $@ $<
+
+vulkan/moe_gate_up_gemm_iq2s_iq2xxs.spv: vulkan/moe_gate_up_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_MIX_IQ2S_IQ2XXS -o $@ $<
+
 vulkan/moe_down_gemm_iq2s.spv: vulkan/moe_down_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ2S -o $@ $<
 
 vulkan/moe_down_gemm_iq3s.spv: vulkan/moe_down_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3S -o $@ $<
+
+vulkan/moe_down_gemm_iq3xxs.spv: vulkan/moe_down_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3XXS -o $@ $<
+
+vulkan/moe_down_gemm_q3k.spv: vulkan/moe_down_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_Q3K -o $@ $<
 
 vulkan/moe_down_gemm.spv: vulkan/moe_down_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
