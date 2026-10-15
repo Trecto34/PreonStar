@@ -2278,3 +2278,12 @@ Every type already reached a tuned kernel except IQ1_M. Its one tensor
   kernel was not measured), or a mixed-type gate/up pair kernel. W6's pair covers
   only 12/64 layers on this file, and the same-type IQ3_S/IQ4_XS pairs (12 more
   layers) would be worth ~0.5-1% on paper, below the gate.
+
+## VeriLoop-E2-GSQ-RCO-IQ3_S decode rounds 1-2 — NO LEVER, kernels at practical bandwidth limit (2026-10-15)
+Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Swapped-.spv A/B, interleaved, 2 reps each:
+- **Round 1 (all REJECTED):** IQ3_XXS LDS float-grid + 16/128-entry sign LUT 19.4 / 17.1 (-12% / -23%); IQ3_S LDS grid + sign LUT 18.7 (-16%), + u16 loads 18.7; IQ4_XS uvec2 loads 22.1 and byte-pair LDS LUT 22.1 (flat); Q4_K lane-pair single-dword mapping 21.0 (-5%, closes the unbuilt item in the dot4 entry above).  LDS tables lose on wave64 gfx1013.
+- **Occupancy (`mmq_info`):** iq3_s r4 64 VGPR / 16 subgroups per SIMD, iq4_xs 64 / 16, iq3_xxs r4 64 / 16, q4k 56 / 18; 0 spills everywhere.  Not occupancy- or spill-limited.
+- **IQ3_S ablation:** all grid/sign/fma math removed, every load kept: 22.2 -> 23.5 tok/s (+5.7%).  u16 loads replacing the 4x byte `load_u32` alone: 22.1 (flat).  The kernel is not ALU- or load-instruction-bound.
+- **Achieved GB/s (GGUF bytes / profiled ms per tok):** IQ4_XS 362 (8.26 ms), IQ3_S 311 (11.29), IQ3_XXS 302 (6.82), Q4_K 279 (6.49), vs ~373 loads-only floor.  Best case all three laggards at floor saves ~4.4 ms of ~45 = ~24 tok/s, so 25 tok/s is out of reach by dominant-kernel work.
+- **Fusion:** summed kernel GPU time (~49 ms with timestamps) is >= wall (45 ms): no CPU/submit gap to recover.
+- `reconsider_if`: a repacked weight layout (changes the GGUF, out of scope) or hardware with more bandwidth.
