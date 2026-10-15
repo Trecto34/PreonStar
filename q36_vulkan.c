@@ -259,6 +259,7 @@ typedef struct {
     q36_vk_kernel dense_iq3_s_decode_full;
     q36_vk_kernel dense_iq3_s_decode_r4;
     q36_vk_kernel dense_iq3_s_decode_r1;
+    q36_vk_kernel dense_iq3_s_decode_nx;
     q36_vk_kernel dense_iq3_s_mmq;
     q36_vk_kernel dense_iq3_s_bm64_mmq;
     q36_vk_kernel dense_iq3_s_mmq_r4;
@@ -3392,6 +3393,7 @@ int q36_gpu_init(void) {
     q36_vk.dense_iq3_s_decode_full = Q36_VK_KERNEL("vulkan/dense_iq3_s_decode_full.spv", 4, 16, 1u << 2);
     q36_vk.dense_iq3_s_decode_r4 = Q36_VK_KERNEL("vulkan/dense_iq3_s_decode_r4.spv", 4, 16, 1u << 2);
     q36_vk.dense_iq3_s_decode_r1 = Q36_VK_KERNEL("vulkan/dense_iq3_s_decode_r1.spv", 4, 16, 1u << 2);
+    q36_vk.dense_iq3_s_decode_nx = Q36_VK_KERNEL("vulkan/dense_iq3_s_decode_nx.spv", 4, 20, 1u << 2);
     q36_vk.dense_iq3_s_mmq = Q36_VK_KERNEL("vulkan/dense_iq3_s_mmq.spv", 5, 20, 1u << 2);
     q36_vk.dense_iq3_s_bm64_mmq = Q36_VK_KERNEL("vulkan/dense_iq3_s_bm64_mmq.spv", 5, 20, 1u << 2);
     q36_vk.dense_iq3_s_mmq_r4 = Q36_VK_KERNEL("vulkan/dense_iq3_s_mmq_r4.spv", 5, 20, 1u << 2);
@@ -3827,6 +3829,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_q5k_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_r4);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_r1);
+    q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_nx);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_full);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_mmq_r4);
@@ -8920,9 +8923,10 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                         ((uint32_t)out_dim + 3u) / 4u :
                         ((uint32_t)out_dim + 4u) / 5u,
                     1, 1);
-            } else if (weight_type == Q36_VK_TENSOR_IQ3_XXS && out_dim % 4u == 0u &&
-                       n_tok >= 2u && n_tok <= 8u &&
-                       q36_vk_env_default_on("Q36_VK_DENSE_IQ3_NX")) {
+            } else if (out_dim % 4u == 0u && n_tok >= 2u && n_tok <= 8u &&
+                       q36_vk_env_default_on(weight_type == Q36_VK_TENSOR_IQ3_XXS ?
+                                             "Q36_VK_DENSE_IQ3_NX" :
+                                             "Q36_VK_DENSE_IQ3S_NX")) {
                 /* Small-batch activation rows share one weight unpack.
                  * dense_iq3_xxs_decode_r4 is ALU-bound (P4: 5.4 VALU/weight), and
                  * the 128-row MMQ tile costs a full tile for 2..8 rows
@@ -8940,14 +8944,17 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                     (uint32_t)out_dim, (uint32_t)n_tok,
                     (uint32_t)blocks, (uint32_t)row_bytes, scale,
                 };
+                bool xxs = weight_type == Q36_VK_TENSOR_IQ3_XXS;
                 const char *op = q36_vk_prof_iq3_shape(
                     weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
-                    (uint32_t)out_dim, "dense_iq3_xxs_decode_nx");
+                    (uint32_t)out_dim,
+                    xxs ? "dense_iq3_xxs_decode_nx" : "dense_iq3_s_decode_nx");
                 if (getenv("Q36_VK_DBG_IQ3N"))
                     fprintf(stderr, "IQ3F n_tok=%u in=%u out=%u nx\n",
                             (uint32_t)n_tok, (uint32_t)in_dim, (uint32_t)out_dim);
                 ok = q36_vk_run_unlocked(
-                    op, &q36_vk.dense_iq3_xxs_decode_nx,
+                    op, xxs ? &q36_vk.dense_iq3_xxs_decode_nx :
+                              &q36_vk.dense_iq3_s_decode_nx,
                     bindings, &push, sizeof(push),
                     ((uint32_t)out_dim + 3u) / 4u, 1, 1);
             } else {
