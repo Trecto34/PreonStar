@@ -265,6 +265,7 @@ typedef struct {
     q36_vk_kernel dense_iq3_s_mmq_r4;
     q36_vk_kernel dense_iq4_xs;
     q36_vk_kernel dense_iq4_xs_decode;
+    q36_vk_kernel dense_iq4_xs_decode_nx;
     q36_vk_kernel dense_iq4_xs_mmq;
     q36_vk_kernel dense_iq1_m;
     q36_vk_kernel dense_extra_decode;
@@ -3399,6 +3400,7 @@ int q36_gpu_init(void) {
     q36_vk.dense_iq3_s_mmq_r4 = Q36_VK_KERNEL("vulkan/dense_iq3_s_mmq_r4.spv", 5, 20, 1u << 2);
     q36_vk.dense_iq4_xs = Q36_VK_KERNEL("vulkan/dense_iq4_xs.spv", 3, 20, 1u << 2);
     q36_vk.dense_iq4_xs_decode = Q36_VK_KERNEL("vulkan/dense_iq4_xs_decode.spv", 3, 16, 1u << 2);
+    q36_vk.dense_iq4_xs_decode_nx = Q36_VK_KERNEL("vulkan/dense_iq4_xs_decode_nx.spv", 3, 20, 1u << 2);
     q36_vk.dense_iq4_xs_mmq = Q36_VK_KERNEL("vulkan/dense_iq4_xs_mmq.spv", 3, 20, 1u << 2);
     q36_vk.dense_iq1_m = Q36_VK_KERNEL("vulkan/dense_iq1_m.spv", 4, 20, 1u << 2);
     q36_vk.dense_extra_decode = Q36_VK_KERNEL("vulkan/dense_extra_decode.spv", 4, 20, 1u << 2);
@@ -3820,6 +3822,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_iq2s_pair);
     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_iq2s);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_mmq);
+    q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_decode_nx);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs);
     q36_vk_kernel_destroy(&q36_vk.dense_kquant_mmq);
@@ -8815,6 +8818,28 @@ bool q2_family = weight_type == Q36_VK_TENSOR_Q2_0 ||
                     (uint32_t)out_dim, "dense_iq4_xs_decode");
                 ok = q36_vk_run_unlocked(
                     op, &q36_vk.dense_iq4_xs_decode,
+                    bindings, &push, sizeof(push),
+                    ((uint32_t)out_dim + 3u) / 4u, 1, 1);
+            } else if (n_tok <= 8u && out_dim % 4u == 0u &&
+                       q36_vk_env_default_on("Q36_VK_DENSE_IQ4XS_NX")) {
+                /* Small-batch verify rows share one nibble unpack, as for IQ3_XXS
+                 * (dense_iq3_xxs_decode_nx); bit-exact with the n_tok == 1 decode
+                 * kernel, tests/test_dense_iq4xs_nx.c.  Replaces the 128-row MMQ tile. */
+                struct {
+                    uint32_t out_dim;
+                    uint32_t n_tok;
+                    uint32_t blocks;
+                    uint32_t row_bytes;
+                    float scale;
+                } push = {
+                    (uint32_t)out_dim, (uint32_t)n_tok,
+                    (uint32_t)blocks, (uint32_t)row_bytes, scale,
+                };
+                const char *op = q36_vk_prof_iq3_shape(
+                    weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
+                    (uint32_t)out_dim, "dense_iq4_xs_decode_nx");
+                ok = q36_vk_run_unlocked(
+                    op, &q36_vk.dense_iq4_xs_decode_nx,
                     bindings, &push, sizeof(push),
                     ((uint32_t)out_dim + 3u) / 4u, 1, 1);
             } else {

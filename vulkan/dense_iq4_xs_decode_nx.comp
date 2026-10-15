@@ -1,0 +1,131 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Up to NTOK activation rows per weight block, for the small (2..8 row) MTP
+ * verify and replay steps.  The IQ4_XS counterpart of
+ * dense_iq3_xxs_decode_nx.comp: the 136-byte IQ4_XS block is read and its
+ * nibbles unpacked once per weight word, then the same word feeds every
+ * activation row of the chunk.  Replaces the 128-row MMQ tile
+ * (dense_iq4_xs_mmq) that n_tok >= 2 otherwise falls onto.
+ *
+ * Each row's FMA chain is the same operands in the same order as
+ * dense_iq4_xs_decode (per-lane block striding, the 4-word packed walk, the
+ * per-block scale fma, then subgroupAdd), so every output row is bit-identical
+ * to a separate n_tok == 1 dispatch (tests/test_dense_iq4xs_nx.c).  The
+ * guarded partial chunk of an odd n_tok leaves the rows it does compute
+ * untouched.
+ *
+ * Requires out_dim % ROWS == 0 (the dispatch checks it, so no row guard is
+ * needed) and the q8_k activation layout written by add_rms_norm_q8_k.comp:
+ * row t of the activation starts at t * blocks * Q8K_WORDS words. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint ww[]; };
+layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint n_tok;
+    uint blocks;
+    uint row_bytes;
+    float scale;
+} pc;
+
+const uint ROWS = 4u;
+const uint NTOK = 2u;
+const uint Q8K_WORDS = 74u;
+const int values[16] = int[16](
+    -127, -104, -83, -65, -49, -35, -22, -10,
+       1,   13,  25,  38,  53,  69,  89, 113);
+shared float value_lut[16];
+
+vec4 unpack_i8(uint v) {
+    return vec4(float(bitfieldExtract(int(v), 0, 8)),
+                float(bitfieldExtract(int(v), 8, 8)),
+                float(bitfieldExtract(int(v), 16, 8)),
+                float(bitfieldExtract(int(v), 24, 8)));
+}
+
+vec4 unpack_iq4(uint v, uint shift) {
+    return vec4(value_lut[(v >> (shift + 0u)) & 15u],
+                value_lut[(v >> (shift + 8u)) & 15u],
+                value_lut[(v >> (shift + 16u)) & 15u],
+                value_lut[(v >> (shift + 24u)) & 15u]);
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint itid = lid & 7u;
+    uint first_row = gl_WorkGroupID.x * ROWS;
+    if (lid < 16u) value_lut[lid] = float(values[lid]);
+    barrier();
+
+    /* Whole-token-pair chunks; the last one is partial when n_tok is odd.  `tn`
+     * guards every token-indexed loop so a partial chunk neither reads a q8 row
+     * past the end of the activation buffer nor stores one. */
+    for (uint t0 = 0u; t0 < pc.n_tok; t0 += NTOK) {
+        const uint tn = min(NTOK, pc.n_tok - t0);
+        float acc[ROWS][NTOK];
+        for (uint r = 0u; r < ROWS; r++)
+            for (uint t = 0u; t < NTOK; t++) acc[r][t] = 0.0;
+
+        for (uint b = lid >> 3u; b < pc.blocks; b += 8u) {
+            vec4 qv[NTOK][8];
+            float yd[NTOK];
+            for (uint t = 0u; t < tn; t++) {
+                uint qbase = (t0 + t) * pc.blocks * Q8K_WORDS + b * Q8K_WORDS;
+                for (uint l = 0u; l < 8u; l++)
+                    qv[t][l] = unpack_i8(q8[qbase + 2u + 8u * itid + l]);
+                yd[t] = uintBitsToFloat(q8[qbase]);
+            }
+            uint ib = itid;
+
+            for (uint r = 0u; r < ROWS; r++) {
+                uint row = first_row + r;
+                uint base = (row * pc.row_bytes + 136u * b) >> 2u;
+                uint meta0 = ww[base];
+                uint meta1 = ww[base + 1u];
+                float sum[NTOK];
+                for (uint t = 0u; t < NTOK; t++) sum[t] = 0.0;
+                for (uint l = 0u; l < 4u; l++) {
+                    uint packed = ww[base + 2u + 4u * ib + l];
+                    vec4 w0 = unpack_iq4(packed, 0u);
+                    vec4 w1 = unpack_iq4(packed, 4u);
+                    for (uint t = 0u; t < tn; t++) {
+                        vec4 q0 = qv[t][l];
+                        vec4 q1 = qv[t][l + 4u];
+                        sum[t] = fma(w0.x, q0.x,
+                                 fma(w0.y, q0.y,
+                                 fma(w0.z, q0.z,
+                                 fma(w0.w, q0.w,
+                                 fma(w1.x, q1.x,
+                                 fma(w1.y, q1.y,
+                                 fma(w1.z, q1.z,
+                                 fma(w1.w, q1.w, sum[t]))))))));
+                    }
+                }
+                uint sl = meta1 >> (8u * (ib >> 1u));
+                uint sh = meta0 >> 16u;
+                int ls = int((sl >> (4u * (ib & 1u))) & 15u) |
+                         int(((sh >> (2u * ib)) & 3u) << 4u);
+                float wd = unpackHalf2x16(meta0).x;
+                for (uint t = 0u; t < tn; t++)
+                    acc[r][t] = fma(wd * yd[t] * float(ls - 32), sum[t], acc[r][t]);
+            }
+        }
+
+        for (uint r = 0u; r < ROWS; r++) {
+            uint row = first_row + r;
+            for (uint t = 0u; t < tn; t++) {
+                float total = subgroupAdd(acc[r][t]);
+                if (lid == 0u) y[(t0 + t) * pc.out_dim + row] = total * pc.scale;
+            }
+        }
+    }
+}
