@@ -184,6 +184,8 @@ VULKAN_SHADERS := \
 	vulkan/dense_extra_mmq_q2_0.spv \
 	vulkan/dense_kquant_mmq.spv \
 	vulkan/dense_kquant_decode.spv \
+	vulkan/dense_q4k_decode_nx.spv \
+	vulkan/dense_q5k_decode_nx.spv \
 	vulkan/dense_q4k_decode.spv \
 	vulkan/dense_q5k_decode.spv \
 	vulkan/moe_reduce.spv \
@@ -317,6 +319,12 @@ vulkan/dense_q4k_decode.spv: vulkan/dense_kquant_decode.comp
 
 vulkan/dense_q5k_decode.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q5K_ONLY=1 -DQ36_BOUNDS=0 -o $@ $<
+
+vulkan/dense_q4k_decode_nx.spv: vulkan/dense_kquant_decode_nx.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q4K_ONLY=1 -o $@ $<
+
+vulkan/dense_q5k_decode_nx.spv: vulkan/dense_kquant_decode_nx.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q5K_ONLY=1 -o $@ $<
 
 vulkan/matmul_q8_0_f32b.spv: vulkan/matmul_q8_0_f32b.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
@@ -627,6 +635,14 @@ tests/test_dense_iq4xs_nx.o: tests/test_dense_iq4xs_nx.c q36_gpu.h q36_cli_args.
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
 
 $(IQ4XS_NX_TEST): tests/test_dense_iq4xs_nx.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
+KQUANT_NX_TEST := tests/test_dense_kquant_nx
+
+tests/test_dense_kquant_nx.o: tests/test_dense_kquant_nx.c q36_gpu.h q36_cli_args.h
+	$(CC) $(GPU_CFLAGS) -I. -c -o $@ $<
+
+$(KQUANT_NX_TEST): tests/test_dense_kquant_nx.o q36_ssd.o q36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
 
 IQ1M_MMQ_TEST := tests/test_dense_iq1m_mmq

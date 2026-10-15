@@ -1,0 +1,156 @@
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Up to NTOK activation rows per weight block for Q4_K / Q5_K, for the small
+ * (2..8 row) MTP verify and replay steps.
+ *
+ * dense_q4k_decode / dense_q5k_decode take one activation row.  For n_tok >= 2
+ * the dispatch fell to the 128-row K-quant MMQ tile (dense_kquant_mmq +
+ * predequant_b16), a full tile per 2..8 rows.  Here the block's scales, nibbles
+ * and activation words are loaded once and feed every token in the chunk; only
+ * the dot-product chain is duplicated per token.
+ *
+ * Each (row, token) accumulates the same operands in the same order as the
+ * one-token kernel (same lane/block striding, same acc/qsum/part expressions,
+ * same subgroupAdd), so every output is bit-identical to a separate n_tok == 1
+ * dispatch (tests/test_dense_kquant_nx.c).  Chunks are independent, and the
+ * guarded partial chunk of an odd n_tok (tn) leaves the computed rows untouched.
+ *
+ * Built twice from this file: Q36_Q4K_ONLY (block 144 bytes) and Q36_Q5K_ONLY
+ * (block 176 bytes).  Requires out_dim % ROWS == 0 (the dispatch checks it) and
+ * the q8_k activation layout written by add_rms_norm_q8_k.comp: token t, block b
+ * starts at (t * blocks + b) * Q8K_WORDS words. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint ww[]; };
+layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint n_tok;
+    uint blocks;
+    uint row_bytes;
+    float scale;
+} pc;
+
+const uint ROWS = 4u;
+const uint NTOK = 2u;
+const uint Q8K_WORDS = 74u;
+
+uint load_u8(uint off) {
+    return (ww[off >> 2u] >> ((off & 3u) * 8u)) & 255u;
+}
+
+uint load_u32(uint off) {
+    return ww[off >> 2u];
+}
+
+float load_f16(uint off) {
+    return unpackHalf2x16(ww[off >> 2u] >> ((off & 2u) * 8u)).x;
+}
+
+void k4_scale_min(uint base, uint j, out uint sc, out uint mn) {
+    uint s0 = load_u8(base + 4u + j);
+    if (j < 4u) {
+        sc = s0 & 63u;
+        mn = load_u8(base + 8u + j) & 63u;
+    } else {
+        uint s1 = load_u8(base + 8u + j);
+        uint s2 = load_u8(base + j);
+        sc = (s1 & 15u) | ((s2 >> 6u) << 4u);
+        mn = (s1 >> 4u) | ((s0 >> 6u) << 4u);
+    }
+}
+
+vec4 unpack_i8(uint v) {
+    return vec4(float(bitfieldExtract(int(v), 0, 8)),
+                float(bitfieldExtract(int(v), 8, 8)),
+                float(bitfieldExtract(int(v), 16, 8)),
+                float(bitfieldExtract(int(v), 24, 8)));
+}
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint itid = lid & 15u;
+    uint first_row = gl_WorkGroupID.x * ROWS;
+
+    /* Token chunks are uniform across the workgroup, so subgroupAdd below is
+     * always reached convergently.  `tn` guards the token-indexed loops for a
+     * partial last chunk. */
+    for (uint t0 = 0u; t0 < pc.n_tok; t0 += NTOK) {
+        const uint tn = min(NTOK, pc.n_tok - t0);
+        float acc[ROWS][NTOK];
+        for (uint r = 0u; r < ROWS; r++)
+            for (uint t = 0u; t < NTOK; t++) acc[r][t] = 0.0;
+
+        for (uint b = lid >> 4u; b < pc.blocks; b += 4u) {
+            vec4 qvec[NTOK][4];
+            float qsum[NTOK];
+            float yd[NTOK];
+            for (uint t = 0u; t < tn; t++) {
+                uint qbase = (t0 + t) * pc.blocks * Q8K_WORDS + b * Q8K_WORDS;
+                for (uint i = 0u; i < 4u; i++)
+                    qvec[t][i] = unpack_i8(q8[qbase + 2u + 4u * itid + i]);
+                float s = 0.0;
+                for (uint i = 0u; i < 4u; i++)
+                    s += qvec[t][i].x + qvec[t][i].y + qvec[t][i].z + qvec[t][i].w;
+                qsum[t] = s;
+                yd[t] = uintBitsToFloat(q8[qbase]);
+            }
+
+            for (uint r = 0u; r < ROWS; r++) {
+                uint row = first_row + r;
+#ifdef Q36_Q5K_ONLY
+                uint base = row * pc.row_bytes + 176u * b;
+#else
+                uint base = row * pc.row_bytes + 144u * b;
+#endif
+                uint group = itid >> 1u;
+                uint sc;
+                uint mn;
+                k4_scale_min(base, group, sc, mn);
+                float qdot[NTOK];
+                for (uint t = 0u; t < NTOK; t++) qdot[t] = 0.0;
+                for (uint i = 0u; i < 4u; i++) {
+                    uint idx = 16u * itid + 4u * i;
+                    uint packed;
+#ifdef Q36_Q5K_ONLY
+                    uint ql = load_u32(base + 48u + (group >> 1u) * 32u +
+                                       (idx & 31u));
+                    uint low = (group & 1u) == 0u ?
+                        ql & 0x0f0f0f0fu : (ql >> 4u) & 0x0f0f0f0fu;
+                    uint qh = load_u32(base + 16u + (idx & 31u));
+                    packed = low | (((qh >> group) & 0x01010101u) << 4u);
+#else
+                    uint ql = load_u32(base + 16u + (group >> 1u) * 32u +
+                                       (idx & 31u));
+                    packed = (group & 1u) == 0u ?
+                        ql & 0x0f0f0f0fu : (ql >> 4u) & 0x0f0f0f0fu;
+#endif
+                    vec4 wv = unpack_i8(packed);
+                    for (uint t = 0u; t < tn; t++)
+                        qdot[t] += dot(wv, qvec[t][i]);
+                }
+                float d = load_f16(base);
+                float dm = load_f16(base + 2u);
+                for (uint t = 0u; t < tn; t++) {
+                    float part = d * float(sc) * qdot[t] -
+                                 dm * float(mn) * qsum[t];
+                    acc[r][t] = fma(yd[t], part, acc[r][t]);
+                }
+            }
+        }
+
+        for (uint r = 0u; r < ROWS; r++) {
+            uint row = first_row + r;
+            for (uint t = 0u; t < tn; t++) {
+                float total = subgroupAdd(acc[r][t]);
+                if (lid == 0u)
+                    y[(t0 + t) * pc.out_dim + row] = total * pc.scale;
+            }
+        }
+    }
+}

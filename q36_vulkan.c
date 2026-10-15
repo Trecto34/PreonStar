@@ -286,6 +286,8 @@ typedef struct {
     q36_vk_kernel dense_kquant_decode;
     q36_vk_kernel dense_q4k_decode;
     q36_vk_kernel dense_q5k_decode;
+    q36_vk_kernel dense_q4k_decode_nx;
+    q36_vk_kernel dense_q5k_decode_nx;
     q36_vk_kernel moe_reduce;
     q36_vk_kernel ffn_tail;
     q36_vk_kernel fwht;
@@ -3422,6 +3424,8 @@ int q36_gpu_init(void) {
     q36_vk.dense_kquant_decode = Q36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
     q36_vk.dense_q4k_decode = Q36_VK_KERNEL("vulkan/dense_q4k_decode.spv", 3, 28, 1u << 2);
     q36_vk.dense_q5k_decode = Q36_VK_KERNEL("vulkan/dense_q5k_decode.spv", 3, 28, 1u << 2);
+    q36_vk.dense_q4k_decode_nx = Q36_VK_KERNEL("vulkan/dense_q4k_decode_nx.spv", 3, 20, 1u << 2);
+    q36_vk.dense_q5k_decode_nx = Q36_VK_KERNEL("vulkan/dense_q5k_decode_nx.spv", 3, 20, 1u << 2);
     q36_vk.moe_reduce = Q36_VK_KERNEL("vulkan/moe_reduce.spv", 3, 8, 1u << 2);
     q36_vk.ffn_tail = Q36_VK_KERNEL("vulkan/ffn_tail.spv", 3, 8, 1u << 0);
 
@@ -3830,6 +3834,8 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_kquant_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_q4k_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_q5k_decode);
+    q36_vk_kernel_destroy(&q36_vk.dense_q4k_decode_nx);
+    q36_vk_kernel_destroy(&q36_vk.dense_q5k_decode_nx);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_r4);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_r1);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_nx);
@@ -4301,6 +4307,8 @@ static void q36_vk_prepare_dense_kernels(void) {
         &q36_vk.dense_iq3_xxs_decode_r4,
         &q36_vk.dense_q4k_decode,
         &q36_vk.dense_kquant_decode,
+        &q36_vk.dense_q4k_decode_nx,
+        &q36_vk.dense_q5k_decode_nx,
         &q36_vk.dense_extra_decode_iq2s,
         &q36_vk.dense_extra_mmq_iq2s,
         &q36_vk.dense_extra_decode_iq2s_pair,
@@ -5657,6 +5665,43 @@ int q36_gpu_matmul_k_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                                    q5_full ? &q36_vk.dense_q5k_decode :
                                              &q36_vk.dense_kquant_decode;
             ok = q36_vk_run_unlocked(op, kernel,
+                                     bindings, &push, sizeof(push),
+                                     ((uint32_t)out_dim + 3u) / 4u, 1, 1);
+        }
+        pthread_mutex_unlock(&q36_vk_mu);
+        return ok;
+    }
+
+    /* Small-batch verify/replay (2..8 rows): the one-token decode kernels take
+     * n_tok == 1 only, and the fallback is the 128-row K-quant MMQ tile.  The nx
+     * kernel shares each block's loads across the rows and keeps every row's
+     * one-token accumulation, so the result is bit-identical to n_tok == 1
+     * (tests/test_dense_kquant_nx.c). */
+    if (!q36_gpu_quality && n_tok >= 2u && n_tok <= 8u &&
+        (weight_type == Q36_VK_TENSOR_Q4_K || weight_type == Q36_VK_TENSOR_Q5_K) &&
+        out_dim % 4u == 0u &&
+        q36_vk_env_default_on("Q36_VK_DENSE_KQUANT_NX")) {
+        pthread_mutex_lock(&q36_vk_mu);
+        q36_gpu_tensor *weights = q36_vk_weight_get_unlocked(source, weight_bytes);
+        int ok = weights != NULL;
+        if (ok) {
+            struct {
+                uint32_t out_dim;
+                uint32_t n_tok;
+                uint32_t blocks;
+                uint32_t row_bytes;
+                float scale;
+            } push = {
+                (uint32_t)out_dim, (uint32_t)n_tok,
+                (uint32_t)blocks, (uint32_t)row_bytes, scale,
+            };
+            const q36_gpu_tensor *bindings[3] = { weights, q8, out };
+            bool q4 = weight_type == Q36_VK_TENSOR_Q4_K;
+            const char *op = q36_vk_prof_iq3_shape(
+                weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
+                (uint32_t)out_dim, q4 ? "dense_q4k_decode_nx" : "dense_q5k_decode_nx");
+            ok = q36_vk_run_unlocked(op,
+                                     q4 ? &q36_vk.dense_q4k_decode_nx : &q36_vk.dense_q5k_decode_nx,
                                      bindings, &push, sizeof(push),
                                      ((uint32_t)out_dim + 3u) / 4u, 1, 1);
         }
