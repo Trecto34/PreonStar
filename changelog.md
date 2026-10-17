@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-16
+
+- Added `repeat_penalty` (llama.cpp-style multiplicative; request alias
+  `repetition_penalty`) to the sampler, the server API and `q36-agent --repeat-penalty`.
+- Added `q36-server` startup defaults `--temp`, `--top-k`, `--top-p`, `--min-p`
+  and `--repeat-penalty`; explicit request values still win.
+- Penalized sampling now restores logits exactly instead of adding the penalty back.
+
 ## 2026-09-17
 
 - Added Swift Qwen3.8-27B download support for `ukisai/Swift-Qwen3.8-27B-GGUF`.

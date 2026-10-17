@@ -278,7 +278,8 @@ bool q36_session_vision_prefix_matches(const q36_session *s,
                                        const q36_vision_span *images, size_t count);
 int q36_session_argmax_penalized_excluding(q36_session *s, int excluded_id,
                                            const int *tokens, int n_tokens,
-                                           float presence, float frequency);
+                                           float presence, float frequency,
+                                           float repeat_penalty);
 bool q36_session_has_vision_state(const q36_session *s);
 /* Identity metadata only; embedding data is NULL. Valid until the next sync. */
 const q36_vision_span *q36_session_vision_spans(const q36_session *s, size_t *count);
@@ -296,6 +297,7 @@ int q36_session_sample_penalized(q36_session *s,
                                  const int *tokens, int n_tokens,
                                  float presence_penalty,
                                  float frequency_penalty,
+                                 float repeat_penalty,
                                  uint64_t *rng);
 #ifdef Q36_TEST_HOOKS
 int q36_test_sample_logits(const float *logits, uint32_t n_vocab,
@@ -308,6 +310,7 @@ int q36_test_sample_logits_penalized(float *logits, uint32_t n_vocab,
                                      const int *tokens, int n_tokens,
                                      float presence_penalty,
                                      float frequency_penalty,
+                                     float repeat_penalty,
                                      uint64_t *rng, float *prob_scratch);
 uint32_t q36_test_kv_next_cap(uint32_t cap, uint32_t need, uint32_t limit);
 #endif

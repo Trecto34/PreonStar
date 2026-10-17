@@ -94,6 +94,7 @@ typedef struct {
     float top_p;
     float min_p;
     float frequency_penalty;
+    float repeat_penalty;
     uint64_t seed;
     q36_think_mode think_mode;
     bool think_mode_set;
@@ -101,6 +102,7 @@ typedef struct {
     bool top_k_set;
     bool top_p_set;
     bool min_p_set;
+    bool repeat_penalty_set;
 } agent_generation_options;
 
 typedef struct {
@@ -800,6 +802,7 @@ static agent_config parse_options(int argc, char **argv) {
             .top_k = 0,
             .top_p = Q36_DEFAULT_TOP_P,
             .min_p = Q36_DEFAULT_MIN_P,
+            .repeat_penalty = 1.0f,
             .think_mode = Q36_THINK_HIGH,
         },
     };
@@ -909,6 +912,11 @@ static agent_config parse_options(int argc, char **argv) {
                    !strcmp(arg, "--default-frequency-penalty")) {
             c.gen.frequency_penalty = parse_float_range(
                 need_arg(&i, argc, argv, arg), arg, -2.0f, 2.0f);
+        } else if (!strcmp(arg, "--repeat-penalty") ||
+                   !strcmp(arg, "--default-repeat-penalty")) {
+            c.gen.repeat_penalty = parse_float_range(
+                need_arg(&i, argc, argv, arg), arg, 0.5f, 2.0f);
+            c.gen.repeat_penalty_set = true;
         } else if (!strcmp(arg, "--seed")) {
             c.gen.seed = parse_u64(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--think")) {
@@ -7378,6 +7386,7 @@ static void test_agent_streaming_defaults(void) {
                          "--top-p", "0.6", "--min-p", "0.01"};
     char *budgetv[] = {"q36-agent", "--thinking-budget", "32000"};
     char *penaltyv[] = {"q36-agent", "--default-frequency-penalty", "0.15"};
+    char *repeatv[] = {"q36-agent", "--repeat-penalty", "1.1"};
     char *uptov[] = {"q36-agent", "--edit-upto"};
     agent_config def = parse_options(1, defv);
     agent_config stream = parse_options(2, streamv);
@@ -7393,6 +7402,7 @@ static void test_agent_streaming_defaults(void) {
     agent_config override = parse_options(9, overridev);
     agent_config budget = parse_options(3, budgetv);
     agent_config penalty = parse_options(3, penaltyv);
+    agent_config repeat = parse_options(3, repeatv);
     agent_config upto = parse_options(2, uptov);
     agent_apply_sampling_defaults(&override, NULL);
 
@@ -7402,6 +7412,10 @@ static void test_agent_streaming_defaults(void) {
     AGENT_TEST_ASSERT(budget.gen.thinking_budget == 32000);
     AGENT_TEST_ASSERT(def.gen.frequency_penalty == 0.0f);
     AGENT_TEST_ASSERT(penalty.gen.frequency_penalty == 0.15f);
+    AGENT_TEST_ASSERT(def.gen.repeat_penalty == 1.0f);
+    AGENT_TEST_ASSERT(!def.gen.repeat_penalty_set);
+    AGENT_TEST_ASSERT(repeat.gen.repeat_penalty == 1.1f);
+    AGENT_TEST_ASSERT(repeat.gen.repeat_penalty_set);
     AGENT_TEST_ASSERT(!def.edit_upto);
     AGENT_TEST_ASSERT(upto.edit_upto);
     AGENT_TEST_ASSERT(def.gen.ctx_size == AGENT_RESIDENT_CTX);
@@ -10890,6 +10904,7 @@ typedef struct {
     float top_p;
     float min_p;
     float frequency_penalty;
+    float repeat_penalty;
     const int *penalty_tokens;
     int penalty_token_count;
 } agent_sampling_request;
@@ -10903,6 +10918,7 @@ static agent_sampling_request agent_sampling_request_build(
         .top_p = greedy ? 1.0f : cfg->gen.top_p,
         .min_p = greedy ? 0.0f : cfg->gen.min_p,
         .frequency_penalty = greedy ? 0.0f : cfg->gen.frequency_penalty,
+        .repeat_penalty = greedy ? 1.0f : cfg->gen.repeat_penalty,
     };
     if (!greedy && transcript && generated > 0 && generated <= transcript->len) {
         request.penalty_tokens = transcript->v + transcript->len - generated;
@@ -10919,7 +10935,7 @@ static int worker_sample_with_mode(agent_worker *w, const agent_config *cfg,
         w->session, request.temperature, request.top_k,
         request.top_p, request.min_p,
         request.penalty_tokens, request.penalty_token_count,
-        0.0f, request.frequency_penalty, rng);
+        0.0f, request.frequency_penalty, request.repeat_penalty, rng);
 }
 
 static const char agent_partial_tool_interrupt_warning[] =
@@ -11172,6 +11188,10 @@ static char *agent_remote_request(agent_worker *w, bool thinking, int think_budg
     }
     if (cfg->gen.frequency_penalty != 0.0f) {
         snprintf(num, sizeof(num), ",\"frequency_penalty\":%g", (double)cfg->gen.frequency_penalty);
+        agent_json_puts(&out, &len, &cap, num);
+    }
+    if (cfg->gen.repeat_penalty != 1.0f) {
+        snprintf(num, sizeof(num), ",\"repeat_penalty\":%g", (double)cfg->gen.repeat_penalty);
         agent_json_puts(&out, &len, &cap, num);
     }
     if (cfg->gen.seed) {
@@ -11680,6 +11700,8 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             think_budget);
         agent_trace(w, "active_frequency_penalty=%.3f",
                     (double)cfg->gen.frequency_penalty);
+        agent_trace(w, "active_repeat_penalty=%.3f",
+                    (double)cfg->gen.repeat_penalty);
         while (generated < max_tokens && !worker_should_interrupt(w)) {
             worker_apply_pending_power(w);
             bool greedy_sampling = agent_stream_wants_greedy_sampling(&stream);

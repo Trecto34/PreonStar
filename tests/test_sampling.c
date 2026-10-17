@@ -340,7 +340,7 @@ int main(int argc, char **argv) {
     const int seen_once[] = {0};
     int token = q36_test_sample_logits_penalized(
         penalty_logits, 3, 0.0f, 0, 1.0f, 0.0f,
-        seen_once, 1, 1.0f, 0.0f, &penalty_rng, penalty_scratch);
+        seen_once, 1, 1.0f, 0.0f, 1.0f, &penalty_rng, penalty_scratch);
     CHECK(token == 1, "presence penalty expected token 1, got %d", token);
     CHECK(fabsf(penalty_logits[0]) < 1.0e-6f && penalty_logits[1] == -0.5f,
           "presence penalty did not restore logits");
@@ -348,10 +348,27 @@ int main(int argc, char **argv) {
     const int seen_twice[] = {0, 0};
     token = q36_test_sample_logits_penalized(
         penalty_logits, 3, 0.0f, 0, 1.0f, 0.0f,
-        seen_twice, 2, 0.0f, 0.3f, &penalty_rng, penalty_scratch);
+        seen_twice, 2, 0.0f, 0.3f, 1.0f, &penalty_rng, penalty_scratch);
     CHECK(token == 1, "frequency penalty expected token 1, got %d", token);
     CHECK(fabsf(penalty_logits[0]) < 1.0e-6f && penalty_logits[1] == -0.5f,
           "frequency penalty did not restore logits");
+
+    /* rp=2.0 halves the seen positive logit 1.0 -> 0.5, so unseen 0.9 wins. */
+    float repeat_logits[] = {1.0f, 0.9f, -2.0f};
+    float repeat_scratch[3];
+    uint64_t repeat_rng = 1;
+    const int seen_repeat[] = {0};
+    token = q36_test_sample_logits_penalized(
+        repeat_logits, 3, 0.0f, 0, 1.0f, 0.0f,
+        seen_repeat, 1, 0.0f, 0.0f, 2.0f, &repeat_rng, repeat_scratch);
+    CHECK(token == 1, "repeat penalty expected token 1, got %d", token);
+    CHECK(repeat_logits[0] == 1.0f && repeat_logits[1] == 0.9f &&
+          repeat_logits[2] == -2.0f, "repeat penalty did not restore logits");
+    const int unpenalized = q36_test_sample_logits_penalized(
+        repeat_logits, 3, 0.0f, 0, 1.0f, 0.0f,
+        seen_repeat, 1, 0.0f, 0.0f, 1.0f, &repeat_rng, repeat_scratch);
+    CHECK(unpenalized == 0, "repeat_penalty 1.0 expected token 0, got %d",
+          unpenalized);
 
     free(logits);
     free(scratch);

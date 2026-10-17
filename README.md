@@ -405,7 +405,9 @@ generation continues. A repetitive partial tool call is discarded before it
 can execute, and the model is asked to express the same change compactly.
 `--frequency-penalty` (also accepted as `--default-frequency-penalty`) is an
 optional low-strength sampler aid; it defaults to 0 and is not used for greedy
-native tool syntax.
+native tool syntax. `--repeat-penalty F` (0.5..2.0, default 1 = off) adds the
+multiplicative llama.cpp-style penalty, in local mode and forwarded to a
+`--server` as `repeat_penalty`.
 
 With Qwen3.8-27B, `--thinking-budget` also selects the starting effort:
 up to 8000 tokens is `low`, up to 16000 is `medium`, up to 24000 is `high`,
@@ -686,10 +688,26 @@ Supported endpoints:
 
 `/v1/chat/completions` accepts the usual OpenAI-style `messages`,
 `max_tokens`/`max_completion_tokens`, `temperature`, `top_p`, `top_k`,
-`min_p`, `presence_penalty`, `frequency_penalty`, `seed`, `stream`,
+`min_p`, `presence_penalty`, `frequency_penalty`, `repeat_penalty` (alias
+`repetition_penalty`), `seed`, `stream`,
 `stream_options.include_usage`, `tools`, and `tool_choice`. Tool schemas and
 calls use the native Qwen3 Coder tagged format, and generated calls are mapped
 back to OpenAI tool calls.
+
+Server sampling defaults apply when a request omits a field; explicit request
+values always win:
+
+```
+q36-server --temp 0.2 --top-p 0.9 --min-p 0.05 --top-k 40 --repeat-penalty 1.05
+```
+
+`--temp` (0..100), `--top-k` (0 = off), `--top-p` (0..1), `--min-p` (0..1) and
+`--repeat-penalty` (0.5..2.0, 1 = off) override the model's built-in defaults.
+`repeat_penalty` is llama.cpp-style: the logit of every token already generated
+is divided by the penalty when positive and multiplied by it when negative.
+Out-of-range request values are clamped to 0.5..2.0. It is disabled inside
+native tool-call syntax, like the other penalties. For coding, keep the V cache
+at `-ctv q8_0` or `f16`; the Vulkan/Metal default is q4_0.
 
 Both Qwen3.6 and Qwen3.8 accept the fixed-template controls:
 

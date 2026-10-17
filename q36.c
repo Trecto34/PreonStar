@@ -295,6 +295,7 @@ static const gguf_type_info gguf_types[] = {
 enum {
     Q36_TENSOR_F32 = 0,
     Q36_TENSOR_F16 = 1,
+    Q36_TENSOR_Q4_0 = 2,
     Q36_TENSOR_Q8_0 = 8,
     Q36_TENSOR_Q2_K = 10,
     Q36_TENSOR_Q3_K = 11,
@@ -335,12 +336,15 @@ typedef struct {
     bool hadamard_rotate;
     bool hadamard_inverse;
     bool hadamard_grouped;   /* GDN ssm_out: activation needs a tiled->grouped permute */
+    bool from_q4_0;          /* file stores Q4_0; loader re-encodes it as Q8_0 in the arena */
 } q36_tensor;
 
 typedef struct {
     int fd;
     const uint8_t *map;
-    uint64_t size;
+    uint64_t size;          /* file bytes plus the converted-tensor arena, if any */
+    uint64_t file_size;     /* bytes actually backed by the GGUF file */
+    uint64_t map_len;       /* reserved address range starting at map */
     uint32_t version;
     uint64_t n_kv;
     uint64_t n_tensors;
@@ -3800,7 +3804,7 @@ static void model_close(q36_model *m) {
     if (m->owned) {
         free(m->kv);
         free(m->tensors);
-        if (m->map) munmap((void *)m->map, (size_t)m->size);
+        if (m->map) munmap((void *)m->map, (size_t)m->map_len);
         if (m->fd >= 0) close(m->fd);
     }
     memset(m, 0, sizeof(*m));
@@ -3846,6 +3850,50 @@ static bool tensor_in_appended_nextn_block(const q36_model *m, q36_str name) {
     return len > 0 && (uint64_t)len <= name.len && memcmp(name.ptr, prefix, (size_t)len) == 0;
 }
 
+/* Re-encode Q4_0 tensors as Q8_0 into an anonymous arena right after the file
+ * in the reserved address range, so downstream code keeps addressing weights as
+ * map + abs_offset.  Lossless: Q4_0 value (nibble - 8) is in [-8, 7] and keeps
+ * the block's f16 scale, so the dequantized weights are bit-identical. */
+static void model_convert_q4_0(q36_model *m) {
+    const uint64_t arena_off = align_up(m->file_size, 1u << 20);
+    uint64_t used = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            if (used == 0) return;
+            uint64_t len = align_up(used, 1u << 20);
+            if (arena_off + len > m->map_len ||
+                mmap((void *)(m->map + arena_off), (size_t)len, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED)
+                q36_die("cannot map the Q4_0 conversion arena");
+            used = 0;
+        }
+        for (uint64_t i = 0; i < m->n_tensors; i++) {
+            q36_tensor *t = &m->tensors[i];
+            if (!t->from_q4_0) continue;
+            uint64_t src = m->tensor_data_pos + t->rel_offset;
+            uint64_t q4_bytes = t->elements / Q36_QK8_0 * Q36_Q4_0_BYTES;
+            if (src > m->file_size || q4_bytes > m->file_size - src)
+                q36_die("tensor points outside GGUF file");
+            uint64_t dst = align_up(used, 32);
+            used = dst + t->bytes;
+            if (pass == 0) continue;
+            const uint8_t *q4 = m->map + src;
+            q36_block_q8_0 *q8 = (q36_block_q8_0 *)(void *)((uint8_t *)m->map + arena_off + dst);
+            for (uint64_t b = 0; b < t->elements / Q36_QK8_0; b++, q4 += Q36_Q4_0_BYTES) {
+                memcpy(&q8[b].d, q4, sizeof(q8[b].d));
+                for (uint32_t j = 0; j < 16; j++) {
+                    q8[b].qs[j] = (int8_t)((q4[2 + j] & 15u) - 8);
+                    q8[b].qs[j + 16] = (int8_t)((q4[2 + j] >> 4) - 8);
+                }
+            }
+            t->abs_offset = arena_off + dst;
+            if (t->bytes > m->max_tensor_bytes) m->max_tensor_bytes = t->bytes;
+        }
+    }
+    mprotect((void *)(m->map + arena_off), (size_t)align_up(used, 1u << 20), PROT_READ);
+    m->size = arena_off + used;
+}
+
 static void parse_tensors(q36_model *m, q36_cursor *c) {
     uint64_t remaining = c->size - c->pos;
     if (m->n_tensors > remaining / 32 ||
@@ -3865,6 +3913,16 @@ static void parse_tensors(q36_model *m, q36_cursor *c) {
         }
         if (!cursor_u32(c, &t->type)) q36_die(c->error);
         if (!cursor_u64(c, &t->rel_offset)) q36_die(c->error);
+        if (t->type == Q36_TENSOR_Q4_0 && !tensor_in_appended_nextn_block(m, t->name)) {
+            /* Q4_0 -> Q8_0 is exact (q-8 fits int8, same f16 scale), so the
+             * whole Q8_0 kernel set serves these tensors; see
+             * model_convert_q4_0. */
+            if ((t->elements % Q36_QK8_0) != 0) q36_die("q4_0 tensor row is not a multiple of 32");
+            t->from_q4_0 = true;
+            t->type = Q36_TENSOR_Q8_0;
+            t->bytes = t->elements / Q36_QK8_0 * sizeof(q36_block_q8_0);
+            continue;
+        }
         if (!tensor_nbytes(t->type, t->elements, &t->bytes)) {
             if (tensor_in_appended_nextn_block(m, t->name)) {
                 t->bytes = 0;
@@ -3879,11 +3937,13 @@ static void parse_tensors(q36_model *m, q36_cursor *c) {
         q36_tensor *t = &m->tensors[i];
         if (t->rel_offset > UINT64_MAX - m->tensor_data_pos) q36_die("tensor offset overflow");
         t->abs_offset = m->tensor_data_pos + t->rel_offset;
+        if (t->from_q4_0) continue;   /* placed by model_convert_q4_0 */
         if (t->bytes != 0 && (t->abs_offset > m->size || t->bytes > m->size - t->abs_offset)) {
             q36_die("tensor points outside GGUF file");
         }
         if (t->bytes > m->max_tensor_bytes) m->max_tensor_bytes = t->bytes;
     }
+    model_convert_q4_0(m);
 }
 
 static void model_open(q36_model *m, const char *path, bool graph_mapping) {
@@ -3899,11 +3959,17 @@ static void model_open(q36_model *m, const char *path, bool graph_mapping) {
     if (fstat(fd, &st) == -1) q36_die_errno("cannot stat model", path);
     if (st.st_size < 32) q36_die("model file is too small to be GGUF");
     if ((uintmax_t)st.st_size > SIZE_MAX) q36_die("model file is too large to map");
-    map = mmap(NULL, (size_t)st.st_size, PROT_READ, graph_mapping ? MAP_SHARED : MAP_PRIVATE, fd, 0);
-    if (map == MAP_FAILED) q36_die_errno("cannot mmap model", path);
+    /* Reserve twice the file in address space (never committed) so a Q4_0
+     * conversion arena can follow the file mapping; see model_convert_q4_0. */
+    uint64_t reserve = align_up((uint64_t)st.st_size, 1u << 20) + 2u * (uint64_t)st.st_size;
+    map = mmap(NULL, (size_t)reserve, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (map == MAP_FAILED) q36_die_errno("cannot reserve model address range", path);
+    if (mmap(map, (size_t)st.st_size, PROT_READ, (graph_mapping ? MAP_SHARED : MAP_PRIVATE) | MAP_FIXED, fd, 0) == MAP_FAILED)
+        q36_die_errno("cannot mmap model", path);
     m->fd = fd;
     m->map = map;
-    m->size = (uint64_t)st.st_size;
+    m->map_len = reserve;
+    m->size = m->file_size = (uint64_t)st.st_size;
     m->owned = true;
     c = cursor_at(m, 0);
     if (!cursor_u32(&c, &magic)) q36_die(c.error);
@@ -4313,10 +4379,10 @@ done:
     free(x); free(norm); free(qkv); free(work); free(wide);
     q36_image_patches_free(&patches);
 #ifdef MADV_DONTNEED
-    madvise((void *)m->map, (size_t)m->size, MADV_DONTNEED);
+    madvise((void *)m->map, (size_t)m->file_size, MADV_DONTNEED);
 #endif
 #ifdef POSIX_FADV_DONTNEED
-    posix_fadvise(m->fd, 0, (off_t)m->size, POSIX_FADV_DONTNEED);
+    posix_fadvise(m->fd, 0, (off_t)m->file_size, POSIX_FADV_DONTNEED);
 #endif
     return ok;
 }
@@ -4374,8 +4440,8 @@ static bool q36_layer_is_full_attention(uint32_t il) {
 }
 
 static bool tensor_type_is_routed_gate_up(uint32_t type) {
-    return type == Q36_TENSOR_Q4_K || type == Q36_TENSOR_IQ2_XXS ||
-           type == Q36_TENSOR_IQ2_S || type == Q36_TENSOR_IQ3_XXS ||
+    return type == Q36_TENSOR_Q4_K || type == Q36_TENSOR_Q3_K ||
+           type == Q36_TENSOR_IQ2_XXS || type == Q36_TENSOR_IQ2_S || type == Q36_TENSOR_IQ3_XXS ||
            type == Q36_TENSOR_IQ3_S ||
            type == Q36_TENSOR_Q8_0;
 }
@@ -5980,7 +6046,10 @@ static void config_validate_model(const q36_model *m) {
     prefix = g_q36_shape.arch;
     config_expect_string("general.architecture", arch, prefix);
     config_expect_string("tokenizer.ggml.model", tok_model, "gpt2");
-    config_expect_string("tokenizer.ggml.pre", tok_pre, "qwen35");
+    /* Some converters label the identical Qwen3.5 vocab/merges "qwen2"; the
+     * engine's pre-tokenizer is the qwen35 one either way. */
+    if (!q36_streq(tok_pre, "qwen2"))
+        config_expect_string("tokenizer.ggml.pre", tok_pre, "qwen35");
 #define Q36_META_KEY(suffix) snprintf(key, sizeof(key), "%s.%s", prefix, suffix)
 #define Q36_EXPECT_U32(suffix, expected) do { \
     Q36_META_KEY(suffix); \
@@ -6943,6 +7012,7 @@ static bool q36_vulkan_cache_reserve(q36_vulkan_full_attn_cache *c,
                                      uint32_t cap, uint32_t rows) {
     q36_gpu_tensor *k, *v;
     if (!c || rows > c->cap || cap <= c->cap) return false;
+    q36_gpu_trim_scratch();
     k = q36_gpu_tensor_alloc_uninitialized((uint64_t)cap * c->k_row_bytes);
     v = q36_gpu_tensor_alloc_uninitialized((uint64_t)cap * c->v_row_bytes);
     if (!k || !v) goto fail;
@@ -6973,7 +7043,10 @@ static bool q36_vulkan_runtime_reserve_kv(q36_vulkan_runtime *rt,
         c = &rt->full[il];
         if (need <= c->cap) continue;
         cap = q36_kv_next_cap(c->cap, need, limit);
-        if (!cap || !q36_vulkan_cache_reserve(c, cap, rows)) return false;
+        if (!cap) return false;
+        /* Tight heap: retry with the exact need instead of the 1.25x step. */
+        if (!q36_vulkan_cache_reserve(c, cap, rows) &&
+            (need == cap || !q36_vulkan_cache_reserve(c, need, rows))) return false;
     }
     if (rt->mtp_enabled && need > rt->mtp_full.cap) {
         uint32_t cap = q36_kv_next_cap(rt->mtp_full.cap, need, limit);
@@ -10706,13 +10779,40 @@ static int q36_sample_logits_penalized(float *logits, uint32_t n_vocab,
                                        const int *tokens, int n_tokens,
                                        float presence_penalty,
                                        float frequency_penalty,
+                                       float repeat_penalty,
                                        uint64_t *rng, float *scratch) {
     if (!tokens || n_tokens <= 0 ||
-        (presence_penalty == 0.0f && frequency_penalty == 0.0f)) {
+        (presence_penalty == 0.0f && frequency_penalty == 0.0f &&
+         repeat_penalty == 1.0f)) {
         return q36_sample_top_p_min_p(logits, n_vocab, temperature, top_k,
                                       top_p, min_p, rng, scratch);
     }
 
+    /* Distinct seen ids plus their original logits, so the logits can be
+     * restored exactly after sampling (no float add-back drift). */
+    struct { int id; float logit; } *saved =
+        malloc((size_t)n_tokens * sizeof(*saved));
+    if (!saved) {
+        return q36_sample_top_p_min_p(logits, n_vocab, temperature, top_k,
+                                      top_p, min_p, rng, scratch);
+    }
+    int n_saved = 0;
+    memset(scratch, 0, (size_t)n_vocab * sizeof(scratch[0]));
+    for (int i = 0; i < n_tokens; i++) {
+        int token = tokens[i];
+        if (token < 0 || (uint32_t)token >= n_vocab) continue;
+        if (scratch[token] != 0.0f) continue;
+        scratch[token] = 1.0f;
+        saved[n_saved].id = token;
+        saved[n_saved].logit = logits[token];
+        n_saved++;
+    }
+    /* llama.cpp-style multiplicative penalty: positive logits shrink, negative grow. */
+    for (int k = 0; k < n_saved; k++) {
+        float *l = &logits[saved[k].id];
+        if (repeat_penalty != 1.0f) *l = *l > 0.0f ? *l / repeat_penalty : *l * repeat_penalty;
+    }
+    /* Scratch counts occurrences for frequency/presence; first hit applies presence. */
     memset(scratch, 0, (size_t)n_vocab * sizeof(scratch[0]));
     for (int i = 0; i < n_tokens; i++) {
         int token = tokens[i];
@@ -10723,14 +10823,8 @@ static int q36_sample_logits_penalized(float *logits, uint32_t n_vocab,
     }
     int sampled = q36_sample_top_p_min_p(logits, n_vocab, temperature, top_k,
                                          top_p, min_p, rng, scratch);
-    memset(scratch, 0, (size_t)n_vocab * sizeof(scratch[0]));
-    for (int i = 0; i < n_tokens; i++) {
-        int token = tokens[i];
-        if (token < 0 || (uint32_t)token >= n_vocab) continue;
-        if (scratch[token] == 0.0f) logits[token] += presence_penalty;
-        scratch[token] += 1.0f;
-        logits[token] += frequency_penalty;
-    }
+    for (int k = 0; k < n_saved; k++) logits[saved[k].id] = saved[k].logit;
+    free(saved);
     return sampled;
 }
 
@@ -10750,12 +10844,13 @@ int q36_test_sample_logits_penalized(float *logits, uint32_t n_vocab,
                                      const int *tokens, int n_tokens,
                                      float presence_penalty,
                                      float frequency_penalty,
+                                     float repeat_penalty,
                                      uint64_t *rng, float *prob_scratch) {
     if (!logits || !rng || !prob_scratch || n_vocab == 0) return -1;
     return q36_sample_logits_penalized(
         logits, n_vocab, temperature, top_k, top_p, min_p,
         tokens, n_tokens, presence_penalty, frequency_penalty,
-        rng, prob_scratch);
+        repeat_penalty, rng, prob_scratch);
 }
 
 uint32_t q36_test_kv_next_cap(uint32_t cap, uint32_t need, uint32_t limit) {
@@ -12096,10 +12191,12 @@ int q36_session_sample_penalized(q36_session *s,
                                  const int *tokens, int n_tokens,
                                  float presence_penalty,
                                  float frequency_penalty,
+                                 float repeat_penalty,
                                  uint64_t *rng) {
     if (!s || !s->logits || !rng) return -1;
     if (!tokens || n_tokens <= 0 ||
-        (presence_penalty == 0.0f && frequency_penalty == 0.0f)) {
+        (presence_penalty == 0.0f && frequency_penalty == 0.0f &&
+         repeat_penalty == 1.0f)) {
         return q36_session_sample(s, temperature, top_k, top_p, min_p, rng);
     }
     if (!q36_session_ensure_logits_host(s)) return -1;
@@ -12107,19 +12204,21 @@ int q36_session_sample_penalized(q36_session *s,
     return q36_sample_logits_penalized(
         s->logits, Q36_N_VOCAB, temperature, top_k, top_p, min_p,
         tokens, n_tokens, presence_penalty, frequency_penalty,
-        rng, s->sample_probs);
+        repeat_penalty, rng, s->sample_probs);
 }
 
 int q36_session_argmax_penalized_excluding(q36_session *s, int excluded_id,
                                            const int *tokens, int n_tokens,
-                                           float presence, float frequency) {
+                                           float presence, float frequency,
+                                           float repeat_penalty) {
     if (!s || excluded_id < 0 || excluded_id >= (int)Q36_N_VOCAB ||
         !q36_session_ensure_logits_host(s)) return -1;
     float saved = s->logits[excluded_id];
     s->logits[excluded_id] = -INFINITY;
     uint64_t rng = 1;
     int token = q36_sample_logits_penalized(s->logits, Q36_N_VOCAB,
-        0, 0, 1, 0, tokens, n_tokens, presence, frequency, &rng, s->sample_probs);
+        0, 0, 1, 0, tokens, n_tokens, presence, frequency, repeat_penalty,
+        &rng, s->sample_probs);
     s->logits[excluded_id] = saved;
     return token;
 }

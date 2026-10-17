@@ -809,6 +809,7 @@ typedef struct {
     float min_p;
     float presence_penalty;
     float frequency_penalty;
+    float repeat_penalty;        /* multiplicative; 1.0 = off */
     bool temperature_set;
     bool top_p_set;
     bool min_p_set;
@@ -941,6 +942,7 @@ static void request_init(request *r, req_kind kind, int max_tokens) {
     r->temperature = Q36_DEFAULT_TEMPERATURE;
     r->top_p = Q36_DEFAULT_TOP_P;
     r->min_p = Q36_DEFAULT_MIN_P;
+    r->repeat_penalty = 1.0f;
     r->think_mode = Q36_THINK_HIGH;
     r->preserve_thinking = true;
 }
@@ -964,6 +966,17 @@ static void request_apply_model_sampling_defaults(q36_engine *engine, request *r
     if (!r->top_k_set) r->top_k = top_k;
     if (!r->top_p_set) r->top_p = top_p;
     if (!r->min_p_set) r->min_p = min_p;
+}
+
+/* repeat_penalty must be positive; out-of-range values are clamped to the
+ * 0.5..2.0 band the CLI accepts, so one extreme client value cannot wreck decoding. */
+static bool json_repeat_penalty(const char **p, float *out) {
+    double v = 0.0;
+    if (!json_number(p, &v) || v <= 0.0) return false;
+    if (v < 0.5) v = 0.5;
+    if (v > 2.0) v = 2.0;
+    *out = (float)v;
+    return true;
 }
 
 static bool request_validate_ignore_eos(const request *r, char *err, size_t errlen) {
@@ -3282,6 +3295,11 @@ static bool parse_chat_request(q36_engine *e, server *s, const char *body, int d
                 goto bad;
             }
             r->presence_penalty = (float)v;
+        } else if (!strcmp(key, "repeat_penalty") || !strcmp(key, "repetition_penalty")) {
+            if (!json_repeat_penalty(&p, &r->repeat_penalty)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "frequency_penalty")) {
             double v = 0.0;
             if (!json_number(&p, &v)) {
@@ -3692,6 +3710,11 @@ static bool parse_responses_request(q36_engine *e, server *s, const char *body,
                 goto bad;
             }
             r->presence_penalty = (float)v;
+        } else if (!strcmp(key, "repeat_penalty") || !strcmp(key, "repetition_penalty")) {
+            if (!json_repeat_penalty(&p, &r->repeat_penalty)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "frequency_penalty")) {
             double v;
             if (!json_number(&p, &v)) {
@@ -3926,6 +3949,11 @@ static bool parse_anthropic_request(q36_engine *e, server *s, const char *body, 
                 goto bad;
             }
             r->presence_penalty = (float)v;
+        } else if (!strcmp(key, "repeat_penalty") || !strcmp(key, "repetition_penalty")) {
+            if (!json_repeat_penalty(&p, &r->repeat_penalty)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "frequency_penalty")) {
             double v = 0.0;
             if (!json_number(&p, &v)) {
@@ -4160,6 +4188,11 @@ static bool parse_completion_request(q36_engine *e, server *s, const char *body,
                 goto bad;
             }
             r->presence_penalty = (float)v;
+        } else if (!strcmp(key, "repeat_penalty") || !strcmp(key, "repetition_penalty")) {
+            if (!json_repeat_penalty(&p, &r->repeat_penalty)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "frequency_penalty")) {
             double v = 0.0;
             if (!json_number(&p, &v)) {
@@ -6698,6 +6731,16 @@ struct server {
     float default_frequency_penalty;
     bool default_presence_penalty_set;
     bool default_frequency_penalty_set;
+    float default_temperature;
+    int default_top_k;
+    float default_top_p;
+    float default_min_p;
+    float default_repeat_penalty;
+    bool default_temperature_set;
+    bool default_top_k_set;
+    bool default_top_p_set;
+    bool default_min_p_set;
+    bool default_repeat_penalty_set;
     kv_disk_cache kv;
     tool_memory tool_mem;
     bool disable_exact_tool_replay;
@@ -6742,6 +6785,13 @@ static void request_apply_default_penalties(request *r, server *s) {
     if (!s) return;
     if (s->default_presence_penalty_set) r->presence_penalty = s->default_presence_penalty;
     if (s->default_frequency_penalty_set) r->frequency_penalty = s->default_frequency_penalty;
+    /* The *_set flags also stop request_apply_model_sampling_defaults from
+     * replacing these with the model's defaults; client JSON parsed later wins. */
+    if (s->default_temperature_set) { r->temperature = s->default_temperature; r->temperature_set = true; }
+    if (s->default_top_k_set) { r->top_k = s->default_top_k; r->top_k_set = true; }
+    if (s->default_top_p_set) { r->top_p = s->default_top_p; r->top_p_set = true; }
+    if (s->default_min_p_set) { r->min_p = s->default_min_p; r->min_p_set = true; }
+    if (s->default_repeat_penalty_set) r->repeat_penalty = s->default_repeat_penalty;
 }
 
 static void server_inference_lock(server *s) {
@@ -8805,7 +8855,7 @@ static uint64_t trace_begin(
     fprintf(s->trace, "\n===== request %llu ", (unsigned long long)id);
     trace_time(s->trace);
     fprintf(s->trace,
-            " =====\nkind: %s\nmodel: %s\nstream: %d\ntools: %d\nthink_mode: %s\nthinking_budget: %d\npreserve_thinking: %d\nprompt_tokens: %d\neffective_prompt_tokens: %d\ncached_tokens: %d\nmax_tokens: %d\ntemperature: %.3f\ntop_k: %d\ntop_p: %.3f\nmin_p: %.3f\npresence_penalty: %.3f\nfrequency_penalty: %.3f\nseed: %llu\n",
+            " =====\nkind: %s\nmodel: %s\nstream: %d\ntools: %d\nthink_mode: %s\nthinking_budget: %d\npreserve_thinking: %d\nprompt_tokens: %d\neffective_prompt_tokens: %d\ncached_tokens: %d\nmax_tokens: %d\ntemperature: %.3f\ntop_k: %d\ntop_p: %.3f\nmin_p: %.3f\npresence_penalty: %.3f\nfrequency_penalty: %.3f\nrepeat_penalty: %.3f\nseed: %llu\n",
             j->req.kind == REQ_CHAT ? "chat" : "completion",
             j->req.model ? j->req.model : "",
             j->req.stream ? 1 : 0,
@@ -8823,6 +8873,7 @@ static uint64_t trace_begin(
             j->req.min_p,
             j->req.presence_penalty,
             j->req.frequency_penalty,
+            j->req.repeat_penalty,
             (unsigned long long)j->req.seed);
     fprintf(s->trace, "stream_include_usage: %d\n",
             j->req.stream_include_usage ? 1 : 0);
@@ -9374,6 +9425,7 @@ static void server_progress_cb(void *ud, const char *event, int current, int tot
     }
     int display_start = p->cached_tokens;
     if (display_start < 0 || display_start > p->prompt_tokens) display_start = 0;
+    if (current < display_start) display_start = 0; /* rebuild after failure: show absolute */
     int display_total = p->prompt_tokens - display_start;
     if (display_total <= 0) {
         display_start = 0;
@@ -10062,9 +10114,11 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         if (greedy_tool_syntax) temperature = 0.0f;
         float presence_penalty = j->req.presence_penalty;
         float frequency_penalty = j->req.frequency_penalty;
+        float repeat_penalty = j->req.repeat_penalty;
         if (in_tool_call && !qwen_tool_decode_state_uses_payload_sampling(qwen_tool_state)) {
             presence_penalty = 0.0f;
             frequency_penalty = 0.0f;
+            repeat_penalty = 1.0f;
         }
         int close_rank = 0;
         const bool hard_think_close = think_close_id >= 0 && j->req.thinking_budget_hard &&
@@ -10087,7 +10141,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             q36_session_sample_penalized(
                 slot->session, temperature, top_k, top_p, min_p,
                 generated_tokens.v, generated_tokens.len,
-                presence_penalty, frequency_penalty, &rng);
+                presence_penalty, frequency_penalty, repeat_penalty, &rng);
         if (hard_think_close)
             trace_event(s, trace_id, "hard thinking budget close at thinking_tokens=%d",
                         thinking_tokens);
@@ -10096,7 +10150,8 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                         completion, close_rank);
         if (j->req.ignore_eos && token == q36_token_eos(s->engine))
             token = q36_session_argmax_penalized_excluding(slot->session, q36_token_eos(s->engine),
-                generated_tokens.v, generated_tokens.len, presence_penalty, frequency_penalty);
+                generated_tokens.v, generated_tokens.len, presence_penalty, frequency_penalty,
+                repeat_penalty);
         else token = q36_session_eos_to_think_close(slot->session, token);
         if (token < 0) {
             finish = "error";
@@ -10113,6 +10168,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         const int block_start = q36_session_pos(slot->session);
         if (!multimodal && !s->batched_mode && temperature <= 0.0f &&
             presence_penalty == 0.0f && frequency_penalty == 0.0f &&
+            repeat_penalty == 1.0f &&
             q36_engine_mtp_draft_tokens(s->engine) > 1 &&
             getenv("Q36_MTP_SPEC_DISABLE") == NULL)
         {
@@ -10806,6 +10862,7 @@ static void append_model_json_profile(buf *b, int ctx, int default_tokens,
             "\"ignore_eos\","
             "\"presence_penalty\","
             "\"frequency_penalty\","
+            "\"repeat_penalty\","
             "\"stop\","
             "\"seed\","
             "\"stream\","
@@ -11321,6 +11378,16 @@ typedef struct {
     float default_frequency_penalty;
     bool default_presence_penalty_set;
     bool default_frequency_penalty_set;
+    float default_temperature;
+    int default_top_k;
+    float default_top_p;
+    float default_min_p;
+    float default_repeat_penalty;
+    bool default_temperature_set;
+    bool default_top_k_set;
+    bool default_top_p_set;
+    bool default_min_p_set;
+    bool default_repeat_penalty_set;
     const char *trace_path;
     const char *kv_disk_dir;
     const char *models_dir;
@@ -11450,6 +11517,16 @@ static void usage(FILE *fp) {
         "      Guards against a request degenerating into verbatim repetition. Explicit client values win.\n"
         "  --frequency-penalty F   (alias: --default-frequency-penalty)\n"
         "      Default frequency_penalty when the client omits one. Range -2..2. Default: 0. Explicit client values win.\n"
+        "  --temp F                (alias: --temperature)\n"
+        "      Default temperature when the client omits one. Range 0..100. Default: model default. Explicit client values win.\n"
+        "  --top-k N\n"
+        "      Default top_k when the client omits one. Range 0 or more (0 = off). Default: model default. Explicit client values win.\n"
+        "  --top-p F\n"
+        "      Default top_p when the client omits one. Range 0..1. Default: model default. Explicit client values win.\n"
+        "  --min-p F\n"
+        "      Default min_p when the client omits one. Range 0..1. Default: model default. Explicit client values win.\n"
+        "  --repeat-penalty F\n"
+        "      Default repeat_penalty when the client omits one. Range 0.5..2.0. Default: 1 (off). Explicit client values win.\n"
         "  -t, --threads N\n"
         "      CPU helper threads for lightweight host-side work.\n"
         "  --prefill-chunk N\n"
@@ -11649,6 +11726,21 @@ static server_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--frequency-penalty") || !strcmp(arg, "--default-frequency-penalty")) {
             c.default_frequency_penalty = parse_float_arg(need_arg(&i, argc, argv, arg), arg, -2.0f, 2.0f);
             c.default_frequency_penalty_set = true;
+        } else if (!strcmp(arg, "--temp") || !strcmp(arg, "--temperature")) {
+            c.default_temperature = parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.0f, 100.0f);
+            c.default_temperature_set = true;
+        } else if (!strcmp(arg, "--top-k")) {
+            c.default_top_k = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
+            c.default_top_k_set = true;
+        } else if (!strcmp(arg, "--top-p")) {
+            c.default_top_p = parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
+            c.default_top_p_set = true;
+        } else if (!strcmp(arg, "--min-p")) {
+            c.default_min_p = parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
+            c.default_min_p_set = true;
+        } else if (!strcmp(arg, "--repeat-penalty")) {
+            c.default_repeat_penalty = parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.5f, 2.0f);
+            c.default_repeat_penalty_set = true;
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--f32-fast-wide")) {
@@ -11849,6 +11941,16 @@ int main(int argc, char **argv) {
     s.default_frequency_penalty = cfg.default_frequency_penalty;
     s.default_presence_penalty_set = cfg.default_presence_penalty_set;
     s.default_frequency_penalty_set = cfg.default_frequency_penalty_set;
+    s.default_temperature = cfg.default_temperature;
+    s.default_top_k = cfg.default_top_k;
+    s.default_top_p = cfg.default_top_p;
+    s.default_min_p = cfg.default_min_p;
+    s.default_repeat_penalty = cfg.default_repeat_penalty;
+    s.default_temperature_set = cfg.default_temperature_set;
+    s.default_top_k_set = cfg.default_top_k_set;
+    s.default_top_p_set = cfg.default_top_p_set;
+    s.default_min_p_set = cfg.default_min_p_set;
+    s.default_repeat_penalty_set = cfg.default_repeat_penalty_set;
     s.disable_exact_tool_replay = cfg.disable_exact_tool_replay;
     s.tool_mem.max_entries = cfg.tool_memory_max_ids;
     if (cfg.kv_disk_dir && s.model_count > 0) {
