@@ -694,6 +694,12 @@ Supported endpoints:
 calls use the native Qwen3 Coder tagged format, and generated calls are mapped
 back to OpenAI tool calls.
 
+Flash attention is built in, so there is no `-fa` switch (unlike llama.cpp).
+Vulkan prefill uses the flash-attention kernels `attn_prefill_fa_gqa6/gqa8`
+(on by default; `Q36_VK_ATTN_FA=0` falls back to the qtile2 kernel for A/B
+checks), and decode uses split-K flash-decoding (`attn_decode_split` +
+`attn_combine`). llama.cpp flags such as `-fa on` are not accepted.
+
 Server sampling defaults apply when a request omits a field; explicit request
 values always win:
 
