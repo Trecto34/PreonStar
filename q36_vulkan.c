@@ -229,6 +229,7 @@ typedef struct {
     q36_vk_kernel moe_gate_up_decode;
     q36_vk_kernel moe_gate_up_decode_iq2s;
     q36_vk_kernel moe_gate_up_decode_iq3xxs;
+    q36_vk_kernel moe_gate_up_decode_q3k;
     q36_vk_kernel moe_gate_up_decode_iq2s_iq2xxs;
     q36_vk_kernel moe_down_q2k_f32b;
     q36_vk_kernel moe_down_q2k_f32b_iq2s;
@@ -242,6 +243,7 @@ typedef struct {
     q36_vk_kernel moe_gate_up_gemm;
     q36_vk_kernel moe_gate_up_gemm_iq2s;
     q36_vk_kernel moe_gate_up_gemm_iq3xxs;
+    q36_vk_kernel moe_gate_up_gemm_q3k;
     q36_vk_kernel moe_gate_up_gemm_iq2s_iq2xxs;
     q36_vk_kernel moe_down_gemm;
     q36_vk_kernel moe_down_gemm_iq2s;
@@ -284,6 +286,7 @@ typedef struct {
     q36_vk_kernel dense_kquant_decode;
     q36_vk_kernel dense_q4k_decode;
     q36_vk_kernel dense_q5k_decode;
+    q36_vk_kernel dense_q3k_decode;
     q36_vk_kernel moe_reduce;
     q36_vk_kernel ffn_tail;
     q36_vk_kernel fwht;
@@ -1200,6 +1203,13 @@ static bool q36_vk_env_default_on(const char *name) {
     return !env || !env[0] || env[0] != '0';
 }
 
+/* New f32-activation routes that shift logits against the q8 baseline stay
+ * opt-in until a drift review accepts them. */
+static bool q36_vk_env_opt_in(const char *name) {
+    const char *env = getenv(name);
+    return env && env[0] && env[0] != '0';
+}
+
 static bool q36_vk_have_subgroups(bool clustered) {
     return q36_vk.subgroup_size >= 32u && q36_vk.subgroup_arithmetic &&
            (!clustered || q36_vk.subgroup_clustered);
@@ -1909,6 +1919,16 @@ static q36_gpu_tensor *q36_vk_tensor_alloc_kind_unlocked(uint64_t bytes, bool de
 static void q36_vk_tensor_free_unlocked(q36_gpu_tensor *tensor);
 static void q36_vk_b16_ring_destroy_unlocked(void);
 
+/* Pooled scratch keeps its VRAM; free it all when an allocation fails so a
+ * long-context prefill retries instead of dying on a full heap. */
+static bool q36_vk_pools_drain_unlocked(void) {
+    bool any = q36_vk_pool_n || q36_vk_private_pool_n;
+    while (q36_vk_pool_n) q36_vk_tensor_free_unlocked(q36_vk_pool[--q36_vk_pool_n]);
+    while (q36_vk_private_pool_n)
+        q36_vk_tensor_free_unlocked(q36_vk_private_pool[--q36_vk_private_pool_n]);
+    return any;
+}
+
 static q36_gpu_tensor *q36_vk_tensor_alloc_scratch_unlocked(uint64_t bytes) {
     const uint64_t alloc_bytes = bytes ? q36_round_up_u64(bytes, 4) : 4;
     if (q36_gpu_quality) return q36_vk_tensor_alloc_kind_unlocked(bytes, false, true);
@@ -1936,7 +1956,10 @@ static q36_gpu_tensor *q36_vk_tensor_alloc_scratch_unlocked(uint64_t bytes) {
         }
         q36_vk_tensor_free_unlocked(tensor);
     }
-    return q36_vk_tensor_alloc_kind_unlocked(bytes, false, true);
+    q36_gpu_tensor *t = q36_vk_tensor_alloc_kind_unlocked(bytes, false, true);
+    if (!t && q36_vk_pools_drain_unlocked())
+        t = q36_vk_tensor_alloc_kind_unlocked(bytes, false, true);
+    return t;
 }
 
 static void q36_vk_tensor_free_unlocked(q36_gpu_tensor *tensor) {
@@ -3360,6 +3383,7 @@ int q36_gpu_init(void) {
     q36_vk.moe_gate_up_decode = Q36_VK_KERNEL("vulkan/moe_gate_up_decode.spv", 8, 24, 1u << 6);
     q36_vk.moe_gate_up_decode_iq2s = Q36_VK_KERNEL("vulkan/moe_gate_up_decode_iq2s.spv", 8, 24, 1u << 6);
     q36_vk.moe_gate_up_decode_iq3xxs = Q36_VK_KERNEL("vulkan/moe_gate_up_decode_iq3xxs.spv", 8, 24, 1u << 6);
+    q36_vk.moe_gate_up_decode_q3k = Q36_VK_KERNEL("vulkan/moe_gate_up_decode_q3k.spv", 8, 24, 1u << 6);
     q36_vk.moe_gate_up_decode_iq2s_iq2xxs = Q36_VK_KERNEL("vulkan/moe_gate_up_decode_iq2s_iq2xxs.spv", 8, 24, 1u << 6);
     q36_vk.moe_down_q2k_f32b = Q36_VK_KERNEL("vulkan/moe_down_q2k_f32b.spv", 5, 24, 1u << 4);
     q36_vk.moe_down_q2k_f32b_iq2s = Q36_VK_KERNEL("vulkan/moe_down_q2k_f32b_iq2s.spv", 6, 24, 1u << 4);
@@ -3373,6 +3397,7 @@ int q36_gpu_init(void) {
     q36_vk.moe_gate_up_gemm = Q36_VK_KERNEL("vulkan/moe_gate_up_gemm.spv", 8, 24, 1u << 6);
     q36_vk.moe_gate_up_gemm_iq2s = Q36_VK_KERNEL("vulkan/moe_gate_up_gemm_iq2s.spv", 8, 24, 1u << 6);
     q36_vk.moe_gate_up_gemm_iq3xxs = Q36_VK_KERNEL("vulkan/moe_gate_up_gemm_iq3xxs.spv", 8, 24, 1u << 6);
+    q36_vk.moe_gate_up_gemm_q3k = Q36_VK_KERNEL("vulkan/moe_gate_up_gemm_q3k.spv", 8, 24, 1u << 6);
     q36_vk.moe_gate_up_gemm_iq2s_iq2xxs = Q36_VK_KERNEL("vulkan/moe_gate_up_gemm_iq2s_iq2xxs.spv", 8, 24, 1u << 6);
     q36_vk.moe_down_gemm = Q36_VK_KERNEL("vulkan/moe_down_gemm.spv", 5, 24, 1u << 4);
     q36_vk.moe_down_gemm_iq2s = Q36_VK_KERNEL("vulkan/moe_down_gemm_iq2s.spv", 6, 24, 1u << 4);
@@ -3418,6 +3443,7 @@ int q36_gpu_init(void) {
     q36_vk.dense_kquant_decode = Q36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
     q36_vk.dense_q4k_decode = Q36_VK_KERNEL("vulkan/dense_q4k_decode.spv", 3, 28, 1u << 2);
     q36_vk.dense_q5k_decode = Q36_VK_KERNEL("vulkan/dense_q5k_decode.spv", 3, 28, 1u << 2);
+    q36_vk.dense_q3k_decode = Q36_VK_KERNEL("vulkan/dense_q3k_decode.spv", 3, 28, 1u << 2);
     q36_vk.moe_reduce = Q36_VK_KERNEL("vulkan/moe_reduce.spv", 3, 8, 1u << 2);
     q36_vk.ffn_tail = Q36_VK_KERNEL("vulkan/ffn_tail.spv", 3, 8, 1u << 0);
 
@@ -3825,6 +3851,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.dense_kquant_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_q4k_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_q5k_decode);
+    q36_vk_kernel_destroy(&q36_vk.dense_q3k_decode);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_r4);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_r1);
     q36_vk_kernel_destroy(&q36_vk.dense_iq3_s_decode_full);
@@ -3849,6 +3876,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_decode);
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_decode_iq2s);
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_decode_iq3xxs);
+    q36_vk_kernel_destroy(&q36_vk.moe_gate_up_decode_q3k);
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_decode_iq2s_iq2xxs);
     q36_vk_kernel_destroy(&q36_vk.moe_down_q2k_f32b);
     q36_vk_kernel_destroy(&q36_vk.moe_down_q2k_f32b_iq2s);
@@ -3862,6 +3890,7 @@ void q36_gpu_cleanup(void) {
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_gemm);
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_gemm_iq2s);
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_gemm_iq3xxs);
+    q36_vk_kernel_destroy(&q36_vk.moe_gate_up_gemm_q3k);
     q36_vk_kernel_destroy(&q36_vk.moe_gate_up_gemm_iq2s_iq2xxs);
     q36_vk_kernel_destroy(&q36_vk.moe_down_gemm);
     q36_vk_kernel_destroy(&q36_vk.moe_down_gemm_iq2s);
@@ -4176,6 +4205,15 @@ int q36_gpu_synchronize(void) {
     pthread_mutex_unlock(&q36_vk_mu);
     if (!ok || q36_vk_device_lost) return 0;
     return q36_vk_ok(vkDeviceWaitIdle(q36_vk.device), "vkDeviceWaitIdle");
+}
+
+void q36_gpu_trim_scratch(void) {
+    if (!q36_vk.ready || !q36_gpu_synchronize()) return;
+    pthread_mutex_lock(&q36_vk_mu);
+    q36_vk_b16_ring_destroy_unlocked();
+    q36_vk_retired_sweep_unlocked();
+    q36_vk_pools_drain_unlocked();
+    pthread_mutex_unlock(&q36_vk_mu);
 }
 
 int q36_gpu_device_lost(void) {
@@ -5647,8 +5685,12 @@ int q36_gpu_matmul_k_quant_q8_scaled_tensor(q36_gpu_tensor *out,
                            out_dim % 4u == 0u;
             bool q5_full = weight_type == Q36_VK_TENSOR_Q5_K &&
                            out_dim % 4u == 0u;
+            bool q3_full = weight_type == Q36_VK_TENSOR_Q3_K &&
+                           out_dim % 4u == 0u &&
+                           q36_vk_env_default_on("Q36_VK_DENSE_Q3K_DECODE");
             q36_vk_kernel *kernel = q4_full ? &q36_vk.dense_q4k_decode :
                                    q5_full ? &q36_vk.dense_q5k_decode :
+                                   q3_full ? &q36_vk.dense_q3k_decode :
                                              &q36_vk.dense_kquant_decode;
             ok = q36_vk_run_unlocked(op, kernel,
                                      bindings, &push, sizeof(push),
@@ -9456,6 +9498,7 @@ int q36_gpu_moe_ffn_f32_tensor(q36_gpu_tensor *out,
     bool gu_iq2s = gate->type == Q36_VK_TENSOR_IQ2_S && up->type == Q36_VK_TENSOR_IQ2_S;
     bool gu_iq3xxs = gate->type == Q36_VK_TENSOR_IQ3_XXS && up->type == Q36_VK_TENSOR_IQ3_XXS;
     bool gu_iq2s_iq2xxs = gate->type == Q36_VK_TENSOR_IQ2_S && up->type == Q36_VK_TENSOR_IQ2_XXS;
+    bool gu_q3k = gate->type == Q36_VK_TENSOR_Q3_K && up->type == Q36_VK_TENSOR_Q3_K;
     bool down_iq2s = down->type == Q36_VK_TENSOR_IQ2_S;
     bool down_iq3s = down->type == Q36_VK_TENSOR_IQ3_S;
     bool down_iq3xxs = down->type == Q36_VK_TENSOR_IQ3_XXS;
@@ -9467,11 +9510,16 @@ int q36_gpu_moe_ffn_f32_tensor(q36_gpu_tensor *out,
                             q36_vk_env_default_on("Q36_VK_MOE_APEX_IQ2S_IQ3XXS");
     bool apex_iq2s_iq2xxs_iq3xxs = gu_iq2s_iq2xxs && down_iq3xxs &&
                                    q36_vk_env_default_on("Q36_VK_MOE_APEX_MIXED");
-    bool apex = apex_iq3xxs_q3k || apex_iq2s_iq3xxs || apex_iq2s_iq2xxs_iq3xxs;
+    bool apex_iq3xxs = gu_iq3xxs && down_iq3xxs &&
+                       q36_vk_env_opt_in("Q36_VK_MOE_APEX_IQ3XXS");
+    bool apex_q3k = gu_q3k && down_q3k && q36_vk_env_opt_in("Q36_VK_MOE_APEX_Q3K");
+    bool apex = apex_iq3xxs_q3k || apex_iq2s_iq3xxs || apex_iq2s_iq2xxs_iq3xxs || apex_q3k || apex_iq3xxs;
     uint32_t gate_block_bytes = q4k ? 144u : gate->type == Q36_VK_TENSOR_IQ2_S ? 82u :
-                                gate->type == Q36_VK_TENSOR_IQ3_XXS ? 98u : 66u;
+                                gate->type == Q36_VK_TENSOR_IQ3_XXS ? 98u :
+                                gate->type == Q36_VK_TENSOR_Q3_K ? 110u : 66u;
     uint32_t up_block_bytes = q4k ? 144u : up->type == Q36_VK_TENSOR_IQ2_S ? 82u :
-                              up->type == Q36_VK_TENSOR_IQ3_XXS ? 98u : 66u;
+                              up->type == Q36_VK_TENSOR_IQ3_XXS ? 98u :
+                              up->type == Q36_VK_TENSOR_Q3_K ? 110u : 66u;
     uint64_t gate_stride = (uint64_t)(in_dim / Q36_VK_QK_K) * gate_block_bytes * mid_dim;
     uint64_t up_stride = (uint64_t)(in_dim / Q36_VK_QK_K) * up_block_bytes * mid_dim;
     uint64_t down_stride = (uint64_t)(mid_dim / Q36_VK_QK_K) *
@@ -9695,19 +9743,23 @@ int q36_gpu_moe_ffn_f32_tensor(q36_gpu_tensor *out,
                 ok = q36_vk_run_unlocked("moe_q4k_gate_up", &q36_vk.moe_gate_up_q4k_f32b, qgb, &gpush, sizeof(gpush),
                                          mid_dim, wave_tile_count, 1);
             } else {
-                ok = gemm ? q36_vk_run_unlocked(gu_iq3xxs ? "moe_iq3xxs_gate_up_gemm" :
+                ok = gemm ? q36_vk_run_unlocked(gu_q3k ? "moe_q3k_gate_up_gemm" :
+                                                gu_iq3xxs ? "moe_iq3xxs_gate_up_gemm" :
                                                 (gu_iq2s_iq2xxs ? "moe_iq2s_iq2xxs_gate_up_gemm" :
                                                  (gu_iq2s ? "moe_iq2s_gate_up_gemm" : "moe_iq2_gate_up_gemm")),
+                                                gu_q3k ? &q36_vk.moe_gate_up_gemm_q3k :
                                                 gu_iq3xxs ? &q36_vk.moe_gate_up_gemm_iq3xxs :
                                                 (gu_iq2s_iq2xxs ? &q36_vk.moe_gate_up_gemm_iq2s_iq2xxs :
                                                  (gu_iq2s ? &q36_vk.moe_gate_up_gemm_iq2s : &q36_vk.moe_gate_up_gemm)),
                                                 gb, &gpush, sizeof(gpush),
                                                 (mid_dim + 63u) / 64u, wave_tile_count, 1)
-                          : q36_vk_run_unlocked(identity ? (gu_iq3xxs ? "moe_iq3xxs_gate_up_decode" :
+                          : q36_vk_run_unlocked(identity ? (gu_q3k ? "moe_q3k_gate_up_decode" :
+                                                              gu_iq3xxs ? "moe_iq3xxs_gate_up_decode" :
                                                                (gu_iq2s_iq2xxs ? "moe_iq2s_iq2xxs_gate_up_decode" :
                                                                 (gu_iq2s ? "moe_iq2s_gate_up_decode" : "moe_iq2_gate_up_decode")))
                                                          : (gu_iq2s ? "moe_iq2s_gate_up_f32b" : "moe_iq2_gate_up"),
-                                                identity ? (gu_iq3xxs ? &q36_vk.moe_gate_up_decode_iq3xxs :
+                                                identity ? (gu_q3k ? &q36_vk.moe_gate_up_decode_q3k :
+                                                            gu_iq3xxs ? &q36_vk.moe_gate_up_decode_iq3xxs :
                                                             (gu_iq2s_iq2xxs ? &q36_vk.moe_gate_up_decode_iq2s_iq2xxs :
                                                              (gu_iq2s ? &q36_vk.moe_gate_up_decode_iq2s
                                                                       : &q36_vk.moe_gate_up_decode)))

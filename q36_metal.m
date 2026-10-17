@@ -4557,3 +4557,5 @@ int q36_gpu_moe_ffn_tensor(
         out, map, size, gate, up, down, selected, weights,
         layer, used, x, tokens, in_dim, mid_dim, out_dim, experts);
 }
+
+void q36_gpu_trim_scratch(void) {}

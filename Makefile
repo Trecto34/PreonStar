@@ -131,6 +131,7 @@ VULKAN_SHADERS := \
 	vulkan/moe_gate_up_decode.spv \
 	vulkan/moe_gate_up_decode_iq2s.spv \
 	vulkan/moe_gate_up_decode_iq3xxs.spv \
+	vulkan/moe_gate_up_decode_q3k.spv \
 	vulkan/moe_gate_up_decode_iq2s_iq2xxs.spv \
 	vulkan/moe_down_q2k_sum_decode_iq2s.spv \
 	vulkan/moe_down_q2k_sum_decode_iq3s.spv \
@@ -143,6 +144,7 @@ VULKAN_SHADERS := \
 	vulkan/moe_gate_up_gemm.spv \
 	vulkan/moe_gate_up_gemm_iq2s.spv \
 	vulkan/moe_gate_up_gemm_iq3xxs.spv \
+	vulkan/moe_gate_up_gemm_q3k.spv \
 	vulkan/moe_gate_up_gemm_iq2s_iq2xxs.spv \
 	vulkan/moe_down_gemm_iq2s.spv \
 	vulkan/moe_down_gemm_iq3s.spv \
@@ -184,6 +186,7 @@ VULKAN_SHADERS := \
 	vulkan/dense_kquant_decode.spv \
 	vulkan/dense_q4k_decode.spv \
 	vulkan/dense_q5k_decode.spv \
+	vulkan/dense_q3k_decode.spv \
 	vulkan/moe_reduce.spv \
 	vulkan/ffn_tail.spv
 
@@ -307,6 +310,9 @@ vulkan/dense_kquant_decode.spv: vulkan/dense_kquant_decode.comp
 vulkan/dense_q4k_decode.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q4K_ONLY=1 -DQ36_BOUNDS=0 -o $@ $<
 
+vulkan/dense_q3k_decode.spv: vulkan/dense_kquant_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q3K_ONLY=1 -DQ36_BOUNDS=0 -o $@ $<
+
 vulkan/dense_q5k_decode.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q5K_ONLY=1 -DQ36_BOUNDS=0 -o $@ $<
 
@@ -359,6 +365,9 @@ vulkan/moe_gate_up_decode_iq2s.spv: vulkan/moe_gate_up_decode.comp
 vulkan/moe_gate_up_decode_iq3xxs.spv: vulkan/moe_gate_up_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3XXS -o $@ $<
 
+vulkan/moe_gate_up_decode_q3k.spv: vulkan/moe_gate_up_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_Q3K -o $@ $<
+
 vulkan/moe_gate_up_decode_iq2s_iq2xxs.spv: vulkan/moe_gate_up_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_MIX_IQ2S_IQ2XXS -o $@ $<
 
@@ -398,6 +407,9 @@ vulkan/moe_gate_up_gemm_iq2s.spv: vulkan/moe_gate_up_gemm.comp
 
 vulkan/moe_gate_up_gemm_iq3xxs.spv: vulkan/moe_gate_up_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_IQ3XXS -o $@ $<
+
+vulkan/moe_gate_up_gemm_q3k.spv: vulkan/moe_gate_up_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_Q3K -o $@ $<
 
 vulkan/moe_gate_up_gemm_iq2s_iq2xxs.spv: vulkan/moe_gate_up_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_MOE_MIX_IQ2S_IQ2XXS -o $@ $<

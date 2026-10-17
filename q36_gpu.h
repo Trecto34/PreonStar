@@ -62,6 +62,8 @@ int q36_gpu_begin_commands(void);
 int q36_gpu_flush_commands(void);
 int q36_gpu_end_commands(void);
 int q36_gpu_synchronize(void);
+/* Free idle pooled scratch so large one-off allocations (KV growth) fit. */
+void q36_gpu_trim_scratch(void);
 
 /* True once the GPU context has been destroyed under us (an amdgpu ring
  * timeout is the usual cause).  Latched and one-way: every later GPU call

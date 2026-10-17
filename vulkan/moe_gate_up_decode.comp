@@ -30,7 +30,7 @@ layout(push_constant) uniform Push {
 
 const uint IQ2_U16 = 33u;
 
-#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_IQ3XXS)
+#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_IQ3XXS) || defined(Q36_MOE_Q3K)
 /* IQ2_S superblock: [d f16][64 qs][8 qh][8 scales] = 82 bytes; grid values are
  * unsigned magnitudes (<= 43) with 8 explicit sign bits per 8-element group. */
 const uint IQ2S_BYTES = 82u;
@@ -42,6 +42,36 @@ uint g_u8(uint off) {
 
 uint u_u8(uint off) {
     return (uint(uw[off >> 1u]) >> (8u * (off & 1u))) & 255u;
+}
+#endif
+#ifdef Q36_MOE_Q3K
+/* Q3_K superblock: [32 hmask][64 qs][12 packed 6-bit scales][d f16] = 110
+ * bytes.  Element n of 256: half = n>>7, j = (n>>5)&3, l = n&31; the 3-bit
+ * value is ((qs[32*half+l] >> 2j) & 3) - (hmask[l] bit (4*half+j) ? 0 : 4)
+ * and each 16-element group carries one scale. */
+const uint Q3K_BYTES = 110u;
+
+uint g_u32(uint off) {
+    return uint(gw[off >> 1u]) | (uint(gw[(off >> 1u) + 1u]) << 16u);
+}
+
+uint u_u32(uint off) {
+    return uint(uw[off >> 1u]) | (uint(uw[(off >> 1u) + 1u]) << 16u);
+}
+
+float q3k_scale(uint slo, uint shi, uint g) {
+    return float(int(((g < 8u ? slo : (slo >> 4u)) & 15u) |
+                     (((shi >> (2u * (g >> 2u))) & 3u) << 4u)) - 32);
+}
+
+/* Four consecutive elements from four qs bytes and four hmask bytes. */
+vec4 q3k_vec(uint q, uint h, uint sh, uint hb) {
+    vec4 r;
+    for (uint z = 0u; z < 4u; z++) {
+        r[z] = float(int((q >> (8u * z + sh)) & 3u) -
+                     (((h >> (8u * z + hb)) & 1u) != 0u ? 0 : 4));
+    }
+    return r;
 }
 #endif
 #ifdef Q36_MOE_IQ3XXS
@@ -75,6 +105,9 @@ void main(void) {
 #elif defined(Q36_MOE_IQ3XXS)
     uint row_bytes = pc.blocks * IQ3XXS_BYTES;
     uint base_bytes = (expert * pc.mid_dim + row) * row_bytes;
+#elif defined(Q36_MOE_Q3K)
+    uint row_bytes = pc.blocks * Q3K_BYTES;
+    uint base_bytes = (expert * pc.mid_dim + row) * row_bytes;
 #else
     uint row_u16 = pc.blocks * IQ2_U16;
     uint base_u16 = (expert * pc.mid_dim + row) * row_u16;
@@ -85,7 +118,30 @@ void main(void) {
     float up_acc = 0.0;
 
     for (uint i = ix; i < pc.blocks; i += 4u) {
-#ifdef Q36_MOE_IQ3XXS
+#if defined(Q36_MOE_Q3K)
+        /* A thread owns one 16-element group (itid), so one scale per
+         * thread and 16 consecutive qs/hmask bytes. */
+        uint bb = base_bytes + i * Q3K_BYTES;
+        uint hf = itid >> 3u;
+        uint jj = (itid >> 1u) & 3u;
+        uint lo16 = (itid & 1u) * 16u;
+        uint qsh = 2u * jj;
+        uint hbit = 4u * hf + jj;
+        uint qo = bb + 32u + 32u * hf + lo16;
+        uint ho = bb + lo16;
+        float gd = unpackHalf2x16(uint(gw[(bb + 108u) >> 1u])).x *
+                   q3k_scale(g_u8(bb + 96u + (itid & 7u)), g_u8(bb + 104u + (itid & 3u)), itid);
+        float ud = unpackHalf2x16(uint(uw[(bb + 108u) >> 1u])).x *
+                   q3k_scale(u_u8(bb + 96u + (itid & 7u)), u_u8(bb + 104u + (itid & 3u)), itid);
+        uint y4 = (i * 256u + 16u * itid) >> 2u;
+        for (uint l = 0u; l < 4u; l++) {
+            vec4 gv = q3k_vec(g_u32(qo + 4u * l), g_u32(ho + 4u * l), qsh, hbit);
+            vec4 uv = q3k_vec(u_u32(qo + 4u * l), u_u32(ho + 4u * l), qsh, hbit);
+            vec4 bv = xv[x4 + y4 + l];
+            gate_acc = fma(gd, dot(bv, gv), gate_acc);
+            up_acc = fma(ud, dot(bv, uv), up_acc);
+        }
+#elif defined(Q36_MOE_IQ3XXS)
         uint bb = base_bytes + i * IQ3XXS_BYTES;
         uint g32 = itid >> 1u;
         uint half16 = itid & 1u;

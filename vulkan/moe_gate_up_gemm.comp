@@ -48,7 +48,7 @@ const uint INVALID = 0xffffffffu;
 const uint BM = 64u;
 const uint KK = 8u;
 
-#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_IQ3XXS)
+#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_IQ3XXS) || defined(Q36_MOE_Q3K)
 /* IQ2_S superblock: [d f16][64 qs][8 qh][8 scales] = 82 bytes.  Two 4-bit
  * scales per 32-element group (low nibble = first 16, high = last 16), so
  * the group scale folds into f32 per half instead of once per group. */
@@ -61,6 +61,35 @@ uint g_u8(uint off) {
 
 uint u_u8(uint off) {
     return (uint(uw[off >> 1u]) >> (8u * (off & 1u))) & 255u;
+}
+#endif
+#ifdef Q36_MOE_Q3K
+/* Q3_K superblock: [32 hmask][64 qs][12 packed 6-bit scales][d f16] = 110
+ * bytes, one scale per 16 elements (see moe_gate_up_decode.comp).  Values
+ * stage as v/4 (-1..0.75, exact in f16) and the per-half scale d*sc*4 folds
+ * into f32 like IQ2_S's two nibbles. */
+const uint Q3K_BYTES = 110u;
+
+uint g_u32(uint off) {
+    return uint(gw[off >> 1u]) | (uint(gw[(off >> 1u) + 1u]) << 16u);
+}
+
+uint u_u32(uint off) {
+    return uint(uw[off >> 1u]) | (uint(uw[(off >> 1u) + 1u]) << 16u);
+}
+
+float q3k_scale(uint slo, uint shi, uint g) {
+    return float(int(((g < 8u ? slo : (slo >> 4u)) & 15u) |
+                     (((shi >> (2u * (g >> 2u))) & 3u) << 4u)) - 32);
+}
+
+vec4 q3k_vec(uint q, uint h, uint sh, uint hb) {
+    vec4 r;
+    for (uint z = 0u; z < 4u; z++) {
+        r[z] = float(int((q >> (8u * z + sh)) & 3u) -
+                     (((h >> (8u * z + hb)) & 1u) != 0u ? 0 : 4));
+    }
+    return r;
 }
 #endif
 #ifdef Q36_MOE_IQ3XXS
@@ -82,7 +111,7 @@ shared f16vec4 Au[BM][KK];
 shared f16vec4 Bs[SLOT_TILE][KK];
 shared float Dg[BM];
 shared float Du[BM];
-#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS)
+#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_Q3K)
 shared float Dg2[BM];   /* high-nibble scale of the 32-element group */
 shared float Du2[BM];
 #endif
@@ -101,7 +130,7 @@ void main(void) {
         sh_slot[tid] = slot;
         sh_x4[tid] = (slot != INVALID ? slot / pc.n_used : 0u) * pc.blocks * 64u;
     }
-#if !defined(Q36_MOE_IQ2S) && !defined(Q36_MOE_IQ3XXS)
+#if !defined(Q36_MOE_IQ2S) && !defined(Q36_MOE_IQ3XXS) && !defined(Q36_MOE_Q3K)
     for (uint w = tid; w < 512u; w += 256u) sh_grid[w] = tables[w];
 #endif
 
@@ -112,13 +141,15 @@ void main(void) {
     uint urow_u16 = pc.blocks * IQ2_U16;
 #elif defined(Q36_MOE_IQ3XXS)
     uint row_bytes = pc.blocks * IQ3XXS_BYTES;
+#elif defined(Q36_MOE_Q3K)
+    uint row_bytes = pc.blocks * Q3K_BYTES;
 #else
     uint row_u16 = pc.blocks * IQ2_U16;
 #endif
     uint ar = tid >> 2u;      /* staged row 0..63 */
     uint sub = tid & 3u;      /* 8-element group within the 32-block */
     uint row = row0 + ar;
-#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_IQ3XXS)
+#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_IQ3XXS) || defined(Q36_MOE_Q3K)
     uint base_bytes = (expert * pc.mid_dim + (row < pc.mid_dim ? row : 0u)) * row_bytes;
 #elif defined(Q36_MOE_MIX_IQ2S_IQ2XXS)
     uint gbase_bytes = (expert * pc.mid_dim + (row < pc.mid_dim ? row : 0u)) * grow_bytes;
@@ -169,7 +200,30 @@ void main(void) {
         uint ib32 = kb & 7u;
         /* Stage gate and up: 64 rows x one 32-element scale group, one
          * 8-element grid word per thread. */
-#ifdef Q36_MOE_IQ3XXS
+#if defined(Q36_MOE_Q3K)
+        {
+            /* This thread's 8 elements: qs/hmask bytes e = 8*sub..8*sub+7 of
+             * the 32-run, shift 2*(ib32&3) and hmask bit 4*(ib32>>2)+(ib32&3). */
+            uint bb = base_bytes + sb * Q3K_BYTES;
+            uint qsh = 2u * (ib32 & 3u);
+            uint hbit = 4u * (ib32 >> 2u) + (ib32 & 3u);
+            uint qo = bb + 32u + 32u * (ib32 >> 2u) + 8u * sub;
+            uint ho = bb + 8u * sub;
+            Ag[ar][a_k0] = f16vec4(0.25 * q3k_vec(g_u32(qo), g_u32(ho), qsh, hbit));
+            Ag[ar][a_k1] = f16vec4(0.25 * q3k_vec(g_u32(qo + 4u), g_u32(ho + 4u), qsh, hbit));
+            Au[ar][a_k0] = f16vec4(0.25 * q3k_vec(u_u32(qo), u_u32(ho), qsh, hbit));
+            Au[ar][a_k1] = f16vec4(0.25 * q3k_vec(u_u32(qo + 4u), u_u32(ho + 4u), qsh, hbit));
+            if ((sub & 1u) == 0u) {
+                uint grp = 2u * ib32 + (sub >> 1u);
+                float gd = unpackHalf2x16(uint(gw[(bb + 108u) >> 1u])).x *
+                           q3k_scale(g_u8(bb + 96u + (grp & 7u)), g_u8(bb + 104u + (grp & 3u)), grp);
+                float ud = unpackHalf2x16(uint(uw[(bb + 108u) >> 1u])).x *
+                           q3k_scale(u_u8(bb + 96u + (grp & 7u)), u_u8(bb + 104u + (grp & 3u)), grp);
+                if (sub == 0u) { Dg[ar] = gd * 4.0; Du[ar] = ud * 4.0; }
+                else { Dg2[ar] = gd * 4.0; Du2[ar] = ud * 4.0; }
+            }
+        }
+#elif defined(Q36_MOE_IQ3XXS)
         {
             uint bb = base_bytes + sb * IQ3XXS_BYTES;
             uint g32 = ib32;
@@ -324,7 +378,7 @@ void main(void) {
 
         f16vec2 pkg[4][2];
         f16vec2 pku[4][2];
-#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS)
+#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_Q3K)
         /* Two 4-bit scales per 32-element group: the xor swizzle only permutes
          * the low three bits, so the four slots carrying the low nibble are
          * exactly the four kk in the half selected by bit 2 of swz_ry.  Fold

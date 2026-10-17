@@ -6,7 +6,7 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY)
+#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY) || defined(Q36_Q3K_ONLY)
 layout(set = 0, binding = 0) readonly buffer Weights { uint ww[]; };
 #else
 layout(set = 0, binding = 0) readonly buffer Weights { uint16_t wh[]; };
@@ -37,6 +37,8 @@ const uint Q8K_WORDS = 74u;
 
 #ifdef Q36_Q4K_ONLY
 #define QTYPE Q4_K
+#elif defined(Q36_Q3K_ONLY)
+#define QTYPE Q3_K
 #elif defined(Q36_Q5K_ONLY)
 #define QTYPE Q5_K
 #else
@@ -44,7 +46,7 @@ const uint Q8K_WORDS = 74u;
 #endif
 
 uint load_u8(uint off) {
-#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY)
+#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY) || defined(Q36_Q3K_ONLY)
     return (ww[off >> 2u] >> ((off & 3u) * 8u)) & 255u;
 #else
     return (uint(wh[off >> 1u]) >> ((off & 1u) * 8u)) & 255u;
@@ -52,7 +54,7 @@ uint load_u8(uint off) {
 }
 
 uint load_u32(uint off) {
-#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY)
+#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY) || defined(Q36_Q3K_ONLY)
     return ww[off >> 2u];
 #else
     uint i = off >> 1u;
@@ -65,7 +67,7 @@ int load_i8(uint off) {
 }
 
 float load_f16(uint off) {
-#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY)
+#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY) || defined(Q36_Q3K_ONLY)
     return unpackHalf2x16(ww[off >> 2u] >> ((off & 2u) * 8u)).x;
 #else
     return unpackHalf2x16(uint(wh[off >> 1u])).x;
@@ -190,6 +192,22 @@ vec4 dequant_word(uint row, uint block, uint word) {
            float(load_i8(base + 192u + (idx >> 4u))) * qv;
 }
 
+#ifdef Q36_Q3K_ONLY
+/* A Q3_K block is 110 bytes, so odd blocks start 2 bytes off a word boundary.
+ * Fetch the 16 bytes at even offset `off` as four aligned words, funnel-shifted
+ * when misaligned: 4-5 word loads instead of eight 16-bit ones. */
+uvec4 load_16b(uint off) {
+    uint w = off >> 2u;
+    uvec4 r = uvec4(ww[w], ww[w + 1u], ww[w + 2u], ww[w + 3u]);
+    if ((off & 2u) != 0u) {
+        uint w4 = ww[w + 4u];
+        r = uvec4((r.x >> 16u) | (r.y << 16u), (r.y >> 16u) | (r.z << 16u),
+                  (r.z >> 16u) | (r.w << 16u), (r.w >> 16u) | (w4 << 16u));
+    }
+    return r;
+}
+#endif
+
 vec4 unpack_i8(uint v) {
     return vec4(float(bitfieldExtract(int(v), 0, 8)),
                 float(bitfieldExtract(int(v), 8, 8)),
@@ -209,7 +227,7 @@ void main(void) {
         for (uint i = 0u; i < 4u; i++)
             qvec[i] = unpack_i8(q8[b * Q8K_WORDS + 2u + 4u * itid + i]);
         float qsum = 0.0;
-        if (QTYPE == Q4_K || QTYPE == Q5_K || QTYPE == Q6_K) {
+        if (QTYPE == Q4_K || QTYPE == Q5_K || QTYPE == Q6_K || QTYPE == Q3_K) {
             for (uint i = 0u; i < 4u; i++)
                 qsum += qvec[i].x + qvec[i].y + qvec[i].z + qvec[i].w;
         }
@@ -240,6 +258,30 @@ void main(void) {
                 acc[r] = fma(yd, part, acc[r]);
                 continue;
             }
+#ifdef Q36_Q3K_ONLY
+            if (QTYPE == Q3_K) {
+                /* Value = lo2 + 4*hbit - 4: dot the 3-bit codes (0..7) and
+                 * subtract 4*sum(q8).  Integer-exact, so identical to the
+                 * generic path below. */
+                uint base = row * pc.row_bytes + 110u * b;
+                int sc = q3_scale(base, itid);
+                uint half_id = itid >> 3u;
+                uint group = itid & 7u;
+                uint shift = 2u * (group >> 1u);
+                uint hshift = half_id * 4u + (group >> 1u);
+                uint lo16 = 16u * (itid & 1u);
+                uvec4 qs = load_16b(base + 32u + half_id * 32u + lo16);
+                uvec4 hm = load_16b(base + lo16);
+                float qdot = -4.0 * qsum;
+                for (uint i = 0u; i < 4u; i++) {
+                    uint codes = ((qs[i] >> shift) & 0x03030303u) |
+                                 (((hm[i] >> hshift) & 0x01010101u) << 2u);
+                    qdot += dot(unpack_i8(codes), qvec[i]);
+                }
+                acc[r] = fma(yd * load_f16(base + 108u) * float(sc), qdot, acc[r]);
+                continue;
+            }
+#endif
             if (QTYPE == Q3_K) {
                 uint base = row * pc.row_bytes + 110u * b;
                 int sc = q3_scale(base, itid);
