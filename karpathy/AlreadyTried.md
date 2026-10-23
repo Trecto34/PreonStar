@@ -2526,6 +2526,24 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   55f55566... unchanged. Host phases per token now forward=15.3 read=2.3
   caller=0.52 ms.
 
+### fused add + RMS norm + q8_K — ACCEPTED, ~0.6% (structural, 2026-10-23)
+
+`add_rms_norm_q8_k.spv` and its host wrapper already existed but were parked
+behind `P36_VK_FUSED_RMS_Q8`. Taking the switch out:
+
+- md5 **55f55566... identical**, so the shader's `nearest_int` magic rounding
+  and bsum words do match `p36_quant_q8_k` byte for byte. No arithmetic risk.
+- Dispatch inventory, same 20-token span: `q8_k_quant` 1954 -> 1220,
+  `add_rms_norm` 778 -> 10, new `add_rms_norm_q8_k` 790. Net **-722
+  dispatches, ~36 per token** — the norm pass and the quantization pass merged
+  into one, plus the q8 blocks come from values already in registers.
+- Speed: 51.38 -> 51.71 t/s median over 5 interleaved pairs, i.e. ~+0.6%,
+  which is at the edge of run noise. The reason to keep it is the dispatch
+  count and the removed DRAM round trip, not the measured delta.
+- The 1220 surviving quantizations are the FFN/MoE input norms, which do not
+  go through `add_rms_norm` (they use `norm_rope` and friends). Extending the
+  fusion there is the remaining ~60 dispatches/token.
+
 ### q8_K quantization dedupe — TRIED, REJECTED (0 hits in 1210 calls)
 
 The premise (gate and up each quantize the same hidden state, so ~50 of the

@@ -195,8 +195,12 @@ int p36_gpu_add_rms_norm_tensor(p36_gpu_tensor *out_norm,
 }
 
 static bool p36_vk_use_fused_rms_q8(void) {
-    const char *env = getenv("P36_VK_FUSED_RMS_Q8");
-    return env && env[0] == '1';
+    /* Add + RMS norm + q8_K quantization in one dispatch.  The fused shader
+     * writes the same bytes the standalone quantizer did (md5 55f55566... on
+     * the 64-token probe) and removes ~36 dispatches per decode token, most
+     * of which were the norm's own pass.  It was parked behind an env switch
+     * while it was unmeasured; unconditional now. */
+    return true;
 }
 
 int p36_gpu_add_rms_norm_q8_k_tensor(p36_gpu_tensor *out_norm,
