@@ -146,6 +146,17 @@ LEDGER_ENTRIES = [
         "reconsider_if": "The streaming copy is fused into the matvec, or a model's expert working set exceeds RAM by an order of magnitude.",
         "source_reference": "AlreadyTried.md:2317-2332",
     },
+    {
+        "id": "AT-SWIFT-012",
+        "priority": 8,
+        "target": "vulkan/dense_q4k_decode.spv",
+        "approach": "8 rows per workgroup instead of 4",
+        "result": "REJECTED",
+        "reason_rejected": "Kernel cost 3.13 -> 4.55 ms/token (+45%) by dispatch timestamps. Dispatches per token are unchanged at 225, so the launch-overhead saving the change targeted does not exist; half the wave count plus higher register pressure costs more than it saves.",
+        "evidence": "evidence/decode-profile-20261023.md; 10-token window vs 8-token baseline, kernel GPU time from VK timestamp queries.",
+        "reconsider_if": "Occupancy data shows the 4-row kernel is wave-starved; the fix would then be more parallelism, not fewer workgroups.",
+        "source_reference": "AlreadyTried.md:2334-2352",
+    },
 ]
 
 

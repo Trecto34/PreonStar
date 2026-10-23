@@ -2331,3 +2331,21 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
 - **Reconsider if** the streaming path is rewritten to fuse the copy into the
   matvec, or if a model is used where the expert working set exceeds RAM by an
   order of magnitude.
+
+## dense_q4k_decode — 8 rows per workgroup — REJECTED, 45% SLOWER (2026-10-23)
+
+- **Tried.** `ROWS = 8` in `vulkan/dense_kquant_decode.comp` under
+  `P36_Q4K_ONLY`, with the host dispatch changed to `(out_dim + 7) / 8` groups
+  and a matching `out_dim % 8` guard. Motivation: `dense_q4k_decode` is 26% of
+  decode GPU time and 225 matvecs per token.
+- **Result.** Kernel cost **3.13 -> 4.55 ms/token (+45%)** measured by dispatch
+  timestamps, over a 10-token window vs the 8-token baseline. Dispatch count per
+  token is unchanged (225): `ROWS` sets rows per workgroup, not the number of
+  matvec calls, so the launch-overhead saving the change was aiming at does not
+  exist.
+- **Why it cannot win.** Halving the group count halves the wave count on a
+  small CU count while `acc[ROWS]` plus the four `vec4` activation registers
+  push register pressure up. Fewer, fatter workgroups lose here.
+- **Disposition.** Reverted; tree clean; baseline 71.83 t/s.
+- **Reconsider if** occupancy data shows the 4-row kernel is wave-starved, in
+  which case the answer is more parallelism, not fewer workgroups.
