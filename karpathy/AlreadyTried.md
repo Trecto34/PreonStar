@@ -2526,6 +2526,24 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   55f55566... unchanged. Host phases per token now forward=15.3 read=2.3
   caller=0.52 ms.
 
+### q8_K quantization dedupe — TRIED, REJECTED (0 hits in 1210 calls)
+
+The premise (gate and up each quantize the same hidden state, so ~50 of the
+98 `quantize_q8_k` dispatches per token are redundant) is false. Built the
+two-slot cache keyed by `(root, write_gen, in_dim, n_tok)` and switched the
+four `p36_vk_quantize_q8_k_alloc_tensor` call sites to it, with the cache
+owning the tensor and a `_release()` that only frees uncached ones. md5
+unchanged, and the counters read **0 hits / 1210 misses**: every call has a
+genuinely distinct input. Gate and up already share one quantization inside
+`p36_vk_moe_gate_up_iq2_swiglu`; the rest are per-layer hidden states and the
+MoE mid buffer, all different bytes. Reverted.
+
+Useful side finding: 1210 quantize *calls* produce 1954 dispatches, so
+`p36_gpu_quantize_q8_k_tensor` splits a call across ~1.6 dispatches on
+average. The dispatch count is chunking, not redundancy, which is why both
+the dedupe (this) and the in-kernel fusion (rejected above) target the wrong
+thing. Any further work on these 98 dispatches has to start at that split.
+
 ### Where the last 4 ms of a token goes — barriers, not bubbles (2026-10-23)
 
 - Kernel time is 15.34 ms against a 19.5 ms token. Ruled *out* as the cause:
