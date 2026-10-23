@@ -1489,10 +1489,15 @@ static bool p36_forward_tokens_vulkan(p36_session *s, const int *tokens, uint32_
     if (compute_logits) {
         s->gpu_top2_valid = false;
         s->logits_host_valid = false;
-        if (p36_gpu_top2_tensor(rt->top2, rt->logits, P36_N_VOCAB)) {
+        /* Alternate buffers per token: the reader can still be waiting on
+         * this result while the next token's dispatch writes the other. */
+        p36_gpu_tensor *top2 = rt->top2[rt->top2_flip & 1u];
+        s->gpu_top2_slot = (uint8_t)(rt->top2_flip & 1u);
+        rt->top2_flip ^= 1u;
+        if (p36_gpu_top2_tensor(top2, rt->logits, P36_N_VOCAB)) {
             int32_t ids[2] = {-1, -1};
             if (hprof_on) h3 = p36_hprof_ns();
-            if (!p36_gpu_tensor_read(rt->top2, 0, ids, sizeof(ids)))
+            if (!p36_gpu_tensor_read(top2, 0, ids, sizeof(ids)))
                 return false;
             if (hprof_on) h4 = p36_hprof_ns();
             s->gpu_top2[0] = ids[0];

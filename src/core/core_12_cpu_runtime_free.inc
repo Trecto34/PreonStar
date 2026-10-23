@@ -354,7 +354,8 @@ static void p36_vulkan_runtime_free(p36_vulkan_runtime *rt) {
     p36_gpu_tensor_free(rt->ffn_shared_out);
     p36_gpu_tensor_free(rt->ffn_scalar);
     p36_gpu_tensor_free(rt->logits);
-    p36_gpu_tensor_free(rt->top2);
+    p36_gpu_tensor_free(rt->top2[0]);
+    p36_gpu_tensor_free(rt->top2[1]);
     p36_gpu_tensor_free(rt->topk8);
     p36_gpu_tensor_free(rt->minp_pack);
     p36_gpu_tensor_free(rt->scores);
@@ -681,10 +682,11 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
         P36_GPU_ALLOC_SCRATCH_F32(scores, (uint64_t)ctx_size * P36_N_HEAD);
 #endif
     rt->logits = p36_gpu_tensor_alloc((uint64_t)P36_N_VOCAB * sizeof(float));
-    rt->top2 = p36_gpu_tensor_alloc(2u * sizeof(int32_t));
+    rt->top2[0] = p36_gpu_tensor_alloc(2u * sizeof(int32_t));
+    rt->top2[1] = p36_gpu_tensor_alloc(2u * sizeof(int32_t));
     rt->topk8 = p36_gpu_tensor_alloc(8u * (sizeof(int32_t) + sizeof(float)));
     rt->minp_pack = p36_gpu_tensor_alloc(P36_GPU_MINP_BYTES(P36_N_VOCAB));
-    if (!rt->logits || !rt->top2 || !rt->topk8 || !rt->minp_pack) goto fail;
+    if (!rt->logits || !rt->top2[0] || !rt->top2[1] || !rt->topk8 || !rt->minp_pack) goto fail;
     if (enable_mtp) {
         rt->mtp_full.cap = kv_cap;
         rt->mtp_full.type_k = cache_type_k;

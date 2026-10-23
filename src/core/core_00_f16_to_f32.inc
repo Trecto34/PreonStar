@@ -659,6 +659,7 @@ struct p36_session {
     float *mtp_logits;
     bool logits_host_valid;
     bool gpu_top2_valid;
+    uint8_t gpu_top2_slot;   /* which rt->top2 buffer the result landed in */
     int gpu_top2[2];
     void *runtime;
     p36_session_progress_fn progress;
@@ -828,7 +829,10 @@ typedef struct {
     p36_gpu_tensor *ffn_shared_out;
     p36_gpu_tensor *ffn_scalar;
     p36_gpu_tensor *logits;
-    p36_gpu_tensor *top2;
+    /* Two top-2 buffers: the reader waits on one while the next token's
+     * dispatch writes the other, so a deferred read never races the GPU. */
+    p36_gpu_tensor *top2[2];
+    uint32_t top2_flip;
     p36_gpu_tensor *topk8;
     p36_gpu_tensor *minp_pack;
     p36_gpu_tensor *scores;
