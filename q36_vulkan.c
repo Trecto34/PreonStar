@@ -1203,13 +1203,6 @@ static bool q36_vk_env_default_on(const char *name) {
     return !env || !env[0] || env[0] != '0';
 }
 
-/* New f32-activation routes that shift logits against the q8 baseline stay
- * opt-in until a drift review accepts them. */
-static bool q36_vk_env_opt_in(const char *name) {
-    const char *env = getenv(name);
-    return env && env[0] && env[0] != '0';
-}
-
 static bool q36_vk_have_subgroups(bool clustered) {
     return q36_vk.subgroup_size >= 32u && q36_vk.subgroup_arithmetic &&
            (!clustered || q36_vk.subgroup_clustered);
@@ -4693,17 +4686,41 @@ int q36_gpu_vision_stream_init(uint64_t max_weight_bytes) {
     return q36_vk_vision_weight != NULL;
 }
 
+static unsigned char *q36_vk_vision_weight_begin(uint64_t in_dim,
+                                                 uint64_t out_dim,
+                                                 uint64_t n_tok) {
+    uint64_t weight_bytes = in_dim * out_dim * sizeof(uint16_t);
+    if (!q36_vk_vision_weight || weight_bytes > q36_vk_vision_weight->bytes ||
+        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX)
+        return NULL;
+    return q36_gpu_tensor_contents_named(
+        q36_vk_vision_weight, "submit_wait_vision_weight_reuse");
+}
+
+static int q36_vk_vision_matmul_dispatch(q36_gpu_tensor *out,
+                                         uint64_t in_dim, uint64_t out_dim,
+                                         const q36_gpu_tensor *x,
+                                         uint64_t n_tok);
+
+int q36_gpu_vision_matmul_f16_fill(q36_gpu_tensor *out,
+                                   q36_gpu_vision_fill_fn fill, void *ctx,
+                                   uint64_t in_dim, uint64_t out_dim,
+                                   const q36_gpu_tensor *x,
+                                   uint64_t n_tok) {
+    if (!fill) return 0;
+    unsigned char *dst = q36_vk_vision_weight_begin(in_dim, out_dim, n_tok);
+    if (!dst) return 0;
+    if (!fill(ctx, (uint16_t *)dst)) return 0;
+    return q36_vk_vision_matmul_dispatch(out, in_dim, out_dim, x, n_tok);
+}
+
 int q36_gpu_vision_matmul_f16_disk(q36_gpu_tensor *out, int fd,
                                    uint64_t offset, uint64_t in_dim,
                                    uint64_t out_dim,
                                    const q36_gpu_tensor *x,
                                    uint64_t n_tok) {
     uint64_t weight_bytes = in_dim * out_dim * sizeof(uint16_t);
-    if (!q36_vk_vision_weight || weight_bytes > q36_vk_vision_weight->bytes ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX)
-        return 0;
-    unsigned char *dst = q36_gpu_tensor_contents_named(
-        q36_vk_vision_weight, "submit_wait_vision_weight_reuse");
+    unsigned char *dst = q36_vk_vision_weight_begin(in_dim, out_dim, n_tok);
     if (!dst) return 0;
     uint64_t done = 0;
     while (done < weight_bytes) {
@@ -4713,6 +4730,13 @@ int q36_gpu_vision_matmul_f16_disk(q36_gpu_tensor *out, int fd,
         if (n <= 0) return 0;
         done += (uint64_t)n;
     }
+    return q36_vk_vision_matmul_dispatch(out, in_dim, out_dim, x, n_tok);
+}
+
+static int q36_vk_vision_matmul_dispatch(q36_gpu_tensor *out,
+                                         uint64_t in_dim, uint64_t out_dim,
+                                         const q36_gpu_tensor *x,
+                                         uint64_t n_tok) {
     pthread_mutex_lock(&q36_vk_mu);
     struct {
         uint32_t in_dim;
@@ -5724,9 +5748,18 @@ int q36_gpu_matmul_k_quant_q8_scaled_tensor(q36_gpu_tensor *out,
             q36_gpu_tensor *b16 = q36_vk_predequant_b16_unlocked(
                 q8, (uint32_t)n_tok, (uint32_t)blocks);
             const q36_gpu_tensor *bindings[4] = { weights, q8, out, b16 };
+            /* One pipeline, branch on push-constant type: label the profiler
+             * row by type so per-arm changes are not lost in the shared row. */
+            const char *mmq_op =
+                weight_type == Q36_VK_TENSOR_Q2_K ? "dense_kquant_mmq_q2k" :
+                weight_type == Q36_VK_TENSOR_Q3_K ? "dense_kquant_mmq_q3k" :
+                weight_type == Q36_VK_TENSOR_Q4_K ? "dense_kquant_mmq_q4k" :
+                weight_type == Q36_VK_TENSOR_Q5_K ? "dense_kquant_mmq_q5k" :
+                weight_type == Q36_VK_TENSOR_Q6_K ? "dense_kquant_mmq_q6k" :
+                                                    "dense_kquant_mmq";
             const char *op = q36_vk_prof_iq3_shape(
                 weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
-                (uint32_t)out_dim, "dense_kquant_mmq");
+                (uint32_t)out_dim, mmq_op);
             ok = b16 != NULL &&
                  q36_vk_run_unlocked(op, &q36_vk.dense_kquant_mmq,
                                      bindings, &push, sizeof(push),
@@ -9510,9 +9543,14 @@ int q36_gpu_moe_ffn_f32_tensor(q36_gpu_tensor *out,
                             q36_vk_env_default_on("Q36_VK_MOE_APEX_IQ2S_IQ3XXS");
     bool apex_iq2s_iq2xxs_iq3xxs = gu_iq2s_iq2xxs && down_iq3xxs &&
                                    q36_vk_env_default_on("Q36_VK_MOE_APEX_MIXED");
-    bool apex_iq3xxs = gu_iq3xxs && down_iq3xxs &&
-                       q36_vk_env_opt_in("Q36_VK_MOE_APEX_IQ3XXS");
-    bool apex_q3k = gu_q3k && down_q3k && q36_vk_env_opt_in("Q36_VK_MOE_APEX_Q3K");
+    /* Prefill batches only: the f32-activation GEMM is what makes IQ3_XXS/Q3_K
+     * prefill ~4x faster, but it moves logits against the q8 route (~0.4-1.0
+     * at decode), so decode and small batches keep the q8 route. */
+    const bool apex_prefill = n_tok >= q36_vk_moe_gemm_min();
+    bool apex_iq3xxs = apex_prefill && gu_iq3xxs && down_iq3xxs &&
+                       q36_vk_env_default_on("Q36_VK_MOE_APEX_IQ3XXS");
+    bool apex_q3k = apex_prefill && gu_q3k && down_q3k &&
+                    q36_vk_env_default_on("Q36_VK_MOE_APEX_Q3K");
     bool apex = apex_iq3xxs_q3k || apex_iq2s_iq3xxs || apex_iq2s_iq2xxs_iq3xxs || apex_q3k || apex_iq3xxs;
     uint32_t gate_block_bytes = q4k ? 144u : gate->type == Q36_VK_TENSOR_IQ2_S ? 82u :
                                 gate->type == Q36_VK_TENSOR_IQ3_XXS ? 98u :

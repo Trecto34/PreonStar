@@ -148,6 +148,7 @@ static void print_model_runtime(FILE *fp, const help_colors *c,
                                 q36_help_tool tool, bool full) {
     title(fp, c, "Model And Runtime");
     opt(fp, c, "-m, --model FILE", "GGUF model path. Default: " Q36_DEFAULT_MODEL_PATH);
+    opt(fp, c, "--chat-template FILE", "Load an external .jinja chat template file (disabled by default).");
     opt(fp, c, "--metal | --vulkan | --cpu", "Select the backend explicitly.");
     opt(fp, c, "--backend NAME", "Backend name: metal, vulkan, or cpu.");
     if (tool != Q36_HELP_BENCH) {

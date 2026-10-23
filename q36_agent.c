@@ -841,6 +841,8 @@ static agent_config parse_options(int argc, char **argv) {
             c.gen.trace_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
             c.engine.model_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--chat-template")) {
+            c.engine.chat_template = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--vision")) {
             c.engine.vision_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--mtp")) {
@@ -1548,13 +1550,14 @@ static const char agent_tools_prompt_vision[] =
     "}\n\n";
 
 static char *agent_build_tools_prompt(bool edit_upto, bool vision) {
+    const char *intro = agent_tools_prompt_intro;
     const char *edit = edit_upto ? agent_tools_prompt_edit_upto : agent_tools_prompt_edit_exact;
     const char *tail = strstr(agent_tools_prompt_after_edit, "</tools>");
-    size_t a = strlen(agent_tools_prompt_intro), b = strlen(edit);
+    size_t a = strlen(intro), b = strlen(edit);
     size_t c = (size_t)(tail - agent_tools_prompt_after_edit);
     size_t d = vision ? strlen(agent_tools_prompt_vision) : 0;
     char *out = xmalloc(a + b + c + d + strlen(tail) + 1);
-    memcpy(out, agent_tools_prompt_intro, a);
+    memcpy(out, intro, a);
     memcpy(out + a, edit, b);
     memcpy(out + a + b, agent_tools_prompt_after_edit, c);
     if (vision) memcpy(out + a + b + c, agent_tools_prompt_vision, d);
@@ -1573,7 +1576,7 @@ static char *agent_build_system_prompt(const char *extra, bool *thinking,
 
     size_t a = strlen(tools);
     size_t b = strlen(plain);
-    char *out = xmalloc(a + b + 3);
+    char *out = xmalloc(a + 2 + b + 1);
     memcpy(out, tools, a);
     memcpy(out + a, "\n\n", 2);
     memcpy(out + a + 2, plain, b + 1);
@@ -1590,6 +1593,12 @@ static const char agent_qwen_tool_syntax_reminder[] =
     "$PARAMETER_VALUE\n"
     "</parameter>\n"
     "</function>\n"
+    "</tool_call>\n";
+
+static const char agent_json_tool_syntax_reminder[] =
+    "Tool syntax reminder:\n"
+    "<tool_call>\n"
+    "{\"name\": \"$TOOL_NAME\", \"arguments\": {\"$PARAMETER_NAME\": \"$PARAMETER_VALUE\"}}\n"
     "</tool_call>\n";
 
 #define AGENT_SYSTEM_PROMPT_REMINDER_TOKENS 50000
@@ -1664,9 +1673,46 @@ static char *agent_build_system_prompt_reminder(bool edit_upto, bool vision) {
     return out;
 }
 
+static char *agent_collect_tool_schemas(bool vision) {
+    const char *open_tag = strstr(agent_tools_prompt_after_edit, "<tools>\n");
+    const char *close_tag = strstr(agent_tools_prompt_after_edit, "\n</tools>");
+    if (!open_tag || !close_tag || close_tag <= open_tag + 8) return NULL;
+    const char *body = open_tag + 8;
+    size_t body_len = (size_t)(close_tag - body);
+    size_t v_len = vision ? strlen(agent_tools_prompt_vision) : 0;
+    char *buf = xmalloc(body_len + (v_len ? v_len + 2 : 0) + 1);
+    memcpy(buf, body, body_len);
+    size_t total = body_len;
+    if (v_len) {
+        memcpy(buf + total, "\n\n", 2);
+        total += 2;
+        memcpy(buf + total, agent_tools_prompt_vision, v_len);
+        total += v_len;
+    }
+    buf[total] = '\0';
+    return buf;
+}
+
 static void agent_append_system_prompt(q36_engine *engine, q36_tokens *tokens,
                                        const char *extra, bool *thinking,
-                                       bool edit_upto) {
+                                       bool edit_upto, q36_think_mode think_mode) {
+    const char *chat_tmpl = q36_engine_chat_template(engine);
+    if (chat_tmpl) {
+        char *plain = agent_chat_control_text(extra, thinking);
+        char *tools_buf = agent_collect_tool_schemas(q36_engine_has_vision(engine));
+        bool en_think = (!thinking || *thinking) && think_mode != Q36_THINK_NONE;
+        q36_think_mode eff_mode = (think_mode == Q36_THINK_NONE && en_think) ?
+                                  Q36_THINK_HIGH : think_mode;
+        char *rendered = q36_jinja_render_system_block(
+            chat_tmpl, plain, tools_buf, eff_mode, en_think);
+        free(tools_buf);
+        free(plain);
+        if (rendered) {
+            if (rendered[0]) q36_tokenize_rendered_chat(engine, rendered, tokens);
+            free(rendered);
+            return;
+        }
+    }
     /* The built-in prompt is trusted Q36 control text.  User supplied system
      * text remains ordinary chat content. */
     char *prompt = agent_build_system_prompt(extra, thinking, edit_upto,
@@ -1711,8 +1757,9 @@ static void agent_worker_maybe_append_system_prompt_reminder(agent_worker *w) {
         return;
     }
 
-    char *reminder = agent_build_system_prompt_reminder(w->cfg->edit_upto,
-                                                        q36_engine_has_vision(w->engine));
+    char *reminder = agent_build_system_prompt_reminder(
+        w->cfg->edit_upto,
+        q36_engine_has_vision(w->engine));
     agent_publish_system_status(w, "Re-injecting system prompt reminder...");
     agent_trace(w, "system prompt reminder injected at transcript=%d",
                 w->transcript.len);
@@ -2126,6 +2173,52 @@ static void agent_qwen_tool_parse(agent_qwen_tool_parser *p) {
             agent_tool_calls_push(&p->calls, &p->current);
             p->parse_pos += close_len;
             continue;
+        }
+        if (p->raw[p->parse_pos] == '{') {
+            char *end = agent_qwen_tool_find_close_tag(p->raw + p->parse_pos, "tool_call", &close_len);
+            if (!end) return;
+            size_t json_len = (size_t)(end - (p->raw + p->parse_pos));
+            char *json_body = xstrndup(p->raw + p->parse_pos, json_len);
+            q36_jv *root = q36_jv_parse(json_body);
+            free(json_body);
+            if (!root) {
+                agent_qwen_tool_set_error(p, "invalid JSON in tool_call");
+                return;
+            }
+            const q36_jv *fn = q36_jv_get(root, "function");
+            const q36_jv *src = fn ? fn : root;
+            char name_scratch[128];
+            const char *name = q36_jv_text(q36_jv_get(src, "name"), name_scratch, sizeof(name_scratch));
+            if (!name || !name[0]) {
+                q36_jv_free(root);
+                agent_qwen_tool_set_error(p, "JSON tool_call missing function name");
+                return;
+            }
+            agent_tool_call tc = {0};
+            tc.name = xstrdup(name);
+            const q36_jv *args_jv = q36_jv_get(src, "arguments");
+            if (!args_jv) args_jv = q36_jv_get(src, "parameters");
+            q36_jv *parsed_args = NULL;
+            if (args_jv) {
+                char arg_scratch[64];
+                const char *args_str = q36_jv_text(args_jv, arg_scratch, sizeof(arg_scratch));
+                if (args_str) {
+                    parsed_args = q36_jv_parse(args_str);
+                    args_jv = parsed_args;
+                }
+            }
+            for (int i = 0; args_jv && i < q36_jv_count(args_jv); i++) {
+                char val_scratch[64];
+                const char *k = q36_jv_key(args_jv, i);
+                const char *v = q36_jv_text(q36_jv_at(args_jv, i), val_scratch, sizeof(val_scratch));
+                if (k && v) agent_tool_call_add_arg(&tc, k, v, strlen(v));
+            }
+            if (parsed_args) q36_jv_free(parsed_args);
+            q36_jv_free(root);
+            agent_tool_calls_push(&p->calls, &tc);
+            p->parse_pos = (size_t)(end - p->raw) + close_len;
+            p->state = AGENT_QWEN_TOOL_DONE;
+            return;
         }
 
         char *tag_end = strchr(p->raw + p->parse_pos, '>');
@@ -3896,6 +3989,21 @@ static void agent_stream_tool_events(agent_stream_renderer *sr) {
     agent_tool_visualizer *v = &sr->viz;
     if (!v->tool_announced && p->current.name)
         agent_tool_viz_tool(sr, p->current.name);
+    if (!v->tool_announced && !p->current.name &&
+        p->state == AGENT_QWEN_TOOL_DONE && p->calls.len > 0)
+    {
+        for (int ci = 0; ci < p->calls.len; ci++) {
+            const agent_tool_call *call = &p->calls.v[ci];
+            agent_tool_viz_tool(sr, call->name);
+            for (int ai = 0; ai < call->argc; ai++) {
+                agent_tool_viz_param_begin(sr, call->args[ai].name);
+                const char *val = call->args[ai].value ? call->args[ai].value : "";
+                for (size_t k = 0; val[k]; k++)
+                    agent_tool_viz_param_raw_byte(sr, val[k]);
+                agent_tool_viz_param_end(sr);
+            }
+        }
+    }
     if (v->tool_announced && !p->current.name && !v->param_active) {
         agent_tool_viz_render_read(sr);
         if (!v->last_output_newline) agent_tool_viz_puts(sr, "\n");
@@ -4765,13 +4873,13 @@ static bool agent_kv_save_path(agent_worker *w, const char *path,
 }
 
 static bool agent_worker_build_system_tokens(agent_worker *w, q36_tokens *out) {
-    bool thinking = q36_think_mode_enabled(effective_think_mode(w->cfg));
+    q36_think_mode eff_mode = effective_think_mode(w->cfg);
+    bool thinking = q36_think_mode_enabled(eff_mode);
     q36_chat_begin(w->engine, out);
-    if (w->cfg->gen.think_mode == Q36_THINK_MAX &&
-        effective_think_mode(w->cfg) == Q36_THINK_MAX)
+    if (w->cfg->gen.think_mode == Q36_THINK_MAX && eff_mode == Q36_THINK_MAX)
         q36_chat_append_max_effort_prefix(w->engine, out);
     agent_append_system_prompt(w->engine, out, w->cfg->gen.system, &thinking,
-                               w->cfg->edit_upto);
+                               w->cfg->edit_upto, eff_mode);
     q36_prompt_prefix_append(w->engine, out, &w->cfg->gen.prefix);
     return thinking;
 }
@@ -7290,6 +7398,20 @@ static void test_agent_qwen_tool_parser(void) {
                               "line one\nline two"));
     AGENT_TEST_ASSERT(!strcmp(agent_tool_arg_value(&p.calls.v[0], "new"),
                               "replacement"));
+    agent_qwen_tool_parser_free(&p);
+
+    const char *json_raw =
+        "<tool_call>\n"
+        "{\"name\": \"edit\", \"arguments\": {\"path\": \"/tmp/b.c\", \"old\": \"x\", \"new\": \"y\"}}\n"
+        "</tool_call>";
+    p = (agent_qwen_tool_parser){.state = AGENT_QWEN_TOOL_SEARCH};
+    for (size_t i = 0; json_raw[i]; i++) agent_qwen_tool_feed(&p, json_raw + i, 1);
+    AGENT_TEST_ASSERT(p.state == AGENT_QWEN_TOOL_DONE);
+    AGENT_TEST_ASSERT(p.calls.len == 1);
+    AGENT_TEST_ASSERT(!strcmp(p.calls.v[0].name, "edit"));
+    AGENT_TEST_ASSERT(!strcmp(agent_tool_arg_value(&p.calls.v[0], "path"), "/tmp/b.c"));
+    AGENT_TEST_ASSERT(!strcmp(agent_tool_arg_value(&p.calls.v[0], "old"), "x"));
+    AGENT_TEST_ASSERT(!strcmp(agent_tool_arg_value(&p.calls.v[0], "new"), "y"));
     agent_qwen_tool_parser_free(&p);
 }
 
@@ -12028,7 +12150,8 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 agent_tool_observation_puts(&observation,
                     "Close thinking with </think> before retrying the tool call.\n");
             agent_tool_observation_puts(
-                &observation, agent_qwen_tool_syntax_reminder);
+                &observation, q36_engine_chat_template(w->engine) ?
+                agent_json_tool_syntax_reminder : agent_qwen_tool_syntax_reminder);
         } else {
             agent_tool_observation_free(&observation);
             for (int ci = 0; ci < qwen_tool.calls.len; ci++)

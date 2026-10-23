@@ -54,6 +54,15 @@ int q36_gpu_vision_matmul_f16_disk(q36_gpu_tensor *out, int fd,
                                    uint64_t out_dim,
                                    const q36_gpu_tensor *x,
                                    uint64_t n_tok);
+/* Same F16 vision matmul, but the caller writes the [out_dim][in_dim] F16
+ * weight into the mapped stream buffer (used to dequantize F32/Q8_0 sidecar
+ * weights on the host without a dedicated shader). Return nonzero on success. */
+typedef int (*q36_gpu_vision_fill_fn)(void *ctx, uint16_t *dst);
+int q36_gpu_vision_matmul_f16_fill(q36_gpu_tensor *out,
+                                   q36_gpu_vision_fill_fn fill, void *ctx,
+                                   uint64_t in_dim, uint64_t out_dim,
+                                   const q36_gpu_tensor *x,
+                                   uint64_t n_tok);
 int q36_gpu_vision_attention(q36_gpu_tensor *out,
                              const q36_gpu_tensor *qkv,
                              uint32_t rows);

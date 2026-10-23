@@ -639,6 +639,7 @@ struct q36_engine {
     bool mtp_ready;
     bool vision_ready;
     bool kat_coder;
+    char *chat_template;
     bool cpu_mmq_contract;   /* CPU reference emulates the f16 dense MMQ contract */
     q36_variant variant;
 };
@@ -1415,6 +1416,1944 @@ const char *q36_qwen38_effort_instruction(q36_think_mode mode) {
         return "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.";
     if (mode == Q36_THINK_MEDIUM || mode == Q36_THINK_NONE) return NULL;
     return "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.";
+}
+
+const char *q36_jinja_effort_name(q36_think_mode mode) {
+    switch (mode) {
+    case Q36_THINK_LOW: return "low";
+    case Q36_THINK_MEDIUM: return "medium";
+    case Q36_THINK_HIGH: return "high";
+    case Q36_THINK_XHIGH:
+    case Q36_THINK_MAX: return "xhigh";
+    case Q36_THINK_NONE:
+    default: return NULL;
+    }
+}
+
+/* --- Runtime Jinja2 Chat Template Evaluator --- */
+typedef struct jinja_arena_block {
+    struct jinja_arena_block *next;
+    size_t used;
+    size_t cap;
+    uint8_t data[];
+} jinja_arena_block;
+
+typedef struct {
+    jinja_arena_block *head;
+} jinja_arena;
+
+static void *ja_alloc(jinja_arena *a, size_t size) {
+    size = (size + 7u) & ~7u;
+    if (!a->head || a->head->used + size > a->head->cap) {
+        size_t cap = size > 65536u ? size : 65536u;
+        jinja_arena_block *b = (jinja_arena_block *)calloc(1, sizeof(*b) + cap);
+        if (!b) abort();
+        b->cap = cap;
+        b->next = a->head;
+        a->head = b;
+    }
+    void *p = a->head->data + a->head->used;
+    a->head->used += size;
+    return p;
+}
+
+static char *ja_strndup(jinja_arena *a, const char *s, size_t n) {
+    char *p = (char *)ja_alloc(a, n + 1);
+    if (n && s) memcpy(p, s, n);
+    p[n] = '\0';
+    return p;
+}
+
+static char *ja_strdup(jinja_arena *a, const char *s) {
+    if (!s) return ja_strndup(a, "", 0);
+    return ja_strndup(a, s, strlen(s));
+}
+
+static void ja_free(jinja_arena *a) {
+    jinja_arena_block *b = a->head;
+    while (b) {
+        jinja_arena_block *next = b->next;
+        free(b);
+        b = next;
+    }
+    a->head = NULL;
+}
+
+typedef struct {
+    char *ptr;
+    size_t len;
+    size_t cap;
+} jbuf;
+
+static void jbuf_append(jbuf *b, const char *s, size_t n) {
+    if (!n) return;
+    if (b->len + n + 1 > b->cap) {
+        size_t ncap = b->cap ? b->cap * 2 : 256;
+        while (ncap < b->len + n + 1) ncap *= 2;
+        b->ptr = (char *)realloc(b->ptr, ncap);
+        if (!b->ptr) abort();
+        b->cap = ncap;
+    }
+    memcpy(b->ptr + b->len, s, n);
+    b->len += n;
+    b->ptr[b->len] = '\0';
+}
+
+static void jbuf_puts(jbuf *b, const char *s) {
+    if (s) jbuf_append(b, s, strlen(s));
+}
+
+static void jbuf_putc(jbuf *b, char c) {
+    jbuf_append(b, &c, 1);
+}
+
+typedef enum {
+    JVAL_UNDEFINED = 0,
+    JVAL_NONE,
+    JVAL_BOOL,
+    JVAL_INT,
+    JVAL_STR,
+    JVAL_LIST,
+    JVAL_MAP,
+} jval_kind;
+
+typedef struct jval jval;
+typedef struct jmap jmap;
+typedef struct jlist jlist;
+
+struct jval {
+    jval_kind kind;
+    union {
+        bool b;
+        int64_t i;
+        struct {
+            const char *ptr;
+            size_t len;
+        } s;
+        jlist *list;
+        jmap *map;
+    } u;
+};
+
+struct jlist {
+    jval *items;
+    size_t len;
+    size_t cap;
+};
+
+typedef struct {
+    const char *key;
+    jval val;
+} jkv;
+
+struct jmap {
+    jkv *entries;
+    size_t len;
+    size_t cap;
+    const char *raw_json;
+};
+
+static jval jval_undef(void) { return (jval){.kind = JVAL_UNDEFINED}; }
+static jval jval_none(void) { return (jval){.kind = JVAL_NONE}; }
+static jval jval_bool(bool b) { return (jval){.kind = JVAL_BOOL, .u.b = b}; }
+static jval jval_int(int64_t i) { return (jval){.kind = JVAL_INT, .u.i = i}; }
+static jval jval_str_n(jinja_arena *a, const char *s, size_t n) {
+    return (jval){.kind = JVAL_STR, .u.s = {ja_strndup(a, s, n), n}};
+}
+static jval jval_str(jinja_arena *a, const char *s) {
+    if (!s) s = "";
+    return jval_str_n(a, s, strlen(s));
+}
+static jval jval_list_new(jinja_arena *a, size_t cap) {
+    jlist *l = (jlist *)ja_alloc(a, sizeof(*l));
+    l->cap = cap ? cap : 4;
+    l->items = (jval *)ja_alloc(a, l->cap * sizeof(jval));
+    l->len = 0;
+    return (jval){.kind = JVAL_LIST, .u.list = l};
+}
+static void jlist_push(jinja_arena *a, jlist *l, jval v) {
+    if (l->len == l->cap) {
+        size_t ncap = l->cap * 2;
+        jval *nitems = (jval *)ja_alloc(a, ncap * sizeof(jval));
+        memcpy(nitems, l->items, l->len * sizeof(jval));
+        l->items = nitems;
+        l->cap = ncap;
+    }
+    l->items[l->len++] = v;
+}
+static jval jval_map_new(jinja_arena *a, size_t cap) {
+    jmap *m = (jmap *)ja_alloc(a, sizeof(*m));
+    m->cap = cap ? cap : 8;
+    m->entries = (jkv *)ja_alloc(a, m->cap * sizeof(jkv));
+    m->len = 0;
+    m->raw_json = NULL;
+    return (jval){.kind = JVAL_MAP, .u.map = m};
+}
+static void jmap_set(jinja_arena *a, jmap *m, const char *key, jval v) {
+    for (size_t i = 0; i < m->len; i++) {
+        if (!strcmp(m->entries[i].key, key)) {
+            m->entries[i].val = v;
+            return;
+        }
+    }
+    if (m->len == m->cap) {
+        size_t ncap = m->cap * 2;
+        jkv *nentries = (jkv *)ja_alloc(a, ncap * sizeof(jkv));
+        memcpy(nentries, m->entries, m->len * sizeof(jkv));
+        m->entries = nentries;
+        m->cap = ncap;
+    }
+    m->entries[m->len].key = ja_strdup(a, key);
+    m->entries[m->len].val = v;
+    m->len++;
+}
+static jval jmap_get(const jmap *m, const char *key) {
+    if (!m || !key) return jval_undef();
+    for (size_t i = 0; i < m->len; i++) {
+        if (!strcmp(m->entries[i].key, key)) return m->entries[i].val;
+    }
+    return jval_undef();
+}
+static bool jmap_has(const jmap *m, const char *key) {
+    if (!m || !key) return false;
+    for (size_t i = 0; i < m->len; i++) {
+        if (!strcmp(m->entries[i].key, key)) {
+            return m->entries[i].val.kind != JVAL_UNDEFINED;
+        }
+    }
+    return false;
+}
+
+static bool jval_truthy(jval v) {
+    switch (v.kind) {
+    case JVAL_UNDEFINED:
+    case JVAL_NONE: return false;
+    case JVAL_BOOL: return v.u.b;
+    case JVAL_INT: return v.u.i != 0;
+    case JVAL_STR: return v.u.s.len > 0;
+    case JVAL_LIST: return v.u.list && v.u.list->len > 0;
+    case JVAL_MAP: return v.u.map && (v.u.map->len > 0 || (v.u.map->raw_json && v.u.map->raw_json[0]));
+    }
+    return false;
+}
+
+static bool jval_eq(jval a, jval b) {
+    if (a.kind != b.kind) return false;
+    switch (a.kind) {
+    case JVAL_UNDEFINED:
+    case JVAL_NONE: return true;
+    case JVAL_BOOL: return a.u.b == b.u.b;
+    case JVAL_INT: return a.u.i == b.u.i;
+    case JVAL_STR:
+        return a.u.s.len == b.u.s.len &&
+               (!a.u.s.len || !memcmp(a.u.s.ptr, b.u.s.ptr, a.u.s.len));
+    case JVAL_LIST:
+        if (a.u.list->len != b.u.list->len) return false;
+        for (size_t i = 0; i < a.u.list->len; i++)
+            if (!jval_eq(a.u.list->items[i], b.u.list->items[i])) return false;
+        return true;
+    case JVAL_MAP:
+        return a.u.map == b.u.map;
+    }
+    return false;
+}
+
+static jval jval_to_str(jinja_arena *a, jval v) {
+    char num[64];
+    switch (v.kind) {
+    case JVAL_UNDEFINED:
+    case JVAL_NONE: return jval_str(a, "");
+    case JVAL_BOOL: return jval_str(a, v.u.b ? "True" : "False");
+    case JVAL_INT:
+        snprintf(num, sizeof(num), "%lld", (long long)v.u.i);
+        return jval_str(a, num);
+    case JVAL_STR: return v;
+    default: return jval_str(a, "");
+    }
+}
+
+static void jbuf_json_escape(jbuf *b, const char *s, size_t len) {
+    jbuf_putc(b, '"');
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        switch (c) {
+        case '"': jbuf_puts(b, "\\\""); break;
+        case '\\': jbuf_puts(b, "\\\\"); break;
+        case '\b': jbuf_puts(b, "\\b"); break;
+        case '\f': jbuf_puts(b, "\\f"); break;
+        case '\n': jbuf_puts(b, "\\n"); break;
+        case '\r': jbuf_puts(b, "\\r"); break;
+        case '\t': jbuf_puts(b, "\\t"); break;
+        default:
+            if (c < 0x20) {
+                char hex[8];
+                snprintf(hex, sizeof(hex), "\\u%04x", c);
+                jbuf_puts(b, hex);
+            } else {
+                jbuf_putc(b, (char)c);
+            }
+        }
+    }
+    jbuf_putc(b, '"');
+}
+
+static void jval_write_json(jbuf *b, jval v) {
+    char num[64];
+    switch (v.kind) {
+    case JVAL_UNDEFINED:
+    case JVAL_NONE:
+        jbuf_puts(b, "null");
+        break;
+    case JVAL_BOOL:
+        jbuf_puts(b, v.u.b ? "true" : "false");
+        break;
+    case JVAL_INT:
+        snprintf(num, sizeof(num), "%lld", (long long)v.u.i);
+        jbuf_puts(b, num);
+        break;
+    case JVAL_STR:
+        jbuf_json_escape(b, v.u.s.ptr, v.u.s.len);
+        break;
+    case JVAL_LIST:
+        jbuf_putc(b, '[');
+        for (size_t i = 0; i < v.u.list->len; i++) {
+            if (i) jbuf_puts(b, ", ");
+            jval_write_json(b, v.u.list->items[i]);
+        }
+        jbuf_putc(b, ']');
+        break;
+    case JVAL_MAP:
+        if (v.u.map->raw_json) {
+            jbuf_puts(b, v.u.map->raw_json);
+            break;
+        }
+        jbuf_putc(b, '{');
+        for (size_t i = 0; i < v.u.map->len; i++) {
+            if (i) jbuf_puts(b, ", ");
+            jbuf_json_escape(b, v.u.map->entries[i].key, strlen(v.u.map->entries[i].key));
+            jbuf_puts(b, ": ");
+            jval_write_json(b, v.u.map->entries[i].val);
+        }
+        jbuf_putc(b, '}');
+        break;
+    }
+}
+
+typedef enum {
+    JTOK_TEXT,
+    JTOK_EXPR,
+    JTOK_STMT,
+} jtok_kind;
+
+typedef struct {
+    jtok_kind kind;
+    const char *ptr;
+    size_t len;
+} jtok;
+
+typedef enum {
+    JSTMT_TEXT,
+    JSTMT_EXPR,
+    JSTMT_SET,
+    JSTMT_IF,
+    JSTMT_FOR,
+    JSTMT_MACRO,
+    JSTMT_BREAK,
+    JSTMT_CONTINUE,
+} jstmt_kind;
+
+typedef struct jstmt jstmt;
+
+typedef struct {
+    jstmt *items;
+    size_t len;
+    size_t cap;
+} jstmt_list;
+
+typedef struct {
+    const char *cond_ptr;
+    size_t cond_len;
+    jstmt_list body;
+} jif_branch;
+
+typedef struct {
+    const char *name;
+    const char *def_ptr;
+    size_t def_len;
+} jmacro_param;
+
+struct jstmt {
+    jstmt_kind kind;
+    union {
+        struct {
+            const char *ptr;
+            size_t len;
+        } text;
+        struct {
+            const char *ptr;
+            size_t len;
+        } expr;
+        struct {
+            const char *var;
+            const char *attr;
+            const char *expr_ptr;
+            size_t expr_len;
+        } set;
+        struct {
+            jif_branch *branches;
+            size_t branch_count;
+        } if_stmt;
+        struct {
+            const char *var1;
+            const char *var2;
+            const char *iter_ptr;
+            size_t iter_len;
+            const char *cond_ptr;
+            size_t cond_len;
+            jstmt_list body;
+            jstmt_list else_body;
+        } for_stmt;
+        struct {
+            const char *name;
+            jmacro_param *params;
+            size_t param_count;
+            jstmt_list body;
+        } macro;
+    } u;
+};
+
+static bool j_is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f';
+}
+
+static const char *find_tag_end(const char *p, const char *end, char close_c) {
+    char quote = 0;
+    while (p + 1 < end) {
+        char c = *p;
+        if (quote) {
+            if (c == '\\' && p + 1 < end) {
+                p += 2;
+                continue;
+            }
+            if (c == quote) quote = 0;
+            p++;
+            continue;
+        }
+        if (c == '\'' || c == '"') {
+            quote = c;
+            p++;
+            continue;
+        }
+        if (c == close_c && p[1] == '}') return p;
+        p++;
+    }
+    return NULL;
+}
+
+static bool j_lex(jinja_arena *a, const char *src, jtok **out_toks, size_t *out_count,
+                  char *err, size_t errlen) {
+    size_t cap = 64, len = 0;
+    jtok *toks = (jtok *)ja_alloc(a, cap * sizeof(jtok));
+    const char *end = src + strlen(src);
+    const char *p = src;
+
+    while (p < end) {
+        const char *tag = p;
+        while (tag + 1 < end) {
+            if (tag[0] == '{' && (tag[1] == '%' || tag[1] == '{' || tag[1] == '#')) break;
+            tag++;
+        }
+        if (tag + 1 >= end) tag = end;
+
+        size_t tlen = (size_t)(tag - p);
+        if (tag < end) {
+            char kind_c = tag[1];
+            bool strip_left = (tag + 2 < end && tag[2] == '-');
+            if (strip_left) {
+                while (tlen > 0 && j_is_space(p[tlen - 1])) tlen--;
+            } else if (kind_c == '%' || kind_c == '#') {
+                size_t line_start = tlen;
+                while (line_start > 0 && p[line_start - 1] != '\n') line_start--;
+                bool all_ws = true;
+                for (size_t i = line_start; i < tlen; i++) {
+                    if (p[i] != ' ' && p[i] != '\t') {
+                        all_ws = false;
+                        break;
+                    }
+                }
+                if (all_ws) tlen = line_start;
+            }
+        }
+        if (tlen > 0) {
+            if (len == cap) {
+                size_t ncap = cap * 2;
+                jtok *nt = (jtok *)ja_alloc(a, ncap * sizeof(jtok));
+                memcpy(nt, toks, len * sizeof(jtok));
+                toks = nt;
+                cap = ncap;
+            }
+            toks[len++] = (jtok){JTOK_TEXT, p, tlen};
+        }
+        if (tag >= end) break;
+
+        char kind_c = tag[1];
+        bool strip_left = (tag + 2 < end && tag[2] == '-');
+        const char *body_start = tag + 2 + (strip_left ? 1 : 0);
+        const char *close = NULL;
+        if (kind_c == '#') {
+            const char *q = body_start;
+            while (q + 1 < end) {
+                if (q[0] == '#' && q[1] == '}') {
+                    close = q;
+                    break;
+                }
+                q++;
+            }
+        } else {
+            close = find_tag_end(body_start, end, kind_c == '{' ? '}' : '%');
+        }
+        if (!close) {
+            if (err && errlen) snprintf(err, errlen, "unclosed Jinja tag");
+            return false;
+        }
+        bool strip_right = (close > body_start && close[-1] == '-');
+        const char *body_end = close - (strip_right ? 1 : 0);
+        while (body_start < body_end && j_is_space(*body_start)) body_start++;
+        while (body_end > body_start && j_is_space(body_end[-1])) body_end--;
+
+        if (kind_c != '#') {
+            if (len == cap) {
+                size_t ncap = cap * 2;
+                jtok *nt = (jtok *)ja_alloc(a, ncap * sizeof(jtok));
+                memcpy(nt, toks, len * sizeof(jtok));
+                toks = nt;
+                cap = ncap;
+            }
+            toks[len++] = (jtok){
+                kind_c == '{' ? JTOK_EXPR : JTOK_STMT,
+                body_start,
+                (size_t)(body_end - body_start),
+            };
+        }
+
+        p = close + 2;
+        if (strip_right) {
+            while (p < end && j_is_space(*p)) p++;
+        } else if (kind_c == '%' || kind_c == '#') {
+            if (p < end && *p == '\r') p++;
+            if (p < end && *p == '\n') p++;
+        }
+    }
+
+    *out_toks = toks;
+    *out_count = len;
+    return true;
+}
+
+static bool j_is_ident_start(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+static bool j_is_ident_char(char c) {
+    return j_is_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+static void j_skip_ws(const char **p, const char *end) {
+    while (*p < end && j_is_space(**p)) (*p)++;
+}
+
+static bool j_match_kw(const char **p, const char *end, const char *kw) {
+    j_skip_ws(p, end);
+    size_t n = strlen(kw);
+    if ((size_t)(end - *p) < n) return false;
+    if (memcmp(*p, kw, n) != 0) return false;
+    if ((size_t)(end - *p) > n && j_is_ident_char((*p)[n])) return false;
+    *p += n;
+    return true;
+}
+
+static bool j_peek_kw(const char *p, const char *end, const char *kw) {
+    return j_match_kw(&p, end, kw);
+}
+
+static const char *j_read_ident(jinja_arena *a, const char **p, const char *end) {
+    j_skip_ws(p, end);
+    if (*p >= end || !j_is_ident_start(**p)) return NULL;
+    const char *start = *p;
+    while (*p < end && j_is_ident_char(**p)) (*p)++;
+    return ja_strndup(a, start, (size_t)(*p - start));
+}
+
+static void jstmt_list_push(jinja_arena *a, jstmt_list *list, jstmt s) {
+    if (list->len == list->cap) {
+        size_t ncap = list->cap ? list->cap * 2 : 8;
+        jstmt *nitems = (jstmt *)ja_alloc(a, ncap * sizeof(jstmt));
+        if (list->len) memcpy(nitems, list->items, list->len * sizeof(jstmt));
+        list->items = nitems;
+        list->cap = ncap;
+    }
+    list->items[list->len++] = s;
+}
+
+static bool j_parse_block(jinja_arena *a, const jtok *toks, size_t count, size_t *idx,
+                          jstmt_list *out, const char **stop_kw, char *err, size_t errlen);
+
+static bool j_parse_if(jinja_arena *a, const jtok *toks, size_t count, size_t *idx,
+                       jstmt *out, char *err, size_t errlen) {
+    const jtok *t = &toks[*idx];
+    const char *p = t->ptr, *end = t->ptr + t->len;
+    j_match_kw(&p, end, "if");
+    j_skip_ws(&p, end);
+    (*idx)++;
+
+    size_t bcap = 4, blen = 0;
+    jif_branch *branches = (jif_branch *)ja_alloc(a, bcap * sizeof(jif_branch));
+    branches[blen].cond_ptr = p;
+    branches[blen].cond_len = (size_t)(end - p);
+    branches[blen].body = (jstmt_list){0};
+
+    const char *stop = NULL;
+    if (!j_parse_block(a, toks, count, idx, &branches[blen].body, &stop, err, errlen))
+        return false;
+    blen++;
+
+    while (stop && !strcmp(stop, "elif")) {
+        const jtok *et = &toks[*idx];
+        const char *ep = et->ptr, *eend = et->ptr + et->len;
+        j_match_kw(&ep, eend, "elif");
+        j_skip_ws(&ep, eend);
+        (*idx)++;
+        if (blen == bcap) {
+            size_t ncap = bcap * 2;
+            jif_branch *nb = (jif_branch *)ja_alloc(a, ncap * sizeof(jif_branch));
+            memcpy(nb, branches, blen * sizeof(jif_branch));
+            branches = nb;
+            bcap = ncap;
+        }
+        branches[blen].cond_ptr = ep;
+        branches[blen].cond_len = (size_t)(eend - ep);
+        branches[blen].body = (jstmt_list){0};
+        stop = NULL;
+        if (!j_parse_block(a, toks, count, idx, &branches[blen].body, &stop, err, errlen))
+            return false;
+        blen++;
+    }
+
+    if (stop && !strcmp(stop, "else")) {
+        (*idx)++;
+        if (blen == bcap) {
+            size_t ncap = bcap * 2;
+            jif_branch *nb = (jif_branch *)ja_alloc(a, ncap * sizeof(jif_branch));
+            memcpy(nb, branches, blen * sizeof(jif_branch));
+            branches = nb;
+            bcap = ncap;
+        }
+        branches[blen].cond_ptr = NULL;
+        branches[blen].cond_len = 0;
+        branches[blen].body = (jstmt_list){0};
+        stop = NULL;
+        if (!j_parse_block(a, toks, count, idx, &branches[blen].body, &stop, err, errlen))
+            return false;
+        blen++;
+    }
+
+    if (!stop || strcmp(stop, "endif")) {
+        if (err && errlen) snprintf(err, errlen, "expected endif");
+        return false;
+    }
+    (*idx)++;
+    out->kind = JSTMT_IF;
+    out->u.if_stmt.branches = branches;
+    out->u.if_stmt.branch_count = blen;
+    return true;
+}
+
+static const char *find_for_if(const char *p, const char *end) {
+    int depth = 0;
+    char quote = 0;
+    for (const char *q = p; q < end; q++) {
+        char c = *q;
+        if (quote) {
+            if (c == '\\' && q + 1 < end) { q++; continue; }
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '\'' || c == '"') { quote = c; continue; }
+        if (c == '(' || c == '[' || c == '{') { depth++; continue; }
+        if (c == ')' || c == ']' || c == '}') { if (depth > 0) depth--; continue; }
+        if (depth == 0 && (q == p || !j_is_ident_char(q[-1]))) {
+            const char *tmp = q;
+            if (j_match_kw(&tmp, end, "if")) return q;
+        }
+    }
+    return NULL;
+}
+
+static bool j_parse_for(jinja_arena *a, const jtok *toks, size_t count, size_t *idx,
+                        jstmt *out, char *err, size_t errlen) {
+    const jtok *t = &toks[*idx];
+    const char *p = t->ptr, *end = t->ptr + t->len;
+    j_match_kw(&p, end, "for");
+    const char *var1 = j_read_ident(a, &p, end);
+    const char *var2 = NULL;
+    j_skip_ws(&p, end);
+    if (p < end && *p == ',') {
+        p++;
+        var2 = j_read_ident(a, &p, end);
+    }
+    if (!var1 || !j_match_kw(&p, end, "in")) {
+        if (err && errlen) snprintf(err, errlen, "invalid for loop syntax");
+        return false;
+    }
+    j_skip_ws(&p, end);
+    const char *if_pos = find_for_if(p, end);
+    const char *iter_end = if_pos ? if_pos : end;
+    const char *cond_ptr = NULL;
+    size_t cond_len = 0;
+    if (if_pos) {
+        const char *cp = if_pos;
+        j_match_kw(&cp, end, "if");
+        j_skip_ws(&cp, end);
+        cond_ptr = cp;
+        cond_len = (size_t)(end - cp);
+    }
+    (*idx)++;
+
+    memset(out, 0, sizeof(*out));
+    out->kind = JSTMT_FOR;
+    out->u.for_stmt.var1 = var1;
+    out->u.for_stmt.var2 = var2;
+    out->u.for_stmt.iter_ptr = p;
+    out->u.for_stmt.iter_len = (size_t)(iter_end - p);
+    out->u.for_stmt.cond_ptr = cond_ptr;
+    out->u.for_stmt.cond_len = cond_len;
+
+    const char *stop = NULL;
+    if (!j_parse_block(a, toks, count, idx, &out->u.for_stmt.body, &stop, err, errlen))
+        return false;
+    if (stop && !strcmp(stop, "else")) {
+        (*idx)++;
+        stop = NULL;
+        if (!j_parse_block(a, toks, count, idx, &out->u.for_stmt.else_body, &stop, err, errlen))
+            return false;
+    }
+    if (!stop || strcmp(stop, "endfor")) {
+        if (err && errlen) snprintf(err, errlen, "expected endfor");
+        return false;
+    }
+    (*idx)++;
+    return true;
+}
+
+static bool j_parse_macro(jinja_arena *a, const jtok *toks, size_t count, size_t *idx,
+                          jstmt *out, char *err, size_t errlen) {
+    const jtok *t = &toks[*idx];
+    const char *p = t->ptr, *end = t->ptr + t->len;
+    j_match_kw(&p, end, "macro");
+    const char *name = j_read_ident(a, &p, end);
+    j_skip_ws(&p, end);
+    if (!name || p >= end || *p != '(') {
+        if (err && errlen) snprintf(err, errlen, "invalid macro header");
+        return false;
+    }
+    p++;
+    size_t pcap = 4, plen = 0;
+    jmacro_param *params = (jmacro_param *)ja_alloc(a, pcap * sizeof(jmacro_param));
+    j_skip_ws(&p, end);
+    while (p < end && *p != ')') {
+        const char *pname = j_read_ident(a, &p, end);
+        if (!pname) {
+            if (err && errlen) snprintf(err, errlen, "invalid macro param");
+            return false;
+        }
+        j_skip_ws(&p, end);
+        const char *def_ptr = NULL;
+        size_t def_len = 0;
+        if (p < end && *p == '=') {
+            p++;
+            j_skip_ws(&p, end);
+            const char *dstart = p;
+            int depth = 0;
+            char quote = 0;
+            while (p < end) {
+                char c = *p;
+                if (quote) {
+                    if (c == '\\' && p + 1 < end) { p += 2; continue; }
+                    if (c == quote) quote = 0;
+                    p++;
+                    continue;
+                }
+                if (c == '\'' || c == '"') { quote = c; p++; continue; }
+                if (c == '(' || c == '[' || c == '{') { depth++; p++; continue; }
+                if (c == ')' || c == ']' || c == '}') {
+                    if (depth == 0 && c == ')') break;
+                    if (depth > 0) depth--;
+                    p++;
+                    continue;
+                }
+                if (depth == 0 && c == ',') break;
+                p++;
+            }
+            def_ptr = dstart;
+            def_len = (size_t)(p - dstart);
+        }
+        if (plen == pcap) {
+            size_t ncap = pcap * 2;
+            jmacro_param *np = (jmacro_param *)ja_alloc(a, ncap * sizeof(jmacro_param));
+            memcpy(np, params, plen * sizeof(jmacro_param));
+            params = np;
+            pcap = ncap;
+        }
+        params[plen++] = (jmacro_param){pname, def_ptr, def_len};
+        j_skip_ws(&p, end);
+        if (p < end && *p == ',') p++;
+        j_skip_ws(&p, end);
+    }
+    if (p >= end || *p != ')') {
+        if (err && errlen) snprintf(err, errlen, "unclosed macro param list");
+        return false;
+    }
+    (*idx)++;
+
+    memset(out, 0, sizeof(*out));
+    out->kind = JSTMT_MACRO;
+    out->u.macro.name = name;
+    out->u.macro.params = params;
+    out->u.macro.param_count = plen;
+
+    const char *stop = NULL;
+    if (!j_parse_block(a, toks, count, idx, &out->u.macro.body, &stop, err, errlen))
+        return false;
+    if (!stop || strcmp(stop, "endmacro")) {
+        if (err && errlen) snprintf(err, errlen, "expected endmacro");
+        return false;
+    }
+    (*idx)++;
+    return true;
+}
+
+static bool j_parse_set(jinja_arena *a, const jtok *t, jstmt *out, char *err, size_t errlen) {
+    const char *p = t->ptr, *end = t->ptr + t->len;
+    j_match_kw(&p, end, "set");
+    const char *var = j_read_ident(a, &p, end);
+    const char *attr = NULL;
+    j_skip_ws(&p, end);
+    if (p < end && *p == '.') {
+        p++;
+        attr = j_read_ident(a, &p, end);
+    }
+    j_skip_ws(&p, end);
+    if (!var || p >= end || *p != '=') {
+        if (err && errlen) snprintf(err, errlen, "invalid set statement");
+        return false;
+    }
+    p++;
+    j_skip_ws(&p, end);
+    out->kind = JSTMT_SET;
+    out->u.set.var = var;
+    out->u.set.attr = attr;
+    out->u.set.expr_ptr = p;
+    out->u.set.expr_len = (size_t)(end - p);
+    return true;
+}
+
+static bool j_parse_block(jinja_arena *a, const jtok *toks, size_t count, size_t *idx,
+                          jstmt_list *out, const char **stop_kw, char *err, size_t errlen) {
+    while (*idx < count) {
+        const jtok *t = &toks[*idx];
+        if (t->kind == JTOK_TEXT) {
+            jstmt s = {.kind = JSTMT_TEXT, .u.text = {t->ptr, t->len}};
+            jstmt_list_push(a, out, s);
+            (*idx)++;
+            continue;
+        }
+        if (t->kind == JTOK_EXPR) {
+            jstmt s = {.kind = JSTMT_EXPR, .u.expr = {t->ptr, t->len}};
+            jstmt_list_push(a, out, s);
+            (*idx)++;
+            continue;
+        }
+        const char *p = t->ptr, *end = t->ptr + t->len;
+        if (j_peek_kw(p, end, "endif")) { if (stop_kw) *stop_kw = "endif"; return true; }
+        if (j_peek_kw(p, end, "elif")) { if (stop_kw) *stop_kw = "elif"; return true; }
+        if (j_peek_kw(p, end, "else")) { if (stop_kw) *stop_kw = "else"; return true; }
+        if (j_peek_kw(p, end, "endfor")) { if (stop_kw) *stop_kw = "endfor"; return true; }
+        if (j_peek_kw(p, end, "endmacro")) { if (stop_kw) *stop_kw = "endmacro"; return true; }
+
+        jstmt s = {0};
+        if (j_peek_kw(p, end, "if")) {
+            if (!j_parse_if(a, toks, count, idx, &s, err, errlen)) return false;
+            jstmt_list_push(a, out, s);
+        } else if (j_peek_kw(p, end, "for")) {
+            if (!j_parse_for(a, toks, count, idx, &s, err, errlen)) return false;
+            jstmt_list_push(a, out, s);
+        } else if (j_peek_kw(p, end, "macro")) {
+            if (!j_parse_macro(a, toks, count, idx, &s, err, errlen)) return false;
+            jstmt_list_push(a, out, s);
+        } else if (j_peek_kw(p, end, "set")) {
+            if (!j_parse_set(a, t, &s, err, errlen)) return false;
+            jstmt_list_push(a, out, s);
+            (*idx)++;
+        } else if (j_peek_kw(p, end, "break")) {
+            s.kind = JSTMT_BREAK;
+            jstmt_list_push(a, out, s);
+            (*idx)++;
+        } else if (j_peek_kw(p, end, "continue")) {
+            s.kind = JSTMT_CONTINUE;
+            jstmt_list_push(a, out, s);
+            (*idx)++;
+        } else {
+            if (err && errlen)
+                snprintf(err, errlen, "unsupported statement: %.*s", (int)t->len, t->ptr);
+            return false;
+        }
+    }
+    if (stop_kw) *stop_kw = NULL;
+    return true;
+}
+
+typedef struct jscope {
+    struct jscope *parent;
+    jmap *vars;
+} jscope;
+
+typedef struct {
+    jinja_arena *arena;
+    jscope *root_scope;
+    jscope *cur_scope;
+    const jstmt **macros;
+    size_t macro_count;
+    size_t macro_cap;
+    bool failed;
+    char *err;
+    size_t errlen;
+    bool loop_break;
+    bool loop_continue;
+} jctx;
+
+static void jctx_fail(jctx *ctx, const char *msg) {
+    if (ctx->failed) return;
+    ctx->failed = true;
+    if (ctx->err && ctx->errlen) snprintf(ctx->err, ctx->errlen, "%s", msg ? msg : "Jinja error");
+}
+
+static jval jctx_lookup(jctx *ctx, const char *name) {
+    for (jscope *s = ctx->cur_scope; s; s = s->parent) {
+        if (jmap_has(s->vars, name)) return jmap_get(s->vars, name);
+    }
+    return jval_undef();
+}
+
+static jval j_eval_expr(jctx *ctx, const char **p, const char *end, bool active);
+static bool j_exec_block(jctx *ctx, const jstmt_list *block, jbuf *out);
+
+static jval j_parse_string_lit(jctx *ctx, const char **p, const char *end) {
+    char quote = **p;
+    (*p)++;
+    jbuf b = {0};
+    while (*p < end && **p != quote) {
+        char c = *(*p)++;
+        if (c == '\\' && *p < end) {
+            char esc = *(*p)++;
+            switch (esc) {
+            case 'n': jbuf_putc(&b, '\n'); break;
+            case 'r': jbuf_putc(&b, '\r'); break;
+            case 't': jbuf_putc(&b, '\t'); break;
+            case '\\': jbuf_putc(&b, '\\'); break;
+            case '\'': jbuf_putc(&b, '\''); break;
+            case '"': jbuf_putc(&b, '"'); break;
+            default: jbuf_putc(&b, esc); break;
+            }
+        } else {
+            jbuf_putc(&b, c);
+        }
+    }
+    if (*p < end && **p == quote) (*p)++;
+    jval v = jval_str_n(ctx->arena, b.ptr ? b.ptr : "", b.len);
+    free(b.ptr);
+    return v;
+}
+
+typedef struct {
+    const char *kw;
+    jval val;
+} jcall_arg;
+
+static bool j_parse_call_args(jctx *ctx, const char **p, const char *end, bool active,
+                              jcall_arg **out_args, size_t *out_count) {
+    size_t cap = 4, len = 0;
+    jcall_arg *args = (jcall_arg *)ja_alloc(ctx->arena, cap * sizeof(jcall_arg));
+    j_skip_ws(p, end);
+    while (*p < end && **p != ')') {
+        const char *save = *p;
+        const char *ident = j_read_ident(ctx->arena, p, end);
+        j_skip_ws(p, end);
+        const char *kw = NULL;
+        if (ident && *p < end && **p == '=' && (*p + 1 >= end || (*p)[1] != '=')) {
+            (*p)++;
+            kw = ident;
+        } else {
+            *p = save;
+        }
+        jval val = j_eval_expr(ctx, p, end, active);
+        if (ctx->failed) return false;
+        if (len == cap) {
+            size_t ncap = cap * 2;
+            jcall_arg *na = (jcall_arg *)ja_alloc(ctx->arena, ncap * sizeof(jcall_arg));
+            memcpy(na, args, len * sizeof(jcall_arg));
+            args = na;
+            cap = ncap;
+        }
+        args[len++] = (jcall_arg){kw, val};
+        j_skip_ws(p, end);
+        if (*p < end && **p == ',') (*p)++;
+        j_skip_ws(p, end);
+    }
+    if (*p < end && **p == ')') (*p)++;
+    *out_args = args;
+    *out_count = len;
+    return true;
+}
+
+static bool char_in_set(char c, const char *chars, size_t clen) {
+    if (!chars) return j_is_space(c);
+    for (size_t i = 0; i < clen; i++) {
+        if (c == chars[i]) return true;
+    }
+    return false;
+}
+
+static jval j_str_strip_impl(jinja_arena *a, jval s, const char *chars, size_t clen,
+                             bool left, bool right) {
+    if (s.kind != JVAL_STR) return jval_str(a, "");
+    const char *p = s.u.s.ptr;
+    size_t start = 0, end = s.u.s.len;
+    if (left) {
+        while (start < end && char_in_set(p[start], chars, clen)) start++;
+    }
+    if (right) {
+        while (end > start && char_in_set(p[end - 1], chars, clen)) end--;
+    }
+    return jval_str_n(a, p + start, end - start);
+}
+
+static jval j_call_str_method(jctx *ctx, jval obj, const char *method,
+                              const jcall_arg *args, size_t argc) {
+    const char *s = obj.u.s.ptr;
+    size_t slen = obj.u.s.len;
+    if (!strcmp(method, "strip") || !strcmp(method, "lstrip") || !strcmp(method, "rstrip")) {
+        const char *chars = NULL;
+        size_t clen = 0;
+        if (argc > 0 && args[0].val.kind == JVAL_STR) {
+            chars = args[0].val.u.s.ptr;
+            clen = args[0].val.u.s.len;
+        }
+        bool left = strcmp(method, "rstrip") != 0;
+        bool right = strcmp(method, "lstrip") != 0;
+        return j_str_strip_impl(ctx->arena, obj, chars, clen, left, right);
+    }
+    if (!strcmp(method, "startswith")) {
+        if (argc < 1 || args[0].val.kind != JVAL_STR) return jval_bool(false);
+        size_t plen = args[0].val.u.s.len;
+        return jval_bool(slen >= plen && !memcmp(s, args[0].val.u.s.ptr, plen));
+    }
+    if (!strcmp(method, "endswith")) {
+        if (argc < 1 || args[0].val.kind != JVAL_STR) return jval_bool(false);
+        size_t plen = args[0].val.u.s.len;
+        return jval_bool(slen >= plen && !memcmp(s + slen - plen, args[0].val.u.s.ptr, plen));
+    }
+    if (!strcmp(method, "split")) {
+        jval list = jval_list_new(ctx->arena, 4);
+        const char *sep = (argc >= 1 && args[0].val.kind == JVAL_STR) ? args[0].val.u.s.ptr : NULL;
+        size_t sep_len = (argc >= 1 && args[0].val.kind == JVAL_STR) ? args[0].val.u.s.len : 0;
+        int64_t maxsplit = (argc >= 2 && args[1].val.kind == JVAL_INT) ? args[1].val.u.i : -1;
+        if (!sep || sep_len == 0) {
+            jlist_push(ctx->arena, list.u.list, obj);
+            return list;
+        }
+        size_t pos = 0;
+        int64_t splits = 0;
+        while (pos <= slen) {
+            if (maxsplit >= 0 && splits >= maxsplit) {
+                jlist_push(ctx->arena, list.u.list, jval_str_n(ctx->arena, s + pos, slen - pos));
+                break;
+            }
+            const char *found = NULL;
+            if (pos + sep_len <= slen) {
+                for (size_t i = pos; i + sep_len <= slen; i++) {
+                    if (!memcmp(s + i, sep, sep_len)) {
+                        found = s + i;
+                        break;
+                    }
+                }
+            }
+            if (!found) {
+                jlist_push(ctx->arena, list.u.list, jval_str_n(ctx->arena, s + pos, slen - pos));
+                break;
+            }
+            size_t part_len = (size_t)(found - (s + pos));
+            jlist_push(ctx->arena, list.u.list, jval_str_n(ctx->arena, s + pos, part_len));
+            pos = (size_t)(found - s) + sep_len;
+            splits++;
+        }
+        return list;
+    }
+    if (!strcmp(method, "lower")) {
+        char *dst = ja_strndup(ctx->arena, s, slen);
+        for (size_t i = 0; i < slen; i++) dst[i] = (char)tolower((unsigned char)dst[i]);
+        return (jval){.kind = JVAL_STR, .u.s = {dst, slen}};
+    }
+    if (!strcmp(method, "upper")) {
+        char *dst = ja_strndup(ctx->arena, s, slen);
+        for (size_t i = 0; i < slen; i++) dst[i] = (char)toupper((unsigned char)dst[i]);
+        return (jval){.kind = JVAL_STR, .u.s = {dst, slen}};
+    }
+    return jval_undef();
+}
+
+static jval j_call_function(jctx *ctx, const char *name, const jcall_arg *args, size_t argc) {
+    if (!strcmp(name, "namespace")) {
+        jval m = jval_map_new(ctx->arena, argc ? argc : 4);
+        for (size_t i = 0; i < argc; i++) {
+            if (args[i].kw) jmap_set(ctx->arena, m.u.map, args[i].kw, args[i].val);
+        }
+        return m;
+    }
+    if (!strcmp(name, "raise_exception")) {
+        const char *msg = (argc > 0 && args[0].val.kind == JVAL_STR) ?
+            args[0].val.u.s.ptr : "Jinja template exception";
+        jctx_fail(ctx, msg);
+        return jval_undef();
+    }
+    if (!strcmp(name, "range")) {
+        int64_t start = 0, stop = 0, step = 1;
+        if (argc == 1 && args[0].val.kind == JVAL_INT) stop = args[0].val.u.i;
+        else if (argc >= 2 && args[0].val.kind == JVAL_INT && args[1].val.kind == JVAL_INT) {
+            start = args[0].val.u.i;
+            stop = args[1].val.u.i;
+            if (argc >= 3 && args[2].val.kind == JVAL_INT && args[2].val.u.i != 0)
+                step = args[2].val.u.i;
+        }
+        jval list = jval_list_new(ctx->arena, 8);
+        if (step > 0) {
+            for (int64_t v = start; v < stop; v += step)
+                jlist_push(ctx->arena, list.u.list, jval_int(v));
+        } else {
+            for (int64_t v = start; v > stop; v += step)
+                jlist_push(ctx->arena, list.u.list, jval_int(v));
+        }
+        return list;
+    }
+    for (size_t i = 0; i < ctx->macro_count; i++) {
+        const jstmt *m = ctx->macros[i];
+        if (!strcmp(m->u.macro.name, name)) {
+            jscope macro_scope = {
+                .parent = ctx->root_scope,
+                .vars = jval_map_new(ctx->arena, 8).u.map,
+            };
+            for (size_t pi = 0; pi < m->u.macro.param_count; pi++) {
+                const jmacro_param *mp = &m->u.macro.params[pi];
+                jval val = jval_undef();
+                bool found = false;
+                for (size_t ai = 0; ai < argc; ai++) {
+                    if (args[ai].kw && !strcmp(args[ai].kw, mp->name)) {
+                        val = args[ai].val;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found && pi < argc && !args[pi].kw) {
+                    val = args[pi].val;
+                    found = true;
+                }
+                if (!found && mp->def_ptr) {
+                    const char *dp = mp->def_ptr;
+                    val = j_eval_expr(ctx, &dp, mp->def_ptr + mp->def_len, true);
+                }
+                jmap_set(ctx->arena, macro_scope.vars, mp->name, val);
+            }
+            jscope *prev = ctx->cur_scope;
+            ctx->cur_scope = &macro_scope;
+            jbuf mbuf = {0};
+            j_exec_block(ctx, &m->u.macro.body, &mbuf);
+            ctx->cur_scope = prev;
+            jval res = jval_str_n(ctx->arena, mbuf.ptr ? mbuf.ptr : "", mbuf.len);
+            free(mbuf.ptr);
+            return res;
+        }
+    }
+    return jval_undef();
+}
+
+static jval j_eval_primary(jctx *ctx, const char **p, const char *end, bool active) {
+    j_skip_ws(p, end);
+    if (*p >= end) return jval_undef();
+    char c = **p;
+    if (c == '(') {
+        (*p)++;
+        jval v = j_eval_expr(ctx, p, end, active);
+        j_skip_ws(p, end);
+        if (*p < end && **p == ')') (*p)++;
+        return v;
+    }
+    if (c == '[') {
+        (*p)++;
+        jval list = active ? jval_list_new(ctx->arena, 4) : jval_undef();
+        j_skip_ws(p, end);
+        while (*p < end && **p != ']') {
+            jval item = j_eval_expr(ctx, p, end, active);
+            if (active) jlist_push(ctx->arena, list.u.list, item);
+            j_skip_ws(p, end);
+            if (*p < end && **p == ',') (*p)++;
+            j_skip_ws(p, end);
+        }
+        if (*p < end && **p == ']') (*p)++;
+        return list;
+    }
+    if (c == '\'' || c == '"') {
+        return j_parse_string_lit(ctx, p, end);
+    }
+    if (c >= '0' && c <= '9') {
+        int64_t val = 0;
+        while (*p < end && **p >= '0' && **p <= '9') {
+            val = val * 10 + (**p - '0');
+            (*p)++;
+        }
+        return jval_int(val);
+    }
+    const char *ident = j_read_ident(ctx->arena, p, end);
+    if (!ident) return jval_undef();
+    if (!strcmp(ident, "true") || !strcmp(ident, "True")) return jval_bool(true);
+    if (!strcmp(ident, "false") || !strcmp(ident, "False")) return jval_bool(false);
+    if (!strcmp(ident, "none") || !strcmp(ident, "None") || !strcmp(ident, "null")) return jval_none();
+
+    j_skip_ws(p, end);
+    if (*p < end && **p == '(') {
+        (*p)++;
+        jcall_arg *args = NULL;
+        size_t argc = 0;
+        if (!j_parse_call_args(ctx, p, end, active, &args, &argc)) return jval_undef();
+        if (!active) return jval_undef();
+        return j_call_function(ctx, ident, args, argc);
+    }
+    if (!active) return jval_undef();
+    return jctx_lookup(ctx, ident);
+}
+
+static jval j_eval_subscript(jctx *ctx, jval obj, const char **p, const char *end, bool active) {
+    j_skip_ws(p, end);
+    const char *scan = *p;
+    int depth = 0;
+    char quote = 0;
+    const char *colon1 = NULL, *colon2 = NULL;
+    const char *close_bracket = NULL;
+    while (scan < end) {
+        char c = *scan;
+        if (quote) {
+            if (c == '\\' && scan + 1 < end) { scan += 2; continue; }
+            if (c == quote) quote = 0;
+            scan++;
+            continue;
+        }
+        if (c == '\'' || c == '"') { quote = c; scan++; continue; }
+        if (c == '(' || c == '[' || c == '{') { depth++; scan++; continue; }
+        if (c == ')' || c == ']' || c == '}') {
+            if (depth == 0 && c == ']') { close_bracket = scan; break; }
+            if (depth > 0) depth--;
+            scan++;
+            continue;
+        }
+        if (depth == 0 && c == ':') {
+            if (!colon1) colon1 = scan;
+            else if (!colon2) colon2 = scan;
+        }
+        scan++;
+    }
+    if (!close_bracket) return jval_undef();
+
+    if (!colon1) {
+        jval idx = j_eval_expr(ctx, p, close_bracket, active);
+        *p = close_bracket + 1;
+        if (!active) return jval_undef();
+        if (obj.kind == JVAL_LIST && idx.kind == JVAL_INT) {
+            int64_t i = idx.u.i;
+            int64_t len = (int64_t)obj.u.list->len;
+            if (i < 0) i += len;
+            if (i >= 0 && i < len) return obj.u.list->items[i];
+            return jval_undef();
+        }
+        if (obj.kind == JVAL_MAP && idx.kind == JVAL_STR) {
+            return jmap_get(obj.u.map, idx.u.s.ptr);
+        }
+        return jval_undef();
+    }
+
+    const char *s1 = *p, *e1 = colon1;
+    const char *s2 = colon1 + 1, *e2 = colon2 ? colon2 : close_bracket;
+    const char *s3 = colon2 ? colon2 + 1 : close_bracket, *e3 = close_bracket;
+    *p = close_bracket + 1;
+
+    j_skip_ws(&s1, e1);
+    j_skip_ws(&s2, e2);
+    j_skip_ws(&s3, e3);
+    bool has_start = (s1 < e1);
+    bool has_stop = (s2 < e2);
+    bool has_step = (s3 < e3);
+
+    jval vstart = has_start ? j_eval_expr(ctx, &s1, e1, active) : jval_undef();
+    jval vstop = has_stop ? j_eval_expr(ctx, &s2, e2, active) : jval_undef();
+    jval vstep = has_step ? j_eval_expr(ctx, &s3, e3, active) : jval_int(1);
+    if (!active || obj.kind != JVAL_LIST) return jval_undef();
+
+    int64_t step = (vstep.kind == JVAL_INT && vstep.u.i != 0) ? vstep.u.i : 1;
+    int64_t len = (int64_t)obj.u.list->len;
+    int64_t start, stop;
+    if (step > 0) {
+        start = (vstart.kind == JVAL_INT) ? (vstart.u.i < 0 ? vstart.u.i + len : vstart.u.i) : 0;
+        stop = (vstop.kind == JVAL_INT) ? (vstop.u.i < 0 ? vstop.u.i + len : vstop.u.i) : len;
+        if (start < 0) start = 0;
+        if (stop > len) stop = len;
+        jval res = jval_list_new(ctx->arena, (size_t)(stop > start ? stop - start : 1));
+        for (int64_t i = start; i < stop; i += step)
+            jlist_push(ctx->arena, res.u.list, obj.u.list->items[i]);
+        return res;
+    } else {
+        start = (vstart.kind == JVAL_INT) ? (vstart.u.i < 0 ? vstart.u.i + len : vstart.u.i) : (len - 1);
+        stop = (vstop.kind == JVAL_INT) ? (vstop.u.i < 0 ? vstop.u.i + len : vstop.u.i) : -1;
+        if (start >= len) start = len - 1;
+        if (stop < -1) stop = -1;
+        jval res = jval_list_new(ctx->arena, (size_t)len);
+        for (int64_t i = start; i > stop; i += step)
+            jlist_push(ctx->arena, res.u.list, obj.u.list->items[i]);
+        return res;
+    }
+}
+
+static jval j_eval_postfix(jctx *ctx, const char **p, const char *end, bool active) {
+    jval v = j_eval_primary(ctx, p, end, active);
+    for (;;) {
+        j_skip_ws(p, end);
+        if (*p < end && **p == '.') {
+            (*p)++;
+            const char *attr = j_read_ident(ctx->arena, p, end);
+            if (!attr) break;
+            j_skip_ws(p, end);
+            if (*p < end && **p == '(') {
+                (*p)++;
+                jcall_arg *args = NULL;
+                size_t argc = 0;
+                if (!j_parse_call_args(ctx, p, end, active, &args, &argc)) return jval_undef();
+                if (!active) {
+                    v = jval_undef();
+                } else if (v.kind == JVAL_STR) {
+                    v = j_call_str_method(ctx, v, attr, args, argc);
+                } else if (v.kind == JVAL_MAP && !strcmp(attr, "get")) {
+                    if (argc >= 1 && args[0].val.kind == JVAL_STR && jmap_has(v.u.map, args[0].val.u.s.ptr))
+                        v = jmap_get(v.u.map, args[0].val.u.s.ptr);
+                    else if (argc >= 2)
+                        v = args[1].val;
+                    else
+                        v = jval_none();
+                } else {
+                    v = jval_undef();
+                }
+            } else {
+                if (!active) v = jval_undef();
+                else if (v.kind == JVAL_MAP) v = jmap_get(v.u.map, attr);
+                else v = jval_undef();
+            }
+            continue;
+        }
+        if (*p < end && **p == '[') {
+            (*p)++;
+            v = j_eval_subscript(ctx, v, p, end, active);
+            continue;
+        }
+        break;
+    }
+    return v;
+}
+
+static jval j_eval_filter(jctx *ctx, const char **p, const char *end, bool active) {
+    jval v = j_eval_postfix(ctx, p, end, active);
+    for (;;) {
+        j_skip_ws(p, end);
+        if (*p >= end || **p != '|' || (*p + 1 < end && (*p)[1] == '|')) break;
+        (*p)++;
+        const char *fname = j_read_ident(ctx->arena, p, end);
+        if (!fname) break;
+        jcall_arg *args = NULL;
+        size_t argc = 0;
+        j_skip_ws(p, end);
+        if (*p < end && **p == '(') {
+            (*p)++;
+            if (!j_parse_call_args(ctx, p, end, active, &args, &argc)) return jval_undef();
+        }
+        if (!active) continue;
+        if (!strcmp(fname, "trim") || !strcmp(fname, "strip")) {
+            v = j_str_strip_impl(ctx->arena, jval_to_str(ctx->arena, v), NULL, 0, true, true);
+        } else if (!strcmp(fname, "string")) {
+            v = jval_to_str(ctx->arena, v);
+        } else if (!strcmp(fname, "length") || !strcmp(fname, "count")) {
+            if (v.kind == JVAL_LIST) v = jval_int((int64_t)v.u.list->len);
+            else if (v.kind == JVAL_STR) v = jval_int((int64_t)v.u.s.len);
+            else if (v.kind == JVAL_MAP) v = jval_int((int64_t)v.u.map->len);
+            else v = jval_int(0);
+        } else if (!strcmp(fname, "tojson")) {
+            jbuf b = {0};
+            jval_write_json(&b, v);
+            v = jval_str_n(ctx->arena, b.ptr ? b.ptr : "", b.len);
+            free(b.ptr);
+        } else if (!strcmp(fname, "lower")) {
+            v = j_call_str_method(ctx, jval_to_str(ctx->arena, v), "lower", NULL, 0);
+        } else if (!strcmp(fname, "upper")) {
+            v = j_call_str_method(ctx, jval_to_str(ctx->arena, v), "upper", NULL, 0);
+        } else if (!strcmp(fname, "first")) {
+            if (v.kind == JVAL_LIST && v.u.list->len > 0) v = v.u.list->items[0];
+            else v = jval_undef();
+        } else if (!strcmp(fname, "last")) {
+            if (v.kind == JVAL_LIST && v.u.list->len > 0) v = v.u.list->items[v.u.list->len - 1];
+            else v = jval_undef();
+        } else if (!strcmp(fname, "default")) {
+            bool use_def = (v.kind == JVAL_UNDEFINED);
+            if (argc >= 2 && args[1].val.kind == JVAL_BOOL && args[1].val.u.b)
+                use_def = !jval_truthy(v);
+            if (use_def && argc >= 1) v = args[0].val;
+        }
+    }
+    return v;
+}
+
+static jval j_eval_unary(jctx *ctx, const char **p, const char *end, bool active) {
+    j_skip_ws(p, end);
+    if (*p < end && **p == '-') {
+        (*p)++;
+        jval v = j_eval_unary(ctx, p, end, active);
+        if (active && v.kind == JVAL_INT) return jval_int(-v.u.i);
+        return jval_int(0);
+    }
+    if (*p < end && **p == '+') {
+        (*p)++;
+        return j_eval_unary(ctx, p, end, active);
+    }
+    return j_eval_filter(ctx, p, end, active);
+}
+
+static jval j_eval_mul(jctx *ctx, const char **p, const char *end, bool active) {
+    jval left = j_eval_unary(ctx, p, end, active);
+    for (;;) {
+        j_skip_ws(p, end);
+        if (*p < end && (**p == '*' || **p == '/' || **p == '%')) {
+            char op = *(*p)++;
+            if (op == '/' && *p < end && **p == '/') (*p)++;
+            jval right = j_eval_unary(ctx, p, end, active);
+            if (active && left.kind == JVAL_INT && right.kind == JVAL_INT) {
+                if (op == '*') left = jval_int(left.u.i * right.u.i);
+                else if (op == '/' && right.u.i != 0) left = jval_int(left.u.i / right.u.i);
+                else if (op == '%' && right.u.i != 0) left = jval_int(left.u.i % right.u.i);
+            }
+            continue;
+        }
+        break;
+    }
+    return left;
+}
+
+static jval j_eval_add(jctx *ctx, const char **p, const char *end, bool active) {
+    jval left = j_eval_mul(ctx, p, end, active);
+    for (;;) {
+        j_skip_ws(p, end);
+        if (*p < end && (**p == '+' || **p == '-' || **p == '~')) {
+            char op = *(*p)++;
+            jval right = j_eval_mul(ctx, p, end, active);
+            if (!active) continue;
+            if (op == '~' || (op == '+' && (left.kind == JVAL_STR || right.kind == JVAL_STR))) {
+                jval ls = jval_to_str(ctx->arena, left);
+                jval rs = jval_to_str(ctx->arena, right);
+                size_t n = ls.u.s.len + rs.u.s.len;
+                char *buf = (char *)ja_alloc(ctx->arena, n + 1);
+                if (ls.u.s.len) memcpy(buf, ls.u.s.ptr, ls.u.s.len);
+                if (rs.u.s.len) memcpy(buf + ls.u.s.len, rs.u.s.ptr, rs.u.s.len);
+                buf[n] = '\0';
+                left = (jval){.kind = JVAL_STR, .u.s = {buf, n}};
+            } else if (left.kind == JVAL_INT && right.kind == JVAL_INT) {
+                left = jval_int(op == '+' ? left.u.i + right.u.i : left.u.i - right.u.i);
+            }
+            continue;
+        }
+        break;
+    }
+    return left;
+}
+
+static bool jval_in(jval needle, jval haystack) {
+    if (haystack.kind == JVAL_LIST) {
+        for (size_t i = 0; i < haystack.u.list->len; i++) {
+            if (jval_eq(needle, haystack.u.list->items[i])) return true;
+        }
+        return false;
+    }
+    if (haystack.kind == JVAL_MAP && needle.kind == JVAL_STR) {
+        return jmap_has(haystack.u.map, needle.u.s.ptr);
+    }
+    if (haystack.kind == JVAL_STR && needle.kind == JVAL_STR) {
+        if (needle.u.s.len == 0) return true;
+        if (needle.u.s.len > haystack.u.s.len) return false;
+        for (size_t i = 0; i + needle.u.s.len <= haystack.u.s.len; i++) {
+            if (!memcmp(haystack.u.s.ptr + i, needle.u.s.ptr, needle.u.s.len)) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+static jval j_eval_cmp(jctx *ctx, const char **p, const char *end, bool active) {
+    jval left = j_eval_add(ctx, p, end, active);
+    for (;;) {
+        j_skip_ws(p, end);
+        const char *save = *p;
+        if (j_match_kw(p, end, "is")) {
+            bool neg = j_match_kw(p, end, "not");
+            const char *tname = j_read_ident(ctx->arena, p, end);
+            if (!tname) { *p = save; break; }
+            bool res = false;
+            if (active) {
+                if (!strcmp(tname, "defined")) res = (left.kind != JVAL_UNDEFINED);
+                else if (!strcmp(tname, "undefined")) res = (left.kind == JVAL_UNDEFINED);
+                else if (!strcmp(tname, "none") || !strcmp(tname, "null")) res = (left.kind == JVAL_NONE);
+                else if (!strcmp(tname, "string")) res = (left.kind == JVAL_STR);
+                else if (!strcmp(tname, "mapping")) res = (left.kind == JVAL_MAP);
+                else if (!strcmp(tname, "iterable") || !strcmp(tname, "sequence"))
+                    res = (left.kind == JVAL_LIST || left.kind == JVAL_MAP || left.kind == JVAL_STR);
+                else if (!strcmp(tname, "true") || !strcmp(tname, "True"))
+                    res = (left.kind == JVAL_BOOL && left.u.b);
+                else if (!strcmp(tname, "false") || !strcmp(tname, "False"))
+                    res = (left.kind == JVAL_BOOL && !left.u.b);
+                else if (!strcmp(tname, "boolean")) res = (left.kind == JVAL_BOOL);
+                else if (!strcmp(tname, "integer") || !strcmp(tname, "number")) res = (left.kind == JVAL_INT);
+                if (neg) res = !res;
+            }
+            left = jval_bool(res);
+            continue;
+        }
+        bool not_in = false;
+        if (j_match_kw(p, end, "not")) {
+            if (j_match_kw(p, end, "in")) not_in = true;
+            else { *p = save; break; }
+        }
+        if (not_in || j_match_kw(p, end, "in")) {
+            jval right = j_eval_add(ctx, p, end, active);
+            if (active) {
+                bool res = jval_in(left, right);
+                left = jval_bool(not_in ? !res : res);
+            }
+            continue;
+        }
+        if (*p + 1 < end && ((*p)[0] == '=' || (*p)[0] == '!' || (*p)[0] == '<' || (*p)[0] == '>') && (*p)[1] == '=') {
+            char op = (*p)[0];
+            *p += 2;
+            jval right = j_eval_add(ctx, p, end, active);
+            if (active) {
+                if (op == '=') left = jval_bool(jval_eq(left, right));
+                else if (op == '!') left = jval_bool(!jval_eq(left, right));
+                else if (op == '<' && left.kind == JVAL_INT && right.kind == JVAL_INT)
+                    left = jval_bool(left.u.i <= right.u.i);
+                else if (op == '>' && left.kind == JVAL_INT && right.kind == JVAL_INT)
+                    left = jval_bool(left.u.i >= right.u.i);
+                else left = jval_bool(false);
+            }
+            continue;
+        }
+        if (*p < end && (**p == '<' || **p == '>')) {
+            char op = *(*p)++;
+            jval right = j_eval_add(ctx, p, end, active);
+            if (active && left.kind == JVAL_INT && right.kind == JVAL_INT) {
+                left = jval_bool(op == '<' ? left.u.i < right.u.i : left.u.i > right.u.i);
+            } else if (active) {
+                left = jval_bool(false);
+            }
+            continue;
+        }
+        break;
+    }
+    return left;
+}
+
+static jval j_eval_not(jctx *ctx, const char **p, const char *end, bool active) {
+    if (j_match_kw(p, end, "not")) {
+        jval v = j_eval_not(ctx, p, end, active);
+        return active ? jval_bool(!jval_truthy(v)) : jval_undef();
+    }
+    return j_eval_cmp(ctx, p, end, active);
+}
+
+static jval j_eval_and(jctx *ctx, const char **p, const char *end, bool active) {
+    jval left = j_eval_not(ctx, p, end, active);
+    while (j_match_kw(p, end, "and")) {
+        bool rhs_active = active && jval_truthy(left);
+        jval right = j_eval_not(ctx, p, end, rhs_active);
+        if (active) left = rhs_active ? right : jval_bool(false);
+    }
+    return left;
+}
+
+static jval j_eval_or(jctx *ctx, const char **p, const char *end, bool active) {
+    jval left = j_eval_and(ctx, p, end, active);
+    while (j_match_kw(p, end, "or")) {
+        bool rhs_active = active && !jval_truthy(left);
+        jval right = j_eval_and(ctx, p, end, rhs_active);
+        if (active && rhs_active) left = right;
+    }
+    return left;
+}
+
+static jval j_eval_expr(jctx *ctx, const char **p, const char *end, bool active) {
+    jval val = j_eval_or(ctx, p, end, active);
+    const char *save = *p;
+    if (j_match_kw(p, end, "if")) {
+        jval cond = j_eval_or(ctx, p, end, active);
+        bool take_true = active && jval_truthy(cond);
+        jval else_val = jval_str(ctx->arena, "");
+        if (j_match_kw(p, end, "else")) {
+            else_val = j_eval_expr(ctx, p, end, active && !take_true);
+        }
+        if (active) return take_true ? val : else_val;
+        return jval_undef();
+    }
+    *p = save;
+    return val;
+}
+
+static bool j_exec_block(jctx *ctx, const jstmt_list *block, jbuf *out) {
+    for (size_t i = 0; i < block->len; i++) {
+        if (ctx->failed || ctx->loop_break || ctx->loop_continue) return !ctx->failed;
+        const jstmt *s = &block->items[i];
+        switch (s->kind) {
+        case JSTMT_TEXT:
+            jbuf_append(out, s->u.text.ptr, s->u.text.len);
+            break;
+        case JSTMT_EXPR: {
+            const char *p = s->u.expr.ptr;
+            jval v = j_eval_expr(ctx, &p, s->u.expr.ptr + s->u.expr.len, true);
+            if (ctx->failed) return false;
+            jval sv = jval_to_str(ctx->arena, v);
+            jbuf_append(out, sv.u.s.ptr, sv.u.s.len);
+            break;
+        }
+        case JSTMT_SET: {
+            const char *p = s->u.set.expr_ptr;
+            jval v = j_eval_expr(ctx, &p, s->u.set.expr_ptr + s->u.set.expr_len, true);
+            if (ctx->failed) return false;
+            if (s->u.set.attr) {
+                jval target = jctx_lookup(ctx, s->u.set.var);
+                if (target.kind == JVAL_MAP) {
+                    jmap_set(ctx->arena, target.u.map, s->u.set.attr, v);
+                }
+            } else {
+                jmap_set(ctx->arena, ctx->cur_scope->vars, s->u.set.var, v);
+            }
+            break;
+        }
+        case JSTMT_IF: {
+            for (size_t bi = 0; bi < s->u.if_stmt.branch_count; bi++) {
+                const jif_branch *br = &s->u.if_stmt.branches[bi];
+                bool take = true;
+                if (br->cond_ptr) {
+                    const char *p = br->cond_ptr;
+                    jval cv = j_eval_expr(ctx, &p, br->cond_ptr + br->cond_len, true);
+                    if (ctx->failed) return false;
+                    take = jval_truthy(cv);
+                }
+                if (take) {
+                    if (!j_exec_block(ctx, &br->body, out)) return false;
+                    break;
+                }
+            }
+            break;
+        }
+        case JSTMT_FOR: {
+            const char *p = s->u.for_stmt.iter_ptr;
+            jval iter = j_eval_expr(ctx, &p, s->u.for_stmt.iter_ptr + s->u.for_stmt.iter_len, true);
+            if (ctx->failed) return false;
+            if (iter.kind != JVAL_LIST || iter.u.list->len == 0) {
+                if (!j_exec_block(ctx, &s->u.for_stmt.else_body, out)) return false;
+                break;
+            }
+            jlist *items = iter.u.list;
+            jscope loop_scope = {
+                .parent = ctx->cur_scope,
+                .vars = jval_map_new(ctx->arena, 8).u.map,
+            };
+            jscope *prev_scope = ctx->cur_scope;
+            ctx->cur_scope = &loop_scope;
+            if (s->u.for_stmt.cond_ptr) {
+                jval filtered = jval_list_new(ctx->arena, items->len);
+                for (size_t idx = 0; idx < items->len; idx++) {
+                    jmap_set(ctx->arena, loop_scope.vars, s->u.for_stmt.var1, items->items[idx]);
+                    const char *cp = s->u.for_stmt.cond_ptr;
+                    jval cv = j_eval_expr(ctx, &cp, s->u.for_stmt.cond_ptr + s->u.for_stmt.cond_len, true);
+                    if (ctx->failed) { ctx->cur_scope = prev_scope; return false; }
+                    if (jval_truthy(cv)) jlist_push(ctx->arena, filtered.u.list, items->items[idx]);
+                }
+                items = filtered.u.list;
+            }
+            if (items->len == 0) {
+                ctx->cur_scope = prev_scope;
+                if (!j_exec_block(ctx, &s->u.for_stmt.else_body, out)) return false;
+                break;
+            }
+            jval loop_obj = jval_map_new(ctx->arena, 8);
+            jmap_set(ctx->arena, loop_scope.vars, "loop", loop_obj);
+            for (size_t idx = 0; idx < items->len; idx++) {
+                jmap_set(ctx->arena, loop_scope.vars, s->u.for_stmt.var1, items->items[idx]);
+                jmap_set(ctx->arena, loop_obj.u.map, "index0", jval_int((int64_t)idx));
+                jmap_set(ctx->arena, loop_obj.u.map, "index", jval_int((int64_t)(idx + 1)));
+                jmap_set(ctx->arena, loop_obj.u.map, "revindex0", jval_int((int64_t)(items->len - 1 - idx)));
+                jmap_set(ctx->arena, loop_obj.u.map, "revindex", jval_int((int64_t)(items->len - idx)));
+                jmap_set(ctx->arena, loop_obj.u.map, "first", jval_bool(idx == 0));
+                jmap_set(ctx->arena, loop_obj.u.map, "last", jval_bool(idx + 1 == items->len));
+                jmap_set(ctx->arena, loop_obj.u.map, "length", jval_int((int64_t)items->len));
+                jmap_set(ctx->arena, loop_obj.u.map, "previtem",
+                         idx > 0 ? items->items[idx - 1] : jval_undef());
+                jmap_set(ctx->arena, loop_obj.u.map, "nextitem",
+                         idx + 1 < items->len ? items->items[idx + 1] : jval_undef());
+                if (!j_exec_block(ctx, &s->u.for_stmt.body, out)) {
+                    ctx->cur_scope = prev_scope;
+                    return false;
+                }
+                if (ctx->loop_continue) ctx->loop_continue = false;
+                if (ctx->loop_break) {
+                    ctx->loop_break = false;
+                    break;
+                }
+            }
+            ctx->cur_scope = prev_scope;
+            break;
+        }
+        case JSTMT_MACRO:
+            if (ctx->macro_count == ctx->macro_cap) {
+                size_t ncap = ctx->macro_cap ? ctx->macro_cap * 2 : 8;
+                const jstmt **nm = (const jstmt **)ja_alloc(ctx->arena, ncap * sizeof(*nm));
+                if (ctx->macro_count) memcpy(nm, ctx->macros, ctx->macro_count * sizeof(*nm));
+                ctx->macros = nm;
+                ctx->macro_cap = ncap;
+            }
+            ctx->macros[ctx->macro_count++] = s;
+            break;
+        case JSTMT_BREAK:
+            ctx->loop_break = true;
+            return true;
+        case JSTMT_CONTINUE:
+            ctx->loop_continue = true;
+            return true;
+        }
+    }
+    return !ctx->failed;
+}
+
+static bool q36_jinja_validate(const char *template_src, char *err, size_t errlen) {
+    jinja_arena arena = {0};
+    jtok *toks = NULL;
+    size_t tok_count = 0;
+    if (!j_lex(&arena, template_src, &toks, &tok_count, err, errlen)) {
+        ja_free(&arena);
+        return false;
+    }
+    size_t idx = 0;
+    jstmt_list root_block = {0};
+    const char *stop = NULL;
+    bool ok = j_parse_block(&arena, toks, tok_count, &idx, &root_block, &stop, err, errlen) && !stop;
+    if (!ok && stop && err && errlen && !err[0])
+        snprintf(err, errlen, "unexpected block end: %s", stop);
+    ja_free(&arena);
+    return ok;
+}
+
+char *q36_jinja_render(const char *template_src,
+                       const q36_jinja_render_params *params,
+                       char *err, size_t errlen) {
+    if (!template_src || !params) {
+        if (err && errlen) snprintf(err, errlen, "null template or params");
+        return NULL;
+    }
+    jinja_arena arena = {0};
+    jtok *toks = NULL;
+    size_t tok_count = 0;
+    if (!j_lex(&arena, template_src, &toks, &tok_count, err, errlen)) {
+        ja_free(&arena);
+        return NULL;
+    }
+    size_t idx = 0;
+    jstmt_list root_block = {0};
+    const char *stop = NULL;
+    if (!j_parse_block(&arena, toks, tok_count, &idx, &root_block, &stop, err, errlen) || stop) {
+        if (stop && err && errlen && !err[0])
+            snprintf(err, errlen, "unexpected block end: %s", stop);
+        ja_free(&arena);
+        return NULL;
+    }
+
+    jscope root_scope = {
+        .parent = NULL,
+        .vars = jval_map_new(&arena, 16).u.map,
+    };
+
+    jval msgs_val = jval_list_new(&arena, params->message_count ? params->message_count : 4);
+    for (size_t i = 0; i < params->message_count; i++) {
+        const q36_jinja_message *m = &params->messages[i];
+        jval mv = jval_map_new(&arena, 6);
+        jmap_set(&arena, mv.u.map, "role", jval_str(&arena, m->role ? m->role : "user"));
+        if (m->parts && m->image_count > 0) {
+            jval clist = jval_list_new(&arena, m->image_count * 2 + 1);
+            for (size_t k = 0; k <= m->image_count; k++) {
+                const char *txt = m->parts[k];
+                if (txt && txt[0]) {
+                    jval item = jval_map_new(&arena, 2);
+                    jmap_set(&arena, item.u.map, "type", jval_str(&arena, "text"));
+                    jmap_set(&arena, item.u.map, "text", jval_str(&arena, txt));
+                    jlist_push(&arena, clist.u.list, item);
+                }
+                if (k < m->image_count) {
+                    jval img = jval_map_new(&arena, 2);
+                    jmap_set(&arena, img.u.map, "type", jval_str(&arena, "image"));
+                    jmap_set(&arena, img.u.map, "image", jval_bool(true));
+                    jlist_push(&arena, clist.u.list, img);
+                }
+            }
+            jmap_set(&arena, mv.u.map, "content", clist);
+        } else {
+            jmap_set(&arena, mv.u.map, "content", jval_str(&arena, m->content ? m->content : ""));
+        }
+        if (m->reasoning_content && m->reasoning_content[0]) {
+            jmap_set(&arena, mv.u.map, "reasoning_content", jval_str(&arena, m->reasoning_content));
+        }
+        if (m->tool_calls && m->tool_call_count > 0) {
+            jval tclist = jval_list_new(&arena, m->tool_call_count);
+            for (size_t k = 0; k < m->tool_call_count; k++) {
+                const q36_jinja_tool_call *tc = &m->tool_calls[k];
+                jval tcv = jval_map_new(&arena, 4);
+                jval fnv = jval_map_new(&arena, 4);
+                jval arg_map = jval_map_new(&arena, 2);
+                arg_map.u.map->raw_json = ja_strdup(&arena, tc->arguments_json && tc->arguments_json[0] ? tc->arguments_json : "{}");
+                jmap_set(&arena, fnv.u.map, "name", jval_str(&arena, tc->name ? tc->name : ""));
+                jmap_set(&arena, fnv.u.map, "arguments", arg_map);
+                jmap_set(&arena, tcv.u.map, "name", jval_str(&arena, tc->name ? tc->name : ""));
+                jmap_set(&arena, tcv.u.map, "arguments", arg_map);
+                jmap_set(&arena, tcv.u.map, "function", fnv);
+                jlist_push(&arena, tclist.u.list, tcv);
+            }
+            jmap_set(&arena, mv.u.map, "tool_calls", tclist);
+        }
+        jlist_push(&arena, msgs_val.u.list, mv);
+    }
+    jmap_set(&arena, root_scope.vars, "messages", msgs_val);
+
+    if (params->tools_json_lines && params->tools_json_lines[0]) {
+        jval tlist = jval_list_new(&arena, 8);
+        const char *p = params->tools_json_lines;
+        while (*p) {
+            while (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            if (*p == '{') {
+                const char *start = p;
+                int depth = 0;
+                bool in_str = false;
+                while (*p) {
+                    if (in_str) {
+                        if (*p == '\\' && p[1]) p++;
+                        else if (*p == '"') in_str = false;
+                    } else {
+                        if (*p == '"') in_str = true;
+                        else if (*p == '{') depth++;
+                        else if (*p == '}') {
+                            depth--;
+                            if (depth == 0) {
+                                p++;
+                                break;
+                            }
+                        }
+                    }
+                    p++;
+                }
+                size_t len = (size_t)(p - start);
+                if (len > 0) {
+                    jval tv = jval_map_new(&arena, 2);
+                    tv.u.map->raw_json = ja_strndup(&arena, start, len);
+                    jlist_push(&arena, tlist.u.list, tv);
+                }
+            } else {
+                const char *nl = strchr(p, '\n');
+                size_t len = nl ? (size_t)(nl - p) : strlen(p);
+                while (len > 0 && (p[len - 1] == '\r' || p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+                if (len > 0) {
+                    jval tv = jval_map_new(&arena, 2);
+                    tv.u.map->raw_json = ja_strndup(&arena, p, len);
+                    jlist_push(&arena, tlist.u.list, tv);
+                }
+                if (!nl) break;
+                p = nl + 1;
+            }
+        }
+        if (tlist.u.list->len > 0) {
+            jmap_set(&arena, root_scope.vars, "tools", tlist);
+        }
+    }
+
+    jmap_set(&arena, root_scope.vars, "add_generation_prompt", jval_bool(params->add_generation_prompt));
+    if (params->enable_thinking_set)
+        jmap_set(&arena, root_scope.vars, "enable_thinking", jval_bool(params->enable_thinking));
+    if (params->preserve_thinking_set)
+        jmap_set(&arena, root_scope.vars, "preserve_thinking", jval_bool(params->preserve_thinking));
+    if (params->reasoning_effort && params->reasoning_effort[0])
+        jmap_set(&arena, root_scope.vars, "reasoning_effort", jval_str(&arena, params->reasoning_effort));
+
+    jctx ctx = {
+        .arena = &arena,
+        .root_scope = &root_scope,
+        .cur_scope = &root_scope,
+        .err = err,
+        .errlen = errlen,
+    };
+    jbuf out = {0};
+    if (!j_exec_block(&ctx, &root_block, &out)) {
+        free(out.ptr);
+        ja_free(&arena);
+        return NULL;
+    }
+    if (!out.ptr) {
+        out.ptr = (char *)calloc(1, 1);
+    }
+    ja_free(&arena);
+    return out.ptr;
+}
+
+char *q36_jinja_render_system_block(const char *template_src,
+                                    const char *system_text,
+                                    const char *tools_json_lines,
+                                    q36_think_mode think_mode,
+                                    bool thinking_enabled) {
+    if (!template_src) return NULL;
+    static const char sentinel[] = "__Q36_USER_SPLIT__";
+    q36_jinja_message msgs[2];
+    size_t count = 0;
+    if (system_text && system_text[0]) {
+        msgs[count++] = (q36_jinja_message){.role = "system", .content = system_text};
+    }
+    msgs[count++] = (q36_jinja_message){.role = "user", .content = sentinel};
+    q36_jinja_render_params params = {
+        .messages = msgs,
+        .message_count = count,
+        .tools_json_lines = tools_json_lines,
+        .add_generation_prompt = false,
+        .enable_thinking_set = true,
+        .enable_thinking = thinking_enabled,
+        .reasoning_effort = thinking_enabled ? q36_jinja_effort_name(think_mode) : NULL,
+    };
+    char *rendered = q36_jinja_render(template_src, &params, NULL, 0);
+    if (!rendered) return NULL;
+    char *split = strstr(rendered, "<|im_start|>user\n__Q36_USER_SPLIT__");
+    if (!split) split = strstr(rendered, sentinel);
+    if (split) *split = '\0';
+    return rendered;
 }
 
 q36_think_mode q36_qwen38_mode_for_budget(int budget) {
@@ -4053,8 +5992,52 @@ typedef struct {
     bool add;
 } q36_vision_mm_ctx;
 
+static bool q36_vision_weight_type_ok(const q36_tensor *t, uint32_t in_dim) {
+    if (!t) return false;
+    if (t->type == Q36_TENSOR_F16 || t->type == Q36_TENSOR_F32) return true;
+    return t->type == Q36_TENSOR_Q8_0 && in_dim % Q36_QK8_0 == 0;
+}
+
+/* Dequantize output row `o` of a vision weight into dst[in_dim]. */
+static void q36_vision_weight_row_f32(const q36_model *m, const q36_tensor *t,
+                                      uint32_t in_dim, uint64_t o, float *dst) {
+    const uint8_t *base = m->map + t->abs_offset;
+    if (t->type == Q36_TENSOR_F32) {
+        memcpy(dst, (const float *)base + o * in_dim, (size_t)in_dim * sizeof(float));
+    } else if (t->type == Q36_TENSOR_F16) {
+        const uint16_t *wr = (const uint16_t *)base + o * in_dim;
+        for (uint32_t i = 0; i < in_dim; i++) dst[i] = q36_f16_to_f32(wr[i]);
+    } else {
+        const uint32_t nb = in_dim / Q36_QK8_0;
+        const q36_block_q8_0 *b = (const q36_block_q8_0 *)base + o * nb;
+        for (uint32_t k = 0; k < nb; k++) {
+            const float d = q36_f16_to_f32(b[k].d);
+            for (uint32_t j = 0; j < Q36_QK8_0; j++)
+                dst[k * Q36_QK8_0 + j] = d * (float)b[k].qs[j];
+        }
+    }
+}
+
 static void q36_vision_mm_worker(void *opaque, uint64_t row0, uint64_t row1) {
     q36_vision_mm_ctx *c = opaque;
+    if (c->weight->type != Q36_TENSOR_F16) {
+        float *wrow = malloc((size_t)c->in_dim * sizeof(float));
+        if (!wrow) q36_die("out of memory");
+        for (uint64_t o = row0; o < row1; o++) {
+            q36_vision_weight_row_f32(c->model, c->weight, c->in_dim, o, wrow);
+            for (uint32_t r = 0; r < c->rows; r++) {
+                const float *x = c->input + (uint64_t)r * c->in_dim;
+                double sum = 0.0;
+                for (uint32_t i = 0; i < c->in_dim; i++)
+                    sum += (double)wrow[i] * x[i];
+                float *dst = c->output + (uint64_t)r * c->out_dim + o;
+                if (c->add) *dst += (float)sum;
+                else *dst = (float)sum;
+            }
+        }
+        free(wrow);
+        return;
+    }
     const uint16_t *weight = (const uint16_t *)(c->model->map + c->weight->abs_offset);
     for (uint64_t o = row0; o < row1; o++) {
         const uint16_t *wr = weight + o * c->in_dim;
@@ -4070,12 +6053,54 @@ static void q36_vision_mm_worker(void *opaque, uint64_t row0, uint64_t row1) {
     }
 }
 
+#if !defined(Q36_NO_GPU) && !defined(Q36_METAL)
+typedef struct {
+    const q36_model *model;
+    const q36_tensor *weight;
+    uint32_t in_dim;
+    uint16_t *dst;
+} q36_vision_fill_ctx;
+
+static void q36_vision_fill_rows(void *opaque, uint64_t row0, uint64_t row1) {
+    q36_vision_fill_ctx *c = opaque;
+    const uint8_t *base = c->model->map + c->weight->abs_offset;
+    for (uint64_t o = row0; o < row1; o++) {
+        uint16_t *out = c->dst + o * c->in_dim;
+        if (c->weight->type == Q36_TENSOR_F32) {
+            const float *src = (const float *)base + o * c->in_dim;
+            for (uint32_t i = 0; i < c->in_dim; i++) out[i] = q36_f32_to_f16(src[i]);
+        } else {
+            const uint32_t nb = c->in_dim / Q36_QK8_0;
+            const q36_block_q8_0 *b = (const q36_block_q8_0 *)base + o * nb;
+            for (uint32_t k = 0; k < nb; k++) {
+                const float d = q36_f16_to_f32(b[k].d);
+                for (uint32_t j = 0; j < Q36_QK8_0; j++)
+                    out[k * Q36_QK8_0 + j] = q36_f32_to_f16(d * (float)b[k].qs[j]);
+            }
+        }
+    }
+}
+
+typedef struct {
+    q36_vision_fill_ctx fill;
+    uint32_t out_dim;
+    uint32_t n_threads;
+} q36_vision_fill_job;
+
+static int q36_vision_fill_cb(void *opaque, uint16_t *dst) {
+    q36_vision_fill_job *j = opaque;
+    j->fill.dst = dst;
+    q36_parallel_for_rows(j->out_dim, 16, j->n_threads, q36_vision_fill_rows, &j->fill);
+    return 1;
+}
+#endif
+
 static bool q36_vision_mm(q36_engine *e, const q36_tensor *weight,
                           const float *input, float *output,
                           uint32_t rows, uint32_t in_dim, uint32_t out_dim,
                           bool add) {
     q36_model *m = &e->vision_model;
-    if (!weight || weight->type != Q36_TENSOR_F16 ||
+    if (!q36_vision_weight_type_ok(weight, in_dim) ||
         weight->elements != (uint64_t)in_dim * out_dim ||
         (weight->ndim == 2 &&
          (weight->dim[0] != in_dim || weight->dim[1] != out_dim)))
@@ -4087,9 +6112,13 @@ static bool q36_vision_mm(q36_engine *e, const q36_tensor *weight,
         q36_gpu_tensor *gx = q36_gpu_tensor_alloc_uninitialized(in_bytes);
         q36_gpu_tensor *gy = q36_gpu_tensor_alloc_uninitialized(out_bytes);
         float *tmp = add ? malloc((size_t)out_bytes) : output;
+        q36_vision_fill_job fj = {{m, weight, in_dim, NULL}, out_dim, e->n_threads};
         int ok = gx && gy && tmp && q36_gpu_tensor_write(gx, 0, input, in_bytes) &&
-            q36_gpu_vision_matmul_f16_disk(gy, m->fd, weight->abs_offset,
-                                           in_dim, out_dim, gx, rows) &&
+            (weight->type == Q36_TENSOR_F16
+                 ? q36_gpu_vision_matmul_f16_disk(gy, m->fd, weight->abs_offset,
+                                                  in_dim, out_dim, gx, rows)
+                 : q36_gpu_vision_matmul_f16_fill(gy, q36_vision_fill_cb, &fj,
+                                                  in_dim, out_dim, gx, rows)) &&
             q36_gpu_tensor_read(gy, 0, tmp, out_bytes);
         if (ok && add)
             for (uint64_t i = 0, n = (uint64_t)rows * out_dim; i < n; i++)
@@ -10373,7 +12402,8 @@ void q36_chat_append_assistant_prefix(q36_engine *e, q36_tokens *tokens, q36_thi
         return;
     }
     q36_tokenize_rendered_chat(e, "<think>\n", tokens);
-    if (think_mode == Q36_THINK_MAX) q36_chat_append_max_effort_prefix(e, tokens);
+    if (think_mode == Q36_THINK_MAX && (!e || !e->chat_template))
+        q36_chat_append_max_effort_prefix(e, tokens);
 }
 
 void q36_encode_chat_prompt(q36_engine *e, const char *system, const char *prompt, q36_think_mode think_mode, q36_tokens *out) {
@@ -10382,8 +12412,45 @@ void q36_encode_chat_prompt(q36_engine *e, const char *system, const char *promp
     q36_chat_apply_thinking_control(prompt, &thinking);
     if (!thinking) think_mode = Q36_THINK_NONE;
     else if (think_mode == Q36_THINK_NONE) think_mode = Q36_THINK_HIGH;
+    if (e && e->chat_template) {
+        q36_jinja_message msgs[2] = {0};
+        size_t n_msgs = 0;
+        if (system && system[0]) {
+            char *sys_trimmed = q36_chat_content_text(system, true);
+            if (sys_trimmed && sys_trimmed[0]) {
+                msgs[n_msgs].role = "system";
+                msgs[n_msgs].content = sys_trimmed;
+                n_msgs++;
+            } else {
+                free(sys_trimmed);
+            }
+        }
+        char *usr_trimmed = q36_chat_content_text(prompt ? prompt : "", true);
+        msgs[n_msgs].role = "user";
+        msgs[n_msgs].content = usr_trimmed ? usr_trimmed : "";
+        n_msgs++;
+        q36_jinja_render_params jp = {
+            .messages = msgs,
+            .message_count = n_msgs,
+            .tools_json_lines = NULL,
+            .add_generation_prompt = true,
+            .enable_thinking_set = true,
+            .enable_thinking = think_mode != Q36_THINK_NONE,
+            .reasoning_effort = think_mode != Q36_THINK_NONE ? q36_jinja_effort_name(think_mode) : NULL,
+        };
+        char *rendered = q36_jinja_render(e->chat_template, &jp, NULL, 0);
+        for (size_t i = 0; i < n_msgs; i++) free((void *)msgs[i].content);
+        if (rendered) {
+            out->len = 0;
+            q36_tokenize_rendered_chat(e, rendered, out);
+            free(rendered);
+            return;
+        }
+    }
     q36_chat_begin(e, out);
-    if (system && system[0]) q36_chat_append_message(e, out, "system", system);
+    if (system && system[0]) {
+        q36_chat_append_message(e, out, "system", system);
+    }
     q36_chat_append_message(e, out, "user", prompt ? prompt : "");
     q36_chat_append_assistant_prefix(e, out, think_mode);
 }
@@ -10988,6 +13055,50 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
                            q36_str_contains(name, "KAT-Coder");
         }
     }
+    {
+        const char *tmpl_opt = opt->chat_template;
+        if (!tmpl_opt || !tmpl_opt[0]) tmpl_opt = getenv("Q36_CHAT_TEMPLATE");
+        if (tmpl_opt && tmpl_opt[0] &&
+            strcasecmp(tmpl_opt, "off") != 0 &&
+            strcasecmp(tmpl_opt, "none") != 0 &&
+            strcasecmp(tmpl_opt, "false") != 0 &&
+            strcasecmp(tmpl_opt, "0") != 0 &&
+            strcasecmp(tmpl_opt, "default") != 0) {
+            FILE *fp = fopen(tmpl_opt, "rb");
+            if (!fp) {
+                fprintf(stderr, "q36: failed to open chat template %s: %s\n",
+                        tmpl_opt, strerror(errno));
+                q36_engine_close(e);
+                return 1;
+            }
+            if (fseek(fp, 0, SEEK_END) != 0) {
+                fclose(fp);
+                fprintf(stderr, "q36: failed to seek chat template %s\n", tmpl_opt);
+                q36_engine_close(e);
+                return 1;
+            }
+            long fsize = ftell(fp);
+            if (fsize <= 0 || fsize > 1024 * 1024 || fseek(fp, 0, SEEK_SET) != 0) {
+                fclose(fp);
+                fprintf(stderr, "q36: invalid chat template size in %s\n", tmpl_opt);
+                q36_engine_close(e);
+                return 1;
+            }
+            char *buf = xmalloc((size_t)fsize + 1);
+            size_t nread = fread(buf, 1, (size_t)fsize, fp);
+            fclose(fp);
+            buf[nread] = '\0';
+            char err[256] = {0};
+            if (!q36_jinja_validate(buf, err, sizeof(err))) {
+                free(buf);
+                fprintf(stderr, "q36: invalid chat template in %s: %s\n",
+                        tmpl_opt, err[0] ? err : "validation failed");
+                q36_engine_close(e);
+                return 1;
+            }
+            e->chat_template = buf;
+        }
+    }
     config_validate_model(&e->model);
     hadamard_parse(&e->model);
     e->variant = g_q36_shape.variant;
@@ -11001,7 +13112,9 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
         q36_str projector = required_string(&e->vision_model, "clip.projector_type");
         q36_tensor *projection = model_find_tensor(&e->vision_model, "mm.2.weight");
         if (!q36_streq(arch, "clip") || !q36_streq(projector, "qwen3vl_merger") ||
-            !projection || projection->type != Q36_TENSOR_F16 ||
+            !projection ||
+            (projection->type != Q36_TENSOR_F16 && projection->type != Q36_TENSOR_F32 &&
+             projection->type != Q36_TENSOR_Q8_0) ||
             projection->dim[0] != 4608u || projection->dim[1] != Q36_N_EMBD) {
             fprintf(stderr, "q36: vision sidecar does not match the language model\n");
             q36_engine_close(e);
@@ -11014,8 +13127,16 @@ int q36_engine_open(q36_engine **out, const q36_engine_options *opt) {
         madvise((void *)e->vision_model.map, (size_t)e->vision_model.size, MADV_DONTNEED);
 #endif
 #if !defined(Q36_NO_GPU) && !defined(Q36_METAL)
+        /* Non-F16 matrices are expanded to F16 in the stream buffer. */
+        uint64_t vision_stream_bytes = e->vision_model.max_tensor_bytes;
+        for (uint64_t i = 0; i < e->vision_model.n_tensors; i++) {
+            const q36_tensor *vt = &e->vision_model.tensors[i];
+            if (vt->ndim < 2) continue;
+            uint64_t f16_bytes = vt->elements * sizeof(uint16_t);
+            if (f16_bytes > vision_stream_bytes) vision_stream_bytes = f16_bytes;
+        }
         if (e->backend == Q36_BACKEND_VULKAN &&
-            !q36_gpu_vision_stream_init(e->vision_model.max_tensor_bytes)) {
+            !q36_gpu_vision_stream_init(vision_stream_bytes)) {
             fprintf(stderr, "q36: unable to allocate streamed vision weight buffer\n");
             q36_engine_close(e);
             return 1;
@@ -11250,6 +13371,7 @@ void q36_engine_close(q36_engine *e) {
     model_close(&e->mtp_model);
     model_close(&e->model);
     free(e->directional_steering_file);
+    free(e->chat_template);
     q36_ssd_memory_lock_release(&e->simulated_memory);
     free(e);
 }
@@ -11369,6 +13491,10 @@ bool q36_engine_is_qwen38(q36_engine *e) {
 
 bool q36_engine_is_kat_coder(q36_engine *e) {
     return e && e->kat_coder;
+}
+
+const char *q36_engine_chat_template(q36_engine *e) {
+    return e ? e->chat_template : NULL;
 }
 
 void q36_engine_sampling_defaults(q36_engine *e, float *temperature,

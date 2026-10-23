@@ -85,6 +85,7 @@ typedef struct {
     const char *model_path;
     const char *mtp_path;
     const char *vision_path;
+    const char *chat_template;
     q36_backend backend;
     int n_threads;
     int context_size;   /* Planned context per session; zero uses 4096. */
@@ -166,9 +167,46 @@ int q36_engine_model_id(q36_engine *e);
 /* Effective prefill chunk (tokens per forward pass): chunk boundaries decide the
  * floating-point schedule, so cache checkpoints must land on multiples of it. */
 uint32_t q36_engine_prefill_chunk(q36_engine *e);
+typedef struct {
+    const char *name;
+    const char *arguments_json;
+} q36_jinja_tool_call;
+
+typedef struct {
+    const char *role;
+    const char *content;
+    const char *const *parts;
+    size_t image_count;
+    const char *reasoning_content;
+    const q36_jinja_tool_call *tool_calls;
+    size_t tool_call_count;
+} q36_jinja_message;
+
+typedef struct {
+    const q36_jinja_message *messages;
+    size_t message_count;
+    const char *tools_json_lines;
+    bool add_generation_prompt;
+    bool enable_thinking_set;
+    bool enable_thinking;
+    bool preserve_thinking_set;
+    bool preserve_thinking;
+    const char *reasoning_effort;
+} q36_jinja_render_params;
+
 bool q36_engine_is_qwen38(q36_engine *e);
 bool q36_engine_is_kat_coder(q36_engine *e);
+const char *q36_engine_chat_template(q36_engine *e);
 const char *q36_qwen38_effort_instruction(q36_think_mode mode);
+const char *q36_jinja_effort_name(q36_think_mode mode);
+char *q36_jinja_render(const char *template_src,
+                       const q36_jinja_render_params *params,
+                       char *err, size_t errlen);
+char *q36_jinja_render_system_block(const char *template_src,
+                                    const char *system_text,
+                                    const char *tools_json_lines,
+                                    q36_think_mode think_mode,
+                                    bool thinking_enabled);
 q36_think_mode q36_qwen38_mode_for_budget(int budget);
 int q36_think_close_rank_limit(int think_tokens, int start_tokens);
 bool q36_engine_has_vision(q36_engine *e);
