@@ -2430,3 +2430,56 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   decode. The gate only stays exact because of it; changing it is a numerics
   decision (md5 gate), not a load cleanup, so it was measured and reverted.
 - **Scope.** Q3_K paths only. Q4_K/QS_K/IQ paths in the same shader are untouched.
+
+## moe_matvec gate — take the native-fma kernel — ACCEPTED, +6.3% MiniPlus decode (2026-10-23)
+
+- **Tried.** The gate bank was the only one still forced onto the exact kernel
+  while up and down already took `moe_matvec_fast`. Ablating `fma32()` to a native
+  `fma()` in the exact kernel showed where the difference lives: `moe_matvec`
+  60.24 -> 44.77 ms in the same profile window, i.e. the emulated correctly-rounded
+  fp32 fma (fp64 mul/add plus a round-to-odd fixup) is 15.5 ms = 25.7% of that
+  kernel and ~8% of decode. Everything else in the two kernels is identical.
+- **Why the precision is worthless here.** Gate output never reaches the residual
+  unquantized: swiglu multiplies it with up, then `quantize_q8_K` truncates the
+  product to int8 with one scale per 256-element block. A 1-ulp difference dies in
+  that quantization.
+- **Result.** Five interleaved pairs, MiniPlus: exact gate
+  43.43/43.52/42.50/42.99/42.88 (median 42.99) vs native 45.82/46.20/45.42/45.69/
+  45.25 (median 45.69), **+6.3%**, ranges disjoint. Greedy output identical at 64
+  and at 256 tokens (md5 55f555660f6158501394ff16bde68faa).
+- **Honest limit of that evidence.** The md5 gate is *insensitive* to this kernel:
+  leaving the exact gate on but replacing its fma with a plain `a*b+c` also keeps
+  55f55566 over 64 tokens. So the guarantee is structural (int8 truncation one
+  dispatch later, 256-token identical continuation), not bit-equality. A q8_K code
+  sitting exactly on a rounding boundary could still split the two paths; nothing
+  observed here does.
+- **Scope.** Only when quality is off. `--quality` still picks the exact kernel, so
+  CPU-parity runs keep the software fma chain.
+
+## moe_tiles — division-free, then parallel expert scan — ACCEPTED, +5.8% MiniPlus decode (2026-10-23)
+
+- **Target.** `moe_tiles` is dispatched twice per layer (gate/up schedule, down
+  schedule) as a *single workgroup*, and held 10.6% of MiniPlus decode GPU time:
+  942 dispatches, 21.04 us each (min 20.40, max 21.64 — a hard floor, not noise),
+  for a job whose useful work is a few hundred bytes.
+- **Candidate 1 — the division.** The per-expert loop carried
+  `(counts[e] + pair_tile - 1) / pair_tile`, and `pair_tile` is a push constant,
+  so GLSL emits an emulated integer division (~40 instructions) for each of 256
+  iterations on one thread. `pair_tile` is always a power of two, so
+  `findLSB` + shift replaces it, and the scatter's `rank / pair_tile` /
+  `rank % pair_tile` become shift/mask. 19.82 -> 15.60 ms in the window
+  (21.04 -> 16.6 us per dispatch, -21%).
+- **Candidate 2 — the scan itself.** The remaining cost was the same 256-iteration
+  loop as a dependent chain of shared-memory round trips on `tid == 0`. Replaced
+  with a Hillis-Steele exclusive scan across the 256 slots (both the pair counts
+  and the per-expert `ceil(counts/pair_tile)` tile counts, then one shift to
+  exclusive). 15.60 -> 2.18 ms, 16.6 -> 2.31 us per dispatch, **9.1x the kernel**.
+- **Result.** Five interleaved pairs, MiniPlus: serial 45.81/45.68/45.87/45.54/
+  45.63 (median 45.68) vs parallel 48.35/48.46/47.93/48.34/48.43 (median 48.35),
+  **+5.8%**, ranges disjoint. Tile bytes unchanged: greedy 256-token output
+  identical (md5 55f555660f6158501394ff16bde68faa).
+- **Dispatch count was never the problem.** Fusing the two per-layer dispatches
+  would have saved at most 0.19 ms/token now that each is 2.3 us (~0.7% of
+  decode); the 20 us bubbles were a serial loop wearing a launch-latency costume.
+- **Ceiling.** 2.3 us for one workgroup is at the floor this GPU shows for any
+  one-workgroup dispatch (`matmul_f32_fast` with 32 groups measures 4.3 us).

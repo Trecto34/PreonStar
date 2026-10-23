@@ -43,6 +43,11 @@ shared uint tile_off[256];
 
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
+    /* pair_tile is always a power of two (8 for the matvec kernels, 16 for
+     * the prefill GEMMs), so the per-expert tile rounding below is a shift
+     * instead of an emulated integer division: at n_expert = 256 that
+     * division alone was the bulk of this single-workgroup kernel's time. */
+    uint pt_shift = findLSB(pc.pair_tile);
     uint tile_words = 1u + pc.pair_tile;
     uint words = pc.tile_bound * tile_words;
 
@@ -55,25 +60,39 @@ void main(void) {
     }
     barrier();
 
-    if (tid == 0u) {
-        uint off = 0u;
-        uint toff = 0u;
-        for (uint e = 0u; e < pc.n_expert; e++) {
-            offsets[e] = off;
-            starts[e] = off;
-            tile_off[e] = toff;
-            off += counts[e];
-            toff += (counts[e] + pc.pair_tile - 1u) / pc.pair_tile;
-        }
+    /* Exclusive prefix scan over the expert slots.  The schedule only needs
+     * counts and ceil(counts/pair_tile) summed in expert order, and doing
+     * that on one thread made this single-workgroup kernel cost 16 us of a
+     * 1 us job: 256 dependent shared-memory round trips.  Slots with no
+     * pairs stay zero, so scanning all 256 is the same prefix. */
+    starts[tid] = counts[tid];
+    tile_off[tid] = (counts[tid] + pc.pair_tile - 1u) >> pt_shift;
+    barrier();
+    for (uint d = 1u; d < 256u; d <<= 1u) {
+        uint cprev = (tid >= d) ? starts[tid - d] : 0u;
+        uint tprev = (tid >= d) ? tile_off[tid - d] : 0u;
+        barrier();
+        starts[tid] += cprev;
+        tile_off[tid] += tprev;
+        barrier();
+    }
+    {
+        uint cexcl = (tid == 0u) ? 0u : starts[tid - 1u];
+        uint texcl = (tid == 0u) ? 0u : tile_off[tid - 1u];
+        barrier();
+        starts[tid] = cexcl;
+        offsets[tid] = cexcl;
+        tile_off[tid] = texcl;
     }
     barrier();
 
     for (uint i = tid; i < pc.n_slot; i += 256u) {
         uint e = selected[i];
         uint rank = atomicAdd(offsets[e], 1u) - starts[e];
-        uint base = (tile_off[e] + rank / pc.pair_tile) * tile_words;
-        if (rank % pc.pair_tile == 0u)
+        uint slot = rank & (pc.pair_tile - 1u);
+        uint base = (tile_off[e] + (rank >> pt_shift)) * tile_words;
+        if (slot == 0u)
             tiles[base] = pc.streamed != 0u ? slot_map[e] : e;
-        tiles[base + 1u + rank % pc.pair_tile] = i;
+        tiles[base + 1u + slot] = i;
     }
 }
