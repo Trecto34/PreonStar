@@ -125,7 +125,9 @@ static int p36_vk_run_unlocked(
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, kernel->layout, 0, 1, &set, 0, NULL);
     if (push_bytes) vkCmdPushConstants(cmd, kernel->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push);
     uint32_t query0 = UINT32_MAX;
-    if (p36_vk.prof_kernel && p36_vk.query_pool && p36_vk_prof_query_count + 2u <= P36_VK_PROF_QUERY_CAP) {
+    if (p36_vk.prof_kernel && p36_vk_prof_skip_left > 0) {
+        p36_vk_prof_skip_left--;
+    } else if (p36_vk.prof_kernel && p36_vk.query_pool && p36_vk_prof_query_count + 2u <= P36_VK_PROF_QUERY_CAP) {
         query0 = p36_vk_prof_query_count;
         p36_vk_prof_query_count += 2u;
         p36_vk_prof_query_path[query0 / 2u] = kernel->path;
@@ -596,6 +598,10 @@ int p36_gpu_init(void) {
     p36_vk_ring_activate_unlocked(0);
 
     if (getenv("P36_VK_PROF_KERNEL") && p36_vk.timestamp_valid_bits != 0) {
+        /* P36_VK_PROF_SKIP=N leaves the first N dispatches untimed so the report
+         * can describe a decode window instead of the prefill burst. */
+        const char *skip = getenv("P36_VK_PROF_SKIP");
+        if (skip && *skip) p36_vk_prof_skip_left = strtoull(skip, NULL, 10);
         VkQueryPoolCreateInfo qpci = {
             .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
             .queryType = VK_QUERY_TYPE_TIMESTAMP,

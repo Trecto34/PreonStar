@@ -529,7 +529,8 @@ static uint64_t p36_vk_prof_submit_ns;
 static uint64_t p36_vk_prof_record_ns;
 
 enum {
-    P36_VK_PROF_QUERY_CAP = 2048,
+    /* 32k timed dispatches: enough to cover a decode window, not just prefill. */
+    P36_VK_PROF_QUERY_CAP = 65536,
     P36_VK_PROF_KERNEL_CAP = 64,
     P36_VK_PROF_OP_CAP = 128,
     P36_VK_PROF_SHAPE_CAP = 32,
@@ -572,6 +573,8 @@ static uint64_t p36_vk_prof_timeline_seq;
 static bool p36_vk_prof_timeline_tried;
 static p36_vk_prof_kernel_row p36_vk_prof_kernel_rows[P36_VK_PROF_KERNEL_CAP];
 static uint32_t p36_vk_prof_kernel_n;
+/* P36_VK_PROF_SKIP dispatches go untimed so prefill can be excluded. */
+static uint64_t p36_vk_prof_skip_left;
 static p36_vk_prof_op_row p36_vk_prof_op_rows[P36_VK_PROF_OP_CAP];
 static uint32_t p36_vk_prof_op_n;
 
