@@ -118,11 +118,19 @@ void main(void) {
             uint bb = base_bytes + i * IQ3XXS_BYTES;
             float d = unpackHalf2x16(uint(wb[bb >> 1u])).x;
             uint y2 = m2 + ((i * 256u + y_off) >> 1u);
+            /* n advances by 16 per step, so two consecutive p share one 32-bit
+             * aux word; keep the last one instead of reloading it. */
+            uint cg32 = 0xffffffffu;
+            uint caux = 0u;
             for (uint p = 0u; p < 8u; p++) {
                 uint n = y_off + 16u * p;
                 uint g32 = n >> 5u;
                 uint m = n & 31u;
-                uint aux = wb_u32(bb + 66u + 4u * g32);
+                if (g32 != cg32) {
+                    cg32 = g32;
+                    caux = wb_u32(bb + 66u + 4u * g32);
+                }
+                uint aux = caux;
                 uint si = (aux >> (7u * (m >> 3u))) & 127u;
                 uint signs = (tables[TAB_KSIGNS + (si >> 2u)] >> (8u * (si & 3u))) & 255u;
                 uint entry = wb_u8(bb + 2u + 8u * g32 + (m >> 2u));

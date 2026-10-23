@@ -2384,3 +2384,18 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   still fetching one byte at a time from a 16-bit buffer.
 - **Scope.** The wb_u32 helper only replaces the byte assembly; no arithmetic
   changed, which is why the token stream is unchanged.
+
+## moe_down_q2k_sum_decode_iq3xxs — cache the aux word across the p-pair — ACCEPTED (2026-10-23)
+
+- **Tried.** In the same inner loop, the 32-bit aux word was reloaded for p and
+  p+1 even though n advances by 16, so two consecutive p share one g32 group and
+  therefore one aux word. Cache it in caux/cg32 and reload only when g32 changes.
+- **Note on the entry byte.** The same idea does *not* extend to
+  wb_u8(bb + 2u + 8u*g32 + (m>>2u)): the two p of a group have m and m+16, so they
+  read bytes exactly 4 apart inside the same 8-byte span. A word read replaces one
+  byte load, not two, so there is nothing to coalesce there.
+- **Result.** Kernel 2.30 -> 2.19 ms/token. Decode 76.38/76.07/76.50 t/s vs the
+  previous 74.89-75.68 range (previous max 75.68, new min 76.07). Bit-identical
+  (md5 55f555660f6158501394ff16bde68faa).
+- **Caveat.** These three reps were not interleaved against the previous binary,
+  so treat the margin as directional; the disjoint ranges are the argument.
