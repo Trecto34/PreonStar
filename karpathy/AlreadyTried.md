@@ -2483,3 +2483,26 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   decode); the 20 us bubbles were a serial loop wearing a launch-latency costume.
 - **Ceiling.** 2.3 us for one workgroup is at the floor this GPU shows for any
   one-workgroup dispatch (`matmul_f32_fast` with 32 groups measures 4.3 us).
+
+## moe_tiles — one schedule per layer instead of three — ACCEPTED, +4.3% MiniPlus decode (2026-10-23)
+
+- **Finding.** Gate, up and down each built their own expert->pair schedule:
+  three `moe_tiles` dispatches per layer, 120 per token, byte-identical whenever
+  `stream_part == NONE` (the non-streaming path). The schedule depends only on
+  `selected`, `n_slot` and `n_expert`, none of which change between the three.
+- **Rejected first: fusing gate and up.** Measured to be worth 59 us/token =
+  0.28%: the launch gap is a flat 1.48 us per dispatch and a fusion removes
+  exactly 40 of 1317. The memory argument also fails — `qx` is 2.3 KB of Q8_K
+  for one token and lives in L2. Not worth a second weight binding in the
+  hottest kernel.
+- **Change.** `p36_vk_moe_matvec` gained `tiles_handoff` / `tile_count_handoff`;
+  the first of the three builds and transfers ownership to the caller, the other
+  two borrow it. Offered only when not streaming (each streaming part has its
+  own cache-slot map).
+- **Result.** Five interleaved pairs, MiniPlus: 48.84/49.01/48.82/48.23/48.32
+  (median 48.82) vs 51.49/50.91/50.82/51.06/50.74 (median 50.91), **+4.3%**.
+  -0.84 ms/token, against the -0.3 ms predicted from dispatch bubbles plus
+  kernel time; the redundant builds were also paying scratch allocation,
+  descriptor writes and hazard bookkeeping.
+- **Profiler.** `moe_tiles` 1200 -> 400 dispatches, 2.18 -> 0.70 ms; total
+  dispatches 13170 -> 12370. Greedy output identical (md5 55f55566...).

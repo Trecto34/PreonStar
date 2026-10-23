@@ -32,7 +32,9 @@ static int p36_vk_moe_matvec(p36_gpu_tensor *out,
                               uint32_t n_tok,
                              uint32_t in_dim,
                              uint32_t out_dim,
-                             uint32_t n_expert) {
+                             uint32_t n_expert,
+                             p36_gpu_tensor **tiles_handoff,
+                             uint32_t *tile_count_handoff) {
     uint64_t block_bytes = p36_vk_iq_block_bytes(w->type);
     uint64_t blocks;
     uint64_t row_bytes;
@@ -46,6 +48,7 @@ static int p36_vk_moe_matvec(p36_gpu_tensor *out,
     const unsigned char *scales_source = NULL;
     const uint32_t *selected_host;
     p36_gpu_tensor *tiles = NULL;
+    const p36_gpu_tensor *tiles_use;
     p36_gpu_tensor *packed_weights = NULL;
     p36_gpu_tensor *packed_scales = NULL;
     const uint32_t *tiles_host;
@@ -77,28 +80,45 @@ static int p36_vk_moe_matvec(p36_gpu_tensor *out,
     }
 
     tiles_host = NULL;
-    if (!p36_gpu_quality && n_slot <= 4096u && stream_part == P36_VK_STREAM_PART_NONE &&
-        (!p36_vk_stream.enabled || resident_bank) && p36_vk_moe_bank_cache) {
-        tiles = p36_vk_moe_tiles_gpu(selected, (uint32_t)n_slot, n_expert, NULL, P36_VK_MOE_PAIR_TILE);
-        tile_count = p36_vk_moe_tile_bound((uint32_t)n_slot, n_expert, P36_VK_MOE_PAIR_TILE);
-    }
-    if (!tiles) {
-        selected_host = p36_vk_tensor_contents_labeled((p36_gpu_tensor *)selected, "submit_wait_moe_selected");
-        if (!selected_host) return 0;
-        for (uint64_t slot = 0; slot < n_slot; slot++) {
-            if (selected_host[slot] >= n_expert) return 0;
+    /* Gate, up and down run off one expert->pair map, so the first of the
+     * three builds the schedule and hands it over; the other two borrow it
+     * and skip their own single-workgroup build dispatch.  The handoff is
+     * only offered by callers that pass stream_part NONE, because the
+     * streaming parts each need their own cache-slot map. */
+    if (tiles_handoff && *tiles_handoff) {
+        tile_count = tile_count_handoff ? *tile_count_handoff : 0;
+        if (tile_count == 0) return 0;
+    } else {
+        if (!p36_gpu_quality && n_slot <= 4096u && stream_part == P36_VK_STREAM_PART_NONE &&
+            (!p36_vk_stream.enabled || resident_bank) && p36_vk_moe_bank_cache) {
+            tiles = p36_vk_moe_tiles_gpu(selected, (uint32_t)n_slot, n_expert, NULL, P36_VK_MOE_PAIR_TILE);
+            tile_count = p36_vk_moe_tile_bound((uint32_t)n_slot, n_expert, P36_VK_MOE_PAIR_TILE);
         }
-        tiles = p36_vk_moe_build_tiles(selected_host,
-                                       n_slot,
-                                       n_expert,
-                                       stream_part != P36_VK_STREAM_PART_NONE ? stream_slot_map : NULL,
-                                       &tile_count);
-        tiles_host = tiles ? p36_vk_tensor_contents_labeled(tiles, "submit_wait_moe_tiles_read") : NULL;
-        if (!tiles || !tiles_host || tile_count == 0) {
-            p36_gpu_tensor_free(tiles);
-            return 0;
+        if (!tiles) {
+            selected_host = p36_vk_tensor_contents_labeled((p36_gpu_tensor *)selected, "submit_wait_moe_selected");
+            if (!selected_host) return 0;
+            for (uint64_t slot = 0; slot < n_slot; slot++) {
+                if (selected_host[slot] >= n_expert) return 0;
+            }
+            tiles = p36_vk_moe_build_tiles(selected_host,
+                                           n_slot,
+                                           n_expert,
+                                           stream_part != P36_VK_STREAM_PART_NONE ? stream_slot_map : NULL,
+                                           &tile_count);
+            tiles_host = tiles ? p36_vk_tensor_contents_labeled(tiles, "submit_wait_moe_tiles_read") : NULL;
+            if (!tiles || !tiles_host || tile_count == 0) {
+                p36_gpu_tensor_free(tiles);
+                return 0;
+            }
+        }
+        if (tiles && tiles_handoff) {
+            *tiles_handoff = tiles;
+            if (tile_count_handoff) *tile_count_handoff = tile_count;
+            tiles = NULL; /* ownership moved to the caller */
         }
     }
+    tiles_use = (tiles_handoff && *tiles_handoff) ? *tiles_handoff : tiles;
+    if (!tiles_use) return 0;
 
     struct {
         uint32_t out_dim;
@@ -123,7 +143,7 @@ static int p36_vk_moe_matvec(p36_gpu_tensor *out,
         int ok = tables && bank && (!w->has_scales || bank_scales);
         if (ok) {
             const p36_gpu_tensor *bindings[6] = {
-                bank, qx, tiles, w->has_scales ? bank_scales : bank, out, tables,
+                bank, qx, tiles_use, w->has_scales ? bank_scales : bank, out, tables,
             };
             p36_vk_kernel *kernel = (!p36_gpu_quality && p36_vk_use_moe_fast() && fast_allowed) ? &p36_vk.moe_matvec_fast : &p36_vk.moe_matvec;
             ok = p36_vk_run_unlocked(w->type == P36_VK_TENSOR_Q2_K && x_per_expert ? "moe_q2k_down_stream" :
@@ -149,7 +169,7 @@ static int p36_vk_moe_matvec(p36_gpu_tensor *out,
         }
         if (bank) {
             const p36_gpu_tensor *bindings[6] = {
-                bank, qx, tiles, bank_scales ? bank_scales : bank, out, tables,
+                bank, qx, tiles_use, bank_scales ? bank_scales : bank, out, tables,
             };
             p36_vk_kernel *kernel = (!p36_gpu_quality && p36_vk_use_moe_fast() && fast_allowed) ? &p36_vk.moe_matvec_fast : &p36_vk.moe_matvec;
             int ok = p36_vk_run_unlocked(w->type == P36_VK_TENSOR_Q2_K && x_per_expert ? "moe_q2k_down" :
@@ -217,7 +237,7 @@ static int p36_vk_moe_matvec(p36_gpu_tensor *out,
         const p36_gpu_tensor *bindings[6] = {
             packed_weights,
             qx,
-            tiles,
+            tiles_use,
             w->has_scales ? packed_scales : packed_weights,
             out,
             tables,
@@ -1097,6 +1117,11 @@ int p36_gpu_moe_ffn_q8_tensor(p36_gpu_tensor *out,
           p36_vk_moe_gate_up_iq2_swiglu(mid8, model_map, model_size, gate, up,
                                          selected, qx, stream_slots, resident_bank,
                                          n_used, n_tok, in_dim, mid_dim, n_expert);
+    /* One schedule for all three routed matvecs: it maps pairs to experts
+     * and nothing else, so the down leg reuses what gate built. */
+    p36_gpu_tensor *layer_tiles = NULL;
+    uint32_t layer_tile_count = 0;
+    const bool share_tiles = !stream_slots;
     if (!ok && mid8 && down8) {
         /* Gate may take the native-fma kernel too: its output only reaches the
          * graph through swiglu and then quantize_q8_K, which truncates to int8,
@@ -1109,11 +1134,15 @@ int p36_gpu_moe_ffn_q8_tensor(p36_gpu_tensor *out,
              p36_vk_moe_matvec(gate8, model_map, model_size, gate, qx, false, true,
                                 stream_slots ? P36_VK_STREAM_PART_GATE : P36_VK_STREAM_PART_NONE,
                                 stream_slots, resident_bank,
-                                selected, n_used, n_tok, in_dim, mid_dim, n_expert) &&
+                                selected, n_used, n_tok, in_dim, mid_dim, n_expert,
+                                share_tiles ? &layer_tiles : NULL,
+                                share_tiles ? &layer_tile_count : NULL) &&
              p36_vk_moe_matvec(up8, model_map, model_size, up, qx, false, true,
                                 stream_slots ? P36_VK_STREAM_PART_UP : P36_VK_STREAM_PART_NONE,
                                 stream_slots, resident_bank,
-                                selected, n_used, n_tok, in_dim, mid_dim, n_expert) &&
+                                selected, n_used, n_tok, in_dim, mid_dim, n_expert,
+                                share_tiles ? &layer_tiles : NULL,
+                                share_tiles ? &layer_tile_count : NULL) &&
              p36_gpu_swiglu_tensor(mid8, gate8, up8, n_tok * n_used * mid_dim, 0.0f, 1.0f);
     }
     if (ok) {
@@ -1124,7 +1153,9 @@ int p36_gpu_moe_ffn_q8_tensor(p36_gpu_tensor *out,
                                   down->type == P36_VK_TENSOR_Q3_K,
                                   stream_slots ? P36_VK_STREAM_PART_DOWN : P36_VK_STREAM_PART_NONE,
                                   stream_slots, resident_bank,
-                                  selected, n_used, n_tok, mid_dim, out_dim, n_expert);
+                                  selected, n_used, n_tok, mid_dim, out_dim, n_expert,
+                                  share_tiles ? &layer_tiles : NULL,
+                                  share_tiles ? &layer_tile_count : NULL);
     }
     if (ok) {
         struct {
@@ -1138,6 +1169,7 @@ int p36_gpu_moe_ffn_q8_tensor(p36_gpu_tensor *out,
         pthread_mutex_unlock(&p36_vk_mu);
     }
 
+    p36_gpu_tensor_free(layer_tiles);
     p36_gpu_tensor_free(down8);
     p36_gpu_tensor_free(qmid);
     p36_gpu_tensor_free(mid8);
