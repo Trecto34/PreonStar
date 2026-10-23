@@ -1,13 +1,13 @@
 LEDGER_CHECK:
 source=AlreadyTried.md
 active=AlreadyTried.active.md
-source_sha256=be06605e8bef1f4d8d3192d1c6e14ae9a4973609824f74ffe9de7bc5315f214c
+source_sha256=28052052d6b0f9bb2758139b0d609e5f8e07306e6b5f18c43b5d1ee914ecce23
 priority=8
-entries=8
+entries=9
 
 # Active Optimization Ledger (Priority 8)
 
-> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `be06605e8bef1f4d...`)  
+> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `28052052d6b0f9bb...`)  
 > **Filter:** Priority 8  
 > **Mandatory Policy:** Do not repeat rejected approaches without a stated new hardware/runtime reason. Preserve MoE routing parity for Qwen3.6 reference.
 
@@ -23,6 +23,7 @@ entries=8
 | `AT-SWIFT-010` | **MoE matvec type specialization + Q4_K packed loads** | `vulkan/moe_matvec{,_fast}.comp (APEX-I decode)` | **REJECTED** | Both neutral: decode median 71.8 t/s before, 71.8-71.9 t/s after (3 reps). Not a kernel verdict - decode on this host is disk-read-bound (10.3 MiB/token against a 745 MiB/s NVMe stream), so the ALU path is off the critical path. | Weights become resident (pinning, or a box with RAM for model + working set), making decode compute-bound. |
 | `AT-SWIFT-011` | **--ssd-streaming with an 8GB expert cache** | `runtime SSD streaming on APEX-I MoE` | **REJECTED** | Decode 3.18 t/s vs 71.26 t/s baseline (22x slower) despite a 97.8% cache hit rate; the staged-copy path dominates at these expert sizes. | The streaming copy is fused into the matvec, or a model's expert working set exceeds RAM by an order of magnitude. |
 | `AT-SWIFT-012` | **8 rows per workgroup instead of 4** | `vulkan/dense_q4k_decode.spv` | **REJECTED** | Kernel cost 3.13 -> 4.55 ms/token (+45%) by dispatch timestamps. Dispatches per token are unchanged at 225, so the launch-overhead saving the change targeted does not exist; half the wave count plus higher register pressure costs more than it saves. | Occupancy data shows the 4-row kernel is wave-starved; the fix would then be more parallelism, not fewer workgroups. |
+| `AT-SWIFT-013` | **Defer the top2 readback until a consumer asks for it** | `core_15_forward_tokens_cpu.inc sampling handoff` | **REJECTED** | Removed the per-token sync (630 us -> 1 us) and stayed bit-identical, but five interleaved pairs regressed 2.1% (median 71.85 -> 70.37 t/s). The gap was never on the critical path; deferring the drain delayed resubmission instead. | The sampling work itself moves onto the GPU, so the CPU no longer has useful work to overlap with the drain. |
 
 ## Structured Records
 
@@ -97,6 +98,15 @@ entries=8
 - **Evidence:** evidence/decode-profile-20261023.md; 10-token window vs 8-token baseline, kernel GPU time from VK timestamp queries.
 - **Reconsider If:** Occupancy data shows the 4-row kernel is wave-starved; the fix would then be more parallelism, not fewer workgroups.
 - **Source Reference:** AlreadyTried.md:2334-2352
+
+### AT-SWIFT-013: Defer the top2 readback until a consumer asks for it
+- **Priority:** 8
+- **Target:** `core_15_forward_tokens_cpu.inc sampling handoff`
+- **Result:** REJECTED
+- **Reason Rejected:** Removed the per-token sync (630 us -> 1 us) and stayed bit-identical, but five interleaved pairs regressed 2.1% (median 71.85 -> 70.37 t/s). The gap was never on the critical path; deferring the drain delayed resubmission instead.
+- **Evidence:** evidence/decode-profile-20261023.md; timeline gap before/after plus 5 interleaved end-to-end pairs.
+- **Reconsider If:** The sampling work itself moves onto the GPU, so the CPU no longer has useful work to overlap with the drain.
+- **Source Reference:** AlreadyTried.md:2356-2376
 
 ## Transferable Winning Patterns (from OPT-20/21/23)
 - **Hoist Invariant Addressing:** Compute row/col indexing, stride, and scale group offsets outside `kb` block loops.

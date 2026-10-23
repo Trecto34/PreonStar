@@ -157,6 +157,17 @@ LEDGER_ENTRIES = [
         "reconsider_if": "Occupancy data shows the 4-row kernel is wave-starved; the fix would then be more parallelism, not fewer workgroups.",
         "source_reference": "AlreadyTried.md:2334-2352",
     },
+    {
+        "id": "AT-SWIFT-013",
+        "priority": 8,
+        "target": "core_15_forward_tokens_cpu.inc sampling handoff",
+        "approach": "Defer the top2 readback until a consumer asks for it",
+        "result": "REJECTED",
+        "reason_rejected": "Removed the per-token sync (630 us -> 1 us) and stayed bit-identical, but five interleaved pairs regressed 2.1% (median 71.85 -> 70.37 t/s). The gap was never on the critical path; deferring the drain delayed resubmission instead.",
+        "evidence": "evidence/decode-profile-20261023.md; timeline gap before/after plus 5 interleaved end-to-end pairs.",
+        "reconsider_if": "The sampling work itself moves onto the GPU, so the CPU no longer has useful work to overlap with the drain.",
+        "source_reference": "AlreadyTried.md:2356-2376",
+    },
 ]
 
 

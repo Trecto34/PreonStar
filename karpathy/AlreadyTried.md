@@ -2349,3 +2349,23 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
 - **Disposition.** Reverted; tree clean; baseline 71.83 t/s.
 - **Reconsider if** occupancy data shows the 4-row kernel is wave-starved, in
   which case the answer is more parallelism, not fewer workgroups.
+
+## Deferred top2 readback (sampling sync) — REJECTED, 2.1% SLOWER (2026-10-23)
+
+- **Tried.** Decode showed a 630 us device gap per token between top2.spv and
+  logits_minp_pack.spv, i.e. two full GPU->CPU drains per token (top2, then the
+  packed min-p list). Made the top2 readback lazy: the forward only sets
+  gpu_top2_pending, and p36_session_gpu_top2_resolve() reads it on demand from
+  argmax, argmax_excluding and token_rank.
+- **Result.** The sync gap collapsed 630 us -> 1 us per token, output stayed
+  bit-identical (greedy md5 55f555660f6158501394ff16bde68faa), and the decode
+  window went 14.43 -> 14.36 ms/token. End-to-end, however, five interleaved
+  pairs all regressed: baseline 71.50/71.92/71.85/71.72/72.09 (median 71.85) vs
+  lazy 70.37/70.86/70.16/69.84/70.55 (median 70.37), -2.1%.
+- **Why it cannot win.** The 630 us of device-idle time was never on the critical
+  path: the CPU is busy there doing the sampling work it has to do anyway. Moving
+  the drain later just delayed the resubmission, so the GPU got its next command
+  buffer later and the token took longer.
+- **Lesson.** Device-timeline gaps are not automatically recoverable time. Only
+  end-to-end interleaved A/B decides, as CAMPAIGN section 4 says.
+- **Disposition.** Reverted; tree clean; baseline 71.77 t/s.
