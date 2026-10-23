@@ -166,6 +166,11 @@ tests/bench_ab.sh <A_BIN> <B_BIN> /home/server/p36/gguf/<MODEL>.gguf 7 \
   > /tmp/ab-<slug>.csv 2> /tmp/ab-<slug>.summary
 cp /tmp/ab-<slug>.csv karpathy/evidence/raw/
 
+# --- per-kernel GPU time for a DECODE window (the one low-noise metric we have) ---
+P36_VK_PROF_KERNEL=1 P36_VK_PROF_SKIP=3000 P36_VK_PROF_TIMELINE=/tmp/tl.txt   ./p36 -m <MODEL>.gguf -p hello -n 64 --ctx 512 --nothink --vulkan
+python3 karpathy/tools/timeline_report.py /tmp/tl.txt   # ranking, busy%, gaps
+python3 karpathy/tools/timeline_sync.py /tmp/tl.txt     # sampling-sync share
+
 # --- run anything under the memory ceiling (refuses if it cannot fit, kills on RSS) ---
 karpathy/tools/guard.sh <MODEL>.gguf -- ./p36-bench -m <MODEL>.gguf ...
 
@@ -213,6 +218,12 @@ cd /home/server/p36-wt/<slug> && make -j16          # only when the GPU is idle
    page cache mid-decode changes decode by 0.1% (73.34 vs 73.65, 73.76 vs 73.82,
    73.49 vs 73.53 t/s, 3 interleaved pairs). Residency collapse is a symptom, not
    the cause. Do not rank work on page-cache residency again.
+   **Ranking now measured, not guessed** — see `evidence/decode-profile-20261023.md`.
+   Decode on NanoPlus is 11.87 ms/token of GPU work inside a 14.43 ms span (82.3%
+   busy): `dense_q4k_decode` 26.3%, `moe_down_q2k_sum_decode_iq3xxs` 22.1%,
+   `dense_kquant_decode` 11.4%, and 0.63 ms/token lost to the `top2 ->
+   logits_minp_pack` sampling round trip. Note the MoE path on these models is
+   model-specific, not `moe_matvec`.
    Next levers, in order: (a) free RAM so more of the model stays cached,
    (b) prefetch the next layer's 8 experts via one bounded readback,
    (c) expert-major packing at quantize time so co-selected experts are contiguous.
