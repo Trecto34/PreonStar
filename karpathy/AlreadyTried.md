@@ -2315,3 +2315,19 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
 - **Reconsider if** the weights become resident (pinning, or a box with enough
   RAM for model + working set). Then decode is compute-bound and these levers
   become visible — re-rank them, do not assume they are still neutral.
+
+## --ssd-streaming on the APEX-I MoE — REJECTED, 22× SLOWER (2026-10-23)
+
+- **Tried.** `--ssd-streaming --ssd-streaming-cache-experts 8GB` on
+  APEX-I-NanoPlus, hoping an explicit LRU cache in RAM would beat kernel
+  page-cache thrash.
+- **Result.** decode **3.18 t/s** vs **71.26 t/s** baseline. Cache held 796 of
+  6853 experts, hit rate 97.8% (36068/36864), 796 loads, 0 evictions — the
+  streaming path itself is ~22× slower per token regardless of hit rate.
+- **Why it cannot win here.** Streaming swaps zero-copy mmap reads for staged
+  copies through the cache buffer, and the per-load path dominates at these
+  expert sizes. Page-cache thrash costs ~10 MiB/token; streaming costs far more.
+- **Disposition.** Not a default, not a suggestion for this model set.
+- **Reconsider if** the streaming path is rewritten to fuse the copy into the
+  matvec, or if a model is used where the expert working set exceeds RAM by an
+  order of magnitude.

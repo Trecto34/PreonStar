@@ -200,8 +200,18 @@ cd /home/server/p36-wt/<slug> && make -j16          # only when the GPU is idle
    ratio (1.30). Two ALU-side candidates built the same day measured exactly
    neutral and were rejected (`evidence/ab-moe-type-specialization-20261023.md`).
    **Rank nothing on decode speed on this host without an I/O control.**
-   Next levers, in order: (a) find why p36 re-faults 30% more bytes per token
-   than llama.cpp, (b) make the mapping resident so decode turns compute-bound.
+   **Tensor-level answer (same day).** Page-residency sampling (`pagemap` +
+   GGUF offsets) shows the cache collapsing from 6.0 GiB to 1.8 GiB during a
+   20 s decode with `MemFree` at **170 MB**, and every hot refaulted tensor is
+   `blk.N.ffn_down_exps.weight` — the routed-expert down projection, ~98 MiB per
+   layer touched sparsely (8 of 256 experts). No attention, norms or embeddings
+   thrash. `output.weight` is the most *evicted* but never refaulted.
+   The tile schedule is built on the GPU on purpose ("no host read"), so the host
+   does not know the selected experts and cannot `fadvise(WILLNEED)` them without
+   re-adding the stall. Detail: `evidence/decode-thrash-tensors-20261023.md`.
+   Next levers, in order: (a) free RAM so more of the model stays cached,
+   (b) prefetch the next layer's 8 experts via one bounded readback,
+   (c) expert-major packing at quantize time so co-selected experts are contiguous.
    Blocker for (b): `RLIMIT_MEMLOCK` is **8 MiB** here. OOM guard for all of
    this exists at `karpathy/tools/guard.sh` (pre-flight refusal + RSS watchdog;
    systemd scopes are silently unenforced on this host and `ulimit -v` breaks

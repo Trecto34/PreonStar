@@ -1,13 +1,13 @@
 LEDGER_CHECK:
 source=AlreadyTried.md
 active=AlreadyTried.active.md
-source_sha256=3f431a09aa0388c56c4361dffa3a2548abce245e927bf120bbce4dc6a92f8f23
+source_sha256=72ee2996e75961a63749c7f2044a25064c046d9179423dd26201d5e032999fa2
 priority=8
-entries=6
+entries=7
 
 # Active Optimization Ledger (Priority 8)
 
-> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `3f431a09aa0388c5...`)  
+> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `72ee2996e75961a6...`)  
 > **Filter:** Priority 8  
 > **Mandatory Policy:** Do not repeat rejected approaches without a stated new hardware/runtime reason. Preserve MoE routing parity for Qwen3.6 reference.
 
@@ -21,6 +21,7 @@ entries=6
 | `AT-SWIFT-004` | **IQ3_XXS MMQ dynamic k loop (removing [[unroll]])** | `vulkan/dense_iq3_xxs_mmq.comp` | **REJECTED** | Removing [[unroll]] raised 128-token MMQ GPU time from ~940 to 960 ms (+2.1% slower). | Dynamic bounds proven strictly necessary and pipelined without compiler unroll loss. |
 | `AT-SWIFT-005` | **Prefill chunk size > 256 on GFX1013** | `runtime prefill chunk` | **REJECTED** | Exceeds the 10 s amdgpu watchdog timer and destroys GPU context on BC-250 (GQA 6). Default 256 is fastest safe cap. | Mathematical proof of watchdog-safety or kernel execution time reduced sufficiently under 10s watchdog. |
 | `AT-SWIFT-010` | **MoE matvec type specialization + Q4_K packed loads** | `vulkan/moe_matvec{,_fast}.comp (APEX-I decode)` | **REJECTED** | Both neutral: decode median 71.8 t/s before, 71.8-71.9 t/s after (3 reps). Not a kernel verdict - decode on this host is disk-read-bound (10.3 MiB/token against a 745 MiB/s NVMe stream), so the ALU path is off the critical path. | Weights become resident (pinning, or a box with RAM for model + working set), making decode compute-bound. |
+| `AT-SWIFT-011` | **--ssd-streaming with an 8GB expert cache** | `runtime SSD streaming on APEX-I MoE` | **REJECTED** | Decode 3.18 t/s vs 71.26 t/s baseline (22x slower) despite a 97.8% cache hit rate; the staged-copy path dominates at these expert sizes. | The streaming copy is fused into the matvec, or a model's expert working set exceeds RAM by an order of magnitude. |
 
 ## Structured Records
 
@@ -77,6 +78,15 @@ entries=6
 - **Evidence:** evidence/ab-moe-type-specialization-20261023.md; evidence/decode-disk-bound-20261023.md. Packed-load arm bit-identical (md5 4915110d over 64 greedy tokens).
 - **Reconsider If:** Weights become resident (pinning, or a box with RAM for model + working set), making decode compute-bound.
 - **Source Reference:** AlreadyTried.md:2291-2315
+
+### AT-SWIFT-011: --ssd-streaming with an 8GB expert cache
+- **Priority:** 8
+- **Target:** `runtime SSD streaming on APEX-I MoE`
+- **Result:** REJECTED
+- **Reason Rejected:** Decode 3.18 t/s vs 71.26 t/s baseline (22x slower) despite a 97.8% cache hit rate; the staged-copy path dominates at these expert sizes.
+- **Evidence:** evidence/decode-thrash-tensors-20261023.md; run log cache=796/6853 hits=36068/36864 loads=796 evictions=0.
+- **Reconsider If:** The streaming copy is fused into the matvec, or a model's expert working set exceeds RAM by an order of magnitude.
+- **Source Reference:** AlreadyTried.md:2317-2332
 
 ## Transferable Winning Patterns (from OPT-20/21/23)
 - **Hoist Invariant Addressing:** Compute row/col indexing, stride, and scale group offsets outside `kb` block loops.

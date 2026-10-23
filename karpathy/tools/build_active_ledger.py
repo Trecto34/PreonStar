@@ -135,6 +135,17 @@ LEDGER_ENTRIES = [
         "reconsider_if": "Weights become resident (pinning, or a box with RAM for model + working set), making decode compute-bound.",
         "source_reference": "AlreadyTried.md:2291-2315",
     },
+    {
+        "id": "AT-SWIFT-011",
+        "priority": 8,
+        "target": "runtime SSD streaming on APEX-I MoE",
+        "approach": "--ssd-streaming with an 8GB expert cache",
+        "result": "REJECTED",
+        "reason_rejected": "Decode 3.18 t/s vs 71.26 t/s baseline (22x slower) despite a 97.8% cache hit rate; the staged-copy path dominates at these expert sizes.",
+        "evidence": "evidence/decode-thrash-tensors-20261023.md; run log cache=796/6853 hits=36068/36864 loads=796 evictions=0.",
+        "reconsider_if": "The streaming copy is fused into the matvec, or a model's expert working set exceeds RAM by an order of magnitude.",
+        "source_reference": "AlreadyTried.md:2317-2332",
+    },
 ]
 
 
