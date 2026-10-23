@@ -818,6 +818,18 @@ test-quick: test
 
 test-unit: test
 
+# CI gate: builds every binary and runs only the tests that need neither a GGUF
+# model nor a Vulkan device, so a red run means the tree is broken rather than
+# the machine is bare.  This is what .github/workflows/ci.yml runs; the
+# model-backed suites in "test" stay on a workstation.
+check: all
+	./p36_test --quant-primitives
+	./p36_test --ssd-cache-shrink
+	./p36_test --qwen-tool-call-format
+	./p36_test --vector-fixtures
+	./p36_test --server
+	@echo "check: ok"
+
 test-metal: metal p36_agent_test_metal $(SAMPLING_TEST)
 	./p36-eval --self-test-extractors
 	./p36_agent_test_metal

@@ -1,0 +1,26 @@
+name: ci
+
+# The interesting tests in this project need a GGUF model and a Vulkan device,
+# so a hosted runner can only prove that the tree still builds and that the
+# model-free logic still holds. That is exactly what `make check` covers.
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential glslang-tools libvulkan-dev
+
+      - name: Build every binary
+        run: make -j"$(nproc)"
+
+      - name: Model-free, GPU-free test gate
+        run: make check
