@@ -37,8 +37,12 @@ LLAMA_LIBS := \
 	"$(LLAMA_BUILD_DIR)/ggml/src/libggml-cpu.a" \
 	"$(LLAMA_BUILD_DIR)/ggml/src/libggml-base.a"
 LLAMA_LDLIBS := -lstdc++ -fopenmp
-CPU_CFLAGS := $(filter-out -ffast-math,$(CFLAGS)) $(DARWIN_MIN_FLAG) -D_GNU_SOURCE -fno-finite-math-only -DP36_NO_GPU
-GPU_CFLAGS := $(CFLAGS) $(DARWIN_MIN_FLAG) -D_GNU_SOURCE -fno-finite-math-only
+# Split translation units keep their fragments under src/<module>/. The fragments
+# include project headers by bare name, so the tree root and each module directory
+# must be on the quoted-include search path for every compile.
+SRC_INCS := -I. -Isrc/core -Isrc/server -Isrc/agent -Isrc/vulkan
+CPU_CFLAGS := $(filter-out -ffast-math,$(CFLAGS)) $(DARWIN_MIN_FLAG) -D_GNU_SOURCE -fno-finite-math-only -DP36_NO_GPU $(SRC_INCS)
+GPU_CFLAGS := $(CFLAGS) $(DARWIN_MIN_FLAG) -D_GNU_SOURCE -fno-finite-math-only $(SRC_INCS)
 VULKAN_CFLAGS ?=
 LDLIBS ?= -lm -pthread
 GPU_LDLIBS := $(LDLIBS) -ldl -lvulkan
@@ -471,6 +475,14 @@ CORE_OBJS := p36_gpu_core.o p36_vulkan.o p36_image.o
 METAL_CORE_OBJS := p36_gpu_core_metal.o p36_metal.o p36_image.o
 CPU_CORE_OBJS := p36_cpu.o p36_image.o
 
+# Fragment lists. These are prerequisites so that editing a fragment rebuilds the
+# translation unit that #includes it; without them an incremental build silently
+# links a stale object.
+CORE_INCS := $(wildcard src/core/*.inc)
+SERVER_INCS := $(wildcard src/server/*.inc)
+AGENT_INCS := $(wildcard src/agent/*.inc)
+VK_INCS := $(wildcard src/vulkan/*.inc)
+
 .PHONY: test-quality test-cli all help cpu gpu vulkan vulkan-generic vulkan-bc250 metal p36-quality-score test test-metal test-metal-model test-qwen27b-metal-parity test-qwen27b-vulkan-parity test-qwen27b-llama-parity test-quick test-all test-unit test-vulkan test-streaming test-mtp test-model test-session-batch test-server-live test-server-live-metal test-server-live-metal-ssd test-server-batching test-server-batching-metal test-server-batching-metal-ssd test-release release-build-check release-build-check-metal benchmark-gate benchmark-session-batch benchmark-qwen27b benchmark-qwen27b-gate benchmark-qwen27b-metal-gate benchmark-qwen27b-vulkan benchmark-qwen27b-metal benchmark-qwen27b-llama test-reference test-reference-local test-vectors-local reference-openrouter test-llama test-llama-long test-llama-batch test-llama-all clean
 
 all: p36 p36-server p36-bench p36-agent p36-eval p36_test
@@ -641,19 +653,19 @@ cpu: p36_cli_cpu.o linenoise_cpu.o p36_server_cpu.o rax_cpu.o p36_bench_cpu.o p3
 	$(CC) $(CPU_CFLAGS) -o p36_test p36_test_cpu.o rax_cpu.o p36_ssd_cpu.o p36_prompt_prefix.o $(CPU_CORE_OBJS) $(LDLIBS)
 
 # --- GPU (default) objects ---
-p36_gpu_core.o: p36.c p36.h p36_image.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc
+p36_gpu_core.o: p36.c p36.h p36_image.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc $(CORE_INCS)
 	$(CC) $(GPU_CFLAGS) -c -o $@ p36.c
 
-p36_gpu_core_metal.o: p36.c p36.h p36_image.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc
+p36_gpu_core_metal.o: p36.c p36.h p36_image.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc $(CORE_INCS)
 	$(CC) $(GPU_CFLAGS) -DP36_METAL -c -o $@ p36.c
 
-p36_gpu_core_metal_test.o: p36.c p36.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc
+p36_gpu_core_metal_test.o: p36.c p36.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc $(CORE_INCS)
 	$(CC) $(GPU_CFLAGS) -DP36_METAL -DP36_METAL_TEST_COMPAT -c -o $@ p36.c
 
 p36_cli_metal.o: p36_prompt_prefix.h p36_cli.c p36.h p36_cli_args.h p36_ssd.h linenoise.h
 	$(CC) $(GPU_CFLAGS) -DP36_METAL -c -o $@ p36_cli.c
 
-p36_vulkan.o: p36_vulkan.c p36_gpu.h p36_quant.h p36_iq2_tables_vulkan.inc p36_iq_tables.h p36_iq3s_grid_values.inc $(VULKAN_SHADERS)
+p36_vulkan.o: p36_vulkan.c p36_gpu.h p36_quant.h p36_iq2_tables_vulkan.inc p36_iq_tables.h p36_iq3s_grid_values.inc $(VULKAN_SHADERS) $(VK_INCS)
 	$(CC) $(GPU_CFLAGS) $(VULKAN_CFLAGS) -c -o $@ p36_vulkan.c
 
 p36_metal.o: p36_metal.m p36_gpu.h p36_quant.h p36_ssd.h $(METAL_SRCS)
@@ -662,13 +674,13 @@ p36_metal.o: p36_metal.m p36_gpu.h p36_quant.h p36_ssd.h $(METAL_SRCS)
 p36_cli.o: p36_prompt_prefix.h p36_cli.c p36.h p36_cli_args.h p36_ssd.h linenoise.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ p36_cli.c
 
-p36_server.o: p36_loopguard.h p36_server.c p36.h p36_cli_args.h rax.h p36_tool_text.h
+p36_server.o: p36_loopguard.h p36_server.c p36.h p36_cli_args.h rax.h p36_tool_text.h $(SERVER_INCS)
 	$(CC) $(GPU_CFLAGS) -c -o $@ p36_server.c
 
 p36_bench.o: p36_bench.c p36.h p36_cli_args.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ p36_bench.c
 
-p36_agent.o: p36_loopguard.h p36_remote.h p36_prompt_prefix.h p36_agent.c p36.h p36_cli_args.h p36_help.h p36_kvstore.h p36_ssd.h p36_web.h linenoise.h p36_tool_text.h
+p36_agent.o: p36_loopguard.h p36_remote.h p36_prompt_prefix.h p36_agent.c p36.h p36_cli_args.h p36_help.h p36_kvstore.h p36_ssd.h p36_web.h linenoise.h p36_tool_text.h $(AGENT_INCS)
 	$(CC) $(GPU_CFLAGS) -c -o $@ p36_agent.c
 
 p36_eval.o: p36_eval_cases.h p36_eval.c p36.h p36_cli_args.h p36_help.h p36_ssd.h
@@ -689,10 +701,10 @@ p36_web.o: p36_web.c p36_web.h
 p36_remote.o: p36_remote.c p36_remote.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ p36_remote.c
 
-p36_test.o: tests/p36_test.c p36_server.c p36.h p36_cli_args.h rax.h p36_gpu.h p36_tool_text.h
+p36_test.o: tests/p36_test.c p36_server.c p36.h p36_cli_args.h rax.h p36_gpu.h p36_tool_text.h $(SERVER_INCS)
 	$(CC) $(GPU_CFLAGS) -Wno-unused-function -c -o $@ tests/p36_test.c
 
-p36_test_metal.o: tests/p36_test.c p36_server.c p36.h p36_cli_args.h rax.h p36_gpu.h p36_tool_text.h
+p36_test_metal.o: tests/p36_test.c p36_server.c p36.h p36_cli_args.h rax.h p36_gpu.h p36_tool_text.h $(SERVER_INCS)
 	$(CC) $(GPU_CFLAGS) -DP36_METAL -Wno-unused-function -c -o $@ tests/p36_test.c
 
 gguf-tools/quality-testing/score_openrouter.o: gguf-tools/quality-testing/score_openrouter.c p36.h p36_cli_args.h p36_ssd.h p36_prompt_prefix.h
@@ -736,7 +748,7 @@ vulkan/rms_norm_rope_kv_qwen_quant.spv: vulkan/rms_norm_rope_kv_qwen_quant.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 # --- CPU-only objects (-DP36_NO_GPU) ---
-p36_cpu.o: p36.c p36.h p36_image.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc
+p36_cpu.o: p36.c p36.h p36_image.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc $(CORE_INCS)
 	$(CC) $(CPU_CFLAGS) -c -o $@ p36.c
 
 p36_image.o: p36_image.c p36_image.h third_party/iris/jpeg.h third_party/iris/png.h
@@ -745,13 +757,13 @@ p36_image.o: p36_image.c p36_image.h third_party/iris/jpeg.h third_party/iris/pn
 p36_cli_cpu.o: p36_prompt_prefix.h p36_cli.c p36.h p36_cli_args.h p36_ssd.h linenoise.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ p36_cli.c
 
-p36_server_cpu.o: p36_loopguard.h p36_server.c p36.h p36_cli_args.h rax.h p36_tool_text.h
+p36_server_cpu.o: p36_loopguard.h p36_server.c p36.h p36_cli_args.h rax.h p36_tool_text.h $(SERVER_INCS)
 	$(CC) $(CPU_CFLAGS) -c -o $@ p36_server.c
 
 p36_bench_cpu.o: p36_bench.c p36.h p36_cli_args.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ p36_bench.c
 
-p36_agent_cpu.o: p36_loopguard.h p36_remote.h p36_prompt_prefix.h p36_agent.c p36.h p36_cli_args.h p36_help.h p36_kvstore.h p36_ssd.h p36_web.h linenoise.h p36_tool_text.h
+p36_agent_cpu.o: p36_loopguard.h p36_remote.h p36_prompt_prefix.h p36_agent.c p36.h p36_cli_args.h p36_help.h p36_kvstore.h p36_ssd.h p36_web.h linenoise.h p36_tool_text.h $(AGENT_INCS)
 	$(CC) $(CPU_CFLAGS) -c -o $@ p36_agent.c
 
 p36_eval_cpu.o: p36_eval_cases.h p36_eval.c p36.h p36_cli_args.h p36_help.h p36_ssd.h
@@ -769,10 +781,10 @@ p36_ssd_cpu.o: p36_ssd.c p36_ssd.h
 p36_web_cpu.o: p36_web.c p36_web.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ p36_web.c
 
-p36_test_cpu.o: tests/p36_test.c p36_server.c p36.h p36_cli_args.h rax.h p36_tool_text.h
+p36_test_cpu.o: tests/p36_test.c p36_server.c p36.h p36_cli_args.h rax.h p36_tool_text.h $(SERVER_INCS)
 	$(CC) $(CPU_CFLAGS) -Wno-unused-function -c -o $@ tests/p36_test.c
 
-p36_sampling_test_core.o: p36.c p36.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc
+p36_sampling_test_core.o: p36.c p36.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc $(CORE_INCS)
 	$(CC) $(CPU_CFLAGS) -Wno-unused-function -DP36_TEST_HOOKS -c -o $@ p36.c
 
 tests/test_sampling.o: tests/test_sampling.c p36.h p36_cli_args.h
@@ -965,7 +977,7 @@ test-long: p36_test
 		-o $@ tests/test-vectors/llama_qwen_logprobs_capture.c \
 		$(LLAMA_LIBS) $(LDLIBS) $(LLAMA_LDLIBS)
 
-p36_llama_test.o: tests/p36_test.c p36_server.c p36.h rax.h p36_gpu.h p36_tool_text.h
+p36_llama_test.o: tests/p36_test.c p36_server.c p36.h rax.h p36_gpu.h p36_tool_text.h $(SERVER_INCS)
 	$(CC) $(CPU_CFLAGS) $(LLAMA_INCLUDE) -DP36_WITH_LLAMA -Wno-unused-function -c -o $@ tests/p36_test.c
 
 p36_llama_test: p36_llama_test.o rax_cpu.o p36_ssd_cpu.o p36_prompt_prefix.o $(CPU_CORE_OBJS)
@@ -974,13 +986,13 @@ p36_llama_test: p36_llama_test.o rax_cpu.o p36_ssd_cpu.o p36_prompt_prefix.o $(C
 p36_reference_test: p36_test_cpu.o rax_cpu.o p36_ssd_cpu.o p36_prompt_prefix.o $(CPU_CORE_OBJS)
 	$(CC) $(CPU_CFLAGS) -o $@ p36_test_cpu.o rax_cpu.o p36_ssd_cpu.o p36_prompt_prefix.o $(CPU_CORE_OBJS) $(LDLIBS)
 
-p36_agent_test.o: p36_loopguard.h p36_remote.h p36_prompt_prefix.h tests/p36_agent_test.c p36_agent.c p36.h p36_cli_args.h p36_help.h p36_kvstore.h p36_ssd.h p36_web.h linenoise.h p36_tool_text.h
+p36_agent_test.o: p36_loopguard.h p36_remote.h p36_prompt_prefix.h tests/p36_agent_test.c p36_agent.c p36.h p36_cli_args.h p36_help.h p36_kvstore.h p36_ssd.h p36_web.h linenoise.h p36_tool_text.h $(AGENT_INCS)
 	$(CC) $(GPU_CFLAGS) -Wno-unused-function -c -o $@ tests/p36_agent_test.c
 
 p36_agent_test: p36_agent_test.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ p36_agent_test.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o $(CORE_OBJS) $(GPU_LDLIBS)
 
-p36_agent_test_metal.o: p36_prompt_prefix.h tests/p36_agent_test.c p36_agent.c p36.h p36_cli_args.h p36_help.h p36_kvstore.h p36_ssd.h p36_web.h linenoise.h p36_tool_text.h
+p36_agent_test_metal.o: p36_prompt_prefix.h tests/p36_agent_test.c p36_agent.c p36.h p36_cli_args.h p36_help.h p36_kvstore.h p36_ssd.h p36_web.h linenoise.h p36_tool_text.h $(AGENT_INCS)
 	$(CC) $(GPU_CFLAGS) -DP36_METAL -Wno-unused-function -c -o $@ tests/p36_agent_test.c
 
 p36_agent_test_metal: p36_agent_test_metal.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o $(METAL_CORE_OBJS)
