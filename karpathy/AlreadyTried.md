@@ -2369,3 +2369,18 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
 - **Lesson.** Device-timeline gaps are not automatically recoverable time. Only
   end-to-end interleaved A/B decides, as CAMPAIGN section 4 says.
 - **Disposition.** Reverted; tree clean; baseline 71.77 t/s.
+
+## moe_down_q2k_sum_decode_iq3xxs — aligned aux load — ACCEPTED, +4.9% decode (2026-10-23)
+
+- **Tried.** The IQ3_XXS inner loop rebuilt its 32-bit aux word with four
+  wb_u8() calls (each a 16-bit load plus shift and mask) per 256-element group.
+  The word sits at an even offset, so one aligned wb_u32() replaces them.
+- **Result.** Kernel time 2.91 -> 2.30 ms/token (-21%), decode span
+  14.36 -> 13.70 ms/token, greedy output bit-identical
+  (md5 55f555660f6158501394ff16bde68faa). End-to-end, five interleaved pairs:
+  baseline 72.00/71.67/72.06/71.99/71.76 (median 71.99) vs 75.31/74.89/75.61/
+  75.68/75.55 (median 75.55), **+4.9%**, ranges disjoint.
+- **Why it works.** The loop is byte-unpack bound, and this was the last place
+  still fetching one byte at a time from a 16-bit buffer.
+- **Scope.** The wb_u32 helper only replaces the byte assembly; no arithmetic
+  changed, which is why the token stream is unchanged.
