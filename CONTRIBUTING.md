@@ -228,7 +228,7 @@ a real hang (diagnostic only).
 ## Disk KV Cache File Format
 
 The practical disk-KV-cache guide (what it does, cache-key scheme, tuning
-knobs) is in the README's [Disk KV Cache](README.md#disk-kv-cache) section.
+knobs) is in the [Disk KV Cache](docs/configuration.md#disk-kv-cache) section of the configuration guide.
 This is the exact on-disk byte layout, for anyone changing the format itself.
 
 A cache file is:

@@ -2,6 +2,26 @@
 
 ## 2026-10-23
 
+### Documentation restructured
+
+`README.md` went from 1341 lines to ~195. It is now a front door: pitch,
+supported runtimes, requirements, a copy-paste quickstart, the six flags most
+people need, three reference numbers, and an index. Everything else moved into
+`docs/`, which has its own index:
+
+- `docs/architecture.md`, `backends.md`, `benchmarks.md`, `configuration.md`,
+  `server.md`, `agent.md`, `streaming.md`, `models.md`, `testing.md`,
+  `troubleshooting.md`, `hardware/bc250.md`.
+- BC-250 setup is no longer the assumed default. It is documented as the
+  **reference configuration** behind the published numbers, and the generic
+  Vulkan path is described on its own terms.
+- Benchmarks now explain the harness, the flags that change what a number means,
+  the interleaved A/B protocol and its noise floors, and carry a result-table
+  template. The published values are labelled reference points measured on one
+  board, with the command to refresh them.
+- Fixed: stale "QuarkStar" branding, links into sections that moved, and the
+  `CONTRIBUTING.md` pointer to the disk KV cache format.
+
 ### Renamed q36 -> p36
 
 Sources, binaries, on-disk state and documentation are now `p36`. **This is a
