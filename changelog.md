@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-10-23
+
+### Renamed q36 -> p36
+
+Sources, binaries, on-disk state and documentation are now `p36`. **This is a
+breaking change for existing installs**: state moved from `~/.q36` to `~/.p36`
+(with `~/.q36_history`, `~/.q36_agent_history` and `<workspace>/.q36-tmp`
+moving alongside) and `Q36_AGENT_CACHE_DIR` became `P36_AGENT_CACHE_DIR`.
+There is no automatic migration; see "Migrating from q36" in the README for the
+three `mv` commands. The only remaining `q36` strings are the upstream fork
+name and the benchmark provenance table that cites it.
+
+### Split the monoliths into fragments
+
+`p36.c`, `p36_server.c`, `p36_agent.c` and `p36_vulkan.c` had grown to
+16k/16k/15k/10k lines. Each is now a thin manifest over ordered fragments in
+`src/core`, `src/server`, `src/agent` and `src/vulkan`. The fragments are
+`#include`d in order into one translation unit on purpose: the build has no
+LTO, so promoting a function to its own `.c` file would export it and lose
+inlining on the hottest paths. Generated code is unchanged — `p36`,
+`p36-server`, `p36-bench`, `p36-agent` and `p36-eval` are codegen-identical
+to the pre-split build.
+
+### CI
+
+Added `make check` and a GitHub Actions workflow running it: every binary plus
+the test modes that need neither a GGUF model nor a Vulkan device.
+
 ## 2026-10-16
 
 - Added `repeat_penalty` (llama.cpp-style multiplicative; request alias

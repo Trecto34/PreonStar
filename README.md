@@ -92,6 +92,38 @@ The software is currently very fast changing. Consider it alpha quality.
 Before each release, a big QA run is executed, however instabilities
 are definitely possible.
 
+## Source layout
+
+`make -j16` builds six binaries from a handful of translation units. The four
+largest `p36*.c` files are not where the code lives: each is a ~30-line manifest
+that `#include`s ordered fragments from one directory.
+
+| manifest | fragments | owns |
+|---|---|---|
+| `p36.c` | `src/core/` | GGUF loading, quantization kernels, CPU forward pass, sampling, sessions |
+| `p36_server.c` | `src/server/` | HTTP/SSE, Anthropic and OpenAI request parsing, tool schemas |
+| `p36_agent.c` | `src/agent/` | agent loop, tool execution, workspace jail, KV session handling |
+| `p36_vulkan.c` | `src/vulkan/` | Vulkan device setup, pipelines, MoE and attention dispatch |
+
+Each module directory has a `README.md` listing what every fragment contains.
+
+The fragments are included into a single translation unit deliberately. This
+build has no LTO, so moving a function into its own `.c` file would mean
+exporting it and giving up inlining on the decode and prefill hot paths. Keeping
+one TU per binary is what makes the generated code identical to the pre-split
+build, which is verified by `.orchestration/bincompare.sh` (section sizes,
+symbol counts, normalized disassembly).
+
+Two fragments are still large, and both are large for the same reason — the
+preprocessor does not allow a cut:
+
+- `src/server/server_17_eof.inc` (~4.5k lines) is the whole test suite, guarded
+  by `#ifndef P36_SERVER_TEST`. Cutting inside a conditional would put an `#if`
+  in one file and its `#endif` in another, which silently compiles the wrong
+  branch.
+- `src/vulkan/vk_13_eof.inc` (~1.5k lines) is a single function
+  (`p36_vk_moe_build_tiles`), so there is no seam inside it.
+
 ## More Documentation
 
 The focused documents below cover development, release checks, model details,
@@ -463,6 +495,25 @@ the saved text. `/compact` compacts the current context immediately.
 Exiting during generation stops the worker before asking whether to save.
 Sessions containing images cannot be saved yet; declining to exit after a save
 failure returns to the current chat.
+
+### Migrating from q36
+
+The project, its binaries and its on-disk state were renamed from `q36` to
+`p36`. Nothing is migrated for you and there is no fallback path: until you move
+the directories, an existing install simply looks new, so `/list` shows no saved
+sessions and shell history starts empty.
+
+```bash
+mv ~/.q36                ~/.p36                  # kv cache, browser profile, server-kv
+mv ~/.q36_history        ~/.p36_history
+mv ~/.q36_agent_history  ~/.p36_agent_history
+mv <workspace>/.q36-tmp  <workspace>/.p36-tmp   # if the agent ever ran there
+```
+
+The agent cache directory follows the same rename: `Q36_AGENT_CACHE_DIR` is now
+`P36_AGENT_CACHE_DIR`. Saved sessions, the disk KV cache and both command
+histories resolve again once the directories are in place; nothing needs to be
+re-prefilled.
 
 ### Agent execution control
 
