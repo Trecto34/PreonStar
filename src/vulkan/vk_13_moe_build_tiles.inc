@@ -1098,10 +1098,15 @@ int p36_gpu_moe_ffn_q8_tensor(p36_gpu_tensor *out,
                                          selected, qx, stream_slots, resident_bank,
                                          n_used, n_tok, in_dim, mid_dim, n_expert);
     if (!ok && mid8 && down8) {
+        /* Gate may take the native-fma kernel too: its output only reaches the
+         * graph through swiglu and then quantize_q8_K, which truncates to int8,
+         * so the correctly-rounded fma of the exact kernel (15.5 ms of emulated
+         * fp64 on a 2048x512x8 Q3_K gate) buys nothing downstream.  --quality
+         * still forces the exact kernel for CPU parity runs. */
         gate8 = p36_gpu_tensor_alloc_scratch(mid_bytes * n_tok);
         up8 = p36_gpu_tensor_alloc_scratch(mid_bytes * n_tok);
         ok = gate8 && up8 &&
-             p36_vk_moe_matvec(gate8, model_map, model_size, gate, qx, false, false,
+             p36_vk_moe_matvec(gate8, model_map, model_size, gate, qx, false, true,
                                 stream_slots ? P36_VK_STREAM_PART_GATE : P36_VK_STREAM_PART_NONE,
                                 stream_slots, resident_bank,
                                 selected, n_used, n_tok, in_dim, mid_dim, n_expert) &&
