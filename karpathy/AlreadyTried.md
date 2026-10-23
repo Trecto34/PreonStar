@@ -2505,4 +2505,43 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   kernel time; the redundant builds were also paying scratch allocation,
   descriptor writes and hazard bookkeeping.
 - **Profiler.** `moe_tiles` 1200 -> 400 dispatches, 2.18 -> 0.70 ms; total
-  dispatches 13170 -> 12370. Greedy output identical (md5 55f55566...).
+  dispatches 13170 -> 12370.
+
+## embed — dequantize the row on the device — ACCEPTED, +5.1% MiniPlus decode (2026-10-23)
+
+- **Finding.** `p36_gpu_embed_tokens` dequantized every decode row on the host
+  (`p36_tensor_row_to_float` over the mmap) and wrote it into a staging buffer
+  the GPU was about to read. Two host round trips per token for 1152 bytes.
+- **Change.** `embed_row.spv` reads the row out of a device-resident copy of the
+  table, Q4_K and Q8_0, row index from a push constant or from the top-2 buffer.
+  Upload is once, during prefill: 272.8 MiB in 374 ms (write-combined GTT, the
+  parallel row copy does not help; 434 ms when the table goes to cached host
+  memory instead, so device-local stays).
+- **Allocation.** Own exact-size buffer, *not* `p36_vk_weight_get_unlocked`:
+  that path opens a 512 MiB arena plan block for a 272.8 MiB tensor and the
+  allocation fails once the expert banks are resident, which cost 8-13 t/s
+  while every token retried it.
+- **Result.** Five interleaved pairs: 48.42/48.79/48.68/48.94/48.85 (median
+  48.79) vs 51.36/51.69/51.07/51.27/50.84 (median 51.27), **+5.1%**. md5
+  55f55566... unchanged. Host phases per token now forward=15.3 read=2.3
+  caller=0.52 ms.
+
+### B+C — deferred top-2 read + lagged loop — OPEN, reverted
+
+- **Written and measured.** `p36_gpu_tensor_read_begin()` seals the open batch
+  and returns its submission seq; `p36_gpu_tensor_read_wait(seq)` waits only
+  the ring slots at or below that seq instead of draining the queue. The
+  forward pass publishes `s->gpu_top2_seq` and `p36_session_argmax` resolves it
+  on demand. md5 stayed 55f55566...
+- **Alone it is a 2 t/s regression** (49.30 vs 51.27): sealing early with
+  nothing recorded behind it just moves the wait, it does not hide it.
+- **C needs two pieces this did not have.** `rt->top2` has to become
+  `rt->top2[2]` with a per-token parity flip, otherwise waiting on `seq_i`
+  reads a buffer the GPU is already overwriting with `top2_{i+1}`. And the CLI
+  loop has to call `eval_device(i+1)` — row index from `top2[i&1]`, token
+  pushed as a placeholder and patched right after the fetch — *before*
+  `argmax()` resolves `seq_i`; then token i+1's dispatches are already queued
+  when top2_i lands, which is the 2.3 ms read plus the 0.5 ms caller gap.
+- **Plumbing that works.** `p36_gpu_embed_row_tensor(..., ids, row)` already
+  takes a device id; a `-1` sentinel through `p36_forward_tokens_vulkan_into()`
+  selects it. EOS costs one wasted token of compute.
