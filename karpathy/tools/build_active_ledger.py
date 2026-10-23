@@ -168,6 +168,17 @@ LEDGER_ENTRIES = [
         "reconsider_if": "The sampling work itself moves onto the GPU, so the CPU no longer has useful work to overlap with the drain.",
         "source_reference": "AlreadyTried.md:2356-2376",
     },
+    {
+        "id": "AT-SWIFT-014",
+        "priority": 8,
+        "target": "vulkan/moe_down_q2k_sum_decode_iq3xxs.spv",
+        "approach": "Aligned wb_u32 aux load instead of four wb_u8 byte loads",
+        "result": "ACCEPTED",
+        "reason_rejected": "N/A - kept. Kernel 2.91 -> 2.30 ms/token (-21%) and decode 71.99 -> 75.55 t/s median over 5 interleaved pairs (+4.9%, disjoint ranges), bit-identical output.",
+        "evidence": "evidence/decode-profile-20261023.md; VK timestamp kernel window plus 5 interleaved end-to-end pairs.",
+        "reconsider_if": "Never - this is the shipped path. Re-audit only if the IQ3_XXS block layout changes.",
+        "source_reference": "AlreadyTried.md:2378-2396",
+    },
 ]
 
 

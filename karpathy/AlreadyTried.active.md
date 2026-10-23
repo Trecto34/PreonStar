@@ -1,13 +1,13 @@
 LEDGER_CHECK:
 source=AlreadyTried.md
 active=AlreadyTried.active.md
-source_sha256=28052052d6b0f9bb2758139b0d609e5f8e07306e6b5f18c43b5d1ee914ecce23
+source_sha256=723d5357f04aeb8e1747ab0f4a1982e397954bac3641d37d51fae710a3bfcf35
 priority=8
-entries=9
+entries=10
 
 # Active Optimization Ledger (Priority 8)
 
-> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `28052052d6b0f9bb...`)  
+> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `723d5357f04aeb8e...`)  
 > **Filter:** Priority 8  
 > **Mandatory Policy:** Do not repeat rejected approaches without a stated new hardware/runtime reason. Preserve MoE routing parity for Qwen3.6 reference.
 
@@ -24,6 +24,7 @@ entries=9
 | `AT-SWIFT-011` | **--ssd-streaming with an 8GB expert cache** | `runtime SSD streaming on APEX-I MoE` | **REJECTED** | Decode 3.18 t/s vs 71.26 t/s baseline (22x slower) despite a 97.8% cache hit rate; the staged-copy path dominates at these expert sizes. | The streaming copy is fused into the matvec, or a model's expert working set exceeds RAM by an order of magnitude. |
 | `AT-SWIFT-012` | **8 rows per workgroup instead of 4** | `vulkan/dense_q4k_decode.spv` | **REJECTED** | Kernel cost 3.13 -> 4.55 ms/token (+45%) by dispatch timestamps. Dispatches per token are unchanged at 225, so the launch-overhead saving the change targeted does not exist; half the wave count plus higher register pressure costs more than it saves. | Occupancy data shows the 4-row kernel is wave-starved; the fix would then be more parallelism, not fewer workgroups. |
 | `AT-SWIFT-013` | **Defer the top2 readback until a consumer asks for it** | `core_15_forward_tokens_cpu.inc sampling handoff` | **REJECTED** | Removed the per-token sync (630 us -> 1 us) and stayed bit-identical, but five interleaved pairs regressed 2.1% (median 71.85 -> 70.37 t/s). The gap was never on the critical path; deferring the drain delayed resubmission instead. | The sampling work itself moves onto the GPU, so the CPU no longer has useful work to overlap with the drain. |
+| `AT-SWIFT-014` | **Aligned wb_u32 aux load instead of four wb_u8 byte loads** | `vulkan/moe_down_q2k_sum_decode_iq3xxs.spv` | **ACCEPTED** | N/A - kept. Kernel 2.91 -> 2.30 ms/token (-21%) and decode 71.99 -> 75.55 t/s median over 5 interleaved pairs (+4.9%, disjoint ranges), bit-identical output. | Never - this is the shipped path. Re-audit only if the IQ3_XXS block layout changes. |
 
 ## Structured Records
 
@@ -107,6 +108,15 @@ entries=9
 - **Evidence:** evidence/decode-profile-20261023.md; timeline gap before/after plus 5 interleaved end-to-end pairs.
 - **Reconsider If:** The sampling work itself moves onto the GPU, so the CPU no longer has useful work to overlap with the drain.
 - **Source Reference:** AlreadyTried.md:2356-2376
+
+### AT-SWIFT-014: Aligned wb_u32 aux load instead of four wb_u8 byte loads
+- **Priority:** 8
+- **Target:** `vulkan/moe_down_q2k_sum_decode_iq3xxs.spv`
+- **Result:** ACCEPTED
+- **Reason Rejected:** N/A - kept. Kernel 2.91 -> 2.30 ms/token (-21%) and decode 71.99 -> 75.55 t/s median over 5 interleaved pairs (+4.9%, disjoint ranges), bit-identical output.
+- **Evidence:** evidence/decode-profile-20261023.md; VK timestamp kernel window plus 5 interleaved end-to-end pairs.
+- **Reconsider If:** Never - this is the shipped path. Re-audit only if the IQ3_XXS block layout changes.
+- **Source Reference:** AlreadyTried.md:2378-2396
 
 ## Transferable Winning Patterns (from OPT-20/21/23)
 - **Hoist Invariant Addressing:** Compute row/col indexing, stride, and scale group offsets outside `kb` block loops.
