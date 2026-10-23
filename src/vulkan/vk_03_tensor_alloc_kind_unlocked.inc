@@ -299,6 +299,7 @@ static bool p36_vk_gpu_busy_unlocked(void) {
 static int p36_vk_slot_wait_unlocked(p36_vk_cb_slot *s) {
     VkResult rc = VK_SUCCESS;
     if (!s->pending) return 1;
+    uint64_t w0 = p36_vk.prof_kernel ? p36_vk_now_ns() : 0;
     if (p36_vk_device_lost) { s->pending = false; return 0; }
     /* Decode batches finish in tens of microseconds; spinning on the fence
      * status dodges the syscall + thread wakeup of a blocking wait. */
@@ -313,6 +314,8 @@ static int p36_vk_slot_wait_unlocked(p36_vk_cb_slot *s) {
         s->pending = false;
         return p36_vk_ok(rc, "fence wait");
     }
+    if (p36_vk.prof_kernel)
+        p36_vk_prof_op_add("vk_wait_fence", 0, 0, 0, 0, p36_vk_now_ns() - w0, 0, 0);
     vkResetFences(p36_vk.device, 1, &s->fence);
     if (s->pool) vkResetDescriptorPool(p36_vk.device, s->pool, 0);
     s->pending = false;
@@ -340,7 +343,12 @@ static int p36_vk_submit_current_unlocked(bool host_read) {
                              0, 1, &host_barrier, 0, NULL, 0, NULL);
     }
     {
+        /* P36_VK_PROF_KERNEL splits the submit path, which no other counter
+         * covers: driver-side command buffer teardown versus queue submit. */
+        uint64_t e0 = p36_vk.prof_kernel ? p36_vk_now_ns() : 0;
         VkResult rc = vkEndCommandBuffer(p36_vk.command_buffer);
+        if (p36_vk.prof_kernel)
+            p36_vk_prof_op_add("vk_end_cb", 0, 0, 0, 0, p36_vk_now_ns() - e0, 0, 0);
         if (rc != VK_SUCCESS) {
             p36_vk_batch_recording = false;
             return p36_vk_ok(rc, "vkEndCommandBuffer");
@@ -352,7 +360,10 @@ static int p36_vk_submit_current_unlocked(bool host_read) {
             .commandBufferCount = 1,
             .pCommandBuffers = &p36_vk.command_buffer,
         };
+        uint64_t s0 = p36_vk.prof_kernel ? p36_vk_now_ns() : 0;
         VkResult rc = vkQueueSubmit(p36_vk.queue, 1, &si, s->fence);
+        if (p36_vk.prof_kernel)
+            p36_vk_prof_op_add("vk_queue_submit", 0, 0, 0, 0, p36_vk_now_ns() - s0, 0, 0);
         if (rc == VK_SUCCESS && p36_vk_fault_inject_lost &&
             ++p36_vk_submit_calls == p36_vk_fault_inject_lost) {
             rc = VK_ERROR_DEVICE_LOST;

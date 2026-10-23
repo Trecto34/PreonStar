@@ -5,6 +5,15 @@ static void p36_vk_prof_report(void) {
             (double)p36_vk_prof_record_ns / 1e6,
             p36_vk_prof_flushes,
             (double)p36_vk_prof_submit_ns / 1e6);
+    fprintf(stderr,
+            "p36: Vulkan record split desc_ms=%.1f cmd_ms=%.1f book_ms=%.1f"
+            " (per dispatch us: %.2f / %.2f / %.2f)\n",
+            (double)p36_vk_prof_desc_ns / 1e6,
+            (double)p36_vk_prof_cmd_ns / 1e6,
+            (double)p36_vk_prof_book_ns / 1e6,
+            p36_vk_prof_dispatches ? (double)p36_vk_prof_desc_ns / 1e3 / (double)p36_vk_prof_dispatches : 0.0,
+            p36_vk_prof_dispatches ? (double)p36_vk_prof_cmd_ns / 1e3 / (double)p36_vk_prof_dispatches : 0.0,
+            p36_vk_prof_dispatches ? (double)p36_vk_prof_book_ns / 1e3 / (double)p36_vk_prof_dispatches : 0.0);
     if (p36_vk_prof_op_n != 0) {
         fprintf(stderr, "p36: Vulkan op profile\n");
         for (uint32_t i = 0; i < p36_vk_prof_op_n; i++) {

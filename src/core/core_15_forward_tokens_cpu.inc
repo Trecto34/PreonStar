@@ -1451,9 +1451,26 @@ static bool p36_sessions_eval_batch_vulkan(p36_decode_item *items, int count) {
     return true;
 }
 
+/* P36_HOST_PROF: per-token host breakdown of the sampling handoff.  The
+ * handoff is where the GPU sits idle with nothing recorded, so the question
+ * is always which of these four phases owns the stall. */
+static uint64_t p36_hprof_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 static bool p36_forward_tokens_vulkan(p36_session *s, const int *tokens, uint32_t n_tok,
                                       uint32_t pos0, bool compute_logits) {
+    static bool hprof_on, hprof_init;
+    static uint64_t hprof_prev_exit;
+    uint64_t h0 = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0;
     p36_vulkan_runtime *rt;
+    if (!hprof_init) {
+        hprof_init = true;
+        hprof_on = getenv("P36_HOST_PROF") != NULL;
+    }
+    if (hprof_on) h0 = p36_hprof_ns();
     if (!s) return false;
     rt = (p36_vulkan_runtime *)s->runtime;
     if (!p36_forward_tokens_vulkan_into(s,
@@ -1466,14 +1483,18 @@ static bool p36_forward_tokens_vulkan(p36_session *s, const int *tokens, uint32_
                                         false)) {
         return false;
     }
+    if (hprof_on) h1 = p36_hprof_ns();
     if (!p36_vulkan_update_last_h(rt, n_tok - 1u)) return false;
+    if (hprof_on) h2 = p36_hprof_ns();
     if (compute_logits) {
         s->gpu_top2_valid = false;
         s->logits_host_valid = false;
         if (p36_gpu_top2_tensor(rt->top2, rt->logits, P36_N_VOCAB)) {
             int32_t ids[2] = {-1, -1};
+            if (hprof_on) h3 = p36_hprof_ns();
             if (!p36_gpu_tensor_read(rt->top2, 0, ids, sizeof(ids)))
                 return false;
+            if (hprof_on) h4 = p36_hprof_ns();
             s->gpu_top2[0] = ids[0];
             s->gpu_top2[1] = ids[1];
             s->gpu_top2_valid = ids[0] >= 0 && ids[1] >= 0;
@@ -1485,6 +1506,17 @@ static bool p36_forward_tokens_vulkan(p36_session *s, const int *tokens, uint32_
             }
             s->logits_host_valid = true;
         }
+    }
+    if (hprof_on) {
+        uint64_t h5 = p36_hprof_ns();
+        fprintf(stderr,
+                "hprof caller_gap=%.3f forward=%.3f last_h=%.3f top2=%.3f read=%.3f ms\n",
+                (double)(h0 - hprof_prev_exit) / 1e6,
+                (double)(h1 - h0) / 1e6,
+                (double)(h2 - h1) / 1e6,
+                (double)(h3 - h2) / 1e6,
+                (double)(h4 - h3) / 1e6);
+        hprof_prev_exit = h5;
     }
     return true;
 }

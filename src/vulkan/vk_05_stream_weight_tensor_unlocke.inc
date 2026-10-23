@@ -87,6 +87,11 @@ static int p36_vk_run_unlocked(
         };
     }
     vkUpdateDescriptorSets(p36_vk.device, kernel->bindings, writes, 0, NULL);
+    uint64_t prof_ph = 0;
+    if (p36_vk.prof_ops) {
+        prof_ph = p36_vk_now_ns();
+        p36_vk_prof_desc_ns += prof_ph - prof_t0;
+    }
 
     /* Record into the open batch; submission happens at the next host read
      * (p36_vk_flush_unlocked).  One reusable command buffer and fence are
@@ -141,6 +146,11 @@ static int p36_vk_run_unlocked(
     if (query0 != UINT32_MAX) {
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, p36_vk.query_pool, query0 + 1u);
     }
+    if (p36_vk.prof_ops) {
+        uint64_t now = p36_vk_now_ns();
+        p36_vk_prof_cmd_ns += now - prof_ph;
+        prof_ph = now;
+    }
     for (uint32_t i = 0; i < kernel->bindings; i++) {
         roots[i]->last_use_seq = p36_vk_submit_seq + 1;
         if ((kernel->write_mask >> i) & 1u) {
@@ -152,6 +162,7 @@ static int p36_vk_run_unlocked(
             p36_vk_hazard_add(p36_vk_hazard_read, &p36_vk_hazard_read_n, roots[i]);
         }
     }
+    if (p36_vk.prof_ops) p36_vk_prof_book_ns += p36_vk_now_ns() - prof_ph;
     p36_vk_prof_dispatches++;
     {
         uint64_t record_ns = p36_vk_now_ns() - prof_t0;

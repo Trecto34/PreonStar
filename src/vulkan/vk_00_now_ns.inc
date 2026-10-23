@@ -526,6 +526,9 @@ static uint64_t p36_vk_prof_flushes;
 static uint64_t p36_vk_read_bytes_total;
 static uint64_t p36_vk_flush_total;
 static uint64_t p36_vk_prof_submit_ns;
+/* P36_VK_PROF record-path split: descriptor plumbing, command recording and
+ * per-dispatch bookkeeping, so a CPU-bound harness shows which one to fix. */
+static uint64_t p36_vk_prof_desc_ns, p36_vk_prof_cmd_ns, p36_vk_prof_book_ns;
 static uint64_t p36_vk_prof_record_ns;
 
 enum {
