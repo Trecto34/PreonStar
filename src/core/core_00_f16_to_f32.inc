@@ -659,6 +659,7 @@ struct p36_session {
     float *mtp_logits;
     bool logits_host_valid;
     bool gpu_top2_valid;
+    uint64_t gpu_top2_seq;   /* submission carrying the pending top-2 result */
     uint8_t gpu_top2_slot;   /* which rt->top2 buffer the result landed in */
     int gpu_top2[2];
     void *runtime;
