@@ -2526,7 +2526,23 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   55f55566... unchanged. Host phases per token now forward=15.3 read=2.3
   caller=0.52 ms.
 
-### B+C — deferred top-2 read + lagged loop — OPEN, reverted
+### B+C — deferred top-2 read + lagged loop — TRIED, REJECTED (-3.7%)
+
+Double-buffering alone landed and stays (`44806d9`, md5 unchanged, 51.4 t/s):
+`rt->top2[2]` alternated per token, slot published on the session. The lagged
+loop on top of it measured **51.21 -> 49.33 t/s median, 5 interleaved pairs**,
+so it is reverted (stash `C: lagged decode loop`). What the run showed:
+
+- The read stall does disappear: `P36_HOST_PROF` goes `read=2.3 -> 0.000 ms`,
+  `forward` stays 15.3, and `caller_gap` rises 0.52 -> 2.45 ms. The 2.3 ms did
+  not vanish, it moved into the resolve: by the time the host has recorded the
+  next token the GPU still has ~2.4 ms of the *current* token left to run, so
+  the wait is GPU-bound. There is nothing left to hide on the host side.
+- That pins the limiter to the GPU, not the host: ~15.3 ms of kernel work per
+  token against ~19.5 ms of wall means ~4 ms of bubbles inside the token.
+- A deeper command ring (`P36_VK_CB_RING` 4 -> 8) to soften the seal's ring
+  backpressure is much worse, 50.2 -> 44.9 t/s: at 4 slots the GPU never falls
+  far enough behind for the resolve wait to grow, at 8 it does.
 
 - **Written and measured.** `p36_gpu_tensor_read_begin()` seals the open batch
   and returns its submission seq; `p36_gpu_tensor_read_wait(seq)` waits only
