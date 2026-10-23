@@ -2287,3 +2287,31 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
 - **Achieved GB/s (GGUF bytes / profiled ms per tok):** IQ4_XS 362 (8.26 ms), IQ3_S 311 (11.29), IQ3_XXS 302 (6.82), Q4_K 279 (6.49), vs ~373 loads-only floor.  Best case all three laggards at floor saves ~4.4 ms of ~45 = ~24 tok/s, so 25 tok/s is out of reach by dominant-kernel work.
 - **Fusion:** summed kernel GPU time (~49 ms with timestamps) is >= wall (45 ms): no CPU/submit gap to recover.
 - `reconsider_if`: a repacked weight layout (changes the GGUF, out of scope) or hardware with more bandwidth.
+
+## APEX-I MoE decode — type-specialized matvec + Q4_K packed loads — REJECTED, NEUTRAL (2026-10-23)
+
+- **Target.** APEX-I-NanoPlus (MiniCPM-V-4.7-35B-A3B, qwen35moe, Q4_K experts) and
+  APEX-I-MiniPlus (KAT-Coder-V2.5, Q5_K/Q3_K experts). Goal was to close a ~27%
+  decode gap vs llama.cpp on these files.
+- **Candidate 1 — type-specialized matvec.** `moe_matvec{,_fast}.comp` are one
+  shader each with a runtime `if (pc.type == ...)` chain over nine ggml types.
+  Built six `-DP36_TYPE_ONLY` variants and selected them in
+  `p36_vk_moe_type_kernel()` at all three dispatch sites. Required a second pass:
+  `P36_VK_MOE_FAST` defaults ON, so the first version only specialized the dead
+  `moe_matvec` and was null by construction (CAMPAIGN §4 rule 5).
+- **Candidate 2 — Q4_K packed loads.** The four consecutive Q4_K bytes one lane
+  reads are a single aligned word (`wb[off>>2]`), as are its four q8_K
+  activations: 8 loads collapsed to 2 per group.
+- **Correctness.** Candidate 2 was **bit-identical**: 64 greedy tokens, md5
+  `4915110d…` before and after (stash → rebuild → compare → pop).
+- **Result.** Decode medians 71.8 t/s before, 71.8–71.9 t/s after, both candidates.
+  No prefill change. 3 reps, below the §4 7-rep gate — recorded as observational.
+- **Why it cannot work here.** Decode is **disk-read-bound**, not ALU-bound:
+  p36 reads 10.3 MiB/token against a 745 MiB/s NVMe stream, and
+  `bytes_per_token / disk_rate` accounts for the whole per-token time.
+  llama.cpp shows the identical pattern at 7.9 MiB/token / 96.6 t/s. Speed ratio
+  1.35 ≈ bytes ratio 1.30. See `evidence/decode-disk-bound-20261023.md`.
+- **Disposition.** Both reverted, tree clean, baseline 71.47 t/s.
+- **Reconsider if** the weights become resident (pinning, or a box with enough
+  RAM for model + working set). Then decode is compute-bound and these levers
+  become visible — re-rank them, do not assume they are still neutral.

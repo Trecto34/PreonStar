@@ -1,13 +1,13 @@
 LEDGER_CHECK:
 source=AlreadyTried.md
 active=AlreadyTried.active.md
-source_sha256=c34051f3166d587e56638ca6e0a2d8ff498b5aa0c40acc5b1b020f69d88b5e83
+source_sha256=3f431a09aa0388c56c4361dffa3a2548abce245e927bf120bbce4dc6a92f8f23
 priority=8
-entries=5
+entries=6
 
 # Active Optimization Ledger (Priority 8)
 
-> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `c34051f3166d587e...`)  
+> **Auditable source:** `AlreadyTried.md` (# Local Swift campaign ledger) (SHA-256: `3f431a09aa0388c5...`)  
 > **Filter:** Priority 8  
 > **Mandatory Policy:** Do not repeat rejected approaches without a stated new hardware/runtime reason. Preserve MoE routing parity for Qwen3.6 reference.
 
@@ -20,6 +20,7 @@ entries=5
 | `AT-SWIFT-003` | **IQ3_XXS MMQ token tiles 64 or 256** | `vulkan/dense_iq3_xxs_mmq.comp` | **REJECTED** | Produced 161.07 tok/s (tile 64) and 166.87 tok/s (tile 256) at context 1024, versus 172.41 tok/s for default 128-token tile. | Workgroup dispatch divisor or tile dimensions changed in conjunction with different register tiling. |
 | `AT-SWIFT-004` | **IQ3_XXS MMQ dynamic k loop (removing [[unroll]])** | `vulkan/dense_iq3_xxs_mmq.comp` | **REJECTED** | Removing [[unroll]] raised 128-token MMQ GPU time from ~940 to 960 ms (+2.1% slower). | Dynamic bounds proven strictly necessary and pipelined without compiler unroll loss. |
 | `AT-SWIFT-005` | **Prefill chunk size > 256 on GFX1013** | `runtime prefill chunk` | **REJECTED** | Exceeds the 10 s amdgpu watchdog timer and destroys GPU context on BC-250 (GQA 6). Default 256 is fastest safe cap. | Mathematical proof of watchdog-safety or kernel execution time reduced sufficiently under 10s watchdog. |
+| `AT-SWIFT-010` | **MoE matvec type specialization + Q4_K packed loads** | `vulkan/moe_matvec{,_fast}.comp (APEX-I decode)` | **REJECTED** | Both neutral: decode median 71.8 t/s before, 71.8-71.9 t/s after (3 reps). Not a kernel verdict - decode on this host is disk-read-bound (10.3 MiB/token against a 745 MiB/s NVMe stream), so the ALU path is off the critical path. | Weights become resident (pinning, or a box with RAM for model + working set), making decode compute-bound. |
 
 ## Structured Records
 
@@ -67,6 +68,15 @@ entries=5
 - **Evidence:** AMDGPU 10s watchdog timeout and GPU context reset.
 - **Reconsider If:** Mathematical proof of watchdog-safety or kernel execution time reduced sufficiently under 10s watchdog.
 - **Source Reference:** AlreadyTried.md:38-40
+
+### AT-SWIFT-010: MoE matvec type specialization + Q4_K packed loads
+- **Priority:** 8
+- **Target:** `vulkan/moe_matvec{,_fast}.comp (APEX-I decode)`
+- **Result:** REJECTED
+- **Reason Rejected:** Both neutral: decode median 71.8 t/s before, 71.8-71.9 t/s after (3 reps). Not a kernel verdict - decode on this host is disk-read-bound (10.3 MiB/token against a 745 MiB/s NVMe stream), so the ALU path is off the critical path.
+- **Evidence:** evidence/ab-moe-type-specialization-20261023.md; evidence/decode-disk-bound-20261023.md. Packed-load arm bit-identical (md5 4915110d over 64 greedy tokens).
+- **Reconsider If:** Weights become resident (pinning, or a box with RAM for model + working set), making decode compute-bound.
+- **Source Reference:** AlreadyTried.md:2291-2315
 
 ## Transferable Winning Patterns (from OPT-20/21/23)
 - **Hoist Invariant Addressing:** Compute row/col indexing, stride, and scale group offsets outside `kb` block loops.

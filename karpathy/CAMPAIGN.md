@@ -135,6 +135,10 @@ must be rebuilt from a pinned commit in their own worktree (§5).
    - dense 27B prefill: **0.7%** within a session
    - **MoE prefill: 3.4%** (identical code produced 713.98 → 738.81 t/s)
    - decode: spread up to **9.4%** — it needs many reps before it says anything
+   - **APEX-I models on this host: far worse.** 5 interleaved pairs produced
+     108.5 and 512.3 t/s inside a population otherwise at 650–780 — a 6× spread
+     from the same binary. The cause is I/O, not thermals (see §6 item 0). Three
+     reps cannot resolve anything here; treat sub-10% deltas as unmeasured.
    ⇒ a MoE prefill delta under ~3% is noise, and the guard's real acceptance
    band is 3.4%, not 1.5%.
 3. **Interleave A and B rep by rep.** Never run A completely then B: drift lands
@@ -162,6 +166,9 @@ tests/bench_ab.sh <A_BIN> <B_BIN> /home/server/p36/gguf/<MODEL>.gguf 7 \
   > /tmp/ab-<slug>.csv 2> /tmp/ab-<slug>.summary
 cp /tmp/ab-<slug>.csv karpathy/evidence/raw/
 
+# --- run anything under the memory ceiling (refuses if it cannot fit, kills on RSS) ---
+karpathy/tools/guard.sh <MODEL>.gguf -- ./p36-bench -m <MODEL>.gguf ...
+
 # --- one engine run, by hand ---
 ./p36-bench --vulkan -m /home/server/p36/gguf/<MODEL>.gguf \
   --prompt-file tests/long_context_story_prompt.txt \
@@ -184,6 +191,21 @@ cd /home/server/p36-wt/<slug> && make -j16          # only when the GPU is idle
 ```
 
 ## 6. Open items, ranked
+
+0. **NEW (2026-10-23) — decode is disk-read-bound; the lever is bytes/token, not
+   kernels.** Sampled `/proc/<pid>/io` during steady-state decode: p36 pulls
+   **10.3 MiB/token** and llama.cpp **7.9 MiB/token**, both against the same
+   ~760 MiB/s NVMe stream. `bytes_per_token / disk_rate` explains the entire
+   per-token time in both engines, and the speed ratio (1.35) matches the bytes
+   ratio (1.30). Two ALU-side candidates built the same day measured exactly
+   neutral and were rejected (`evidence/ab-moe-type-specialization-20261023.md`).
+   **Rank nothing on decode speed on this host without an I/O control.**
+   Next levers, in order: (a) find why p36 re-faults 30% more bytes per token
+   than llama.cpp, (b) make the mapping resident so decode turns compute-bound.
+   Blocker for (b): `RLIMIT_MEMLOCK` is **8 MiB** here. OOM guard for all of
+   this exists at `karpathy/tools/guard.sh` (pre-flight refusal + RSS watchdog;
+   systemd scopes are silently unenforced on this host and `ulimit -v` breaks
+   the Vulkan address space).
 
 1. **Quant-aware dispatch for the `IQ2_S` / K-quant MoE — W1 LANDED & ACCEPTED (2026-09-20).**
    Landed in `6ef9ceb` (fused gate/up + GEMM pair) and `e8cb6de` (f32 identity decode pair).
@@ -947,6 +969,11 @@ cd /home/server/p36-wt/<slug> && make -j16          # only when the GPU is idle
 Authoritative detail and per-item "reconsider_if" live in
 `karpathy/AlreadyTried.md`; this is only the index.
 
+- **MoE matvec type specialization + Q4_K packed loads (2026-10-23)** — both
+  neutral on APEX-I decode (71.8 → 71.8/71.9 t/s), the packed-load one
+  bit-identical. Not a kernel verdict: decode is disk-bound here, so the ALU path
+  is off the critical path (§6 item 0). Re-rank only if the weights become
+  resident. Detail: `AlreadyTried.md`, `evidence/ab-moe-type-specialization-20261023.md`.
 - **`int dot: 0` is a hardware truth on GFX1013** — all accelerated
   integer-dot properties are `false`; the gate at `ggml-vulkan.cpp:4019` can
   never pass. No flag, pull or shader edit fixes it. (Build-side causes were

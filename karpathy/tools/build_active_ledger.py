@@ -124,6 +124,17 @@ LEDGER_ENTRIES = [
         "reconsider_if": "New occupancy evidence showing 512 threads saturates CUs without barrier stalls.",
         "source_reference": "AlreadyTried.md:29",
     },
+    {
+        "id": "AT-SWIFT-010",
+        "priority": 8,
+        "target": "vulkan/moe_matvec{,_fast}.comp (APEX-I decode)",
+        "approach": "MoE matvec type specialization + Q4_K packed loads",
+        "result": "REJECTED",
+        "reason_rejected": "Both neutral: decode median 71.8 t/s before, 71.8-71.9 t/s after (3 reps). Not a kernel verdict - decode on this host is disk-read-bound (10.3 MiB/token against a 745 MiB/s NVMe stream), so the ALU path is off the critical path.",
+        "evidence": "evidence/ab-moe-type-specialization-20261023.md; evidence/decode-disk-bound-20261023.md. Packed-load arm bit-identical (md5 4915110d over 64 greedy tokens).",
+        "reconsider_if": "Weights become resident (pinning, or a box with RAM for model + working set), making decode compute-bound.",
+        "source_reference": "AlreadyTried.md:2291-2315",
+    },
 ]
 
 
