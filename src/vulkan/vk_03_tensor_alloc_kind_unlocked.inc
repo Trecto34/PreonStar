@@ -245,6 +245,9 @@ static bool p36_vk_stream_copy_model_range(const void *model_map,
  * read waits for everything. Hazard sets survive eager submits because the
  * pending work still executes in submission order. */
 enum { P36_VK_CB_RING = 4 };
+/* Counted so the kernel profile can charge the GPU's non-kernel time to the
+ * hazard barriers rather than leaving it unexplained. */
+static uint64_t p36_vk_hazard_barrier_count;
 typedef struct {
     VkCommandBuffer cb;
     VkFence fence;

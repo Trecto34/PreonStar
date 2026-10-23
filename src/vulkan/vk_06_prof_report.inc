@@ -34,7 +34,8 @@ static void p36_vk_prof_report(void) {
     if (p36_vk_prof_kernel_n != 0) {
         uint64_t total_ns = 0;
         for (uint32_t i = 0; i < p36_vk_prof_kernel_n; i++) total_ns += p36_vk_prof_kernel_rows[i].gpu_ns;
-        fprintf(stderr, "p36: Vulkan kernel GPU time total_ms=%.3f\n", (double)total_ns / 1e6);
+        fprintf(stderr, "p36: Vulkan kernel GPU time total_ms=%.3f barriers=%" PRIu64 "\n",
+                (double)total_ns / 1e6, p36_vk_hazard_barrier_count);
         for (uint32_t i = 0; i < p36_vk_prof_kernel_n; i++) {
             const p36_vk_prof_kernel_row *r = &p36_vk_prof_kernel_rows[i];
             const double pct = total_ns ? 100.0 * (double)r->gpu_ns / (double)total_ns : 0.0;
