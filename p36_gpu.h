@@ -546,6 +546,24 @@ int p36_gpu_copy_f32_tensor(
         const p36_gpu_tensor *src,
         uint32_t                n_floats);
 
+/* Dequantize one Q8_0 embedding row on the device.  When `ids` is given the
+ * row index is read from device memory, so the caller does not have to know
+ * the token before recording the dispatch. */
+/* Upload the quantized embedding table once, ahead of the decode loop. */
+void p36_gpu_embed_table_prepare(const void *model_map, uint64_t model_size,
+                                 uint64_t table_offset, uint64_t table_bytes);
+
+int p36_gpu_embed_row_tensor(
+        p36_gpu_tensor       *dst,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              table_offset,
+        uint64_t              table_bytes,
+        uint32_t              n_embd,
+        uint32_t              type,
+        const p36_gpu_tensor *ids,
+        uint32_t              row);
+
 int p36_gpu_extract_recurrent_v_tensor(
         p36_gpu_tensor       *dst,
         const p36_gpu_tensor *conv,

@@ -187,6 +187,7 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.conv_silu);
     p36_vk_kernel_destroy(&p36_vk.recur_window);
     p36_vk_kernel_destroy(&p36_vk.copy_rows);
+    p36_vk_kernel_destroy(&p36_vk.embed_row);
     p36_vk_kernel_destroy(&p36_vk.rms_norm_rope_kv);
     p36_vk_kernel_destroy(&p36_vk.rms_norm_rope);
     p36_vk_kernel_destroy(&p36_vk.rope_mrope);

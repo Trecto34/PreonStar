@@ -1,0 +1,84 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+
+/* Dequantize one embedding row straight out of the quantized table.  The row
+ * id can come from device memory (the top-2 buffer), so the next token can be
+ * recorded before the host knows it.  Q8_0 and Q4_K cover the tables these
+ * models actually ship; anything else falls back to the host path. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights {
+    uint ww[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Ids {
+    uint ids[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Output {
+    float row_out[];
+};
+
+layout(push_constant) uniform Push {
+    uint n_embd;
+    uint blocks;
+    uint row_bytes;
+    uint row;
+    uint use_ids;
+    uint type;
+} pc;
+
+const uint Q8_0 = 8u;
+const uint Q4_K = 12u;
+
+uint load_u8(uint off) {
+    return (ww[off >> 2u] >> ((off & 3u) * 8u)) & 255u;
+}
+
+float load_f16(uint off) {
+    return unpackHalf2x16(ww[off >> 2u] >> ((off & 2u) * 8u)).x;
+}
+
+/* Q4_K: d, dmin, 12 packed 6-bit scale/min pairs, then 128 bytes of 4-bit q. */
+void k4_scale_min(uint base, uint j, out uint sc, out uint mn) {
+    uint s0 = load_u8(base + 4u + j);
+    if (j < 4u) {
+        sc = s0 & 63u;
+        mn = load_u8(base + 8u + j) & 63u;
+    } else {
+        uint s1 = load_u8(base + 8u + j);
+        uint s2 = load_u8(base + j);
+        sc = (s1 & 15u) | ((s2 >> 6u) << 4u);
+        mn = (s1 >> 4u) | ((s0 >> 6u) << 4u);
+    }
+}
+
+uint q4_value(uint base, uint idx) {
+    uint g = idx >> 5u;
+    uint v = load_u8(base + 16u + (g >> 1u) * 32u + (idx & 31u));
+    return (g & 1u) == 0u ? v & 15u : v >> 4u;
+}
+
+void main(void) {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n_embd) return;
+    uint row = pc.use_ids != 0u ? ids[0] : pc.row;
+    uint row_base = row * pc.row_bytes;
+    float v;
+    if (pc.type == Q8_0) {
+        uint base = row_base + (i >> 5u) * 34u;
+        int q = int(load_u8(base + 2u + (i & 31u)));
+        q = (q ^ 0x80) - 0x80;
+        v = float(q) * load_f16(base);
+    } else {
+        uint base = row_base + (i >> 8u) * 144u;
+        uint idx = i & 255u;
+        uint sc, mn;
+        k4_scale_min(base, idx >> 5u, sc, mn);
+        v = load_f16(base) * float(sc) * float(q4_value(base, idx)) -
+            load_f16(base + 2u) * float(mn);
+    }
+    row_out[i] = v;
+}

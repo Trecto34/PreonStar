@@ -71,6 +71,7 @@ VULKAN_SHADERS := \
 	vulkan/rms_norm_rope_qwen.spv \
 	vulkan/rms_norm_rope_kv_qwen.spv \
 	vulkan/copy_rows.spv \
+	vulkan/embed_row.spv \
 	vulkan/recur_window.spv \
 	vulkan/conv_silu.spv \
 	vulkan/recur_conv_silu_decode.spv \
@@ -195,6 +196,9 @@ VULKAN_SHADERS := \
 	vulkan/ffn_tail.spv
 
 vulkan/moe_matvec_fast.spv: vulkan/moe_matvec_fast.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/embed_row.spv: vulkan/embed_row.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/top2.spv: vulkan/top2.comp

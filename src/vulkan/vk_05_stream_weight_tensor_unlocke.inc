@@ -221,6 +221,7 @@ int p36_gpu_init(void) {
     p36_vk.topk8 = P36_VK_KERNEL("vulkan/topk8.spv", 3, 12, (1u << 1) | (1u << 2));
     p36_vk.logits_minp = P36_VK_KERNEL("vulkan/logits_minp_pack.spv", 2, 24, (1u << 1));
     p36_vk.copy_rows = P36_VK_KERNEL("vulkan/copy_rows.spv", 2, 20, 1u << 1);
+    p36_vk.embed_row = P36_VK_KERNEL("vulkan/embed_row.spv", 3, 24, 1u << 2);
     p36_vk.recur_window = P36_VK_KERNEL("vulkan/recur_window.spv", 3, 12, (1u << 0) | (1u << 2));
     p36_vk.conv_silu = P36_VK_KERNEL("vulkan/conv_silu.spv", 3, 12, 1u << 2);
     p36_vk.recur_conv_silu_decode = P36_VK_KERNEL("vulkan/recur_conv_silu_decode.spv", 4, 12,

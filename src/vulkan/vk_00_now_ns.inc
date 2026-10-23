@@ -168,6 +168,7 @@ typedef struct {
     p36_vk_kernel rms_norm_rope;
     p36_vk_kernel rms_norm_rope_kv;
     p36_vk_kernel copy_rows;
+    p36_vk_kernel embed_row;
     p36_vk_kernel recur_window;
     p36_vk_kernel conv_silu;
     p36_vk_kernel recur_conv_silu_decode;

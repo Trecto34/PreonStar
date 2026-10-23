@@ -63,6 +63,21 @@ static bool p36_gpu_tensor_scale_host(p36_gpu_tensor *tensor, uint32_t n, float 
 
 static bool p36_gpu_embed_tokens(const p36_model *m, const p36_tensor *t,
                                  const int *tokens, uint32_t n_tok, p36_gpu_tensor *dst) {
+    /* Decode takes the row straight off the device copy of the table: no
+     * host dequant, and no host write into a staging buffer the GPU is
+     * about to read.  Prefill batches and the hadamard-inverse variant
+     * keep the host path. */
+    if (!t->hadamard_inverse &&
+        (t->type == P36_TENSOR_Q8_0 || t->type == P36_TENSOR_Q4_K)) {
+        p36_gpu_embed_table_prepare(m->map, m->size, t->abs_offset, t->bytes);
+    }
+    if (n_tok == 1 && !t->hadamard_inverse &&
+        tokens[0] >= 0 && tokens[0] < (int)P36_N_VOCAB &&
+        p36_gpu_embed_row_tensor(dst, m->map, m->size, t->abs_offset, t->bytes,
+                                 P36_N_EMBD, (uint32_t)t->type, NULL,
+                                 (uint32_t)tokens[0])) {
+        return true;
+    }
     float *p = p36_gpu_tensor_contents_named(dst, "submit_wait_embed_tokens");
     if (!p) return false;
     for (uint32_t i = 0; i < n_tok; i++) {
