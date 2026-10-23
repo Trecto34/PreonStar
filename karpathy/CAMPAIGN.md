@@ -209,6 +209,10 @@ cd /home/server/p36-wt/<slug> && make -j16          # only when the GPU is idle
    The tile schedule is built on the GPU on purpose ("no host read"), so the host
    does not know the selected experts and cannot `fadvise(WILLNEED)` them without
    re-adding the stall. Detail: `evidence/decode-thrash-tensors-20261023.md`.
+   **CORRECTION (same day).** That framing is falsified: dropping the whole model
+   page cache mid-decode changes decode by 0.1% (73.34 vs 73.65, 73.76 vs 73.82,
+   73.49 vs 73.53 t/s, 3 interleaved pairs). Residency collapse is a symptom, not
+   the cause. Do not rank work on page-cache residency again.
    Next levers, in order: (a) free RAM so more of the model stays cached,
    (b) prefetch the next layer's 8 experts via one bounded readback,
    (c) expert-major packing at quantize time so co-selected experts are contiguous.

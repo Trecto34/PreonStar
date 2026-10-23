@@ -76,3 +76,38 @@ stall the design removed. Options, in order of expected value:
 `--ssd-streaming --ssd-streaming-cache-experts 8GB`: **3.18 t/s decode** vs 71.26
 baseline (cache 796/6853 experts, 97.8% hit rate, 796 loads). The explicit cache
 path is 22× slower on this model. Do not retry without a new streaming design.
+
+## Falsification, same day: page-cache residency is NOT causal
+
+Dropping the **entire** model page cache mid-decode (external `posix_fadvise
+(POSIX_FADV_DONTNEED)`, no root needed) changes decode by nothing. Three
+interleaved pairs, drop vs keep:
+
+```
+drop=73.34 t/s  keep=73.65
+drop=73.76 t/s  keep=73.82
+drop=73.49 t/s  keep=73.53
+```
+
+The residency collapse above is real, but it is a *symptom*: the engine imports
+weight ranges through `VK_EXT_external_memory_host` (AGENT.md: "no copy, no
+staging-buffer path"), so the pages it needs must be resident for the GPU to read
+them, and they are fetched either way. Making them stay cached buys nothing.
+
+Consequences for the three options in the previous section:
+
+1. **Free RAM for page cache — dead.** p36 holds 6 MB of anonymous memory
+   (`smaps_rollup`); its 4.1-5.9 GB RSS is the model's own file pages. There is no
+   duplicate copy to release, by design.
+2. **Prefetch the next layer's experts — dead.** The device tops out at
+   **776 MiB/s sequential** and p36 already streams 730 MiB/s during decode, i.e.
+   94% of the ceiling. Prefetch cannot add bandwidth, and cache state does not
+   move the number.
+3. **Expert-major packing — no upside left.** Packing changes layout, not bytes
+   read, and bytes read is not what gates the run.
+
+What the measurements leave: decode is gated by something that is neither ALU
+(three kernel A/Bs neutral), nor page-cache state (this test), nor CPU saturation
+(1.5 of 16 cores). The next measurement must be a GPU-side per-kernel timing
+breakdown, which this engine does not currently produce (`gpu_ms=0.000` on every
+op even with `P36_VK_PROF_OP=1`).
