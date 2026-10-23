@@ -2526,6 +2526,24 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   55f55566... unchanged. Host phases per token now forward=15.3 read=2.3
   caller=0.52 ms.
 
+### Where the last 4 ms of a token goes — barriers, not bubbles (2026-10-23)
+
+- Kernel time is 15.34 ms against a 19.5 ms token. Ruled *out* as the cause:
+  host dispatch recording is 0.83 ms/token summed over every op, so launch
+  gaps cannot be 4 ms; and raising `P36_VK_BATCH_FLUSH_AT` 32 -> 256 (four
+  times fewer submits, four times fewer host gaps) is far worse, **51.2 ->
+  39.8 t/s**, so submission overhead is not the limiter either. Small submits
+  keep the GPU fed; the ring wants to stay shallow.
+- The remaining unaccounted GPU work is the hazard barrier: a full
+  compute->compute `VkMemoryBarrier` (SHADER_WRITE|TRANSFER_WRITE ->
+  SHADER_READ|SHADER_WRITE, global scope) between dependent dispatches. Counted
+  in the profile now (`barriers=`): **8459 over the profiled span, ~423 per
+  token**, i.e. ~10 us each against the 4.2 ms gap.
+- So the shortfall is *hard drains inside the layer graph*, not dispatch
+  bubbles. The next lever is narrowing that barrier (buffer-scoped barriers
+  over the produced tensor instead of a global memory barrier), not more host
+  pipelining.
+
 ### B+C — deferred top-2 read + lagged loop — TRIED, REJECTED (-3.7%)
 
 Double-buffering alone landed and stays (`44806d9`, md5 unchanged, 51.4 t/s):
