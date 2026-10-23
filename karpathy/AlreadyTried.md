@@ -2539,10 +2539,15 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   SHADER_READ|SHADER_WRITE, global scope) between dependent dispatches. Counted
   in the profile now (`barriers=`): **8459 over the profiled span, ~423 per
   token**, i.e. ~10 us each against the 4.2 ms gap.
-- So the shortfall is *hard drains inside the layer graph*, not dispatch
-  bubbles. The next lever is narrowing that barrier (buffer-scoped barriers
-  over the produced tensor instead of a global memory barrier), not more host
-  pipelining.
+- **Tested and falsified: buffer-scoped barriers are neutral.** Replacing the
+  global `VkMemoryBarrier` with `VkBufferMemoryBarrier` entries over exactly
+  the tensors in the hazard set (5 interleaved pairs against the global
+  version: 51.67 vs 51.48 median, within noise) buys nothing, so RADV is not
+  doing a cheaper flush for a range, or the barrier was not the cost.
+- Which puts the ~4 ms back on per-dispatch overhead the kernel timestamps do
+  not capture: ~1300 dispatches per token against ~3 us each. The lever is
+  therefore fewer dispatches (fusing the per-layer chain), not barrier
+  surgery. Barrier counting stayed in the profile as instrumentation.
 
 ### B+C — deferred top-2 read + lagged loop — TRIED, REJECTED (-3.7%)
 
