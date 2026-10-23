@@ -2399,3 +2399,34 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   (md5 55f555660f6158501394ff16bde68faa).
 - **Caveat.** These three reps were not interleaved against the previous binary,
   so treat the margin as directional; the disjoint ranges are the argument.
+
+## moe_matvec / moe_matvec_fast Q3_K unpack — word slices — ACCEPTED, +5.3% MiniPlus decode (2026-10-23)
+
+- **Target.** APEX-I-MiniPlus (KAT-Coder-V2.5, Q3_K experts on all three banks).
+  Before this entry `moe_matvec` held 32.0% and `moe_matvec_fast` 24.0% of decode
+  GPU time; the exact kernel only runs the gate (down/up already take the fast
+  path), so the exact kernel is 1/3 of the bytes for 32% of the time.
+- **Tried.** `q3_quad`: each lane owns quants 4k..4k+3 of every 32-element
+  sub-block, i.e. four *consecutive* bytes, and the sign byte at `base + 4k + j`
+  is the same byte for all eight sub-blocks. So one `load_u32` for the sign word
+  plus one per half-block quant window replaces 96 byte loads per block per
+  thread, and `q3_scale` stays as-is. Sub-block index algebra: for sub-block g the
+  2-bit field is at byte j of word `g<4 ? qlo4 : qhi4` shifted by 2*(g&3), the
+  sign bit is `1 << (4*(g>>2) + (g&3))`.
+- **Result.** Kernel GPU ms per profiled window (same dispatch counts before and
+  after): `moe_matvec` 60.24 -> 55.78 (-7.4%), `moe_matvec_fast` 45.20 -> 37.15
+  (-17.8%), 105.4 -> 92.9 ms of MoE matvec (-11.9%). Five interleaved pairs on
+  MiniPlus: baseline 40.08/40.14/40.32/40.33/40.45 (median 40.32) vs
+  42.46/42.84/42.96/41.92/41.79 (median 42.46), **+5.3%**, ranges disjoint.
+  Greedy output bit-identical (md5 55f555660f6158501394ff16bde68faa, checked
+  against a worktree built at HEAD, not against the known-good string alone).
+- **What did *not* pay (keep it out of the ledger twice).** Slicing the q8 word
+  once per (group,pair) — 256 shared-memory loads per block per thread down to 64
+  — moved the kernels only 60.24 -> 59.79 and 45.20 -> 44.17. The loops are not
+  LDS-throughput bound; ACO was already merging what it could.
+- **The real gap between the two kernels is fp64.** Ablating `fma32` to a native
+  `fma()` in the exact kernel took `moe_matvec` 60.24 -> 44.77 ms, i.e. the
+  software correctly-rounded FMA is 15.5 ms = 25.7% of that kernel and ~8% of
+  decode. The gate only stays exact because of it; changing it is a numerics
+  decision (md5 gate), not a load cleanup, so it was measured and reverted.
+- **Scope.** Q3_K paths only. Q4_K/QS_K/IQ paths in the same shader are untouched.

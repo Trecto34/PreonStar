@@ -104,6 +104,15 @@ uint load_u16(uint off) {
     return load_u8(off) | (load_u8(off + 1u) << 8);
 }
 
+/* Four consecutive weight bytes as one little-endian word.  The second read
+ * only happens when the offset is unaligned; Q3_K keeps every such read inside
+ * the 110-byte block. */
+uint load_u32(uint off) {
+    uint shift = (off & 3u) * 8u;
+    uint lo = wb[off >> 2] >> shift;
+    return shift == 0u ? lo : lo | (wb[(off >> 2) + 1u] << (32u - shift));
+}
+
 int load_i8(uint off) {
     uint v = load_u8(off);
     return v >= 128u ? int(v) - 256 : int(v);
@@ -115,6 +124,14 @@ float load_f16(uint off) {
 
 uint tab_u8(uint word_base, uint byte_idx) {
     return (tables[word_base + (byte_idx >> 2)] >> ((byte_idx & 3u) * 8u)) & 255u;
+}
+
+/* One q8_K word holds four consecutive int8 quants; the Q3_K/K-quant loops
+ * below consume exactly four at a stride of 4, so they read the word once and
+ * slice it instead of issuing one shared-memory load per element. */
+int i8_at(uint word, uint shift) {
+    uint v = (word >> shift) & 255u;
+    return v >= 128u ? int(v) - 256 : int(v);
 }
 
 int q8_i8(uint pair_slot, uint idx) {
@@ -146,6 +163,17 @@ uint q2_min(uint base, uint group16) {
     return load_u8(base + group16) >> 4;
 }
 
+/* A lane's four Q3_K quants for one 32-element sub-block: the four bytes of
+ * its quant window sliced by the sub-block's 2-bit field, signed by the bit
+ * that sub-block carries in the block-wide sign word. */
+void q3_quad(uint qb, uint sgn4, uint sh, uint sbit,
+             out int q0, out int q1, out int q2, out int q3) {
+    q0 = int((qb >> sh) & 3u) - (((sgn4 >> 0u) & sbit) != 0u ? 0 : 4);
+    q1 = int((qb >> (8u + sh)) & 3u) - (((sgn4 >> 8u) & sbit) != 0u ? 0 : 4);
+    q2 = int((qb >> (16u + sh)) & 3u) - (((sgn4 >> 16u) & sbit) != 0u ? 0 : 4);
+    q3 = int((qb >> (24u + sh)) & 3u) - (((sgn4 >> 24u) & sbit) != 0u ? 0 : 4);
+}
+
 int q3_scale(uint base, uint group) {
     uint lo = load_u8(base + 96u + (group & 7u));
     lo = group < 8u ? lo & 15u : lo >> 4u;
@@ -154,14 +182,6 @@ int q3_scale(uint base, uint group) {
     return int(lo | (hi << 4u)) - 32;
 }
 
-int q3_value(uint base, uint idx) {
-    uint half_id = idx >> 7u;
-    uint group = (idx & 127u) >> 4u;
-    uint q = load_u8(base + 32u + half_id * 32u + (idx & 31u));
-    uint m = 1u << (half_id * 4u + (group >> 1u));
-    uint lo = (q >> (2u * (group >> 1u))) & 3u;
-    return int(lo) - ((load_u8(base + (idx & 31u)) & m) != 0u ? 0 : 4);
-}
 
 void k4_scale_min(uint base, uint j, out uint scale, out uint mn) {
     uint s0 = load_u8(base + 4u + j);
@@ -324,21 +344,22 @@ void main(void) {
                 }
             } else if (pc.type == Q3_K) {
                 wd = load_f16(base + 108u);
+                uint sgn4 = load_u32(base + 4u * k);
+                uint qlo4 = load_u32(base + 32u + 4u * k);
+                uint qhi4 = load_u32(base + 64u + 4u * k);
                 int lk[PAIR_TILE];
                 for (uint u = 0u; u < PAIR_TILE; u++) lk[u] = 0;
                 for (uint g = 0u; g < 8u; g++) {
                     uint e = 32u * g + 4u * k;
-                    int qv0 = q3_value(base, e + 0u);
-                    int qv1 = q3_value(base, e + 1u);
-                    int qv2 = q3_value(base, e + 2u);
-                    int qv3 = q3_value(base, e + 3u);
+                    int qv0, qv1, qv2, qv3;
+                    q3_quad((g < 4u) ? qlo4 : qhi4, sgn4, 2u * (g & 3u),
+                            1u << (4u * (g >> 2u) + (g & 3u)), qv0, qv1, qv2, qv3);
                     int wsc = q3_scale(base, 2u * g + (k >> 2u));
                     for (uint u = 0u; u < PAIR_TILE; u++) {
                         if (!pair_live[u]) continue;
-                        int s4 = qv0 * q8_i8(u, e + 0u)
-                               + qv1 * q8_i8(u, e + 1u)
-                               + qv2 * q8_i8(u, e + 2u)
-                               + qv3 * q8_i8(u, e + 3u);
+                        uint qw = sh_q8[u * Q8K_WORDS + 2u + (e >> 2u)];
+                        int s4 = qv0 * i8_at(qw, 0u) + qv1 * i8_at(qw, 8u)
+                               + qv2 * i8_at(qw, 16u) + qv3 * i8_at(qw, 24u);
                         lk[u] += wsc * s4;
                     }
                 }
