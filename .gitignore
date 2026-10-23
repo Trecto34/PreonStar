@@ -22,7 +22,6 @@ tests/__pycache__/
 *.o
 *.spv
 *.json
-*.json
 !/opencode.json
 !/tests/test-vectors/*/llamacpp/*.llamacpp.json
 !/tests/test-vectors/*/manifest.json
@@ -43,6 +42,7 @@ TODO.md
 /tests/test_quality_api
 /tests/test_topk8
 /tests/test_attn_decode
+/tests/test_attn_prefill_qtile2
 /tests/test_norm_rope_kv
 /tests/test_attn_fa
 /tests/test_pq2_small
