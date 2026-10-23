@@ -1,6 +1,6 @@
 # Interval-level dispatch timeline — BC-250 Bonsai (2026-09-18 continuation)
 
-Diagnostic: `Q36_VK_PROF_TIMELINE=<path>` in `q36_vulkan.c` dumps every
+Diagnostic: `P36_VK_PROF_TIMELINE=<path>` in `p36_vulkan.c` dumps every
 dispatch's two GPU query-pool timestamps plus the host record time.  Run:
 `ctx 512 / gen 128`, chunk 256, soak-gated.  Raw gzip:
 `runs/cont-timeline-decode.txt.gz`; profiler text `runs/cont-timeline-profile.txt`.
@@ -15,7 +15,7 @@ Timestamp period 10 ns.  Rows are in submission order; `start` is the
   Aggregate GPU time equals union busy time: prefill is strictly serialized,
   not merely "unproven to overlap".
 - 88.9 % of that time is `dense_extra_mmq_q2_0` (2278.89 ms / 800 dispatches).
-- Per-shape (Q36_VK_PROF_SHAPE): 5120x17408 1040.24 ms / 256 disp;
+- Per-shape (P36_VK_PROF_SHAPE): 5120x17408 1040.24 ms / 256 disp;
   17408x5120 554.36 / 128; 5120x10240 235.29 / 96; 6144x5120 195.37 / 128;
   5120x6144 152.13 / 96; 5120x12288 92.59 / 32; 5120x1024 33.14 / 64.
   Every shape runs at roughly the same per-MAC rate, so the inefficiency is
@@ -54,7 +54,7 @@ The decode profile reports 133 flushes / 65 tokens = ~2/token, and they are
 `submit_wait_tensor_read` (65, the greedy argmax host read) plus
 `submit_wait_query_pool` (67, the 2048-query cap forcing a mid-token flush).
 The query-pool flush and the two timestamp writes per dispatch exist only while
-`Q36_VK_PROF_KERNEL` is on, so the between-flush 630 us gaps and per-dispatch
+`P36_VK_PROF_KERNEL` is on, so the between-flush 630 us gaps and per-dispatch
 1.5 us gaps above are **inflated by the measurement itself**.  The kernel
 durations are unaffected, but decode verdicts must come from uninstrumented
 runs and this idle must not be read as fully recoverable.  The measured

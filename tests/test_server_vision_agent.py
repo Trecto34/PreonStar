@@ -21,7 +21,7 @@ out.mkdir(parents=True, exist_ok=False)
 root = Path(__file__).resolve().parent.parent
 for api in args.api or ["openai-completions", "openai-responses", "anthropic-messages"]:
     # Pi preserves Responses call_id/item_id pairs for its OpenAI provider.
-    provider_name = "openai" if api == "openai-responses" else "q36"
+    provider_name = "openai" if api == "openai-responses" else "p36"
     project = out / api
     project.mkdir(exist_ok=True)
     settings = project / "pi-settings"

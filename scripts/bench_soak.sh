@@ -4,7 +4,7 @@
 # Read-only sysfs, so it works unprivileged; the PWM/DPM override lives in
 # scripts/setup_bc250_env.sh (root).
 #
-#   scripts/bench_soak.sh LABEL -- ./q36-bench --vulkan -m ... --gen-tokens 128
+#   scripts/bench_soak.sh LABEL -- ./p36-bench --vulkan -m ... --gen-tokens 128
 #
 # Env: SOAK_TEMP (default 55), SOAK_LOG (default logs/thermal_run_log.csv)
 set -uo pipefail
@@ -75,7 +75,7 @@ out=$("$@" 2>&1)
 rc=$?
 e=$(date +%s)
 end=$(( $(cat "$NODE") / 1000 ))
-last=$(printf '%s' "$out" | grep -v '^q36:' | tail -1 | tr ',' ';')
+last=$(printf '%s' "$out" | grep -v '^p36:' | tail -1 | tr ',' ';')
 printf '%s,%s,%s,%s,%s,"%s"\n' "$(date -Is)" "$LABEL" "$start" "$end" "$((e-s))" "$last" >> "$LOG"
 printf '%s\n' "$out" | tail -2
 exit $rc

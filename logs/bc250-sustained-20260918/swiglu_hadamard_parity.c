@@ -1,4 +1,4 @@
-#include "q36_gpu.h"
+#include "p36_gpu.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,22 +31,22 @@ static int fixture(uint32_t width, uint32_t rows, int mode) {
         }
     }
     for(uint32_t i=0;i<sign_count;i++) signs[i]=i%3u ? 1.0f : -1.0f;
-    q36_gpu_tensor *g=q36_gpu_tensor_alloc(elems*4),
-        *u=q36_gpu_tensor_alloc(elems*4),
-        *s=q36_gpu_tensor_alloc(sign_count*4),
-        *mid=q36_gpu_tensor_alloc(elems*4),
-        *plain=q36_gpu_tensor_alloc(q8_bytes),
-        *ref=q36_gpu_tensor_alloc(q8_bytes),
-        *fused=q36_gpu_tensor_alloc(q8_bytes);
+    p36_gpu_tensor *g=p36_gpu_tensor_alloc(elems*4),
+        *u=p36_gpu_tensor_alloc(elems*4),
+        *s=p36_gpu_tensor_alloc(sign_count*4),
+        *mid=p36_gpu_tensor_alloc(elems*4),
+        *plain=p36_gpu_tensor_alloc(q8_bytes),
+        *ref=p36_gpu_tensor_alloc(q8_bytes),
+        *fused=p36_gpu_tensor_alloc(q8_bytes);
     int ok=g&&u&&s&&mid&&plain&&ref&&fused &&
-        q36_gpu_tensor_write(g,0,gate,elems*4) &&
-        q36_gpu_tensor_write(u,0,up,elems*4) &&
-        q36_gpu_tensor_write(s,0,signs,sign_count*4) &&
-        q36_gpu_swiglu_q8_k_tensor(mid,plain,g,u,width,rows,0.0f,1.0f) &&
-        q36_gpu_hadamard_prepare_tensor(ref,mid,s,width,rows,sign_offset,sign_count,0.03125f,0) &&
-        q36_gpu_swiglu_hadamard_prepare_tensor(fused,g,u,s,width,rows,sign_offset,sign_count,0.03125f) &&
-        q36_gpu_tensor_read(ref,0,a,q8_bytes) &&
-        q36_gpu_tensor_read(fused,0,b,q8_bytes);
+        p36_gpu_tensor_write(g,0,gate,elems*4) &&
+        p36_gpu_tensor_write(u,0,up,elems*4) &&
+        p36_gpu_tensor_write(s,0,signs,sign_count*4) &&
+        p36_gpu_swiglu_q8_k_tensor(mid,plain,g,u,width,rows,0.0f,1.0f) &&
+        p36_gpu_hadamard_prepare_tensor(ref,mid,s,width,rows,sign_offset,sign_count,0.03125f,0) &&
+        p36_gpu_swiglu_hadamard_prepare_tensor(fused,g,u,s,width,rows,sign_offset,sign_count,0.03125f) &&
+        p36_gpu_tensor_read(ref,0,a,q8_bytes) &&
+        p36_gpu_tensor_read(fused,0,b,q8_bytes);
     if(ok && memcmp(a,b,q8_bytes)) {
         for(size_t i=0;i<q8_bytes;i++) if(a[i]!=b[i]) {
             fprintf(stderr,"diff width=%u rows=%u mode=%d byte=%zu %02x/%02x\n",
@@ -55,21 +55,21 @@ static int fixture(uint32_t width, uint32_t rows, int mode) {
         ok=0;
     }
     printf("width=%u rows=%u mode=%d bytes=%zu %s\n",width,rows,mode,q8_bytes,ok?"exact":"FAIL");
-    q36_gpu_tensor_free(g);q36_gpu_tensor_free(u);q36_gpu_tensor_free(s);
-    q36_gpu_tensor_free(mid);q36_gpu_tensor_free(plain);
-    q36_gpu_tensor_free(ref);q36_gpu_tensor_free(fused);
+    p36_gpu_tensor_free(g);p36_gpu_tensor_free(u);p36_gpu_tensor_free(s);
+    p36_gpu_tensor_free(mid);p36_gpu_tensor_free(plain);
+    p36_gpu_tensor_free(ref);p36_gpu_tensor_free(fused);
     free(gate);free(up);free(signs);free(a);free(b);
     return ok;
 }
 
 int main(void) {
     const uint32_t widths[]={1024,5120,17408};
-    int ok=q36_gpu_init();
+    int ok=p36_gpu_init();
     for(size_t i=0;ok&&i<sizeof(widths)/sizeof(widths[0]);i++)
         for(int mode=0;ok&&mode<4;mode++) {
             ok=fixture(widths[i],1,mode);
             if(ok) ok=fixture(widths[i],3,mode);
         }
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     return ok?0:1;
 }

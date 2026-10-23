@@ -18,7 +18,7 @@ VISION_FILE="Qwen3.6-35B-A3B-mmproj-F16.gguf"
 DENSE_VISION_FILE="Qwen3.8-27B-mmproj-F16.gguf"
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-OUT_DIR=${Q36_GGUF_DIR:-"$ROOT/gguf"}
+OUT_DIR=${P36_GGUF_DIR:-"$ROOT/gguf"}
 case "$OUT_DIR" in
     /*) ;;
     *) OUT_DIR="$ROOT/$OUT_DIR" ;;
@@ -70,11 +70,11 @@ Targets:
 
   qwen36-vision
        Qwen3.6 35B A3B F16 vision projector from $VISION_REPO.
-       It is downloaded as $VISION_FILE and does not update ./q36moe.gguf.
+       It is downloaded as $VISION_FILE and does not update ./p36moe.gguf.
 
   qwen38-vision
        Qwen3.8 27B F16 vision projector from $DENSE_REPO.
-       It is downloaded as $DENSE_VISION_FILE and does not update ./q36moe.gguf.
+       It is downloaded as $DENSE_VISION_FILE and does not update ./p36moe.gguf.
 
   mtp  Optional speculative decoding component for either main-model target.
        It must be enabled explicitly with --mtp when starting a runtime.
@@ -86,21 +86,21 @@ Options:
   -h, --help     Show this help.
 
 Environment:
-  Q36_GGUF_DIR   Directory used for downloaded GGUF files.
+  P36_GGUF_DIR   Directory used for downloaded GGUF files.
                  Default: ./gguf
 
 After a main-model download the script updates the legacy link:
-  ./q36moe.gguf -> <download directory>/<selected model>
+  ./p36moe.gguf -> <download directory>/<selected model>
 
 With the default output directory, q2-imatrix matches the compiled model path:
-  ./q36 -p "Hello"
-  ./q36-server --ctx 32768
+  ./p36 -p "Hello"
+  ./p36-server --ctx 32768
 
 Select q2-q4-imatrix explicitly:
-  ./q36 -m $OUT_DIR/$Q2_Q4_FILE --ssd-streaming -p "Hello"
+  ./p36 -m $OUT_DIR/$Q2_Q4_FILE --ssd-streaming -p "Hello"
 
 After downloading mtp, enable it explicitly, for example:
-  ./q36 --mtp <download directory>/$MTP_FILE --mtp-draft 2
+  ./p36 --mtp <download directory>/$MTP_FILE --mtp-draft 2
 
 EOF
 }
@@ -228,19 +228,19 @@ if [ "$MODEL" = "mtp" ]; then
     echo
     echo "MTP is an optional component for q2-imatrix."
     echo "Enable it explicitly, for example:"
-    echo "  ./q36 --mtp $OUT_DIR/$MTP_FILE --mtp-draft 2"
+    echo "  ./p36 --mtp $OUT_DIR/$MTP_FILE --mtp-draft 2"
 elif [ "$MODEL" = "qwen36-vision" ]; then
     echo
     echo "Vision projector downloaded. Use it with the standard model:"
-    echo "  ./q36 --vision $OUT_DIR/$VISION_FILE"
+    echo "  ./p36 --vision $OUT_DIR/$VISION_FILE"
 elif [ "$MODEL" = "qwen38-vision" ]; then
     echo
     echo "Vision projector downloaded. Use it with the dense model:"
-    echo "  ./q36 -m $OUT_DIR/$DENSE_FILE --vision $OUT_DIR/$DENSE_VISION_FILE"
+    echo "  ./p36 -m $OUT_DIR/$DENSE_FILE --vision $OUT_DIR/$DENSE_VISION_FILE"
 elif [ "$LINK_MODEL" -eq 1 ]; then
     cd "$ROOT"
-    ln -sfn "$OUT_DIR/$MODEL_FILE" q36moe.gguf
-    echo "Linked ./q36moe.gguf -> $OUT_DIR/$MODEL_FILE"
+    ln -sfn "$OUT_DIR/$MODEL_FILE" p36moe.gguf
+    echo "Linked ./p36moe.gguf -> $OUT_DIR/$MODEL_FILE"
 fi
 
 echo

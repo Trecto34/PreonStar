@@ -3,7 +3,7 @@
 /* Expert router top-k for decode/small batches. Selection runs on raw
  * logits (softmax is monotone, so the order matches the host's prob-based
  * scan), then weights renormalize the selected logits only: the full
- * softmax denominator cancels, mirroring q36_vk_router_fast_rows. Ties
+ * softmax denominator cancels, mirroring p36_vk_router_fast_rows. Ties
  * pick the lower expert index like the host insertion scan. One serial
  * lane is memory-latency bound here, so 256 lanes reduce each round. */
 

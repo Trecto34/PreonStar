@@ -1,6 +1,6 @@
-/* Self-check for q36_gpu_topk8_tensor (vulkan/topk8.comp): the exact top-8
- * F32 selection used by q36_session_sample's GPU fast path for top_k<=8.
- * No model load needed — just q36_gpu_init() plus synthetic tensors.
+/* Self-check for p36_gpu_topk8_tensor (vulkan/topk8.comp): the exact top-8
+ * F32 selection used by p36_session_sample's GPU fast path for top_k<=8.
+ * No model load needed — just p36_gpu_init() plus synthetic tensors.
  * Verifies against a CPU reference over random arrays and a set of edge
  * cases (ties, negatives, small counts, all-equal, sizes that don't divide
  * the 256-wide grid evenly). See AGENT.md: "Prefer short Vulkan smoke tests
@@ -10,8 +10,8 @@
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
-#include "../q36_gpu.h"
-#include "../q36_cli_args.h"
+#include "../p36_gpu.h"
+#include "../p36_cli_args.h"
 
 static int better(float av, int ai, float bv, int bi) {
     return av > bv || (av == bv && ai < bi);
@@ -37,29 +37,29 @@ static void cpu_topk8(const float *x, int n, int ids[8], float vals[8]) {
 }
 
 static int run_case(const char *name, const float *x, uint32_t n) {
-    q36_gpu_tensor *logits = q36_gpu_tensor_alloc((uint64_t)n * sizeof(float));
-    q36_gpu_tensor *out = q36_gpu_tensor_alloc(8u * (sizeof(int32_t) + sizeof(float)));
+    p36_gpu_tensor *logits = p36_gpu_tensor_alloc((uint64_t)n * sizeof(float));
+    p36_gpu_tensor *out = p36_gpu_tensor_alloc(8u * (sizeof(int32_t) + sizeof(float)));
     if (!logits || !out) {
         fprintf(stderr, "%s: tensor alloc failed\n", name);
         return 1;
     }
-    if (!q36_gpu_tensor_write(logits, 0, x, (uint64_t)n * sizeof(float))) {
+    if (!p36_gpu_tensor_write(logits, 0, x, (uint64_t)n * sizeof(float))) {
         fprintf(stderr, "%s: tensor write failed\n", name);
         return 1;
     }
-    if (!q36_gpu_topk8_tensor(out, logits, n)) {
-        fprintf(stderr, "%s: q36_gpu_topk8_tensor reported unsupported/failed\n", name);
-        q36_gpu_tensor_free(logits);
-        q36_gpu_tensor_free(out);
+    if (!p36_gpu_topk8_tensor(out, logits, n)) {
+        fprintf(stderr, "%s: p36_gpu_topk8_tensor reported unsupported/failed\n", name);
+        p36_gpu_tensor_free(logits);
+        p36_gpu_tensor_free(out);
         return 1;
     }
     struct { int32_t ids[8]; float vals[8]; } gpu;
-    if (!q36_gpu_tensor_read(out, 0, &gpu, sizeof(gpu))) {
+    if (!p36_gpu_tensor_read(out, 0, &gpu, sizeof(gpu))) {
         fprintf(stderr, "%s: readback failed\n", name);
         return 1;
     }
-    q36_gpu_tensor_free(logits);
-    q36_gpu_tensor_free(out);
+    p36_gpu_tensor_free(logits);
+    p36_gpu_tensor_free(out);
 
     int ref_ids[8];
     float ref_vals[8];
@@ -78,10 +78,10 @@ static int run_case(const char *name, const float *x, uint32_t n) {
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_topk8");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_topk8");
     if (cli_rc) return cli_rc;
-    if (!q36_gpu_init()) {
-        fprintf(stderr, "q36_gpu_init failed (no Vulkan device?) — skipping\n");
+    if (!p36_gpu_init()) {
+        fprintf(stderr, "p36_gpu_init failed (no Vulkan device?) — skipping\n");
         return 0;
     }
 
@@ -147,7 +147,7 @@ int main(int argc, char **argv) {
         failures += run_case("n<K", x, 3);
     }
 
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
 
     if (failures) {
         fprintf(stderr, "%d case(s) FAILED\n", failures);

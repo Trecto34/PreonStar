@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# bench_ab.sh B-side wrapper: identical q36-bench binary, RADV_PERFTEST=cswave32.
+# bench_ab.sh B-side wrapper: identical p36-bench binary, RADV_PERFTEST=cswave32.
 #
 # Why this exists
 # ---------------
-# q36_vk_force_wave32 (q36_vulkan.c:1569) forces Wave32 only for shaders whose
+# p36_vk_force_wave32 (p36_vulkan.c:1569) forces Wave32 only for shaders whose
 # path matches `dense_*_mmq.spv`, plus a four-entry named list (delta_net_cols,
 # rope_qwen, rope_qwen_mrope, quantize_q8_0). Every DECODE kernel therefore
 # still runs at the RADV default of subgroupSize 64, even though gfx1013 is a
@@ -21,4 +21,4 @@
 # isolates the flag.
 set -euo pipefail
 export RADV_PERFTEST=cswave32
-exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/q36-bench" "$@"
+exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/p36-bench" "$@"

@@ -6,7 +6,7 @@
  *   3. Normalized Sylvester Walsh-Hadamard transform over 1024-element blocks:
  *        out = H x / sqrt(1024)
  *   4. Fast GPU Q8_K quantization writing 256-element blocks into the exact
- *      layout matching q36_vk_block_q8_K / dense_extra_decode.comp (74 uints per block).
+ *      layout matching p36_vk_block_q8_K / dense_extra_decode.comp (74 uints per block).
  *
  * One workgroup per (1024-block, row): 256 threads.
  * Each 1024-block produces exactly 4 Q8_K sub-blocks of 256 elements each.

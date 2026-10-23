@@ -12,54 +12,54 @@ index 8a923a5..659e8ff 100644
  	vulkan/dense_q4k_decode.spv \
 @@ -226,6 +227,9 @@ vulkan/dense_extra_mmq.spv: vulkan/dense_extra_mmq.comp
  vulkan/dense_extra_mmq_q2_0.spv: vulkan/dense_extra_mmq.comp
- 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -o $@ $<
+ 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q2_0_ONLY=1 -o $@ $<
  
 +vulkan/dense_extra_mmq_q2_0_bk64.spv: vulkan/dense_extra_mmq.comp
-+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -DQ36_Q2_0_BK=64 -o $@ $<
++	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q2_0_ONLY=1 -DP36_Q2_0_BK=64 -o $@ $<
 +
  vulkan/predequant_b16.spv: vulkan/predequant_b16.comp
  	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
  
-diff --git a/q36_vulkan.c b/q36_vulkan.c
+diff --git a/p36_vulkan.c b/p36_vulkan.c
 index 4b89592..d0b1efb 100644
---- a/q36_vulkan.c
-+++ b/q36_vulkan.c
+--- a/p36_vulkan.c
++++ b/p36_vulkan.c
 @@ -243,6 +243,7 @@ typedef struct {
-     q36_vk_kernel dense_extra_decode_q2_0;
-     q36_vk_kernel dense_extra_mmq;
-     q36_vk_kernel dense_extra_mmq_q2_0;
-+    q36_vk_kernel dense_extra_mmq_q2_0_bk64;
-     q36_vk_kernel dense_kquant_mmq;
-     q36_vk_kernel predequant_b16;
-     q36_vk_kernel dense_kquant_decode;
-@@ -3224,6 +3225,7 @@ int q36_gpu_init(void) {
-     q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
-     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
-     q36_vk.dense_extra_mmq_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
-+    q36_vk.dense_extra_mmq_q2_0_bk64 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0_bk64.spv", 4, 24, 1u << 2);
-     q36_vk.dense_kquant_mmq = Q36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
-     q36_vk.predequant_b16 = Q36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
-     q36_vk.dense_kquant_decode = Q36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
-@@ -3613,6 +3615,7 @@ void q36_gpu_cleanup(void) {
-     q36_vk_kernel_destroy(&q36_vk.dense_iq1_m);
-     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq);
-     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0);
-+    q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0_bk64);
-     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0);
-     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode);
-     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_mmq);
-@@ -8214,7 +8217,10 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
+     p36_vk_kernel dense_extra_decode_q2_0;
+     p36_vk_kernel dense_extra_mmq;
+     p36_vk_kernel dense_extra_mmq_q2_0;
++    p36_vk_kernel dense_extra_mmq_q2_0_bk64;
+     p36_vk_kernel dense_kquant_mmq;
+     p36_vk_kernel predequant_b16;
+     p36_vk_kernel dense_kquant_decode;
+@@ -3224,6 +3225,7 @@ int p36_gpu_init(void) {
+     p36_vk.dense_extra_decode_q2_0 = P36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
+     p36_vk.dense_extra_mmq = P36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
+     p36_vk.dense_extra_mmq_q2_0 = P36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
++    p36_vk.dense_extra_mmq_q2_0_bk64 = P36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0_bk64.spv", 4, 24, 1u << 2);
+     p36_vk.dense_kquant_mmq = P36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
+     p36_vk.predequant_b16 = P36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
+     p36_vk.dense_kquant_decode = P36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
+@@ -3613,6 +3615,7 @@ void p36_gpu_cleanup(void) {
+     p36_vk_kernel_destroy(&p36_vk.dense_iq1_m);
+     p36_vk_kernel_destroy(&p36_vk.dense_extra_mmq);
+     p36_vk_kernel_destroy(&p36_vk.dense_extra_mmq_q2_0);
++    p36_vk_kernel_destroy(&p36_vk.dense_extra_mmq_q2_0_bk64);
+     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_q2_0);
+     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode);
+     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_mmq);
+@@ -8214,7 +8217,10 @@ int p36_gpu_matmul_iq_quant_q8_scaled_tensor(p36_gpu_tensor *out,
                      weight_type, scale,
                  };
-                 bool is_q2_0 = weight_type == Q36_VK_TENSOR_Q2_0;
--                q36_vk_kernel *mmq_kernel = is_q2_0 ?
+                 bool is_q2_0 = weight_type == P36_VK_TENSOR_Q2_0;
+-                p36_vk_kernel *mmq_kernel = is_q2_0 ?
 +                bool bk64 = is_q2_0 && n_tok >= 64u &&
-+                            getenv("Q36_VK_Q2_MMQ_BK64") != NULL;
-+                q36_vk_kernel *mmq_kernel = bk64 ?
-+                    &q36_vk.dense_extra_mmq_q2_0_bk64 : is_q2_0 ?
-                     &q36_vk.dense_extra_mmq_q2_0 :
-                     &q36_vk.dense_extra_mmq;
-                 ok = q36_vk_run_unlocked(
++                            getenv("P36_VK_Q2_MMQ_BK64") != NULL;
++                p36_vk_kernel *mmq_kernel = bk64 ?
++                    &p36_vk.dense_extra_mmq_q2_0_bk64 : is_q2_0 ?
+                     &p36_vk.dense_extra_mmq_q2_0 :
+                     &p36_vk.dense_extra_mmq;
+                 ok = p36_vk_run_unlocked(
 diff --git a/vulkan/dense_extra_mmq.comp b/vulkan/dense_extra_mmq.comp
 index 28fd24c..119571d 100644
 --- a/vulkan/dense_extra_mmq.comp
@@ -67,9 +67,9 @@ index 28fd24c..119571d 100644
 @@ -1,6 +1,9 @@
  #version 460
  
- #ifdef Q36_Q2_0_ONLY
-+#ifndef Q36_Q2_0_BK
-+#define Q36_Q2_0_BK 32
+ #ifdef P36_Q2_0_ONLY
++#ifndef P36_Q2_0_BK
++#define P36_Q2_0_BK 32
 +#endif
  #extension GL_EXT_control_flow_attributes : enable
  #extension GL_EXT_shader_16bit_storage : require
@@ -79,7 +79,7 @@ index 28fd24c..119571d 100644
  const uint BM = 64u;
  const uint BN = 128u;
 -const uint BK = 32u;
-+const uint BK = Q36_Q2_0_BK;
++const uint BK = P36_Q2_0_BK;
  const uint STRIDE = BK / 2u + 1u;
  const uint Q8K_WORDS = 74u;
  

@@ -14,7 +14,7 @@ def ts(line):
 
 tot = []
 for i in range(reps):
-    d = tempfile.mkdtemp(prefix="q36bench-")
+    d = tempfile.mkdtemp(prefix="p36bench-")
     tr = os.path.join(d, ".trace")
     where = ["--server", model] if model.startswith("http") else ["--vulkan", "-m", model, "--ctx", "8192"]
     subprocess.run([agent, *where, "--think", "--thinking-budget", "256",

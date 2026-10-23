@@ -2,9 +2,9 @@
 """P8 premise probe: how much of IQ2_M decode is the shared-expert path, and is
 that path dispatch-bound (foldable) or efficiency-bound (not foldable)?
 
-Reads the Q36_VK_PROF=1 Q36_VK_PROF_SHAPE=1 profile of a ctx-512 / gen-128
-q36-bench run.  The shape in the op name is `<in_dim>x<out_dim>` for `n_tok == 1`
-(see q36_vulkan.c q36_vk_prof_iq3_shape), so:
+Reads the P36_VK_PROF=1 P36_VK_PROF_SHAPE=1 profile of a ctx-512 / gen-128
+p36-bench run.  The shape in the op name is `<in_dim>x<out_dim>` for `n_tok == 1`
+(see p36_vulkan.c p36_vk_prof_iq3_shape), so:
   dense_iq2_s_decode_2048x512_n1 -> shared-expert gate and up (2048 -> 512)
   dense_iq2_s_decode_512x2048_n1 -> shared-expert down      (512 -> 2048)
 The routed kernels are the comparison: moe_iq2s_gate_up_decode /
@@ -23,7 +23,7 @@ PREFILL = re.compile(r"_n256|_gemm")
 
 rows = {}
 for ln in open(path):
-    m = re.match(r"q36:   op (\S+)\s+dispatches=(\d+).*gpu_ms=([\d.]+)", ln)
+    m = re.match(r"p36:   op (\S+)\s+dispatches=(\d+).*gpu_ms=([\d.]+)", ln)
     if m:
         rows[m.group(1)] = (int(m.group(2)), float(m.group(3)))
 

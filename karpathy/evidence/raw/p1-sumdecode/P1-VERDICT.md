@@ -1,11 +1,11 @@
 # P1 Verdict — `moe_iq2s_down_sum_decode` (IQ2_M #1 decode kernel)
 
 2026-09-24, audit §P1. Model `gguf/Qwen3.8-35B-A3B-IQ2_M.gguf` (guard
-`Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf` does not reach this kernel:
+`Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS.gguf` does not reach this kernel:
 its expert down projections are Q2_K and dispatch the separate
 `vulkan/moe_down_q2k_sum_decode.spv` blob).
 
-Baseline (`Q36_VK_PROF_KERNEL=1 Q36_VK_PROF_DECODE=1`, ctx 512, chunk 256,
+Baseline (`P36_VK_PROF_KERNEL=1 P36_VK_PROF_DECODE=1`, ctx 512, chunk 256,
 gen 128, IQ2_M):
 
 ```
@@ -27,7 +27,7 @@ per-lane redundancy is served by L1 broadcast, not DRAM).
 |---|---|---|---|---|
 | A | `fma32()` -> `fma()` (profile only) | 315.18 / 314.65 / 313.16 ms | 314.65 ms | **negative**, inside noise |
 | B | force wave32 | n/a | `mmq_info` says `subgroup=32` already | **premise false** |
-| C | `Q36_VK_MOE_DOWN_SUM_DECODE=0` (per-expert parallel down kernels) | 74.46 / 74.42 / 74.39 t/s | 70.65 / 71.07 / 70.95 t/s | **negative**, -4.8% decode |
+| C | `P36_VK_MOE_DOWN_SUM_DECODE=0` (per-expert parallel down kernels) | 74.46 / 74.42 / 74.39 t/s | 70.65 / 71.07 / 70.95 t/s | **negative**, -4.8% decode |
 | D | whole-superblock coalesced read (3 lane-strided loads), no dequant/mid | 314.88 / 315.51 / 315.52 ms | 97.10 / 97.74 / 97.69 ms | **POSITIVE, 3.23x** |
 | E | real field loads kept, dequant ALU collapsed to an add | 314.89 / 315.66 / 315.49 ms | 263.93 / 264.40 / 264.53 ms | **+51.2 ms = ALU cost** |
 

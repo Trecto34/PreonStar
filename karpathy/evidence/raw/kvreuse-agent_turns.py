@@ -4,7 +4,7 @@ Usage: agent_turns.py <turns> [resume_file]. Prints wall time per request."""
 import json, sys, time, urllib.request
 
 URL = "http://127.0.0.1:8011/v1/chat/completions"
-story = open("/home/server/q36-opt-27b/tests/long_context_story_prompt.txt").read()
+story = open("/home/server/p36-opt-27b/tests/long_context_story_prompt.txt").read()
 SYSTEM = "You are a coding agent. Follow the rules below.\n\n" + story[:24000]
 TOOLS = [{"type": "function", "function": {"name": "read_file", "description": "Read a file",
           "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}]
@@ -13,7 +13,7 @@ msgs = json.load(open(state_file)) if state_file and len(sys.argv) > 3 else [{"r
 
 for turn in range(int(sys.argv[1])):
     msgs.append({"role": "user", "content": f"Turn {turn}: summarize paragraph {turn + 1} of the rules in one sentence."})
-    body = json.dumps({"model": "q36", "messages": msgs, "tools": TOOLS, "max_tokens": 24, "temperature": 0}).encode()
+    body = json.dumps({"model": "p36", "messages": msgs, "tools": TOOLS, "max_tokens": 24, "temperature": 0}).encode()
     t0 = time.time()
     r = json.load(urllib.request.urlopen(urllib.request.Request(URL, body, {"Content-Type": "application/json"}), timeout=900))
     dt = time.time() - t0

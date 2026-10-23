@@ -35,7 +35,7 @@ run_arm () {  # $1 pair  $2 arm  $3 spv
     soak
     local t0 sc mc pw t1 pp dec BP out
     t0=$(( $(cat "$HW") / 1000 ))
-    flock -w 1800 /tmp/q36-gpu.lock ./q36-bench --vulkan -m "$MODEL" \
+    flock -w 1800 /tmp/p36-gpu.lock ./p36-bench --vulkan -m "$MODEL" \
         --prompt-file tests/long_context_story_prompt.txt \
         --ctx-start 512 --ctx-max 512 --ctx-alloc 641 \
         --prefill-chunk 256 --gen-tokens 128 > "$TMP/run" 2>&1 &

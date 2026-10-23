@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R5 stage A/B analysis: decode attention cost vs context length.
 
-Reads /tmp/r5/out/*.log (q36-bench profile output) and prints, per arm:
+Reads /tmp/r5/out/*.log (p36-bench profile output) and prints, per arm:
 gen t/s, per-token split/combine ms, attention share of the decode token,
 workgroup count, and the implied request bytes/s and unique (DRAM) bytes/s.
 

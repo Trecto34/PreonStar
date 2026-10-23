@@ -19,12 +19,12 @@ case "$streaming" in
 esac
 stream_args=
 if [ "$streaming" = "--ssd-streaming" ]; then
-    stream_args="--ssd-streaming --ssd-streaming-cache-experts ${Q36_TEST_STREAM_CACHE_EXPERTS:-512}"
+    stream_args="--ssd-streaming --ssd-streaming-cache-experts ${P36_TEST_STREAM_CACHE_EXPERTS:-512}"
 fi
-model=${Q36_TEST_MODEL:-gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf}
-port=${Q36_TEST_SERVER_PORT:-$((19000 + $$ % 1000))}
+model=${P36_TEST_MODEL:-gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf}
+port=${P36_TEST_SERVER_PORT:-$((19000 + $$ % 1000))}
 base=http://127.0.0.1:$port
-tmp=$(mktemp -d /tmp/q36-server-batch.XXXXXX)
+tmp=$(mktemp -d /tmp/p36-server-batch.XXXXXX)
 pid=
 client_pids=
 status=1
@@ -46,19 +46,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if ./q36-server --batched-session 0 >/dev/null 2>&1; then
+if ./p36-server --batched-session 0 >/dev/null 2>&1; then
     echo "--batched-session 0 was accepted" >&2
     exit 1
 fi
-if ./q36-server --batched-session -1 >/dev/null 2>&1; then
+if ./p36-server --batched-session -1 >/dev/null 2>&1; then
     echo "--batched-session -1 was accepted" >&2
     exit 1
 fi
 
 # stream_args is either empty or two validated CLI options. The cache value is
-# validated again by q36-server.
-Q36_SERVER_BATCH_LOG=1 Q36_VK_SESSION_BATCH_LOG=1 \
-./q36-server -m "$model" "$backend" $stream_args --ctx 4096 --prefill-chunk 8 --tokens 32 \
+# validated again by p36-server.
+P36_SERVER_BATCH_LOG=1 P36_VK_SESSION_BATCH_LOG=1 \
+./p36-server -m "$model" "$backend" $stream_args --ctx 4096 --prefill-chunk 8 --tokens 32 \
     --batched-session 4 --kv-disk-dir "$tmp/kv" --kv-disk-space-mb 1024 \
     --kv-cache-min-tokens 32 --kv-cache-cold-max-tokens 4096 \
     --kv-cache-boundary-trim-tokens 0 --kv-cache-boundary-align-tokens 32 \
@@ -82,10 +82,10 @@ if [ "$ready" != 1 ]; then
     exit 1
 fi
 
-python3 tests/test_server_batching.py --url "$base" --pairs "${Q36_TEST_BATCH_PAIRS:-5}" \
+python3 tests/test_server_batching.py --url "$base" --pairs "${P36_TEST_BATCH_PAIRS:-5}" \
     --nonce "batch-$port" \
     >"$tmp/nonstream.json"
-python3 tests/test_server_batching.py --url "$base" --pairs "${Q36_TEST_BATCH_PAIRS:-5}" --stream \
+python3 tests/test_server_batching.py --url "$base" --pairs "${P36_TEST_BATCH_PAIRS:-5}" --stream \
     --nonce "batch-$port" \
     >"$tmp/stream.json"
 grep -q '"status": "PASS"' "$tmp/nonstream.json"

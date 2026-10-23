@@ -1,6 +1,6 @@
-# Q36 Imatrix Calibration Dataset
+# P36 Imatrix Calibration Dataset
 
-This directory builds the Qwen3.6/Q36 calibration corpus used before mixed
+This directory builds the Qwen3.6/P36 calibration corpus used before mixed
 routed-expert quantization. The tracked JSONL is the source of truth and the
 rendered files use the Qwen3.6 chat format.
 
@@ -18,7 +18,7 @@ first.
 ## 1. Build `prompts.jsonl`
 
 ```sh
-python3 gguf-tools/imatrix/dataset/build_q36_imatrix_dataset.py
+python3 gguf-tools/imatrix/dataset/build_p36_imatrix_dataset.py
 ```
 
 This writes:
@@ -27,12 +27,12 @@ This writes:
 - `gguf-tools/imatrix/dataset/manifest.json`
 
 Expected count: `4690` JSONL records, split as `2345` `think` and `2345`
-`nothink`, matching Q36 inference modes.
+`nothink`, matching P36 inference modes.
 
 ## 2. Render Qwen3.6 Chat Prompts
 
 ```sh
-python3 gguf-tools/imatrix/dataset/render_q36_prompts.py \
+python3 gguf-tools/imatrix/dataset/render_p36_prompts.py \
   --in gguf-tools/imatrix/dataset/prompts.jsonl
 ```
 
@@ -56,20 +56,20 @@ update the renderer first and regenerate all three rendered files.
 For a balanced streaming-router profile without processing the full corpus:
 
 ```sh
-python3 gguf-tools/imatrix/dataset/render_q36_prompts.py \
+python3 gguf-tools/imatrix/dataset/render_p36_prompts.py \
   --sample-per-category-mode 2 \
-  --out /tmp/q36-streaming-prompts.txt
+  --out /tmp/p36-streaming-prompts.txt
 ```
 
 This samples each category and thinking mode, then interleaves the groups.
 
-After collecting `Q36_VK_STREAMING_EXPERT_HOTLIST_OUT`, regenerate the
+After collecting `P36_VK_STREAMING_EXPERT_HOTLIST_OUT`, regenerate the
 built-in eviction profile with:
 
 ```sh
-python3 gguf-tools/imatrix/dataset/profile_to_q36_hotlist.py \
-  /tmp/q36-balanced-hotlist.txt \
-  --out q36_streaming_hotlist.inc \
+python3 gguf-tools/imatrix/dataset/profile_to_p36_hotlist.py \
+  /tmp/p36-balanced-hotlist.txt \
+  --out p36_streaming_hotlist.inc \
   --limit 4096
 ```
 
@@ -84,7 +84,7 @@ llama.cpp/build/bin/llama-imatrix \
   --mmap \
   --parse-special \
   --output-format dat \
-  -o gguf/q36-qwen36-imatrix.dat
+  -o gguf/p36-qwen36-imatrix.dat
 ```
 
 The `dat` output is the format consumed by `gguf-tools/qwen36-quantize`.
@@ -96,10 +96,10 @@ make -C gguf-tools
 
 gguf-tools/qwen36-quantize \
   --in gguf/Qwen3.6-35B-A3B-Q8_0.gguf \
-  --imatrix gguf/q36-qwen36-imatrix.dat \
+  --imatrix gguf/p36-qwen36-imatrix.dat \
   --imatrix-strict \
-  --audit gguf/q36-mixed-audit.tsv \
-  --out gguf/Qwen3.6-35B-A3B-Q36-IQ2XXS-gateup-Q2K-down-Q8rest.gguf
+  --audit gguf/p36-mixed-audit.tsv \
+  --out gguf/Qwen3.6-35B-A3B-P36-IQ2XXS-gateup-Q2K-down-Q8rest.gguf
 ```
 
 The quantizer changes only exact routed expert tensors:

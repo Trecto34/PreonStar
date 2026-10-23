@@ -1,5 +1,5 @@
-#include "../q36.h"
-#include "../q36_cli_args.h"
+#include "../p36.h"
+#include "../p36_cli_args.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -56,7 +56,7 @@ static int candidate_cmp(const void *a, const void *b) {
     return (cb->logit > ca->logit) - (cb->logit < ca->logit);
 }
 
-/* Q36's sampler before the min-p fast path. */
+/* P36's sampler before the min-p fast path. */
 static int reference_sample(const float *logits, uint32_t n_vocab,
                             float temperature, int top_k,
                             float top_p, float min_p, uint64_t *rng) {
@@ -213,7 +213,7 @@ static void compare_case(const float *logits, float *scratch, uint32_t n,
         uint64_t opt_rng = seed;
         const int ref = reference_sample(logits, n, temperature, top_k,
                                          top_p, min_p, &ref_rng);
-        const int opt = q36_test_sample_logits(logits, n, temperature, top_k,
+        const int opt = p36_test_sample_logits(logits, n, temperature, top_k,
                                                top_p, min_p, &opt_rng, scratch);
         CHECK(ref == opt,
               "%s seed=%llu token reference=%d optimized=%d",
@@ -247,7 +247,7 @@ static void benchmark(const float *logits, float *scratch, uint32_t n,
 
     start = now_sec();
     for (int i = 0; i < iterations; i++) {
-        checksum += (uint64_t)q36_test_sample_logits(
+        checksum += (uint64_t)p36_test_sample_logits(
             logits, n, 1.0f, 0, top_p, 0.05f, &opt_rng, scratch);
     }
     const double optimized_ms = (now_sec() - start) * 1000.0;
@@ -260,19 +260,19 @@ static void benchmark(const float *logits, float *scratch, uint32_t n,
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_sampling");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_sampling");
     if (cli_rc) return cli_rc;
-    CHECK(q36_test_kv_next_cap(32768, 32769, 100000) == 40960,
+    CHECK(p36_test_kv_next_cap(32768, 32769, 100000) == 40960,
           "KV growth after 32k should reserve 40k");
-    CHECK(q36_test_kv_next_cap(40960, 40961, 100000) == 51200,
+    CHECK(p36_test_kv_next_cap(40960, 40961, 100000) == 51200,
           "KV growth after 40k should reserve 50k");
-    CHECK(q36_test_kv_next_cap(51200, 70000, 100000) == 80000,
+    CHECK(p36_test_kv_next_cap(51200, 70000, 100000) == 80000,
           "KV growth should cover large jumps without doubling");
-    CHECK(q36_test_kv_next_cap(80000, 90000, 100000) == 100000,
+    CHECK(p36_test_kv_next_cap(80000, 90000, 100000) == 100000,
           "KV growth should clamp to the context limit");
-    CHECK(q36_test_kv_next_cap(32768, 32769, 40001) == 40001,
+    CHECK(p36_test_kv_next_cap(32768, 32769, 40001) == 40001,
           "KV growth should clamp to a nearby context limit");
-    CHECK(q36_test_kv_next_cap(32768, 40002, 40001) == 0,
+    CHECK(p36_test_kv_next_cap(32768, 40002, 40001) == 0,
           "KV growth should reject requests beyond the context limit");
 
     const uint32_t semantic_n = 4096;
@@ -319,7 +319,7 @@ int main(int argc, char **argv) {
         boundary_logits,
         (uint32_t)(sizeof(boundary_logits) / sizeof(boundary_logits[0])),
         1.0f, 0, 1.0f, 0.05f, &null_ref_rng);
-    const int null_opt = q36_test_sample_logits(
+    const int null_opt = p36_test_sample_logits(
         boundary_logits,
         (uint32_t)(sizeof(boundary_logits) / sizeof(boundary_logits[0])),
         1.0f, 0, 1.0f, 0.05f, &null_opt_rng, NULL);
@@ -338,7 +338,7 @@ int main(int argc, char **argv) {
     float penalty_scratch[3];
     uint64_t penalty_rng = 1;
     const int seen_once[] = {0};
-    int token = q36_test_sample_logits_penalized(
+    int token = p36_test_sample_logits_penalized(
         penalty_logits, 3, 0.0f, 0, 1.0f, 0.0f,
         seen_once, 1, 1.0f, 0.0f, 1.0f, &penalty_rng, penalty_scratch);
     CHECK(token == 1, "presence penalty expected token 1, got %d", token);
@@ -346,7 +346,7 @@ int main(int argc, char **argv) {
           "presence penalty did not restore logits");
 
     const int seen_twice[] = {0, 0};
-    token = q36_test_sample_logits_penalized(
+    token = p36_test_sample_logits_penalized(
         penalty_logits, 3, 0.0f, 0, 1.0f, 0.0f,
         seen_twice, 2, 0.0f, 0.3f, 1.0f, &penalty_rng, penalty_scratch);
     CHECK(token == 1, "frequency penalty expected token 1, got %d", token);
@@ -358,13 +358,13 @@ int main(int argc, char **argv) {
     float repeat_scratch[3];
     uint64_t repeat_rng = 1;
     const int seen_repeat[] = {0};
-    token = q36_test_sample_logits_penalized(
+    token = p36_test_sample_logits_penalized(
         repeat_logits, 3, 0.0f, 0, 1.0f, 0.0f,
         seen_repeat, 1, 0.0f, 0.0f, 2.0f, &repeat_rng, repeat_scratch);
     CHECK(token == 1, "repeat penalty expected token 1, got %d", token);
     CHECK(repeat_logits[0] == 1.0f && repeat_logits[1] == 0.9f &&
           repeat_logits[2] == -2.0f, "repeat penalty did not restore logits");
-    const int unpenalized = q36_test_sample_logits_penalized(
+    const int unpenalized = p36_test_sample_logits_penalized(
         repeat_logits, 3, 0.0f, 0, 1.0f, 0.0f,
         seen_repeat, 1, 0.0f, 0.0f, 1.0f, &repeat_rng, repeat_scratch);
     CHECK(unpenalized == 0, "repeat_penalty 1.0 expected token 0, got %d",

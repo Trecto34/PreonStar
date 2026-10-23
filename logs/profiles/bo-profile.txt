@@ -1,8 +1,8 @@
-SHARED PROFILE DUMP — Bonsai-2-27B Q2_0/g64 decode on BC-250, q36 e50a3e1
+SHARED PROFILE DUMP — Bonsai-2-27B Q2_0/g64 decode on BC-250, p36 e50a3e1
 =========================================================================
 Command (one generate, greedy):
-  Q36_VK_PROF_KERNEL=1 Q36_VK_PROF_OP=1 ./q36 --vulkan \
-    -m /home/server/q36/gguf/Ternary-Bonsai-2-27B-Q2_0-g64.gguf \
+  P36_VK_PROF_KERNEL=1 P36_VK_PROF_OP=1 ./p36 --vulkan \
+    -m /home/server/p36/gguf/Ternary-Bonsai-2-27B-Q2_0-g64.gguf \
     -c 4096 -n 64 --temp 0 \
     -p "A farmer has 17 sheep. All but 9 run away. How many are left? Give the
         answer and one line of reasoning. Then name the capital of Australia."

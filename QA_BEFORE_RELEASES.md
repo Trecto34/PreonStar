@@ -22,10 +22,10 @@ non-default flags for every model-backed run.
 - Do not fix release warnings with a global suppression. A narrow suppression
   is acceptable only for a test translation unit that intentionally includes
   another C file and leaves unrelated static functions unused.
-- Verify `./q36 --help`, `./q36-server --help`, `./q36-agent --help`,
-  `./q36-bench --help`, and `./q36-eval --help` render without stale options.
+- Verify `./p36 --help`, `./p36-server --help`, `./p36-agent --help`,
+  `./p36-bench --help`, and `./p36-eval --help` render without stale options.
 - Confirm the release binaries use the intended Vulkan loader and Mesa RADV
-  driver with `ldd ./q36` and `vulkaninfo --summary`.
+  driver with `ldd ./p36` and `vulkaninfo --summary`.
 - Confirm a Metal build reports the expected Apple GPU, unified memory, and a
   nonzero `recommendedMaxWorkingSetSize`. A normal single-Mac process must use
   the system default Metal device, matching DS4's local-device policy.
@@ -36,7 +36,7 @@ non-default flags for every model-backed run.
 - Run the isolated Vulkan numeric suite: `make test-vulkan`.
 - Run the model-backed suite: `make test-model`.
 - Run the tracked reference vectors: `make test-reference`.
-- Run `./q36-eval --self-test-extractors` explicitly after evaluator changes.
+- Run `./p36-eval --self-test-extractors` explicitly after evaluator changes.
 - Any assertion, hang, non-finite logit, invalid tool call, or unexplained skip
   is a release blocker.
 
@@ -128,9 +128,9 @@ not evidence of parity.
 
 ## 7. Long Context And Session State
 
-- Run `./q36_test --long-context` with the release context and cache types.
-- Run `./q36_test --session-sync-resume` and
-  `./q36_test --kv-cache-save-restore`.
+- Run `./p36_test --long-context` with the release context and cache types.
+- Run `./p36_test --session-sync-resume` and
+  `./p36_test --kv-cache-save-restore`.
 - Repeat save/restore with `f16`, `q8_0`, and `q4_0` K/V cache types.
 - Verify payload v2 and typed-KV payload v3 load correctly. Token-only v1 is a
   compatibility input, not the current writer format.
@@ -143,7 +143,7 @@ not evidence of parity.
 
 ## 8. Server APIs
 
-- Run `./q36_test --server` after HTTP, SSE, prompt, cache, or tool changes.
+- Run `./p36_test --server` after HTTP, SSE, prompt, cache, or tool changes.
 - Run `make test-server-live` for an actual 4K-context server process, CORS
   preflight, chat completion, and Responses API SSE cycle.
 - On macOS, also run `make test-server-live-metal`.
@@ -177,8 +177,8 @@ not evidence of parity.
   return control without hanging later clients.
 - Repeat concurrent short greedy requests with 1, 2, 4, and 8 resident slots.
   Record aggregate decode tokens/s, per-request latency, and the batch-size
-  distribution from `Q36_SERVER_BATCH_LOG=1`. Record the old single-session
-  path and `Q36_VK_SESSION_BATCH=0` ordered fallback separately. The sequential
+  distribution from `P36_SERVER_BATCH_LOG=1`. Record the old single-session
+  path and `P36_VK_SESSION_BATCH=0` ordered fallback separately. The sequential
   one-process-at-a-time command is `make benchmark-session-batch`.
 - Exercise mixed short/long prefills, more requests than slots, tool-result
   continuations, Responses and Anthropic continuations, a disconnected SSE
@@ -189,7 +189,7 @@ not evidence of parity.
 
 ## 9. Native Agent
 
-- Run `./q36_agent_test`.
+- Run `./p36_agent_test`.
 - Start the agent with no streaming flag on each release GPU backend and require
   full residency in the startup log. Repeat with `--ssd-streaming` and require
   SSD streaming.
@@ -221,7 +221,7 @@ not evidence of parity.
   directory.
 - Verify the published filename, size, checksum, tensor count, architecture,
   context length, and embedded Qwen template.
-- Run `./q36 --inspect -m MODEL` before inference.
+- Run `./p36 --inspect -m MODEL` before inference.
 - Test every GGUF advertised in the release notes. Do not infer compatibility
   from a similar filename.
 
@@ -233,7 +233,7 @@ not evidence of parity.
 - Record resident and streaming results independently.
 - Repeat one decode at reduced `--power` and verify throttling does not change
   greedy output or corrupt session state.
-- On macOS, retain resident and SSD-streaming `q36-bench` results per Apple GPU
+- On macOS, retain resident and SSD-streaming `p36-bench` results per Apple GPU
   generation; compare like-for-like OS, power state, context, and cache types.
 
 ## 13. Release Sign-off

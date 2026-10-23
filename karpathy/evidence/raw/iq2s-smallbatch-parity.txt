@@ -1,9 +1,9 @@
 # IQ2_S small-batch (2..127 token) parity — 2026-09-21T10:15:29-03:00
-# model: Qwen3.8-35B-A3B-IQ2_M.gguf, guard: Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf
+# model: Qwen3.8-35B-A3B-IQ2_M.gguf, guard: Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS.gguf
 # ctx 512, --prefill-chunk 16, --gen-tokens 0, --dump-frontier-logits-dir, frontier 000512
 # arm f32b   = working tree default (IQ2_S gate/up/down via the new small-batch pair)
-# arm q8     = Q36_VK_MOE_F32B=0 (q8 route)
-# arm gemm16 = Q36_VK_MOE_GEMM_MIN=16 (accepted GEMM pair)
+# arm q8     = P36_VK_MOE_F32B=0 (q8 route)
+# arm gemm16 = P36_VK_MOE_GEMM_MIN=16 (accepted GEMM pair)
 
 --- IQ2_M f32b(new) vs q8
 keys: ['source', 'model', 'backend', 'quality', 'quant_bits', 'prompt_tokens', 'frontier_tokens', 'prefill_tokens', 'ctx', 'vocab', 'argmax_id', 'argmax_logit']
@@ -37,10 +37,10 @@ top1 ref=13 (22.664593)  new=13 (22.546253)  same=True
 argmax_id field: 13 13
 top64 overlap: 63 /64
 
---- route misses at chunk 16 (Q36_VK_MOE_ROUTE_DEBUG=1)
+--- route misses at chunk 16 (P36_VK_MOE_ROUTE_DEBUG=1)
 A (HEAD 44143d8): 1280 misses
 B (working tree): 96 misses
 B remaining: only il=0,1,2 (down=21 = IQ3_S ffn_down_exps), 3 layers x 32 forwards = 96
-q36: moe f32 route miss il=0 n_tok=16 gate=22 up=22 down=21
-q36: moe f32 route miss il=1 n_tok=16 gate=22 up=22 down=21
-q36: moe f32 route miss il=2 n_tok=16 gate=22 up=22 down=21
+p36: moe f32 route miss il=0 n_tok=16 gate=22 up=22 down=21
+p36: moe f32 route miss il=1 n_tok=16 gate=22 up=22 down=21
+p36: moe f32 route miss il=2 n_tok=16 gate=22 up=22 down=21

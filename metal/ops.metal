@@ -1,6 +1,6 @@
 // Small Qwen3.6 graph primitives and shape-specialized dense operations.
 
-kernel void q36_f32_to_f16(device const float *src [[buffer(0)]],
+kernel void p36_f32_to_f16(device const float *src [[buffer(0)]],
                             device half *dst [[buffer(1)]],
                             constant uint &count [[buffer(2)]],
                             uint i [[thread_position_in_grid]]) {
@@ -10,7 +10,7 @@ kernel void q36_f32_to_f16(device const float *src [[buffer(0)]],
 /* Match the CPU Q8_K activation boundary without materializing the packed
  * block: select the first signed maximum, round to int8, then immediately
  * reconstruct F32 for the native dense IQ3 matvec. */
-kernel void q36_q8_k_roundtrip_f32(
+kernel void p36_q8_k_roundtrip_f32(
         device const float *src [[buffer(0)]],
         device float *dst [[buffer(1)]],
         threadgroup float *signed_max [[threadgroup(0)]],
@@ -41,7 +41,7 @@ kernel void q36_q8_k_roundtrip_f32(
     dst[i] = float(q) * signed_max[1];
 }
 
-kernel void q36_add_f32(device float *out [[buffer(0)]],
+kernel void p36_add_f32(device float *out [[buffer(0)]],
                          device const float *a [[buffer(1)]],
                          device const float *b [[buffer(2)]],
                          constant uint &n [[buffer(3)]],
@@ -49,21 +49,21 @@ kernel void q36_add_f32(device float *out [[buffer(0)]],
     if (i < n) out[i] = a[i] + b[i];
 }
 
-kernel void q36_copy_f32(device float *out [[buffer(0)]],
+kernel void p36_copy_f32(device float *out [[buffer(0)]],
                           device const float *in [[buffer(1)]],
                           constant uint &n [[buffer(2)]],
                           uint i [[thread_position_in_grid]]) {
     if (i < n) out[i] = in[i];
 }
 
-kernel void q36_scale_f32(device float *x [[buffer(0)]],
+kernel void p36_scale_f32(device float *x [[buffer(0)]],
                            constant uint &n [[buffer(1)]],
                            constant float &scale [[buffer(2)]],
                            uint i [[thread_position_in_grid]]) {
     if (i < n) x[i] *= scale;
 }
 
-kernel void q36_top2_f32(
+kernel void p36_top2_f32(
         device int *out_ids [[buffer(0)]],
         device const float *logits [[buffer(1)]],
         constant uint &count [[buffer(2)]],
@@ -120,7 +120,7 @@ kernel void q36_top2_f32(
     out_ids[1] = id1;
 }
 
-kernel void q36_swiglu_f32(device float *out [[buffer(0)]],
+kernel void p36_swiglu_f32(device float *out [[buffer(0)]],
                             device const float *gate [[buffer(1)]],
                             device const float *up [[buffer(2)]],
                             constant uint &n [[buffer(3)]],
@@ -136,7 +136,7 @@ kernel void q36_swiglu_f32(device float *out [[buffer(0)]],
     out[i] = (g / (1.0f + exp(-g))) * u * weight;
 }
 
-kernel void q36_ffn_tail_f32(device float *out [[buffer(0)]],
+kernel void p36_ffn_tail_f32(device float *out [[buffer(0)]],
                               device const float *shared [[buffer(1)]],
                               device const float *scalar [[buffer(2)]],
     constant uint &width [[buffer(3)]],
@@ -150,14 +150,14 @@ kernel void q36_ffn_tail_f32(device float *out [[buffer(0)]],
     }
 }
 
-struct q36_moe_reduce_args {
+struct p36_moe_reduce_args {
     uint width;
     uint used;
     uint tokens;
     uint has_down_scale;
 };
 
-struct q36_moe_activation_args {
+struct p36_moe_activation_args {
     uint width;
     uint used;
     uint tokens;
@@ -166,7 +166,7 @@ struct q36_moe_activation_args {
     uint has_down_scale;
 };
 
-kernel void q36_moe_activation_f32(
+kernel void p36_moe_activation_f32(
         device float *mid [[buffer(0)]],
         device const float *gate [[buffer(1)]],
         device const float *up [[buffer(2)]],
@@ -174,7 +174,7 @@ kernel void q36_moe_activation_f32(
         device const float *route_weights [[buffer(4)]],
         device const float *gate_scales [[buffer(5)]],
         device const float *up_scales [[buffer(6)]],
-        constant q36_moe_activation_args &args [[buffer(7)]],
+        constant p36_moe_activation_args &args [[buffer(7)]],
         device const float *down_scales [[buffer(8)]],
         uint2 gid [[thread_position_in_grid]]) {
     ulong pair = gid.y;
@@ -192,7 +192,7 @@ kernel void q36_moe_activation_f32(
 // The routed grouped matmul converts its dense RHS tile to half before the
 // multiply. Storing the SwiGLU intermediate in that precision avoids the F32
 // write/read without changing the values consumed by the down projection.
-kernel void q36_moe_activation_f16(
+kernel void p36_moe_activation_f16(
         device half *mid [[buffer(0)]],
         device const float *gate [[buffer(1)]],
         device const float *up [[buffer(2)]],
@@ -200,7 +200,7 @@ kernel void q36_moe_activation_f16(
         device const float *route_weights [[buffer(4)]],
         device const float *gate_scales [[buffer(5)]],
         device const float *up_scales [[buffer(6)]],
-        constant q36_moe_activation_args &args [[buffer(7)]],
+        constant p36_moe_activation_args &args [[buffer(7)]],
         device const float *down_scales [[buffer(8)]],
         uint2 gid [[thread_position_in_grid]]) {
     ulong pair = gid.y;
@@ -215,12 +215,12 @@ kernel void q36_moe_activation_f16(
         (half)((g / (1.0f + exp(-g))) * u * route_weights[pair] * d);
 }
 
-kernel void q36_moe_reduce_f32(
+kernel void p36_moe_reduce_f32(
         device float *out [[buffer(0)]],
         device const float *expert_out [[buffer(1)]],
         device const int *selected [[buffer(2)]],
         device const float *down_scales [[buffer(3)]],
-        constant q36_moe_reduce_args &args [[buffer(4)]],
+        constant p36_moe_reduce_args &args [[buffer(4)]],
         uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= args.width || gid.y >= args.tokens) return;
     float sum = 0.0f;
@@ -233,7 +233,7 @@ kernel void q36_moe_reduce_f32(
     out[(ulong)gid.y * args.width + gid.x] = sum;
 }
 
-kernel void q36_rms_norm_f32(device float *out [[buffer(0)]],
+kernel void p36_rms_norm_f32(device float *out [[buffer(0)]],
                               device const float *in [[buffer(1)]],
                               device const float *weight [[buffer(2)]],
                               constant uint &width [[buffer(3)]],
@@ -253,7 +253,7 @@ kernel void q36_rms_norm_f32(device float *out [[buffer(0)]],
                                (has_weight ? weight[i] : 1.0f);
 }
 
-kernel void q36_l2_norm_f32(device float *x [[buffer(0)]],
+kernel void p36_l2_norm_f32(device float *x [[buffer(0)]],
                              constant uint &width [[buffer(1)]],
                              constant float &eps [[buffer(2)]],
                              uint row [[threadgroup_position_in_grid]],
@@ -268,17 +268,17 @@ kernel void q36_l2_norm_f32(device float *x [[buffer(0)]],
     for (uint i = lane; i < width; i += 32) x[row * width + i] *= scale;
 }
 
-struct q36_dense_args {
+struct p36_dense_args {
     uint in_dim;
     uint out_dim;
     uint tokens;
     float scale;
 };
 
-kernel void q36_matmul_f32(device float *out [[buffer(0)]],
+kernel void p36_matmul_f32(device float *out [[buffer(0)]],
                             device const float *weights [[buffer(1)]],
                             device const float *x [[buffer(2)]],
-                            constant q36_dense_args &args [[buffer(3)]],
+                            constant p36_dense_args &args [[buffer(3)]],
                             uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= args.out_dim || gid.y >= args.tokens) return;
     device const float *w = weights + (ulong)gid.x * args.in_dim;
@@ -288,10 +288,10 @@ kernel void q36_matmul_f32(device float *out [[buffer(0)]],
     out[(ulong)gid.y * args.out_dim + gid.x] = sum * args.scale;
 }
 
-kernel void q36_matmul_f16(device float *out [[buffer(0)]],
+kernel void p36_matmul_f16(device float *out [[buffer(0)]],
                             device const half *weights [[buffer(1)]],
                             device const float *x [[buffer(2)]],
-                            constant q36_dense_args &args [[buffer(3)]],
+                            constant p36_dense_args &args [[buffer(3)]],
                             uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= args.out_dim || gid.y >= args.tokens) return;
     device const half *w = weights + (ulong)gid.x * args.in_dim;
@@ -301,19 +301,19 @@ kernel void q36_matmul_f16(device float *out [[buffer(0)]],
     out[(ulong)gid.y * args.out_dim + gid.x] = sum * args.scale;
 }
 
-struct q36_block_q8_0 {
+struct p36_block_q8_0 {
     half d;
     char qs[32];
 };
 
-kernel void q36_matmul_q8_0(device float *out [[buffer(0)]],
-                             device const q36_block_q8_0 *weights [[buffer(1)]],
+kernel void p36_matmul_q8_0(device float *out [[buffer(0)]],
+                             device const p36_block_q8_0 *weights [[buffer(1)]],
                              device const float *x [[buffer(2)]],
-                             constant q36_dense_args &args [[buffer(3)]],
+                             constant p36_dense_args &args [[buffer(3)]],
                              uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= args.out_dim || gid.y >= args.tokens) return;
     uint blocks = args.in_dim / 32;
-    device const q36_block_q8_0 *w = weights + (ulong)gid.x * blocks;
+    device const p36_block_q8_0 *w = weights + (ulong)gid.x * blocks;
     device const float *v = x + (ulong)gid.y * args.in_dim;
     float sum = 0.0f;
     for (uint b = 0; b < blocks; b++) {
@@ -325,7 +325,7 @@ kernel void q36_matmul_q8_0(device float *out [[buffer(0)]],
     out[(ulong)gid.y * args.out_dim + gid.x] = sum * args.scale;
 }
 
-struct q36_copy_rows_args {
+struct p36_copy_rows_args {
     uint src_stride;
     uint dst_stride;
     uint src_offset;
@@ -333,13 +333,13 @@ struct q36_copy_rows_args {
     uint rows;
 };
 
-kernel void q36_copy_rows_f32(device float *dst [[buffer(0)]],
+kernel void p36_copy_rows_f32(device float *dst [[buffer(0)]],
                                device const float *src [[buffer(1)]],
-                               constant q36_copy_rows_args &args [[buffer(2)]],
+                               constant p36_copy_rows_args &args [[buffer(2)]],
                                uint2 gid [[thread_position_in_grid]]) {
     if (gid.x < args.width && gid.y < args.rows)
         dst[(ulong)gid.y * args.dst_stride + gid.x] =
             src[(ulong)gid.y * args.src_stride + args.src_offset + gid.x];
 }
 
-struct q36_recur_args { uint conv_dim; uint hist; uint tokens; };
+struct p36_recur_args { uint conv_dim; uint hist; uint tokens; };

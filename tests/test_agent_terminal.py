@@ -69,7 +69,7 @@ def check(binary, fragments, expected, cols=40):
 
 
 def main():
-    binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else './q36_agent_test').resolve())
+    binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else './p36_agent_test').resolve())
     check(binary, [bytes([b]) for b in 'hé中'.encode()] + [b'\x1b', b'[', b'D', b'!'], 'hé!中')
     check(binary, [b'\x1b[20', b'0~', 'pasted 中\nsecond line'.encode(), b'\x1b[201', b'~'],
           'pasted 中\nsecond line')

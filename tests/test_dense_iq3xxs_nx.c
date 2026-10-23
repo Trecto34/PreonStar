@@ -8,7 +8,7 @@
  * activation row, bit for bit -- including the partial chunk of an odd n_tok.
  * `n_tok` 1..8 is the range the kernel can be dispatched with (P7: only 2 is
  * reachable today).  The real-weight path is exercised through
- * q36_gpu_matmul_iq_quant_q8_scaled_tensor with a host-backed model map.
+ * p36_gpu_matmul_iq_quant_q8_scaled_tensor with a host-backed model map.
  *
  * Weights are random bytes: grid entries are byte LUT indices, the sign and
  * scale fields are read as-is, and the row scale is a positive f16.  The q8_k
@@ -28,11 +28,11 @@
 #include <unistd.h>
 #include <math.h>
 #include <time.h>
-#include "../q36.h"
-#include "../q36_gpu.h"
-#include "../q36_cli_args.h"
+#include "../p36.h"
+#include "../p36_gpu.h"
+#include "../p36_cli_args.h"
 
-#define IQ3_XXS 18u /* Q36_VK_TENSOR_IQ3_XXS, q36_vulkan.c:33 (not exported in q36_gpu.h) */
+#define IQ3_XXS 18u /* P36_VK_TENSOR_IQ3_XXS, p36_vulkan.c:33 (not exported in p36_gpu.h) */
 #define Q8K_WORDS 74u
 #define BLOCK_BYTES 98u
 #define QK_K 256u
@@ -78,7 +78,7 @@ static void make_q8_row(uint8_t *row, uint32_t blocks) {
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_reject_option_arguments(argc, argv, "test_dense_iq3xxs_nx");
+    int cli_rc = p36_cli_reject_option_arguments(argc, argv, "test_dense_iq3xxs_nx");
     if (cli_rc) return cli_rc;
     /* Real shapes are out_dim 5120..17408 x in_dim 17408 (68 IQ3_XXS blocks a
      * row); the default is the attn_qkv shape. */
@@ -97,25 +97,25 @@ int main(int argc, char **argv) {
     if (posix_memalign((void **)&wmap, (size_t)getpagesize(), weight_bytes)) return 1;
     make_weights(wmap, out_dim, blocks);
 
-    if (!q36_gpu_init()) { fprintf(stderr, "q36_gpu_init failed\n"); return 1; }
-    q36_gpu_set_quality(false);
-    q36_gpu_set_model_map(wmap, weight_bytes);
+    if (!p36_gpu_init()) { fprintf(stderr, "p36_gpu_init failed\n"); return 1; }
+    p36_gpu_set_quality(false);
+    p36_gpu_set_model_map(wmap, weight_bytes);
 
     /* q8 rows: one tensor holding n_tok rows, plus a single-row one, so every
      * arm reads the same bytes. */
     const uint64_t row_words = (uint64_t)blocks * Q8K_WORDS * 4u;
-    q36_gpu_tensor *q8_1 = q36_gpu_tensor_alloc(row_words);
-    q36_gpu_tensor *q8_n = q36_gpu_tensor_alloc(row_words * n_tok);
-    q36_gpu_tensor *o1 = q36_gpu_tensor_alloc(out_dim * 4u);
-    q36_gpu_tensor *on = q36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * 4u);
-    q36_gpu_tensor *om = q36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * 4u);
+    p36_gpu_tensor *q8_1 = p36_gpu_tensor_alloc(row_words);
+    p36_gpu_tensor *q8_n = p36_gpu_tensor_alloc(row_words * n_tok);
+    p36_gpu_tensor *o1 = p36_gpu_tensor_alloc(out_dim * 4u);
+    p36_gpu_tensor *on = p36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * 4u);
+    p36_gpu_tensor *om = p36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * 4u);
     if (!q8_1 || !q8_n || !o1 || !on || !om) { fprintf(stderr, "alloc failed\n"); return 1; }
 
     uint8_t *rows = malloc(row_words * n_tok);
     if (!rows) return 1;
     for (uint32_t t = 0; t < n_tok; t++) make_q8_row(rows + t * row_words, blocks);
-    q36_gpu_tensor_write(q8_1, 0, rows, row_words);
-    q36_gpu_tensor_write(q8_n, 0, rows, row_words * n_tok);
+    p36_gpu_tensor_write(q8_1, 0, rows, row_words);
+    p36_gpu_tensor_write(q8_n, 0, rows, row_words * n_tok);
 
     int ok = 1;
     double ms[3] = { 0, 0, 0 };
@@ -124,7 +124,7 @@ int main(int argc, char **argv) {
          * not the parity reference, only the source of the logit ULP difference
          * that explains why MTP acceptance counts move when nx takes over the
          * verify: MMQ accumulates in f16 (P3), nx in f32. */
-        if (arm == 2) setenv("Q36_VK_DENSE_IQ3_NX", "0", 1);
+        if (arm == 2) setenv("P36_VK_DENSE_IQ3_NX", "0", 1);
         double best = 1e30;
         for (int it = 0; it < iters; it++) {
             double t0 = now_ms();
@@ -132,19 +132,19 @@ int main(int argc, char **argv) {
                 /* n_tok one-token dispatches; the same activation bytes every
                  * time, so this is the r4 decode cost per row. */
                 for (uint32_t t = 0; t < n_tok; t++)
-                    ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(
+                    ok &= p36_gpu_matmul_iq_quant_q8_scaled_tensor(
                         o1, wmap, weight_bytes, 0, IQ3_XXS, in_dim, out_dim,
                         q8_n, 1, scale);
             } else if (arm == 1) {
-                ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(on, wmap, weight_bytes, 0, IQ3_XXS,
+                ok &= p36_gpu_matmul_iq_quant_q8_scaled_tensor(on, wmap, weight_bytes, 0, IQ3_XXS,
                                                                in_dim, out_dim, q8_n, n_tok, scale);
             } else {
-                ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(om, wmap, weight_bytes, 0, IQ3_XXS,
+                ok &= p36_gpu_matmul_iq_quant_q8_scaled_tensor(om, wmap, weight_bytes, 0, IQ3_XXS,
                                                                in_dim, out_dim, q8_n, n_tok, scale);
             }
             /* Dispatches are recorded into an eager ring, so without a sync the
              * host time is pure record time. */
-            ok &= q36_gpu_synchronize() != 0;
+            ok &= p36_gpu_synchronize() != 0;
             if (it == 0) continue; /* warmup */
             double dt = now_ms() - t0;
             if (dt < best) best = dt;
@@ -152,24 +152,24 @@ int main(int argc, char **argv) {
         ms[arm] = best;
         if (!ok) { fprintf(stderr, "dispatch failed (arm %d)\n", arm); return 1; }
     }
-    unsetenv("Q36_VK_DENSE_IQ3_NX");
+    unsetenv("P36_VK_DENSE_IQ3_NX");
 
     /* Parity: n_tok separate one-token dispatches, row by row, read back each
      * time so the comparison is against the r4 kernel's own bits. */
     float *ref = calloc(out_dim, 4);
     float *rn = calloc((size_t)n_tok * out_dim, 4);
     float *rm = calloc((size_t)n_tok * out_dim, 4);
-    q36_gpu_tensor_read(on, 0, rn, (uint64_t)n_tok * out_dim * 4u);
-    q36_gpu_tensor_read(om, 0, rm, (uint64_t)n_tok * out_dim * 4u);
+    p36_gpu_tensor_read(on, 0, rn, (uint64_t)n_tok * out_dim * 4u);
+    p36_gpu_tensor_read(om, 0, rm, (uint64_t)n_tok * out_dim * 4u);
 
     uint64_t mism = 0;
     double max_abs = 0;
     for (uint32_t t = 0; t < n_tok; t++) {
-        if (!q36_gpu_tensor_write(q8_1, 0, rows + t * row_words, row_words)) return 1;
-        ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(o1, wmap, weight_bytes, 0, IQ3_XXS,
+        if (!p36_gpu_tensor_write(q8_1, 0, rows + t * row_words, row_words)) return 1;
+        ok &= p36_gpu_matmul_iq_quant_q8_scaled_tensor(o1, wmap, weight_bytes, 0, IQ3_XXS,
                                                        in_dim, out_dim, q8_1, 1, scale);
-        ok &= q36_gpu_synchronize() != 0;
-        q36_gpu_tensor_read(o1, 0, ref, out_dim * 4u);
+        ok &= p36_gpu_synchronize() != 0;
+        p36_gpu_tensor_read(o1, 0, ref, out_dim * 4u);
         for (uint32_t i = 0; i < out_dim; i++) {
             double d = fabs((double)ref[i] - (double)rn[(size_t)t * out_dim + i]);
             if (!(d <= max_abs)) max_abs = d;
@@ -198,6 +198,6 @@ int main(int argc, char **argv) {
     printf("   nx vs MMQ %u-row tile   %8.3f ms   bit-diff %llu/%llu  max_abs=%.3g\n",
            n_tok, ms[2], (unsigned long long)mmq_bit_diff,
            (unsigned long long)n_tok * out_dim, mmq_max_abs);
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     return mism != 0;
 }

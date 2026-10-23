@@ -1,7 +1,7 @@
 # PTQ1_0 (type 143) — Track B recon, spec extracted from the publisher
 
 Status: **recon only.** Track A (PQ2_0) gates are still running; nothing here is
-implemented in `q36`. Written 2026-09-18 after reading the publisher's own
+implemented in `p36`. Written 2026-09-18 after reading the publisher's own
 source, so the geometry below is not guessed from the file size.
 
 ## Source of truth
@@ -74,21 +74,21 @@ cheap (header + sampled rows, no GPU).
 
 ## Engine gap (measured, not assumed)
 
-`grep` over `q36*.{c,h}` and `vulkan/*.comp`: **no reference to 143 or PTQ1_0**.
+`grep` over `p36*.{c,h}` and `vulkan/*.comp`: **no reference to 143 or PTQ1_0**.
 The only `143` hit outside the IQ lookup tables and `third_party/iris/png.h` is
-`q36_eval.c:667 .choice[5] = "143"`, an unrelated eval option string.
+`p36_eval.c:667 .choice[5] = "143"`, an unrelated eval option string.
 
 Track A's type-142 plumbing is the template; the sites to mirror are
 
-    q36.c:53-59        QK_Q2_0/PQ2_0 byte constants, blocks per 256
-    q36.c:285          {name, qk, bytes} type table
-    q36.c:308-309      Q36_TENSOR_* enum, block struct
-    q36_vulkan.c:40-41 Q36_VK_TENSOR_* enum
-    q36_vulkan.c:245-248, :3264-3267  kernel handles + Q36_VK_KERNEL(...)
-    q36_vulkan.c:7779-7780            bytes per 256 weights (72 / 68)
-    q36_vulkan.c:8251                 host feature guard (int-dot, subgroup64)
+    p36.c:53-59        QK_Q2_0/PQ2_0 byte constants, blocks per 256
+    p36.c:285          {name, qk, bytes} type table
+    p36.c:308-309      P36_TENSOR_* enum, block struct
+    p36_vulkan.c:40-41 P36_VK_TENSOR_* enum
+    p36_vulkan.c:245-248, :3264-3267  kernel handles + P36_VK_KERNEL(...)
+    p36_vulkan.c:7779-7780            bytes per 256 weights (72 / 68)
+    p36_vulkan.c:8251                 host feature guard (int-dot, subgroup64)
     vulkan/dense_extra_{decode,mmq}.comp + Makefile targets
-    tests/q36_test.c   layout oracle + `--dense-quant-model-rows` type list
+    tests/p36_test.c   layout oracle + `--dense-quant-model-rows` type list
 
 The fork carries its own PTQ1_0 Vulkan work on side branches (`fix/ptq1_0-vulkan-supports-op`,
 `perf/ptq1_0-cuda-mmq-prism`); those are useful cross-checks but our kernels are
@@ -97,7 +97,7 @@ independent ports, as with PQ2_0.
 ## Open questions for Track B
 
 1. Is the shipped PTQ1_0 file natively group-128 (F16-source proof)? Not run.
-2. Does `q36`'s existing ternary ordering assumption hold for the staged 32/16/8
+2. Does `p36`'s existing ternary ordering assumption hold for the staged 32/16/8
    split, or does the round-trip in `quantize_row_ptq1_0_ref` (ceiling division,
    multiply-shift decode) need to be modelled exactly in the test reference, the
    way the f16-MMQ contract was for PQ2_0?

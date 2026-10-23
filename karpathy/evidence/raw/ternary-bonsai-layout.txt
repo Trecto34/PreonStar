@@ -5,7 +5,7 @@
 # (cloned to /home/server/prism-llama.cpp, HEAD 5d80cff).
 
 file:  Ternary-Bonsai-2-27B-PQ2_0.gguf   7,206,168,928 bytes (6.71 GiB)
-       downloaded to /home/server/q36/gguf/, size matches the HF API exactly
+       downloaded to /home/server/p36/gguf/, size matches the HF API exactly
 gguf: v3, 851 tensors, 49 KV pairs, alignment 32
 metadata+infos end at 11,120,982 -> tensor data starts 11,120,992
   (the KV table alone is > 4 MiB: prism.hadamard.* name lists make it large;
@@ -76,8 +76,8 @@ Both rejections are NAMED errors from loading real weights, not inference:
       should be in [0, 43)
     E llama_model_load: error loading model
 
-  q36 (/home/server/q36-opt-27b/q36, BC-250 fast path, subgroup 64):
-    q36: unsupported tensor type 142 for output.weight
+  p36 (/home/server/p36-opt-27b/p36, BC-250 fast path, subgroup 64):
+    p36: unsupported tensor type 142 for output.weight
 
 So "cannot run as-is" is now proven on two independent engines, and the
 blocker is the same single item (type 142) - not the arch, not the size.
@@ -91,7 +91,7 @@ This box is RADV GFX1013, so the fork can only run this model on the CPU
 ggml_gemm_pq2_0_4x8_q8_0 - real tuned 4x8 kernels, not a naive fallback).
 
 Therefore the "run it fast" path stays what CAMPAIGN.md section 6 item 6
-records: port type 142 to q36's Vulkan backend. The port is now fully
+records: port type 142 to p36's Vulkan backend. The port is now fully
 specified - block struct, group size, scale placement and the four code
 values are all known from the reference, so it is a transcription job
 (types entry + row dequant + one GEMV), not format research.
@@ -101,7 +101,7 @@ prism.hadamard.weight_names / inverse_weight_names apply an FWHT to
 token_embd and the quantised weights. The fork carries this in the graph
 side (grep 'hadamard' hits src/llama-model.cpp, src/llama-graph.cpp,
 ggml/src/ggml-cuda/ggml-cuda.cu) - but notably NOT in its model loader.
-q36 has no inverse-Hadamard at all. Weights must not be dequantised without
+p36 has no inverse-Hadamard at all. Weights must not be dequantised without
 it or the output is numerically meaningless even though it "runs".
 
 ## Publisher runtime check

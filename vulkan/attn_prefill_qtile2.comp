@@ -65,10 +65,10 @@ layout(push_constant) uniform Push {
  * per CU.  Unlike a trailing [K+1] pad this one sits between live elements, so
  * the toolchain cannot drop it, and it only moves values: 925 -> 794 ms across a
  * ctx-2048 run, 17/17 frontier logit dumps unchanged (MEASURED_ON_BC250). */
-#define Q36_QCHUNK 68u                       /* 64 floats + 4 pad */
-#define Q36_QSTRIDE (4u * Q36_QCHUNK)        /* one q row */
-#define Q36_QIDX(r, d) ((r) * Q36_QSTRIDE + ((d) >> 6u) * Q36_QCHUNK + ((d) & 63u))
-shared float sh_q[QT * HQ * Q36_QSTRIDE];
+#define P36_QCHUNK 68u                       /* 64 floats + 4 pad */
+#define P36_QSTRIDE (4u * P36_QCHUNK)        /* one q row */
+#define P36_QIDX(r, d) ((r) * P36_QSTRIDE + ((d) >> 6u) * P36_QCHUNK + ((d) & 63u))
+shared float sh_q[QT * HQ * P36_QSTRIDE];
 shared float sh_w[QT * HQ * TILE];
 
 float dot4(vec4 a, vec4 b) {
@@ -112,7 +112,7 @@ void main(void) {
         uint ti = r / HQ;
         uint j = r & (HQ - 1u);
         uint d = e & (HD - 1u);
-        sh_q[Q36_QIDX(r, d)] = ti < tn ?
+        sh_q[P36_QIDX(r, d)] = ti < tn ?
             q[((tok0 + ti) * pc.n_head + h0 + j) * HD + d] : 0.0;
     }
     barrier();
@@ -131,7 +131,7 @@ void main(void) {
     uint n_kv_rg = pc.pos0 + tok0 + rg + 1u;
     uint q_base[ROWS];
     for (uint rr = 0u; rr < ROWS; rr++) {
-        q_base[rr] = (r0 + rr) * Q36_QSTRIDE + (lane & 3u) * Q36_QCHUNK;
+        q_base[rr] = (r0 + rr) * P36_QSTRIDE + (lane & 3u) * P36_QCHUNK;
     }
 
     for (uint span = span_first; span < span_limit; span++) {

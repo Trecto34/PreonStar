@@ -3,8 +3,8 @@
 ## 2026-10-16
 
 - Added `repeat_penalty` (llama.cpp-style multiplicative; request alias
-  `repetition_penalty`) to the sampler, the server API and `q36-agent --repeat-penalty`.
-- Added `q36-server` startup defaults `--temp`, `--top-k`, `--top-p`, `--min-p`
+  `repetition_penalty`) to the sampler, the server API and `p36-agent --repeat-penalty`.
+- Added `p36-server` startup defaults `--temp`, `--top-k`, `--top-p`, `--min-p`
   and `--repeat-penalty`; explicit request values still win.
 - Penalized sampling now restores logits exactly instead of adding the penalty back.
 
@@ -14,8 +14,8 @@
 - Added `run_swift.sh` with BC-250 Vulkan fast-path settings, embedded MTP,
   and automatic model-sensitive context/cache defaults.
 - Added `run_swift_iq4_xs.sh` for the IQ4_XS model.
-- Added a bounded dense-weight cache controlled by `Q36_VK_DENSE_WEIGHT_CACHE_GIB`
-  and `Q36_VK_DENSE_WEIGHT_PIN_GIB`. Cache eviction drains all Vulkan work first,
+- Added a bounded dense-weight cache controlled by `P36_VK_DENSE_WEIGHT_CACHE_GIB`
+  and `P36_VK_DENSE_WEIGHT_PIN_GIB`. Cache eviction drains all Vulkan work first,
   preventing use-after-free while allowing the 14.6 GiB IQ4_XS model to run on
   the 16 GiB BC-250 memory budget.
 - IQ4_XS launcher defaults: prewarming disabled, 7 GiB retained prefix plus a
@@ -29,7 +29,7 @@
   permanently deleted the unused 14.6 GiB IQ4_XS file to reclaim disk space.
 - Verified the IQ3_XXS launcher with Vulkan inspection and a protected text
   generation test: `READY`, 39.92 tok/s prefill, and 21.90 tok/s generation.
-- Benchmarked IQ3_XXS with `q36-bench` at 1024 context: 180.27 tok/s prefill
+- Benchmarked IQ3_XXS with `p36-bench` at 1024 context: 180.27 tok/s prefill
   and 23.01 tok/s generation without MTP; three-position MTP measured 175.21
   and 21.73 tok/s, so the launcher now defaults to one draft position.
 - Tested attention span 128 at 1024 and 2048 context; it measured 23.80 and
@@ -70,7 +70,7 @@
   process.
 - Added process-group cleanup for Ctrl-C in the shared Karpathy orchestrator and
   target gate, terminating active model/agent children together instead of
-  leaving an orphaned `q36_test` behind.
+  leaving an orphaned `p36_test` behind.
 - Reduced the shared meta-agent provider watchdog to 180 seconds per tier,
   added fallback-stage output, and exposed `KARPATHY_META_TIMEOUT` for faster
   failure when the provider is unavailable.
@@ -117,7 +117,7 @@
 ## 2026-09-17 — vllm-mxfp4 transfer audit on BC-250
 
 - Created branch `experiment/radiance-transfer-bc250` in the clean Swift target;
-  left the separate, dirty `/home/server/q36-opt` checkout untouched. Added
+  left the separate, dirty `/home/server/p36-opt` checkout untouched. Added
   `tests/benchmark_transfer.sh` to benchmark Swift IQ3_XXS and Qwen3.6 IQ2_XXS
   serially at context 1024, 16 generated tokens, safe per-model prefill chunks,
   and three repetitions by default. It kills an active benchmark on interrupt.

@@ -1,6 +1,6 @@
 P4 dense_extra_mmq_q2_0 lane remap -- correctness record
 ========================================================
-Change: Q36_Q2_0_ONLY path, A-operand LDS read and output row use
+Change: P36_Q2_0_ONLY path, A-operand LDS read and output row use
 row = r*4 + lane_row instead of lane_row*16 + r.
 
 Bank-conflict accounting (say it in the right units):

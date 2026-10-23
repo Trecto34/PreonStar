@@ -4,7 +4,7 @@
       "command": "/home/server/.local/share/mem0-local/venv/bin/python",
       "args": ["/home/server/.local/share/mem0-local/server.py"],
       "env": {
-        "MEM0_USER": "q36-opt-27b"
+        "MEM0_USER": "p36-opt-27b"
       }
     }
   }

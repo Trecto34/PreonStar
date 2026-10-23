@@ -9,9 +9,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
-#include "../q36.h"
-#include "../q36_gpu.h"
-#include "../q36_cli_args.h"
+#include "../p36.h"
+#include "../p36_gpu.h"
+#include "../p36_cli_args.h"
 
 static double get_time_us(void) {
     struct timespec ts;
@@ -85,25 +85,25 @@ static void run_bench(uint32_t out_dim, uint32_t in_dim, uint32_t n_tok, int ite
         }
     }
 
-    q36_gpu_tensor *x_t = q36_gpu_tensor_alloc(in_bytes);
-    q36_gpu_tensor *out_t = q36_gpu_tensor_alloc(out_bytes);
-    q36_gpu_tensor_write(x_t, 0, x_host, in_bytes);
+    p36_gpu_tensor *x_t = p36_gpu_tensor_alloc(in_bytes);
+    p36_gpu_tensor *out_t = p36_gpu_tensor_alloc(out_bytes);
+    p36_gpu_tensor_write(x_t, 0, x_host, in_bytes);
 
-    q36_gpu_set_quality(false);
+    p36_gpu_set_quality(false);
 
     /* Warmup */
     for (int i = 0; i < 3; i++) {
-        int ok = q36_gpu_matmul_q8_0_scaled_tensor(
+        int ok = p36_gpu_matmul_q8_0_scaled_tensor(
             out_t, w_buf, weight_bytes, 0,
             in_dim, out_dim, x_t, n_tok, 1.0f);
         if (!ok) {
-            fprintf(stderr, "q36_gpu_matmul_q8_0_scaled_tensor failed\n");
+            fprintf(stderr, "p36_gpu_matmul_q8_0_scaled_tensor failed\n");
             exit(1);
         }
     }
 
     /* Read back & check parity */
-    q36_gpu_tensor_read(out_t, 0, out_host, out_bytes);
+    p36_gpu_tensor_read(out_t, 0, out_host, out_bytes);
     float max_err = 0.0f;
     for (uint64_t i = 0; i < (uint64_t)n_tok * out_dim; i++) {
         float err = fabsf(out_host[i] - ref_out[i]);
@@ -113,11 +113,11 @@ static void run_bench(uint32_t out_dim, uint32_t in_dim, uint32_t n_tok, int ite
     /* Measure latency */
     double t0 = get_time_us();
     for (int i = 0; i < iters; i++) {
-        q36_gpu_matmul_q8_0_scaled_tensor(
+        p36_gpu_matmul_q8_0_scaled_tensor(
             out_t, w_buf, weight_bytes, 0,
             in_dim, out_dim, x_t, n_tok, 1.0f);
     }
-    q36_gpu_tensor_read(out_t, 0, out_host, out_bytes);
+    p36_gpu_tensor_read(out_t, 0, out_host, out_bytes);
     double t1 = get_time_us();
     double avg_us = (t1 - t0) / iters;
     double avg_ms = avg_us / 1000.0;
@@ -130,8 +130,8 @@ static void run_bench(uint32_t out_dim, uint32_t in_dim, uint32_t n_tok, int ite
     printf("shape [%u x %u x %u]: avg = %.3f ms (%d iters) [max_err=%.6f hash=%08x]\n",
            out_dim, in_dim, n_tok, avg_ms, iters, max_err, hash);
 
-    q36_gpu_tensor_free(x_t);
-    q36_gpu_tensor_free(out_t);
+    p36_gpu_tensor_free(x_t);
+    p36_gpu_tensor_free(out_t);
     free(w_buf);
     free(x_host);
     free(out_host);
@@ -139,10 +139,10 @@ static void run_bench(uint32_t out_dim, uint32_t in_dim, uint32_t n_tok, int ite
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_matmul_q8");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_matmul_q8");
     if (cli_rc) return cli_rc;
-    if (!q36_gpu_init()) {
-        fprintf(stderr, "q36_gpu_init failed\n");
+    if (!p36_gpu_init()) {
+        fprintf(stderr, "p36_gpu_init failed\n");
         return 1;
     }
 
@@ -153,6 +153,6 @@ int main(int argc, char **argv) {
     run_bench(2048, 7168, 1024, 20);
     run_bench(32, 2048, 1024, 20);
 
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     return 0;
 }

@@ -40,7 +40,7 @@ def visible(response):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--binary', type=Path, default=Path('./q36-server'))
+    parser.add_argument('--binary', type=Path, default=Path('./p36-server'))
     parser.add_argument('--model', default='gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf')
     parser.add_argument('--vision', default='gguf/Qwen3.6-35B-A3B-mmproj-F16.gguf')
     parser.add_argument('--output', type=Path, required=True)

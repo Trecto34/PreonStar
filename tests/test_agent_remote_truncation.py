@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""q36-agent --server against a scripted fake server that returns truncated generations.
+"""p36-agent --server against a scripted fake server that returns truncated generations.
 
 Checks: a discarded (incomplete) tool call or empty truncated output is never appended to the
 transcript, recovery goes through the bounded recovery machinery (BLOCKED, no endless retry), and a
 genuinely truncated *content* answer is still accepted as the final reply.
-Usage: tests/test_agent_remote_truncation.py [path/to/q36-agent]   (needs no model)"""
+Usage: tests/test_agent_remote_truncation.py [path/to/p36-agent]   (needs no model)"""
 import json
 import subprocess
 import sys
@@ -12,7 +12,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-AGENT = sys.argv[1] if len(sys.argv) > 1 else "./q36-agent"
+AGENT = sys.argv[1] if len(sys.argv) > 1 else "./p36-agent"
 
 
 def sse(delta, finish=None, extra=None):
@@ -56,7 +56,7 @@ def run(script):
 
     srv = HTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    d = tempfile.mkdtemp(prefix="q36trunc-")
+    d = tempfile.mkdtemp(prefix="p36trunc-")
     p = subprocess.run([AGENT, "--server", "http://127.0.0.1:%d" % srv.server_port, "--think",
                         "--chdir", d, "--non-interactive", "-p", "write hello.txt"],
                        capture_output=True, text=True, timeout=60)

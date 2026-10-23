@@ -1,7 +1,7 @@
 /*
- * Q36 quantization facade.
+ * P36 quantization facade.
  *
- * These are the small GGUF quantization pieces needed by Q36 recipes: float
+ * These are the small GGUF quantization pieces needed by P36 recipes: float
  * conversion, q8_0, q2_K, q4_K, and iq2_xxs.  The code is
  * local C and deliberately narrow; other GGUF type IDs are named for metadata
  * compatibility, but cannot be emitted by this tool.
@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static pthread_mutex_t q36q_init_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t p36q_init_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
     const char *name;
@@ -29,51 +29,51 @@ typedef struct {
     size_t type_size;
     bool can_quantize;
     bool requires_imatrix;
-} q36q_traits;
+} p36q_traits;
 
 #define QK_K 256
-#define Q36Q_GROUP_MAX_EPS 1e-15f
-#define Q36Q_MIN(a, b) ((a) < (b) ? (a) : (b))
-#define Q36Q_MAX(a, b) ((a) > (b) ? (a) : (b))
+#define P36Q_GROUP_MAX_EPS 1e-15f
+#define P36Q_MIN(a, b) ((a) < (b) ? (a) : (b))
+#define P36Q_MAX(a, b) ((a) > (b) ? (a) : (b))
 
-static const q36q_traits q36q_type_traits[Q36Q_TYPE_COUNT] = {
-    [Q36Q_TYPE_F32]     = { "f32",      1,   4, false, false },
-    [Q36Q_TYPE_F16]     = { "f16",      1,   2, false, false },
-    [Q36Q_TYPE_Q4_0]    = { "q4_0",    32,  18, false, false },
-    [Q36Q_TYPE_Q4_1]    = { "q4_1",    32,  20, false, false },
-    [Q36Q_TYPE_Q5_0]    = { "q5_0",    32,  22, false, false },
-    [Q36Q_TYPE_Q5_1]    = { "q5_1",    32,  24, false, false },
-    [Q36Q_TYPE_Q8_0]    = { "q8_0",    32,  34, true,  false },
-    [Q36Q_TYPE_Q8_1]    = { "q8_1",    32,  36, false, false },
-    [Q36Q_TYPE_Q2_K]    = { "q2_K",  QK_K,  84, true,  false },
-    [Q36Q_TYPE_Q3_K]    = { "q3_K",  QK_K, 110, false, false },
-    [Q36Q_TYPE_Q4_K]    = { "q4_K",  QK_K, 144, true,  false },
-    [Q36Q_TYPE_Q5_K]    = { "q5_K",  QK_K, 176, false, false },
-    [Q36Q_TYPE_Q6_K]    = { "q6_K",  QK_K, 210, false, false },
-    [Q36Q_TYPE_Q8_K]    = { "q8_K",  QK_K, 292, false, false },
-    [Q36Q_TYPE_IQ2_XXS] = { "iq2_xxs", QK_K,  66, true,  true  },
-    [Q36Q_TYPE_IQ2_XS]  = { "iq2_xs",  QK_K,  74, false, true  },
-    [Q36Q_TYPE_IQ3_XXS] = { "iq3_xxs", QK_K,  98, false, false },
-    [Q36Q_TYPE_IQ1_S]   = { "iq1_s",   QK_K,  50, false, true  },
-    [Q36Q_TYPE_IQ4_NL]  = { "iq4_nl",     32,  18, false, false },
-    [Q36Q_TYPE_IQ3_S]   = { "iq3_s",   QK_K, 110, false, false },
-    [Q36Q_TYPE_IQ2_S]   = { "iq2_s",   QK_K,  82, false, false },
-    [Q36Q_TYPE_IQ4_XS]  = { "iq4_xs",  QK_K, 136, false, false },
-    [Q36Q_TYPE_I8]      = { "i8",          1,   1, false, false },
-    [Q36Q_TYPE_I16]     = { "i16",         1,   2, false, false },
-    [Q36Q_TYPE_I32]     = { "i32",         1,   4, false, false },
-    [Q36Q_TYPE_I64]     = { "i64",         1,   8, false, false },
-    [Q36Q_TYPE_F64]     = { "f64",         1,   8, false, false },
-    [Q36Q_TYPE_IQ1_M]   = { "iq1_m",   QK_K,  56, false, false },
-    [Q36Q_TYPE_BF16]    = { "bf16",        1,   2, false, false },
-    [Q36Q_TYPE_TQ1_0]   = { "tq1_0",   QK_K,  54, false, false },
-    [Q36Q_TYPE_TQ2_0]   = { "tq2_0",   QK_K,  66, false, false },
-    [Q36Q_TYPE_MXFP4]   = { "mxfp4",      32,  17, false, false },
-    [Q36Q_TYPE_NVFP4]   = { "nvfp4",      64,  36, false, false },
-    [Q36Q_TYPE_Q1_0]    = { "q1_0",      128,  18, false, false },
+static const p36q_traits p36q_type_traits[P36Q_TYPE_COUNT] = {
+    [P36Q_TYPE_F32]     = { "f32",      1,   4, false, false },
+    [P36Q_TYPE_F16]     = { "f16",      1,   2, false, false },
+    [P36Q_TYPE_Q4_0]    = { "q4_0",    32,  18, false, false },
+    [P36Q_TYPE_Q4_1]    = { "q4_1",    32,  20, false, false },
+    [P36Q_TYPE_Q5_0]    = { "q5_0",    32,  22, false, false },
+    [P36Q_TYPE_Q5_1]    = { "q5_1",    32,  24, false, false },
+    [P36Q_TYPE_Q8_0]    = { "q8_0",    32,  34, true,  false },
+    [P36Q_TYPE_Q8_1]    = { "q8_1",    32,  36, false, false },
+    [P36Q_TYPE_Q2_K]    = { "q2_K",  QK_K,  84, true,  false },
+    [P36Q_TYPE_Q3_K]    = { "q3_K",  QK_K, 110, false, false },
+    [P36Q_TYPE_Q4_K]    = { "q4_K",  QK_K, 144, true,  false },
+    [P36Q_TYPE_Q5_K]    = { "q5_K",  QK_K, 176, false, false },
+    [P36Q_TYPE_Q6_K]    = { "q6_K",  QK_K, 210, false, false },
+    [P36Q_TYPE_Q8_K]    = { "q8_K",  QK_K, 292, false, false },
+    [P36Q_TYPE_IQ2_XXS] = { "iq2_xxs", QK_K,  66, true,  true  },
+    [P36Q_TYPE_IQ2_XS]  = { "iq2_xs",  QK_K,  74, false, true  },
+    [P36Q_TYPE_IQ3_XXS] = { "iq3_xxs", QK_K,  98, false, false },
+    [P36Q_TYPE_IQ1_S]   = { "iq1_s",   QK_K,  50, false, true  },
+    [P36Q_TYPE_IQ4_NL]  = { "iq4_nl",     32,  18, false, false },
+    [P36Q_TYPE_IQ3_S]   = { "iq3_s",   QK_K, 110, false, false },
+    [P36Q_TYPE_IQ2_S]   = { "iq2_s",   QK_K,  82, false, false },
+    [P36Q_TYPE_IQ4_XS]  = { "iq4_xs",  QK_K, 136, false, false },
+    [P36Q_TYPE_I8]      = { "i8",          1,   1, false, false },
+    [P36Q_TYPE_I16]     = { "i16",         1,   2, false, false },
+    [P36Q_TYPE_I32]     = { "i32",         1,   4, false, false },
+    [P36Q_TYPE_I64]     = { "i64",         1,   8, false, false },
+    [P36Q_TYPE_F64]     = { "f64",         1,   8, false, false },
+    [P36Q_TYPE_IQ1_M]   = { "iq1_m",   QK_K,  56, false, false },
+    [P36Q_TYPE_BF16]    = { "bf16",        1,   2, false, false },
+    [P36Q_TYPE_TQ1_0]   = { "tq1_0",   QK_K,  54, false, false },
+    [P36Q_TYPE_TQ2_0]   = { "tq2_0",   QK_K,  66, false, false },
+    [P36Q_TYPE_MXFP4]   = { "mxfp4",      32,  17, false, false },
+    [P36Q_TYPE_NVFP4]   = { "nvfp4",      64,  36, false, false },
+    [P36Q_TYPE_Q1_0]    = { "q1_0",      128,  18, false, false },
 };
 
-static float q36q_f32_from_bits(uint32_t bits) {
+static float p36q_f32_from_bits(uint32_t bits) {
     union {
         uint32_t u;
         float f;
@@ -81,7 +81,7 @@ static float q36q_f32_from_bits(uint32_t bits) {
     return v.f;
 }
 
-static uint32_t q36q_f32_to_bits(float f) {
+static uint32_t p36q_f32_to_bits(float f) {
     union {
         float f;
         uint32_t u;
@@ -89,26 +89,26 @@ static uint32_t q36q_f32_to_bits(float f) {
     return v.u;
 }
 
-static uint16_t q36q_f32_to_f16(float f) {
+static uint16_t p36q_f32_to_f16(float f) {
     const float scale_to_inf = 0x1.0p+112f;
     const float scale_to_zero = 0x1.0p-110f;
     float base = (fabsf(f) * scale_to_inf) * scale_to_zero;
 
-    const uint32_t w = q36q_f32_to_bits(f);
+    const uint32_t w = p36q_f32_to_bits(f);
     const uint32_t shl1_w = w + w;
     const uint32_t sign = w & UINT32_C(0x80000000);
     uint32_t bias = shl1_w & UINT32_C(0xFF000000);
     if (bias < UINT32_C(0x71000000)) bias = UINT32_C(0x71000000);
 
-    base = q36q_f32_from_bits((bias >> 1) + UINT32_C(0x07800000)) + base;
-    const uint32_t out = q36q_f32_to_bits(base);
+    base = p36q_f32_from_bits((bias >> 1) + UINT32_C(0x07800000)) + base;
+    const uint32_t out = p36q_f32_to_bits(base);
     const uint32_t exp_bits = (out >> 13) & UINT32_C(0x00007C00);
     const uint32_t mantissa_bits = out & UINT32_C(0x00000FFF);
     const uint32_t nonsign = exp_bits + mantissa_bits;
     return (uint16_t)((sign >> 16) | (shl1_w > UINT32_C(0xFF000000) ? UINT16_C(0x7E00) : nonsign));
 }
 
-static int q36q_nearest_int(float fval) {
+static int p36q_nearest_int(float fval) {
     assert(fabsf(fval) <= 4194303.f);
     float val = fval + 12582912.f;
     int i;
@@ -116,7 +116,7 @@ static int q36q_nearest_int(float fval) {
     return (i & 0x007fffff) - 0x00400000;
 }
 
-static float q36q_make_qkx2_quants(int n, int nmax, const float *x, const float *weights,
+static float p36q_make_qkx2_quants(int n, int nmax, const float *x, const float *weights,
                                    uint8_t *L, float *the_min, uint8_t *Laux,
                                    float rmin, float rdelta, int nstep, bool use_mad) {
     float min = x[0];
@@ -140,8 +140,8 @@ static float q36q_make_qkx2_quants(int n, int nmax, const float *x, const float 
     float scale = 1 / iscale;
     float best_error = 0;
     for (int i = 0; i < n; i++) {
-        int l = q36q_nearest_int(iscale * (x[i] - min));
-        L[i] = Q36Q_MAX(0, Q36Q_MIN(nmax, l));
+        int l = p36q_nearest_int(iscale * (x[i] - min));
+        L[i] = P36Q_MAX(0, P36Q_MIN(nmax, l));
         float diff = scale * L[i] + min - x[i];
         diff = use_mad ? fabsf(diff) : diff * diff;
         best_error += weights[i] * diff;
@@ -155,8 +155,8 @@ static float q36q_make_qkx2_quants(int n, int nmax, const float *x, const float 
         iscale = (rmin + rdelta * is + nmax) / (max - min);
         float sum_l = 0, sum_l2 = 0, sum_xl = 0;
         for (int i = 0; i < n; i++) {
-            int l = q36q_nearest_int(iscale * (x[i] - min));
-            l = Q36Q_MAX(0, Q36Q_MIN(nmax, l));
+            int l = p36q_nearest_int(iscale * (x[i] - min));
+            l = P36Q_MAX(0, P36Q_MIN(nmax, l));
             Laux[i] = l;
             float w = weights[i];
             sum_l += w * l;
@@ -189,7 +189,7 @@ static float q36q_make_qkx2_quants(int n, int nmax, const float *x, const float 
     return scale;
 }
 
-static float q36q_make_qkx3_quants(int n, int nmax, const float *x, const float *weights,
+static float p36q_make_qkx3_quants(int n, int nmax, const float *x, const float *weights,
                                    uint8_t *L, float *the_min, uint8_t *Laux,
                                    float rmin, float rdelta, int nstep, bool use_mad) {
     float min = x[0];
@@ -213,8 +213,8 @@ static float q36q_make_qkx3_quants(int n, int nmax, const float *x, const float 
     float scale = 1 / iscale;
     float best_mad = 0;
     for (int i = 0; i < n; i++) {
-        int l = q36q_nearest_int(iscale * (x[i] - min));
-        L[i] = Q36Q_MAX(0, Q36Q_MIN(nmax, l));
+        int l = p36q_nearest_int(iscale * (x[i] - min));
+        L[i] = P36Q_MAX(0, P36Q_MIN(nmax, l));
         float diff = scale * L[i] + min - x[i];
         diff = use_mad ? fabsf(diff) : diff * diff;
         float w = weights ? weights[i] : x[i] * x[i];
@@ -229,8 +229,8 @@ static float q36q_make_qkx3_quants(int n, int nmax, const float *x, const float 
         iscale = (rmin + rdelta * is + nmax) / (max - min);
         float sum_l = 0, sum_l2 = 0, sum_xl = 0;
         for (int i = 0; i < n; i++) {
-            int l = q36q_nearest_int(iscale * (x[i] - min));
-            l = Q36Q_MAX(0, Q36Q_MIN(nmax, l));
+            int l = p36q_nearest_int(iscale * (x[i] - min));
+            l = P36Q_MAX(0, P36Q_MIN(nmax, l));
             Laux[i] = l;
             float w = weights ? weights[i] : x[i] * x[i];
             sum_l += w * l;
@@ -264,15 +264,15 @@ static float q36q_make_qkx3_quants(int n, int nmax, const float *x, const float 
     return scale;
 }
 
-static float q36q_make_qp_quants(int n, int nmax, const float *x, uint8_t *L, const float *quant_weights) {
+static float p36q_make_qp_quants(int n, int nmax, const float *x, uint8_t *L, const float *quant_weights) {
     float max = 0;
-    for (int i = 0; i < n; i++) max = Q36Q_MAX(max, x[i]);
-    if (max < Q36Q_GROUP_MAX_EPS) {
+    for (int i = 0; i < n; i++) max = P36Q_MAX(max, x[i]);
+    if (max < P36Q_GROUP_MAX_EPS) {
         memset(L, 0, (size_t)n);
         return 0.0f;
     }
     float iscale = nmax / max;
-    for (int i = 0; i < n; i++) L[i] = q36q_nearest_int(iscale * x[i]);
+    for (int i = 0; i < n; i++) L[i] = p36q_nearest_int(iscale * x[i]);
     float scale = 1 / iscale;
     float best_mse = 0;
     for (int i = 0; i < n; i++) {
@@ -285,8 +285,8 @@ static float q36q_make_qp_quants(int n, int nmax, const float *x, uint8_t *L, co
         float scale_is = 1 / iscale_is;
         float mse = 0;
         for (int i = 0; i < n; i++) {
-            int l = q36q_nearest_int(iscale_is * x[i]);
-            l = Q36Q_MIN(nmax, l);
+            int l = p36q_nearest_int(iscale_is * x[i]);
+            l = P36Q_MIN(nmax, l);
             float diff = x[i] - scale_is * l;
             mse += quant_weights[i] * diff * diff;
         }
@@ -297,8 +297,8 @@ static float q36q_make_qp_quants(int n, int nmax, const float *x, uint8_t *L, co
     }
     float sumlx = 0, suml2 = 0;
     for (int i = 0; i < n; i++) {
-        int l = q36q_nearest_int(iscale * x[i]);
-        l = Q36Q_MIN(nmax, l);
+        int l = p36q_nearest_int(iscale * x[i]);
+        l = P36Q_MIN(nmax, l);
         L[i] = l;
         float w = quant_weights[i];
         sumlx += w * x[i] * l;
@@ -311,8 +311,8 @@ static float q36q_make_qp_quants(int n, int nmax, const float *x, uint8_t *L, co
             float slx = sumlx - w * x[i] * L[i];
             float sl2 = suml2 - w * L[i] * L[i];
             if (slx > 0 && sl2 > 0) {
-                int new_l = q36q_nearest_int(x[i] * sl2 / slx);
-                new_l = Q36Q_MIN(nmax, new_l);
+                int new_l = p36q_nearest_int(x[i] * sl2 / slx);
+                new_l = P36Q_MIN(nmax, new_l);
                 if (new_l != L[i]) {
                     slx += w * x[i] * new_l;
                     sl2 += w * new_l * new_l;
@@ -330,7 +330,7 @@ static float q36q_make_qp_quants(int n, int nmax, const float *x, uint8_t *L, co
     return suml2 > 0.0f ? sumlx / suml2 : 0.0f;
 }
 
-static void q36q_get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
+static void p36q_get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
     if (j < 4) {
         *d = q[j] & 63;
         *m = q[j + 4] & 63;
@@ -340,10 +340,10 @@ static void q36q_get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *
     }
 }
 
-static size_t q36q_quantize_q8_0(const float *src, void *dst, int64_t start,
+static size_t p36q_quantize_q8_0(const float *src, void *dst, int64_t start,
                                  int64_t nrows, int64_t ncols) {
     const int64_t qk = 32;
-    const size_t row_size = q36q_row_size(Q36Q_TYPE_Q8_0, ncols);
+    const size_t row_size = p36q_row_size(P36Q_TYPE_Q8_0, ncols);
     const int64_t start_row = start / ncols;
     uint8_t *out = (uint8_t *)dst + (size_t)start_row * row_size;
     const int64_t nblocks = nrows * (ncols / qk);
@@ -358,7 +358,7 @@ static size_t q36q_quantize_q8_0(const float *src, void *dst, int64_t start,
 
         const float d = amax / 127.0f;
         const float id = d ? 1.0f / d : 0.0f;
-        const uint16_t hd = q36q_f32_to_f16(d);
+        const uint16_t hd = p36q_f32_to_f16(d);
         memcpy(out, &hd, sizeof(hd));
 
         int8_t *qs = (int8_t *)(out + sizeof(hd));
@@ -368,7 +368,7 @@ static size_t q36q_quantize_q8_0(const float *src, void *dst, int64_t start,
     return (size_t)nrows * row_size;
 }
 
-static void q36q_write_q4_k_block_ref(const float *x, uint8_t *y) {
+static void p36q_write_q4_k_block_ref(const float *x, uint8_t *y) {
     enum { scales_off = 4, qs_off = 16 };
     uint8_t L[QK_K];
     uint8_t Laux[32];
@@ -385,7 +385,7 @@ static void q36q_write_q4_k_block_ref(const float *x, uint8_t *y) {
         for (int l = 0; l < 32; l++) sum_x2 += x[32 * j + l] * x[32 * j + l];
         float av_x = sqrtf(sum_x2 / 32);
         for (int l = 0; l < 32; l++) weights[l] = av_x + fabsf(x[32 * j + l]);
-        scales[j] = q36q_make_qkx2_quants(32, 15, x + 32 * j, weights, L + 32 * j,
+        scales[j] = p36q_make_qkx2_quants(32, 15, x + 32 * j, weights, L + 32 * j,
                                            &mins[j], Laux, -1.0f, 0.1f, 20, false);
         if (scales[j] > max_scale) max_scale = scales[j];
         if (mins[j] > max_min) max_min = mins[j];
@@ -394,10 +394,10 @@ static void q36q_write_q4_k_block_ref(const float *x, uint8_t *y) {
     float inv_scale = max_scale > 0 ? 63.0f / max_scale : 0.0f;
     float inv_min = max_min > 0 ? 63.0f / max_min : 0.0f;
     for (int j = 0; j < QK_K / 32; j++) {
-        uint8_t ls = q36q_nearest_int(inv_scale * scales[j]);
-        uint8_t lm = q36q_nearest_int(inv_min * mins[j]);
-        ls = Q36Q_MIN(63, ls);
-        lm = Q36Q_MIN(63, lm);
+        uint8_t ls = p36q_nearest_int(inv_scale * scales[j]);
+        uint8_t lm = p36q_nearest_int(inv_min * mins[j]);
+        ls = P36Q_MIN(63, ls);
+        lm = P36Q_MIN(63, lm);
         if (j < 4) {
             scales_out[j] = ls;
             scales_out[j + 4] = lm;
@@ -408,20 +408,20 @@ static void q36q_write_q4_k_block_ref(const float *x, uint8_t *y) {
         }
     }
 
-    uint16_t d = q36q_f32_to_f16(max_scale / 63.0f);
-    uint16_t dmin = q36q_f32_to_f16(max_min / 63.0f);
+    uint16_t d = p36q_f32_to_f16(max_scale / 63.0f);
+    uint16_t dmin = p36q_f32_to_f16(max_min / 63.0f);
     memcpy(y + 0, &d, sizeof(d));
     memcpy(y + 2, &dmin, sizeof(dmin));
 
     uint8_t sc, m;
     for (int j = 0; j < QK_K / 32; j++) {
-        q36q_get_scale_min_k4(j, scales_out, &sc, &m);
-        const float dd = q36q_f16_to_f32(d) * sc;
+        p36q_get_scale_min_k4(j, scales_out, &sc, &m);
+        const float dd = p36q_f16_to_f32(d) * sc;
         if (!dd) continue;
-        const float dm = q36q_f16_to_f32(dmin) * m;
+        const float dm = p36q_f16_to_f32(dmin) * m;
         for (int ii = 0; ii < 32; ii++) {
-            int l = q36q_nearest_int((x[32 * j + ii] + dm) / dd);
-            l = Q36Q_MAX(0, Q36Q_MIN(15, l));
+            int l = p36q_nearest_int((x[32 * j + ii] + dm) / dd);
+            l = P36Q_MAX(0, P36Q_MIN(15, l));
             L[32 * j + ii] = l;
         }
     }
@@ -433,7 +433,7 @@ static void q36q_write_q4_k_block_ref(const float *x, uint8_t *y) {
     }
 }
 
-static void q36q_write_q4_k_block_weighted(const float *x, uint8_t *y, const float *quant_weights) {
+static void p36q_write_q4_k_block_weighted(const float *x, uint8_t *y, const float *quant_weights) {
     enum { scales_off = 4, qs_off = 16 };
     uint8_t L[QK_K];
     uint8_t Laux[32];
@@ -461,12 +461,12 @@ static void q36q_write_q4_k_block_weighted(const float *x, uint8_t *y, const flo
         float sumw = 0;
         for (int l = 0; l < 32; l++) sumw += weights[l];
         sw[j] = sumw;
-        scales[j] = q36q_make_qkx3_quants(32, 15, x + 32 * j, weights, L + 32 * j,
+        scales[j] = p36q_make_qkx3_quants(32, 15, x + 32 * j, weights, L + 32 * j,
                                            &mins[j], Laux, -0.9f, 0.05f, 36, false);
     }
 
-    float d_block = q36q_make_qp_quants(QK_K / 32, 63, scales, Ls, sw);
-    float m_block = q36q_make_qp_quants(QK_K / 32, 63, mins, Lm, sw);
+    float d_block = p36q_make_qp_quants(QK_K / 32, 63, scales, Ls, sw);
+    float m_block = p36q_make_qp_quants(QK_K / 32, 63, mins, Lm, sw);
     for (int j = 0; j < QK_K / 32; j++) {
         uint8_t ls = Ls[j];
         uint8_t lm = Lm[j];
@@ -480,20 +480,20 @@ static void q36q_write_q4_k_block_weighted(const float *x, uint8_t *y, const flo
         }
     }
 
-    uint16_t d = q36q_f32_to_f16(d_block);
-    uint16_t dmin = q36q_f32_to_f16(m_block);
+    uint16_t d = p36q_f32_to_f16(d_block);
+    uint16_t dmin = p36q_f32_to_f16(m_block);
     memcpy(y + 0, &d, sizeof(d));
     memcpy(y + 2, &dmin, sizeof(dmin));
 
     uint8_t sc, m;
     for (int j = 0; j < QK_K / 32; j++) {
-        q36q_get_scale_min_k4(j, scales_out, &sc, &m);
-        const float dd = q36q_f16_to_f32(d) * sc;
+        p36q_get_scale_min_k4(j, scales_out, &sc, &m);
+        const float dd = p36q_f16_to_f32(d) * sc;
         if (!dd) continue;
-        const float dm = q36q_f16_to_f32(dmin) * m;
+        const float dm = p36q_f16_to_f32(dmin) * m;
         for (int ii = 0; ii < 32; ii++) {
-            int l = q36q_nearest_int((x[32 * j + ii] + dm) / dd);
-            l = Q36Q_MAX(0, Q36Q_MIN(15, l));
+            int l = p36q_nearest_int((x[32 * j + ii] + dm) / dd);
+            l = P36Q_MAX(0, P36Q_MIN(15, l));
             L[32 * j + ii] = l;
         }
     }
@@ -505,9 +505,9 @@ static void q36q_write_q4_k_block_weighted(const float *x, uint8_t *y, const flo
     }
 }
 
-static size_t q36q_quantize_q4_k(const float *src, void *dst, int64_t start,
+static size_t p36q_quantize_q4_k(const float *src, void *dst, int64_t start,
                                  int64_t nrows, int64_t ncols, const float *quant_weights) {
-    const size_t row_size = q36q_row_size(Q36Q_TYPE_Q4_K, ncols);
+    const size_t row_size = p36q_row_size(P36Q_TYPE_Q4_K, ncols);
     const int64_t start_row = start / ncols;
     uint8_t *out = (uint8_t *)dst + (size_t)start_row * row_size;
     const int64_t blocks_per_row = ncols / QK_K;
@@ -515,19 +515,19 @@ static size_t q36q_quantize_q4_k(const float *src, void *dst, int64_t start,
     for (int64_t row = 0; row < nrows; row++) {
         const float *xrow = src + start + (size_t)row * (size_t)ncols;
         for (int64_t b = 0; b < blocks_per_row; b++) {
-            uint8_t *block = out + (size_t)row * row_size + (size_t)b * q36q_type_traits[Q36Q_TYPE_Q4_K].type_size;
+            uint8_t *block = out + (size_t)row * row_size + (size_t)b * p36q_type_traits[P36Q_TYPE_Q4_K].type_size;
             const float *x = xrow + (size_t)b * QK_K;
             if (quant_weights) {
-                q36q_write_q4_k_block_weighted(x, block, quant_weights + (size_t)b * QK_K);
+                p36q_write_q4_k_block_weighted(x, block, quant_weights + (size_t)b * QK_K);
             } else {
-                q36q_write_q4_k_block_ref(x, block);
+                p36q_write_q4_k_block_ref(x, block);
             }
         }
     }
     return (size_t)nrows * row_size;
 }
 
-static void q36q_write_q2_k_block_ref(const float *x, uint8_t *y) {
+static void p36q_write_q2_k_block_ref(const float *x, uint8_t *y) {
     enum { scales_off = 0, qs_off = 16, d_off = 80, dmin_off = 82 };
     const float q4scale = 15.0f;
     uint8_t L[QK_K];
@@ -542,7 +542,7 @@ static void q36q_write_q2_k_block_ref(const float *x, uint8_t *y) {
     float max_min = 0;
     for (int j = 0; j < QK_K / 16; j++) {
         for (int l = 0; l < 16; l++) weights[l] = fabsf(x[16 * j + l]);
-        scales[j] = q36q_make_qkx2_quants(16, 3, x + 16 * j, weights, L + 16 * j,
+        scales[j] = p36q_make_qkx2_quants(16, 3, x + 16 * j, weights, L + 16 * j,
                                            &mins[j], Laux, -0.5f, 0.1f, 15, true);
         if (scales[j] > max_scale) max_scale = scales[j];
         if (mins[j] > max_min) max_min = mins[j];
@@ -551,29 +551,29 @@ static void q36q_write_q2_k_block_ref(const float *x, uint8_t *y) {
     uint16_t hd, hmin;
     if (max_scale > 0) {
         float iscale = q4scale / max_scale;
-        for (int j = 0; j < QK_K / 16; j++) scales_out[j] = q36q_nearest_int(iscale * scales[j]);
-        hd = q36q_f32_to_f16(max_scale / q4scale);
+        for (int j = 0; j < QK_K / 16; j++) scales_out[j] = p36q_nearest_int(iscale * scales[j]);
+        hd = p36q_f32_to_f16(max_scale / q4scale);
     } else {
         memset(scales_out, 0, QK_K / 16);
-        hd = q36q_f32_to_f16(0.0f);
+        hd = p36q_f32_to_f16(0.0f);
     }
     if (max_min > 0) {
         float iscale = q4scale / max_min;
-        for (int j = 0; j < QK_K / 16; j++) scales_out[j] |= q36q_nearest_int(iscale * mins[j]) << 4;
-        hmin = q36q_f32_to_f16(max_min / q4scale);
+        for (int j = 0; j < QK_K / 16; j++) scales_out[j] |= p36q_nearest_int(iscale * mins[j]) << 4;
+        hmin = p36q_f32_to_f16(max_min / q4scale);
     } else {
-        hmin = q36q_f32_to_f16(0.0f);
+        hmin = p36q_f32_to_f16(0.0f);
     }
     memcpy(y + d_off, &hd, sizeof(hd));
     memcpy(y + dmin_off, &hmin, sizeof(hmin));
 
     for (int j = 0; j < QK_K / 16; j++) {
-        const float d = q36q_f16_to_f32(hd) * (scales_out[j] & 0xF);
+        const float d = p36q_f16_to_f32(hd) * (scales_out[j] & 0xF);
         if (!d) continue;
-        const float dm = q36q_f16_to_f32(hmin) * (scales_out[j] >> 4);
+        const float dm = p36q_f16_to_f32(hmin) * (scales_out[j] >> 4);
         for (int ii = 0; ii < 16; ii++) {
-            int l = q36q_nearest_int((x[16 * j + ii] + dm) / d);
-            l = Q36Q_MAX(0, Q36Q_MIN(3, l));
+            int l = p36q_nearest_int((x[16 * j + ii] + dm) / d);
+            l = P36Q_MAX(0, P36Q_MIN(3, l));
             L[16 * j + ii] = l;
         }
     }
@@ -586,7 +586,7 @@ static void q36q_write_q2_k_block_ref(const float *x, uint8_t *y) {
     }
 }
 
-static void q36q_write_q2_k_block_weighted(const float *x, uint8_t *y, const float *quant_weights) {
+static void p36q_write_q2_k_block_weighted(const float *x, uint8_t *y, const float *quant_weights) {
     enum { scales_off = 0, qs_off = 16, d_off = 80, dmin_off = 82 };
     uint8_t L[QK_K];
     uint8_t Laux[16];
@@ -606,18 +606,18 @@ static void q36q_write_q2_k_block_weighted(const float *x, uint8_t *y, const flo
         const float *qw = quant_weights + 16 * j;
         for (int l = 0; l < 16; l++) weight[l] = qw[l] * sqrtf(sigma2 + x[16 * j + l] * x[16 * j + l]);
         for (int l = 0; l < QK_K / 16; l++) sw[j] += weight[l];
-        scales[j] = q36q_make_qkx3_quants(16, 3, x + 16 * j, weight, L + 16 * j,
+        scales[j] = p36q_make_qkx3_quants(16, 3, x + 16 * j, weight, L + 16 * j,
                                            &mins[j], Laux, -0.9f, 0.05f, 36, false);
     }
 
-    float dm = q36q_make_qp_quants(QK_K / 16, 15, scales, Ls, sw);
-    float mm = q36q_make_qp_quants(QK_K / 16, 15, mins, Lm, sw);
-    uint16_t hd = q36q_f32_to_f16(dm);
-    uint16_t hmin = q36q_f32_to_f16(mm);
+    float dm = p36q_make_qp_quants(QK_K / 16, 15, scales, Ls, sw);
+    float mm = p36q_make_qp_quants(QK_K / 16, 15, mins, Lm, sw);
+    uint16_t hd = p36q_f32_to_f16(dm);
+    uint16_t hmin = p36q_f32_to_f16(mm);
     memcpy(y + d_off, &hd, sizeof(hd));
     memcpy(y + dmin_off, &hmin, sizeof(hmin));
-    dm = q36q_f16_to_f32(hd);
-    mm = q36q_f16_to_f32(hmin);
+    dm = p36q_f16_to_f32(hd);
+    mm = p36q_f16_to_f32(hmin);
 
     for (int j = 0; j < QK_K / 16; j++) scales_out[j] = Ls[j] | (Lm[j] << 4);
 
@@ -626,8 +626,8 @@ static void q36q_write_q2_k_block_weighted(const float *x, uint8_t *y, const flo
         if (!d) continue;
         const float m = mm * (scales_out[j] >> 4);
         for (int ii = 0; ii < 16; ii++) {
-            int l = q36q_nearest_int((x[16 * j + ii] + m) / d);
-            l = Q36Q_MAX(0, Q36Q_MIN(3, l));
+            int l = p36q_nearest_int((x[16 * j + ii] + m) / d);
+            l = P36Q_MAX(0, P36Q_MIN(3, l));
             L[16 * j + ii] = l;
         }
     }
@@ -640,9 +640,9 @@ static void q36q_write_q2_k_block_weighted(const float *x, uint8_t *y, const flo
     }
 }
 
-static size_t q36q_quantize_q2_k(const float *src, void *dst, int64_t start,
+static size_t p36q_quantize_q2_k(const float *src, void *dst, int64_t start,
                                  int64_t nrows, int64_t ncols, const float *quant_weights) {
-    const size_t row_size = q36q_row_size(Q36Q_TYPE_Q2_K, ncols);
+    const size_t row_size = p36q_row_size(P36Q_TYPE_Q2_K, ncols);
     const int64_t start_row = start / ncols;
     uint8_t *out = (uint8_t *)dst + (size_t)start_row * row_size;
     const int64_t blocks_per_row = ncols / QK_K;
@@ -650,12 +650,12 @@ static size_t q36q_quantize_q2_k(const float *src, void *dst, int64_t start,
     for (int64_t row = 0; row < nrows; row++) {
         const float *xrow = src + start + (size_t)row * (size_t)ncols;
         for (int64_t b = 0; b < blocks_per_row; b++) {
-            uint8_t *block = out + (size_t)row * row_size + (size_t)b * q36q_type_traits[Q36Q_TYPE_Q2_K].type_size;
+            uint8_t *block = out + (size_t)row * row_size + (size_t)b * p36q_type_traits[P36Q_TYPE_Q2_K].type_size;
             const float *x = xrow + (size_t)b * QK_K;
             if (quant_weights) {
-                q36q_write_q2_k_block_weighted(x, block, quant_weights + (size_t)b * QK_K);
+                p36q_write_q2_k_block_weighted(x, block, quant_weights + (size_t)b * QK_K);
             } else {
-                q36q_write_q2_k_block_ref(x, block);
+                p36q_write_q2_k_block_ref(x, block);
             }
         }
     }
@@ -666,11 +666,11 @@ typedef struct {
     uint64_t *grid;
     int *map;
     uint16_t *neighbours;
-} q36q_iq2_data;
+} p36q_iq2_data;
 
-static q36q_iq2_data q36q_iq2_xxs_data;
+static p36q_iq2_data p36q_iq2_xxs_data;
 
-static int q36q_iq2_compare_func(const void *left, const void *right) {
+static int p36q_iq2_compare_func(const void *left, const void *right) {
     const int *l = (const int *)left;
     const int *r = (const int *)right;
     return l[0] < r[0] ? -1 :
@@ -688,11 +688,11 @@ static int q36q_iq2_compare_func(const void *left, const void *right) {
  * initialization we build the direct map for allowed tuples and a nearest-grid
  * list for the missing ones, matching the GGML search exactly.
  */
-static void q36q_iq2_xxs_init(void) {
-    if (q36q_iq2_xxs_data.grid) return;
-    pthread_mutex_lock(&q36q_init_mutex);
-    if (q36q_iq2_xxs_data.grid) {
-        pthread_mutex_unlock(&q36q_init_mutex);
+static void p36q_iq2_xxs_init(void) {
+    if (p36q_iq2_xxs_data.grid) return;
+    pthread_mutex_lock(&p36q_init_mutex);
+    if (p36q_iq2_xxs_data.grid) {
+        pthread_mutex_unlock(&p36q_init_mutex);
         return;
     }
 
@@ -746,7 +746,7 @@ static void q36q_iq2_xxs_init(void) {
             dist2[2 * j + 0] = d2;
             dist2[2 * j + 1] = j;
         }
-        qsort(dist2, grid_size, 2 * sizeof(int), q36q_iq2_compare_func);
+        qsort(dist2, grid_size, 2 * sizeof(int), p36q_iq2_compare_func);
         int d2 = dist2[0], have = 1;
         for (int j = 0; j < grid_size; j++) {
             if (dist2[2 * j] > d2) {
@@ -771,7 +771,7 @@ static void q36q_iq2_xxs_init(void) {
             dist2[2 * j + 0] = d2;
             dist2[2 * j + 1] = j;
         }
-        qsort(dist2, grid_size, 2 * sizeof(int), q36q_iq2_compare_func);
+        qsort(dist2, grid_size, 2 * sizeof(int), p36q_iq2_compare_func);
         map[i] = -(counter + 1);
         int d2 = dist2[0], have = 1;
         uint16_t *start = &neighbours[counter++];
@@ -789,13 +789,13 @@ static void q36q_iq2_xxs_init(void) {
     }
 
     free(dist2);
-    q36q_iq2_xxs_data.map = map;
-    q36q_iq2_xxs_data.neighbours = neighbours;
-    q36q_iq2_xxs_data.grid = grid;
-    pthread_mutex_unlock(&q36q_init_mutex);
+    p36q_iq2_xxs_data.map = map;
+    p36q_iq2_xxs_data.neighbours = neighbours;
+    p36q_iq2_xxs_data.grid = grid;
+    pthread_mutex_unlock(&p36q_init_mutex);
 }
 
-static int q36q_iq2_find_best_neighbour(const uint16_t *neighbours, const uint64_t *grid,
+static int p36q_iq2_find_best_neighbour(const uint16_t *neighbours, const uint64_t *grid,
                                         const float *xval, const float *weight,
                                         float scale, uint8_t *L) {
     int num_neighbors = neighbours[0];
@@ -821,7 +821,7 @@ static int q36q_iq2_find_best_neighbour(const uint16_t *neighbours, const uint64
     return grid_index;
 }
 
-static void q36q_write_iq2_xxs_block(const float *x, uint8_t *y, const float *quant_weights) {
+static void p36q_write_iq2_xxs_block(const float *x, uint8_t *y, const float *quant_weights) {
     enum { d_off = 0, qs_off = 2, block_size = 32, k_max_q = 3 };
     assert(quant_weights);
 
@@ -834,13 +834,13 @@ static void q36q_write_iq2_xxs_block(const float *x, uint8_t *y, const float *qu
     float waux[block_size];
     uint8_t block_signs[4];
 
-    uint16_t hd = q36q_f32_to_f16(0.0f);
+    uint16_t hd = p36q_f32_to_f16(0.0f);
     memcpy(y + d_off, &hd, sizeof(hd));
     memset(q2, 0, sizeof(q2));
 
-    const uint64_t *grid = q36q_iq2_xxs_data.grid;
-    const int *map = q36q_iq2_xxs_data.map;
-    const uint16_t *neighbours = q36q_iq2_xxs_data.neighbours;
+    const uint64_t *grid = p36q_iq2_xxs_data.grid;
+    const int *map = p36q_iq2_xxs_data.map;
+    const uint16_t *neighbours = p36q_iq2_xxs_data.neighbours;
     assert(grid && map && neighbours);
 
     float sumx2 = 0;
@@ -885,14 +885,14 @@ static void q36q_write_iq2_xxs_block(const float *x, uint8_t *y, const float *qu
         }
 
         float max = xval[0];
-        for (int i = 1; i < block_size; i++) max = Q36Q_MAX(max, xval[i]);
-        if (max < Q36Q_GROUP_MAX_EPS) {
+        for (int i = 1; i < block_size; i++) max = P36Q_MAX(max, xval[i]);
+        if (max < P36Q_GROUP_MAX_EPS) {
             scales[ib] = 0;
             memset(L, 0, sizeof(L));
             continue;
         }
 
-        float scale = q36q_make_qp_quants(block_size, k_max_q + 1, xval, L, weight);
+        float scale = p36q_make_qp_quants(block_size, k_max_q + 1, xval, L, weight);
         float eff_max = scale * k_max_q;
         if (eff_max <= 0) {
             scales[ib] = 0;
@@ -907,15 +907,15 @@ static void q36q_write_iq2_xxs_block(const float *x, uint8_t *y, const float *qu
             for (int k = 0; k < 4; k++) {
                 uint16_t u = 0;
                 for (int i = 0; i < 8; i++) {
-                    int l = q36q_nearest_int(0.5f * (id * xval[8 * k + i] - 1));
-                    l = Q36Q_MAX(0, Q36Q_MIN(k_max_q - 1, l));
+                    int l = p36q_nearest_int(0.5f * (id * xval[8 * k + i] - 1));
+                    l = P36Q_MAX(0, P36Q_MIN(k_max_q - 1, l));
                     Laux[8 * k + i] = (uint8_t)l;
                     u |= (uint16_t)(l << (2 * i));
                 }
                 int grid_index = map[u];
                 if (grid_index < 0) {
                     const uint16_t *nbs = neighbours - map[u] - 1;
-                    q36q_iq2_find_best_neighbour(nbs, grid, xval + 8 * k, waux + 8 * k,
+                    p36q_iq2_find_best_neighbour(nbs, grid, xval + 8 * k, waux + 8 * k,
                                                  this_scale, Laux + 8 * k);
                 }
             }
@@ -938,14 +938,14 @@ static void q36q_write_iq2_xxs_block(const float *x, uint8_t *y, const float *qu
             for (int k = 0; k < 4; k++) {
                 uint16_t u = 0;
                 for (int i = 0; i < 8; i++) {
-                    int l = q36q_nearest_int(0.5f * (id * xval[8 * k + i] - 1));
-                    l = Q36Q_MAX(0, Q36Q_MIN(k_max_q - 1, l));
+                    int l = p36q_nearest_int(0.5f * (id * xval[8 * k + i] - 1));
+                    l = P36Q_MAX(0, P36Q_MIN(k_max_q - 1, l));
                     u |= (uint16_t)(l << (2 * i));
                 }
                 int grid_index = map[u];
                 if (grid_index < 0) {
                     const uint16_t *nbs = neighbours - map[u] - 1;
-                    grid_index = q36q_iq2_find_best_neighbour(nbs, grid, xval + 8 * k,
+                    grid_index = p36q_iq2_find_best_neighbour(nbs, grid, xval + 8 * k,
                                                               waux + 8 * k, scale, L + 8 * k);
                 }
                 const int8_t *pg = (const int8_t *)(grid + grid_index);
@@ -976,7 +976,7 @@ static void q36q_write_iq2_xxs_block(const float *x, uint8_t *y, const float *qu
         }
         assert(scale >= 0);
         scales[ib] = scale;
-        max_scale = Q36Q_MAX(max_scale, scale);
+        max_scale = P36Q_MAX(max_scale, scale);
     }
 
     if (!max_scale) {
@@ -985,22 +985,22 @@ static void q36q_write_iq2_xxs_block(const float *x, uint8_t *y, const float *qu
     }
 
     float d = max_scale / 31;
-    hd = q36q_f32_to_f16(d);
+    hd = p36q_f32_to_f16(d);
     memcpy(y + d_off, &hd, sizeof(hd));
     float id = 1 / d;
     for (int ib = 0; ib < QK_K / block_size; ib++) {
-        int l = q36q_nearest_int(0.5f * (id * scales[ib] - 1));
-        l = Q36Q_MAX(0, Q36Q_MIN(15, l));
+        int l = p36q_nearest_int(0.5f * (id * scales[ib] - 1));
+        l = P36Q_MAX(0, P36Q_MIN(15, l));
         q2[2 * ib + 1] |= (uint32_t)l << 28;
     }
     memcpy(y + qs_off, q2, QK_K / 4);
 }
 
-static size_t q36q_quantize_iq2_xxs(const float *src, void *dst, int64_t start,
+static size_t p36q_quantize_iq2_xxs(const float *src, void *dst, int64_t start,
                                     int64_t nrows, int64_t ncols, const float *quant_weights) {
     assert(quant_weights);
-    q36q_iq2_xxs_init();
-    const size_t row_size = q36q_row_size(Q36Q_TYPE_IQ2_XXS, ncols);
+    p36q_iq2_xxs_init();
+    const size_t row_size = p36q_row_size(P36Q_TYPE_IQ2_XXS, ncols);
     const int64_t start_row = start / ncols;
     uint8_t *out = (uint8_t *)dst + (size_t)start_row * row_size;
     const int64_t blocks_per_row = ncols / QK_K;
@@ -1008,62 +1008,62 @@ static size_t q36q_quantize_iq2_xxs(const float *src, void *dst, int64_t start,
     for (int64_t row = 0; row < nrows; row++) {
         const float *xrow = src + start + (size_t)row * (size_t)ncols;
         for (int64_t b = 0; b < blocks_per_row; b++) {
-            uint8_t *block = out + (size_t)row * row_size + (size_t)b * q36q_type_traits[Q36Q_TYPE_IQ2_XXS].type_size;
-            q36q_write_iq2_xxs_block(xrow + (size_t)b * QK_K, block,
+            uint8_t *block = out + (size_t)row * row_size + (size_t)b * p36q_type_traits[P36Q_TYPE_IQ2_XXS].type_size;
+            p36q_write_iq2_xxs_block(xrow + (size_t)b * QK_K, block,
                                      quant_weights + (size_t)b * QK_K);
         }
     }
     return (size_t)nrows * row_size;
 }
 
-const char *q36q_type_name(q36q_type type) {
-    if (type < 0 || type >= Q36Q_TYPE_COUNT) return NULL;
-    return q36q_type_traits[type].name;
+const char *p36q_type_name(p36q_type type) {
+    if (type < 0 || type >= P36Q_TYPE_COUNT) return NULL;
+    return p36q_type_traits[type].name;
 }
 
-bool q36q_can_quantize(q36q_type type) {
-    if (type < 0 || type >= Q36Q_TYPE_COUNT) return false;
-    return q36q_type_traits[type].can_quantize;
+bool p36q_can_quantize(p36q_type type) {
+    if (type < 0 || type >= P36Q_TYPE_COUNT) return false;
+    return p36q_type_traits[type].can_quantize;
 }
 
-int64_t q36q_block_size(q36q_type type) {
-    if (type < 0 || type >= Q36Q_TYPE_COUNT) return 0;
-    return q36q_type_traits[type].block_size;
+int64_t p36q_block_size(p36q_type type) {
+    if (type < 0 || type >= P36Q_TYPE_COUNT) return 0;
+    return p36q_type_traits[type].block_size;
 }
 
-size_t q36q_row_size(q36q_type type, int64_t ne) {
-    if (type < 0 || type >= Q36Q_TYPE_COUNT) return 0;
-    const q36q_traits *tr = &q36q_type_traits[type];
+size_t p36q_row_size(p36q_type type, int64_t ne) {
+    if (type < 0 || type >= P36Q_TYPE_COUNT) return 0;
+    const p36q_traits *tr = &p36q_type_traits[type];
     if (tr->block_size <= 0 || tr->type_size == 0 || ne % tr->block_size != 0) return 0;
     return tr->type_size * (size_t)(ne / tr->block_size);
 }
 
-bool q36q_requires_imatrix(q36q_type type) {
-    if (type < 0 || type >= Q36Q_TYPE_COUNT) return false;
-    return q36q_type_traits[type].requires_imatrix;
+bool p36q_requires_imatrix(p36q_type type) {
+    if (type < 0 || type >= P36Q_TYPE_COUNT) return false;
+    return p36q_type_traits[type].requires_imatrix;
 }
 
-void q36q_quantize_init(q36q_type type) {
-    if (type == Q36Q_TYPE_IQ2_XXS) {
-        q36q_iq2_xxs_init();
+void p36q_quantize_init(p36q_type type) {
+    if (type == P36Q_TYPE_IQ2_XXS) {
+        p36q_iq2_xxs_init();
     }
 }
 
-size_t q36q_quantize_chunk(q36q_type type, const float *src, void *dst,
+size_t p36q_quantize_chunk(p36q_type type, const float *src, void *dst,
                            int64_t start, int64_t nrows, int64_t ncols,
                            const float *imatrix) {
-    if (type == Q36Q_TYPE_Q8_0) {
+    if (type == P36Q_TYPE_Q8_0) {
         (void)imatrix;
-        return q36q_quantize_q8_0(src, dst, start, nrows, ncols);
+        return p36q_quantize_q8_0(src, dst, start, nrows, ncols);
     }
-    if (type == Q36Q_TYPE_Q2_K) {
-        return q36q_quantize_q2_k(src, dst, start, nrows, ncols, imatrix);
+    if (type == P36Q_TYPE_Q2_K) {
+        return p36q_quantize_q2_k(src, dst, start, nrows, ncols, imatrix);
     }
-    if (type == Q36Q_TYPE_Q4_K) {
-        return q36q_quantize_q4_k(src, dst, start, nrows, ncols, imatrix);
+    if (type == P36Q_TYPE_Q4_K) {
+        return p36q_quantize_q4_k(src, dst, start, nrows, ncols, imatrix);
     }
-    if (type == Q36Q_TYPE_IQ2_XXS) {
-        return q36q_quantize_iq2_xxs(src, dst, start, nrows, ncols, imatrix);
+    if (type == P36Q_TYPE_IQ2_XXS) {
+        return p36q_quantize_iq2_xxs(src, dst, start, nrows, ncols, imatrix);
     }
     (void)src;
     (void)dst;
@@ -1071,37 +1071,37 @@ size_t q36q_quantize_chunk(q36q_type type, const float *src, void *dst,
     (void)nrows;
     (void)ncols;
     (void)imatrix;
-    assert(!"unsupported Q36 quantization target");
+    assert(!"unsupported P36 quantization target");
     return 0;
 }
 
-float q36q_f16_to_f32(uint16_t bits) {
+float p36q_f16_to_f32(uint16_t bits) {
     const uint32_t w = (uint32_t)bits << 16;
     const uint32_t sign = w & UINT32_C(0x80000000);
     const uint32_t two_w = w + w;
     const uint32_t exp_offset = UINT32_C(0xE0) << 23;
     const float exp_scale = 0x1.0p-112f;
-    const float normalized_value = q36q_f32_from_bits((two_w >> 4) + exp_offset) * exp_scale;
+    const float normalized_value = p36q_f32_from_bits((two_w >> 4) + exp_offset) * exp_scale;
     const uint32_t magic_mask = UINT32_C(126) << 23;
     const float magic_bias = 0.5f;
-    const float denormalized_value = q36q_f32_from_bits((two_w >> 17) | magic_mask) - magic_bias;
+    const float denormalized_value = p36q_f32_from_bits((two_w >> 17) | magic_mask) - magic_bias;
     const uint32_t denormalized_cutoff = UINT32_C(1) << 27;
     const uint32_t result = sign |
-        (two_w < denormalized_cutoff ? q36q_f32_to_bits(denormalized_value) : q36q_f32_to_bits(normalized_value));
-    return q36q_f32_from_bits(result);
+        (two_w < denormalized_cutoff ? p36q_f32_to_bits(denormalized_value) : p36q_f32_to_bits(normalized_value));
+    return p36q_f32_from_bits(result);
 }
 
-float q36q_bf16_to_f32(uint16_t bits) {
-    return q36q_f32_from_bits((uint32_t)bits << 16);
+float p36q_bf16_to_f32(uint16_t bits) {
+    return p36q_f32_from_bits((uint32_t)bits << 16);
 }
 
-void q36q_f32_to_f16_row(const float *src, uint16_t *dst, int64_t n) {
-    for (int64_t i = 0; i < n; i++) dst[i] = q36q_f32_to_f16(src[i]);
+void p36q_f32_to_f16_row(const float *src, uint16_t *dst, int64_t n) {
+    for (int64_t i = 0; i < n; i++) dst[i] = p36q_f32_to_f16(src[i]);
 }
 
-void q36q_f32_to_bf16_row(const float *src, uint16_t *dst, int64_t n) {
+void p36q_f32_to_bf16_row(const float *src, uint16_t *dst, int64_t n) {
     for (int64_t i = 0; i < n; i++) {
-        uint32_t bits = q36q_f32_to_bits(src[i]);
+        uint32_t bits = p36q_f32_to_bits(src[i]);
         if ((bits & UINT32_C(0x7fffffff)) > UINT32_C(0x7f800000)) {
             dst[i] = (uint16_t)((bits >> 16) | 64);
         } else {

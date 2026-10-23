@@ -11,14 +11,14 @@ index 6ef1a81..3c2a464 100644
  #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
  #extension GL_EXT_control_flow_attributes : enable
 @@ -68,6 +69,10 @@ layout(push_constant) uniform Push {
- #define Q36_QCHUNK 68u                       /* 64 floats + 4 pad */
- #define Q36_QSTRIDE (4u * Q36_QCHUNK)        /* one q row */
- #define Q36_QIDX(r, d) ((r) * Q36_QSTRIDE + ((d) >> 6u) * Q36_QCHUNK + ((d) & 63u))
+ #define P36_QCHUNK 68u                       /* 64 floats + 4 pad */
+ #define P36_QSTRIDE (4u * P36_QCHUNK)        /* one q row */
+ #define P36_QIDX(r, d) ((r) * P36_QSTRIDE + ((d) >> 6u) * P36_QCHUNK + ((d) & 63u))
 +/* The first two Q rows contain 32 padding floats, enough for one maximum per
 + * possible 32-lane subgroup and query row without increasing LDS allocation. */
-+#define Q36_QPADIDX(i) (((i) >> 4u) * Q36_QSTRIDE + (((i) >> 2u) & 3u) * Q36_QCHUNK + 64u + ((i) & 3u))
-+#define Q36_QMAXIDX(sg, rr) Q36_QPADIDX((sg) * ROWS + (rr))
- shared float sh_q[QT * HQ * Q36_QSTRIDE];
++#define P36_QPADIDX(i) (((i) >> 4u) * P36_QSTRIDE + (((i) >> 2u) & 3u) * P36_QCHUNK + 64u + ((i) & 3u))
++#define P36_QMAXIDX(sg, rr) P36_QPADIDX((sg) * ROWS + (rr))
+ shared float sh_q[QT * HQ * P36_QSTRIDE];
  shared float sh_w[QT * HQ * TILE];
  
 @@ -209,18 +214,28 @@ void main(void) {
@@ -34,7 +34,7 @@ index 6ef1a81..3c2a464 100644
 +                    sh_w[(r0 + rr) * TILE + lane] : -3.402823466e38;
 +                tmax = subgroupMax(tmax);
 +                if (subgroupElect())
-+                    sh_q[Q36_QMAXIDX(gl_SubgroupID, rr)] = tmax;
++                    sh_q[P36_QMAXIDX(gl_SubgroupID, rr)] = tmax;
 +            }
 +            barrier();
 +
@@ -42,9 +42,9 @@ index 6ef1a81..3c2a464 100644
 +            uint subgroup0 = rg * subgroups_per_rg;
 +            for (uint rr = 0u; rr < ROWS; rr++) {
 +                if (row_tile_n == 0u) continue;
-+                float tmax = sh_q[Q36_QMAXIDX(subgroup0, rr)];
++                float tmax = sh_q[P36_QMAXIDX(subgroup0, rr)];
 +                if (subgroups_per_rg == 2u)
-+                    tmax = max(tmax, sh_q[Q36_QMAXIDX(subgroup0 + 1u, rr)]);
++                    tmax = max(tmax, sh_q[P36_QMAXIDX(subgroup0 + 1u, rr)]);
                  float n = max(m[rr], tmax);
                  float rs = exp(m[rr] - n);
                  l[rr] *= rs;

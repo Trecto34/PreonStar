@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare two q36-bench --dump-frontier-logits-dir outputs (ref dir, new dir).
+"""Compare two p36-bench --dump-frontier-logits-dir outputs (ref dir, new dir).
 Prints max_abs_diff, top-1 agreement and top-64 overlap per frontier file."""
 import json, os, sys
 

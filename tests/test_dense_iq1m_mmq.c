@@ -19,11 +19,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <math.h>
-#include "../q36.h"
-#include "../q36_gpu.h"
-#include "../q36_cli_args.h"
+#include "../p36.h"
+#include "../p36_gpu.h"
+#include "../p36_cli_args.h"
 
-#define IQ1_M 29u /* Q36_VK_TENSOR_IQ1_M, q36_vulkan.c:39 */
+#define IQ1_M 29u /* P36_VK_TENSOR_IQ1_M, p36_vulkan.c:39 */
 #define Q8K_WORDS 74u
 #define QK_K 256u
 
@@ -40,7 +40,7 @@ static uint16_t f16_pos(float f) {
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_reject_option_arguments(argc, argv, "test_dense_iq1m_mmq");
+    int cli_rc = p36_cli_reject_option_arguments(argc, argv, "test_dense_iq1m_mmq");
     if (cli_rc) return cli_rc;
     /* Default is the Swift-1.5 blk.13 ffn_gate shape, 256-token prefill chunk. */
     const uint32_t out_dim = argc > 1 ? (uint32_t)strtoul(argv[1], NULL, 0) : 17408u;
@@ -70,9 +70,9 @@ int main(int argc, char **argv) {
         memcpy(w + i + 48u, sc, 8);
     }
 
-    if (!q36_gpu_init()) { fprintf(stderr, "q36_gpu_init failed\n"); return 1; }
-    q36_gpu_set_quality(false);
-    q36_gpu_set_model_map(w, weight_bytes);
+    if (!p36_gpu_init()) { fprintf(stderr, "p36_gpu_init failed\n"); return 1; }
+    p36_gpu_set_quality(false);
+    p36_gpu_set_model_map(w, weight_bytes);
 
     uint8_t *rows = malloc(row_words * n_tok);
     if (!rows) return 1;
@@ -86,26 +86,26 @@ int main(int argc, char **argv) {
             for (uint32_t i = 0; i < 8u; i++) q[66 + i] = 0;
         }
     }
-    q36_gpu_tensor *q8_1 = q36_gpu_tensor_alloc(row_words);
-    q36_gpu_tensor *q8_n = q36_gpu_tensor_alloc(row_words * n_tok);
-    q36_gpu_tensor *o1 = q36_gpu_tensor_alloc(out_dim * 4u);
-    q36_gpu_tensor *on = q36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * 4u);
+    p36_gpu_tensor *q8_1 = p36_gpu_tensor_alloc(row_words);
+    p36_gpu_tensor *q8_n = p36_gpu_tensor_alloc(row_words * n_tok);
+    p36_gpu_tensor *o1 = p36_gpu_tensor_alloc(out_dim * 4u);
+    p36_gpu_tensor *on = p36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * 4u);
     if (!q8_1 || !q8_n || !o1 || !on) { fprintf(stderr, "alloc failed\n"); return 1; }
-    q36_gpu_tensor_write(q8_n, 0, rows, row_words * n_tok);
+    p36_gpu_tensor_write(q8_n, 0, rows, row_words * n_tok);
 
-    int ok = q36_gpu_matmul_iq_quant_q8_scaled_tensor(on, w, weight_bytes, 0, type, in_dim,
+    int ok = p36_gpu_matmul_iq_quant_q8_scaled_tensor(on, w, weight_bytes, 0, type, in_dim,
                                                       out_dim, q8_n, n_tok, 0.37f);
-    ok &= q36_gpu_synchronize() != 0;
+    ok &= p36_gpu_synchronize() != 0;
     float *rn = calloc((size_t)n_tok * out_dim, 4), *ref = calloc(out_dim, 4);
-    q36_gpu_tensor_read(on, 0, rn, (uint64_t)n_tok * out_dim * 4u);
+    p36_gpu_tensor_read(on, 0, rn, (uint64_t)n_tok * out_dim * 4u);
 
     double max_abs = 0, max_ref = 0, se = 0, sr = 0;
     for (uint32_t t = 0; ok && t < n_tok; t++) {
-        ok &= q36_gpu_tensor_write(q8_1, 0, rows + t * row_words, row_words);
-        ok &= q36_gpu_matmul_iq_quant_q8_scaled_tensor(o1, w, weight_bytes, 0, type, in_dim,
+        ok &= p36_gpu_tensor_write(q8_1, 0, rows + t * row_words, row_words);
+        ok &= p36_gpu_matmul_iq_quant_q8_scaled_tensor(o1, w, weight_bytes, 0, type, in_dim,
                                                        out_dim, q8_1, 1, 0.37f);
-        ok &= q36_gpu_synchronize() != 0;
-        q36_gpu_tensor_read(o1, 0, ref, out_dim * 4u);
+        ok &= p36_gpu_synchronize() != 0;
+        p36_gpu_tensor_read(o1, 0, ref, out_dim * 4u);
         for (uint32_t i = 0; i < out_dim; i++) {
             double d = fabs((double)ref[i] - (double)rn[(size_t)t * out_dim + i]);
             if (!(d <= max_abs)) max_abs = d; /* also catches NaN */
@@ -121,6 +121,6 @@ int main(int argc, char **argv) {
     int pass = rms < 0.02;
     printf("%s mmq n_tok=%u out_dim=%u in_dim=%u: max_abs=%.3g max_ref=%.3g rel=%.3g rms_rel=%.3g %s\n",
            iq1s ? "iq1_s" : "iq1_m", n_tok, out_dim, in_dim, max_abs, max_ref, rel, rms, pass ? "ok" : "FAIL");
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     return !pass;
 }

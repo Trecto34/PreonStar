@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Short plain-generation benchmark for q36-server (no agent features): TTFT, prefill and decode tok/s.
+"""Short plain-generation benchmark for p36-server (no agent features): TTFT, prefill and decode tok/s.
 Usage: tests/bench_server_plain.py URL [reps]"""
 import json, random, sys, time, urllib.request
 

@@ -1,6 +1,6 @@
-# Q36 GGUF Tools
+# P36 GGUF Tools
 
-Tools for building the Q36 mixed quant of `Qwen3.6-35B-A3B` from:
+Tools for building the P36 mixed quant of `Qwen3.6-35B-A3B` from:
 
 ```text
 gguf/Qwen3.6-35B-A3B-Q8_0.gguf
@@ -20,7 +20,7 @@ On the local Qwen3.6 model this resolves to layers `34..39`.
 For community fine-tunes or abliterated models that retain the 41st speculative MTP
 layer (e.g. `blk.40.*`), `--strip-nextn` (or `--strip-mtp`) strips those tensors,
 drops `nextn_predict_layers` KV metadata, and safely adjusts `block_count` from 41 to 40
-so the quantized GGUF conforms to Q36's 40-layer MoE runtime.
+so the quantized GGUF conforms to P36's 40-layer MoE runtime.
 
 Shared experts, router/gating tensors, embeddings, output heads, norms,
 attention, SSM tensors, and other non-routed tensors are explicit keep-list
@@ -44,7 +44,7 @@ the same target type layout as the Q8-source recipe.
 gguf-tools/qwen36-quantize \
   --in gguf/Qwen3.6-35B-A3B-BF16-00001-of-00002.gguf \
   --in gguf/Qwen3.6-35B-A3B-BF16-00002-of-00002.gguf \
-  --imatrix gguf/Qwen3.6-35B-A3B-chat-v2-routed-moe-q36.dat \
+  --imatrix gguf/Qwen3.6-35B-A3B-chat-v2-routed-moe-p36.dat \
   --imatrix-strict \
   --threads 12 \
   --out gguf/Qwen3.6-35B-A3B-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-v2-imatrix-bf16.gguf
@@ -61,13 +61,13 @@ gguf/Qwen3.6-35B-A3B-Q8_0.gguf
 2. Build the JSONL calibration corpus:
 
 ```sh
-python3 gguf-tools/imatrix/dataset/build_q36_imatrix_dataset.py
+python3 gguf-tools/imatrix/dataset/build_p36_imatrix_dataset.py
 ```
 
 3. Render the corpus with the Qwen3.6 chat template:
 
 ```sh
-python3 gguf-tools/imatrix/dataset/render_q36_prompts.py \
+python3 gguf-tools/imatrix/dataset/render_p36_prompts.py \
   --in gguf-tools/imatrix/dataset/prompts.jsonl
 ```
 
@@ -83,7 +83,7 @@ llama.cpp/build/bin/llama-imatrix \
   --mmap \
   --parse-special \
   --output-format dat \
-  -o gguf/q36-qwen36-imatrix.dat
+  -o gguf/p36-qwen36-imatrix.dat
 ```
 
 5. Dry-run and audit the quantization plan:
@@ -91,13 +91,13 @@ llama.cpp/build/bin/llama-imatrix \
 ```sh
 gguf-tools/qwen36-quantize \
   --in gguf/Qwen3.6-35B-A3B-Q8_0.gguf \
-  --imatrix gguf/q36-qwen36-imatrix.dat \
+  --imatrix gguf/p36-qwen36-imatrix.dat \
   --imatrix-strict \
-  --audit gguf/q36-mixed-audit.tsv \
+  --audit gguf/p36-mixed-audit.tsv \
   --dry-run
 ```
 
-Expected Q36 plan: 80 gate/up routed tensors to `IQ2_XXS`, 40 down routed
+Expected P36 plan: 80 gate/up routed tensors to `IQ2_XXS`, 40 down routed
 tensors to `Q2_K`, and all remaining tensors kept Q8.
 
 For the last-six Q4 expert variant:
@@ -108,7 +108,7 @@ gguf-tools/qwen36-quantize \
   --imatrix gguf/imatrix_unsloth.gguf_file \
   --imatrix-strict \
   --q4-expert-last 6 \
-  --audit gguf/q36-unsloth-last6-q4-quant-audit.tsv \
+  --audit gguf/p36-unsloth-last6-q4-quant-audit.tsv \
   --dry-run
 ```
 
@@ -121,10 +121,10 @@ remaining tensors kept at their source type.
 ```sh
 gguf-tools/qwen36-quantize \
   --in gguf/Qwen3.6-35B-A3B-Q8_0.gguf \
-  --imatrix gguf/q36-qwen36-imatrix.dat \
+  --imatrix gguf/p36-qwen36-imatrix.dat \
   --imatrix-strict \
-  --audit gguf/q36-mixed-audit.tsv \
-  --out gguf/Qwen3.6-35B-A3B-Q36-IQ2XXS-gateup-Q2K-down-Q8rest.gguf
+  --audit gguf/p36-mixed-audit.tsv \
+  --out gguf/Qwen3.6-35B-A3B-P36-IQ2XXS-gateup-Q2K-down-Q8rest.gguf
 ```
 
 Or write the last-six Q4 expert variant:
@@ -135,11 +135,11 @@ gguf-tools/qwen36-quantize \
   --imatrix gguf/imatrix_unsloth.gguf_file \
   --imatrix-strict \
   --q4-expert-last 6 \
-  --audit gguf/q36-unsloth-last6-q4-quant-audit.tsv \
+  --audit gguf/p36-unsloth-last6-q4-quant-audit.tsv \
   --out gguf/Qwen3.6-35B-A3B-Layers34-39Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-unsloth-imatrix.gguf
 ```
 
-7. Run quality testing with the OpenRouter reference set and the native Q36
+7. Run quality testing with the OpenRouter reference set and the native P36
 scorer. See `gguf-tools/quality-testing/README.md`.
 
 ## Community Fine-tunes & Abliterated Models (41 Layers / MTP)
@@ -149,8 +149,8 @@ fine-tunes (such as `Huihui-Qwen3.6-35B-A3B-abliterated`, RavenX, etc.) package 
 additional 41st speculative MTP (Multi-Token Prediction) layer (`blk.40.*`), setting
 `block_count = 41` and `nextn_predict_layers = 1`.
 
-Attempting to run these models directly causes runtime dimension and layer mismatches in Q36.
-To quantize these fine-tunes for Q36:
+Attempting to run these models directly causes runtime dimension and layer mismatches in P36.
+To quantize these fine-tunes for P36:
 
 1. **Quantize with `--strip-nextn`:**
 ```sh
@@ -158,28 +158,28 @@ gguf-tools/qwen36-quantize \
   --in /path/to/Community-Qwen3.6-35B-A3B-Q8_0.gguf \
   --strip-nextn \
   --threads 8 \
-  --out gguf/Community-Qwen3.6-35B-A3B-Q36-IQ2XXS.gguf
+  --out gguf/Community-Qwen3.6-35B-A3B-P36-IQ2XXS.gguf
 ```
 This safely:
 - Strips all 41st layer / nextn tensors (`blk.40.*` and `.nextn_`).
 - Removes the `nextn_predict_layers` KV metadata record.
 - Updates the GGUF `block_count` metadata from 41 to 40.
 
-2. **Run with Q36:**
-The output model runs directly across all Q36 binaries using the `-m` option:
+2. **Run with P36:**
+The output model runs directly across all P36 binaries using the `-m` option:
 
 ```sh
 # Interactive CLI
-./q36 -m gguf/Community-Qwen3.6-35B-A3B-Q36-IQ2XXS.gguf
+./p36 -m gguf/Community-Qwen3.6-35B-A3B-P36-IQ2XXS.gguf
 
 # Single prompt execution
-./q36 -m gguf/Community-Qwen3.6-35B-A3B-Q36-IQ2XXS.gguf -p "Hello! Explain quantum computing."
+./p36 -m gguf/Community-Qwen3.6-35B-A3B-P36-IQ2XXS.gguf -p "Hello! Explain quantum computing."
 
 # OpenAI / Anthropic compatible local API server
-./q36-server -m gguf/Community-Qwen3.6-35B-A3B-Q36-IQ2XXS.gguf --port 8000
+./p36-server -m gguf/Community-Qwen3.6-35B-A3B-P36-IQ2XXS.gguf --port 8000
 
 # Benchmark throughput
-./q36-bench -m gguf/Community-Qwen3.6-35B-A3B-Q36-IQ2XXS.gguf \
+./p36-bench -m gguf/Community-Qwen3.6-35B-A3B-P36-IQ2XXS.gguf \
   --prompt-file tests/long_context_story_prompt.txt \
   --ctx-start 32 --ctx-max 64 --ctx-alloc 128 --gen-tokens 8
 ```

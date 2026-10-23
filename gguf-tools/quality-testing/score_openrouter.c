@@ -1,5 +1,5 @@
-#include "q36.h"
-#include "q36_cli_args.h"
+#include "p36.h"
+#include "p36_cli_args.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -387,7 +387,7 @@ static bool api_ref_load(const char *path, api_ref *ref) {
     return ok;
 }
 
-static int api_alt_token_id(q36_engine *engine, const api_alt *alt) {
+static int api_alt_token_id(p36_engine *engine, const api_alt *alt) {
     if (!alt || !alt->bytes || alt->len <= 0) return -1;
     for (int i = 0; i < alt->len; i++) {
         if (alt->bytes[i] == 0) return -1;
@@ -397,26 +397,26 @@ static int api_alt_token_id(q36_engine *engine, const api_alt *alt) {
     memcpy(text, alt->bytes, (size_t)alt->len);
     text[alt->len] = '\0';
 
-    q36_tokens tv = {0};
-    q36_tokenize_text(engine, text, &tv);
+    p36_tokens tv = {0};
+    p36_tokenize_text(engine, text, &tv);
     int id = tv.len == 1 ? tv.v[0] : -1;
     if (id >= 0) {
         size_t got_len = 0;
-        char *got = q36_token_text(engine, id, &got_len);
+        char *got = p36_token_text(engine, id, &got_len);
         if (got_len != (size_t)alt->len || memcmp(got, alt->bytes, (size_t)alt->len) != 0) {
             id = -1;
         }
         free(got);
     }
-    q36_tokens_free(&tv);
+    p36_tokens_free(&tv);
     free(text);
     return id;
 }
 
-static bool local_logits(q36_session *session, float *logits, int n_vocab,
+static bool local_logits(p36_session *session, float *logits, int n_vocab,
                          double *logsum, int *argmax) {
     int got = 0;
-    const float *frontier = q36_session_logits(session, &got);
+    const float *frontier = p36_session_logits(session, &got);
     if (!frontier || got != n_vocab) return false;
     memcpy(logits, frontier, (size_t)n_vocab * sizeof(*logits));
     float max_logit = -INFINITY;
@@ -447,7 +447,7 @@ static bool dump_logits(const char *path, const char *case_id, int target,
         return false;
     }
     bool ok = fprintf(fp,
-                      "# q36 first logits v1\n"
+                      "# p36 first logits v1\n"
                       "# case=%s target=%d greedy=%d vocab=%d\n"
                       "token\tlogit\n",
                       case_id, target, greedy, n_vocab) >= 0;
@@ -541,7 +541,7 @@ static void usage(FILE *fp, const char *argv0) {
 }
 
 int main(int argc, char **argv) {
-    q36_cli_expand_long_equals(&argc, &argv, "score_openrouter");
+    p36_cli_expand_long_equals(&argc, &argv, "score_openrouter");
     if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
         usage(stdout, argv[0]);
         return 0;
@@ -572,12 +572,12 @@ int main(int argc, char **argv) {
         if (ctx_size < 1024) ctx_size = 1024;
     }
 
-    q36_engine_options opt = {
+    p36_engine_options opt = {
         .model_path = model_path,
-        .backend = Q36_BACKEND_VULKAN,
+        .backend = P36_BACKEND_VULKAN,
         .n_threads = 12,
-        .cache_type_k = Q36_KV_CACHE_F16,
-        .cache_type_v = Q36_KV_CACHE_F16,
+        .cache_type_k = P36_KV_CACHE_F16,
+        .cache_type_v = P36_KV_CACHE_F16,
     };
 
     while (argi < argc) {
@@ -585,17 +585,17 @@ int main(int argc, char **argv) {
         if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
             show_help = true;
         } else if (!strcmp(a, "--vulkan")) {
-            opt.backend = Q36_BACKEND_VULKAN;
+            opt.backend = P36_BACKEND_VULKAN;
         } else if (!strcmp(a, "--cpu")) {
-            opt.backend = Q36_BACKEND_CPU;
+            opt.backend = P36_BACKEND_CPU;
         } else if (!strcmp(a, "--rendered-prompt")) {
             rendered_prompt = true;
         } else if (!strcmp(a, "--dump-first-logits")) {
-            if (argi == argc || q36_cli_token_is_option(argv[argi]))
+            if (argi == argc || p36_cli_token_is_option(argv[argi]))
                 die("--dump-first-logits requires an argument");
             first_logits_path = argv[argi++];
         } else if (!strcmp(a, "--max-cases")) {
-            if (argi == argc || q36_cli_token_is_option(argv[argi]))
+            if (argi == argc || p36_cli_token_is_option(argv[argi]))
                 die("--max-cases requires an argument");
             char *end;
             long n = strtol(argv[argi++], &end, 10);
@@ -608,13 +608,13 @@ int main(int argc, char **argv) {
         } else if (!strcmp(a, "--ssd-streaming-cold")) {
             opt.ssd_streaming_cold = true;
         } else if (!strcmp(a, "--threads")) {
-            if (argi == argc || q36_cli_token_is_option(argv[argi]))
+            if (argi == argc || p36_cli_token_is_option(argv[argi]))
                 die("--threads requires an argument");
             opt.n_threads = atoi(argv[argi++]);
         } else if (!strcmp(a, "--ssd-streaming-cache-experts")) {
-            if (argi == argc || q36_cli_token_is_option(argv[argi]))
+            if (argi == argc || p36_cli_token_is_option(argv[argi]))
                 die("--ssd-streaming-cache-experts requires an argument");
-            if (!q36_parse_streaming_cache_experts_arg(argv[argi++],
+            if (!p36_parse_streaming_cache_experts_arg(argv[argi++],
                                                        &opt.ssd_streaming_cache_experts,
                                                        &opt.ssd_streaming_cache_bytes)) {
                 die("bad --ssd-streaming-cache-experts value");
@@ -631,12 +631,12 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    q36_engine *engine = NULL;
+    p36_engine *engine = NULL;
     opt.context_size = ctx_size;
-    if (q36_engine_open(&engine, &opt) != 0) die("failed to open model");
-    q36_session *session = NULL;
-    if (q36_session_create(&session, engine, ctx_size) != 0) die("failed to create session");
-    const int n_vocab = q36_engine_vocab_size(engine);
+    if (p36_engine_open(&engine, &opt) != 0) die("failed to open model");
+    p36_session *session = NULL;
+    if (p36_session_create(&session, engine, ctx_size) != 0) die("failed to create session");
+    const int n_vocab = p36_engine_vocab_size(engine);
     float *logits = malloc((size_t)n_vocab * sizeof(logits[0]));
     if (!logits) die("out of memory");
 
@@ -688,13 +688,13 @@ int main(int argc, char **argv) {
         bool api_aligned = false;
         api_metrics cm = {0};
 
-        q36_tokens prompt = {0};
-        q36_tokens target = {0};
+        p36_tokens prompt = {0};
+        p36_tokens target = {0};
         if (rendered_prompt)
-            q36_tokenize_rendered_chat(engine, prompt_text, &prompt);
+            p36_tokenize_rendered_chat(engine, prompt_text, &prompt);
         else
-            q36_encode_chat_prompt(engine, NULL, prompt_text, Q36_THINK_NONE, &prompt);
-        q36_tokenize_text(engine, cont_text, &target);
+            p36_encode_chat_prompt(engine, NULL, prompt_text, P36_THINK_NONE, &prompt);
+        p36_tokenize_text(engine, cont_text, &target);
 
         if (prompt.len + target.len + 1 >= ctx_size) {
             fprintf(stderr, "%s exceeds ctx=%d\n", id, ctx_size);
@@ -714,7 +714,7 @@ int main(int argc, char **argv) {
             }
         }
         total_api_ref_tokens += have_api ? ref.n_pos : 0;
-        if (q36_session_sync(session, &prompt, err, sizeof(err)) != 0) {
+        if (p36_session_sync(session, &prompt, err, sizeof(err)) != 0) {
             fprintf(stderr, "%s sync failed: %s\n", id, err);
             return 1;
         }
@@ -803,7 +803,7 @@ int main(int argc, char **argv) {
                 }
             }
 
-            if (q36_session_eval(session, target.v[i], err, sizeof(err)) != 0) {
+            if (p36_session_eval(session, target.v[i], err, sizeof(err)) != 0) {
                 fprintf(stderr, "%s eval failed at target token %d: %s\n", id, i, err);
                 return 1;
             }
@@ -859,8 +859,8 @@ int main(int argc, char **argv) {
                 safe_ratio(cm.pair_agree, cm.pair_total));
 
         api_ref_free(&ref);
-        q36_tokens_free(&prompt);
-        q36_tokens_free(&target);
+        p36_tokens_free(&prompt);
+        p36_tokens_free(&target);
         free(prompt_text);
         free(cont_text);
     }
@@ -900,7 +900,7 @@ int main(int argc, char **argv) {
     fclose(out);
     fclose(mf);
     free(logits);
-    q36_session_free(session);
-    q36_engine_close(engine);
+    p36_session_free(session);
+    p36_engine_close(engine);
     return 0;
 }

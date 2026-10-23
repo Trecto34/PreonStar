@@ -2,7 +2,7 @@
 """Live checks for the agent-control extensions of /v1/chat/completions.
 
 Usage: tests/test_server_agent_controls.py [http://host:port]
-Needs a running q36-server with a thinking-capable model.
+Needs a running p36-server with a thinking-capable model.
 """
 import json
 import sys

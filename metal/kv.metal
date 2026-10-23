@@ -1,11 +1,11 @@
 // Qwen3.6 routing and GPU-resident F16/Q8/Q4 KV-cache stores.
 
-kernel void q36_kv_store_f16(
+kernel void p36_kv_store_f16(
         device half *kcache [[buffer(0)]],
         device half *vcache [[buffer(1)]],
         device const float *k [[buffer(2)]],
         device const float *v [[buffer(3)]],
-        constant q36_kv_store_args &args [[buffer(4)]],
+        constant p36_kv_store_args &args [[buffer(4)]],
         uint2 gid [[thread_position_in_grid]]) {
     uint i = gid.x, tok = gid.y;
     if (tok >= args.tokens) return;
@@ -18,18 +18,18 @@ kernel void q36_kv_store_f16(
             half(v[(ulong)tok * args.v_row + i]);
 }
 
-struct q36_router_args {
+struct p36_router_args {
     uint experts;
     uint used;
     uint tokens;
     float scale;
 };
 
-kernel void q36_router_topk_serial(
+kernel void p36_router_topk_serial(
         device int *selected [[buffer(0)]],
         device float *weights [[buffer(1)]],
         device const float *logits [[buffer(2)]],
-        constant q36_router_args &args [[buffer(3)]],
+        constant p36_router_args &args [[buffer(3)]],
         uint tok [[thread_position_in_grid]]) {
     if (tok >= args.tokens || args.used > 8u) return;
     float best[8];
@@ -69,11 +69,11 @@ kernel void q36_router_topk_serial(
  * This retains the 256-thread router reduction but replaces the old eight
  * full workgroup trees (64 barriers) with one workgroup rendezvous.
  */
-kernel void q36_router_topk(
+kernel void p36_router_topk(
         device int *selected [[buffer(0)]],
         device float *weights [[buffer(1)]],
         device const float *logits [[buffer(2)]],
-        constant q36_router_args &args [[buffer(3)]],
+        constant p36_router_args &args [[buffer(3)]],
         uint tid [[thread_index_in_threadgroup]],
         uint lane [[thread_index_in_simdgroup]],
         uint simdgroup [[simdgroup_index_in_threadgroup]],
@@ -146,7 +146,7 @@ kernel void q36_router_topk(
     }
 }
 
-struct q36_attention_args {
+struct p36_attention_args {
     uint pos0;
     uint heads;
     uint kv_heads;
@@ -156,13 +156,13 @@ struct q36_attention_args {
     uint score_stride;
 };
 
-static inline float q36_kv_q8_value(device const uchar *row, uint index) {
+static inline float p36_kv_q8_value(device const uchar *row, uint index) {
     device const uchar *block = row + (ulong)(index >> 5) * 34u;
     float d = float(*reinterpret_cast<device const half *>(block));
     return d * float(*reinterpret_cast<device const char *>(block + 2u + (index & 31u)));
 }
 
-static inline float q36_kv_q4_value(device const uchar *row, uint index) {
+static inline float p36_kv_q4_value(device const uchar *row, uint index) {
     device const uchar *block = row + (ulong)(index >> 5) * 18u;
     float d = float(*reinterpret_cast<device const half *>(block));
     uint i = index & 31u;
@@ -171,7 +171,7 @@ static inline float q36_kv_q4_value(device const uchar *row, uint index) {
     return d * float(int(q) - 8);
 }
 
-struct q36_kv_quant_args {
+struct p36_kv_quant_args {
     uint k_row;
     uint v_row;
     uint pos0;
@@ -180,12 +180,12 @@ struct q36_kv_quant_args {
     uint v_row_bytes;
 };
 
-kernel void q36_kv_store_q8_q4(
+kernel void p36_kv_store_q8_q4(
         device uchar *kcache [[buffer(0)]],
         device uchar *vcache [[buffer(1)]],
         device const float *k [[buffer(2)]],
         device const float *v [[buffer(3)]],
-        constant q36_kv_quant_args &args [[buffer(4)]],
+        constant p36_kv_quant_args &args [[buffer(4)]],
         uint2 gid [[thread_position_in_grid]]) {
     uint block = gid.x, tok = gid.y;
     if (tok >= args.tokens) return;

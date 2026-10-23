@@ -44,7 +44,7 @@ def check(binary, answers, expected, timeout=5, command=None, noninteractive=Fal
         assert expected in transcript, transcript.decode(errors="replace")
         assert b"DRAFT_OK=1" in transcript, transcript.decode(errors="replace")
         assert termios.tcgetattr(slave) == saved, "terminal mode was not restored"
-        for secret in (b"q36-test-secret", b"wrong-secret", b"secret-suffix"):
+        for secret in (b"p36-test-secret", b"wrong-secret", b"secret-suffix"):
             assert secret not in transcript, "password leaked into terminal/tool output"
         return transcript
     finally:
@@ -56,16 +56,16 @@ def check(binary, answers, expected, timeout=5, command=None, noninteractive=Fal
 
 
 def main():
-    binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else "./q36_agent_test").resolve())
-    check(binary, [b"q36-test-secret\rsecret-suffix"], b"PASSWORD_OK")
-    check(binary, [b"wrong-secret\r", b"q36-test-secret\r"], b"PASSWORD_OK")
-    check(binary, [b"typo\x15q36-test-secreX\x7ft\r"], b"PASSWORD_OK")
+    binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else "./p36_agent_test").resolve())
+    check(binary, [b"p36-test-secret\rsecret-suffix"], b"PASSWORD_OK")
+    check(binary, [b"wrong-secret\r", b"p36-test-secret\r"], b"PASSWORD_OK")
+    check(binary, [b"typo\x15p36-test-secreX\x7ft\r"], b"PASSWORD_OK")
     check(binary, [b"wrong-secret\x03"], b"Password entry cancelled")
     result = check(binary, [], b"Password entry timed out", timeout=1)
     assert b"timed_out=1" in result
     check(binary, [], b"stdoutstderr", command="printf stdout; printf stderr >&2")
     check(binary, [], b"NO_TERMINAL", noninteractive=True)
-    print("q36-agent password tests: entry, retry, editing, cancellation, timeout, "
+    print("p36-agent password tests: entry, retry, editing, cancellation, timeout, "
           "output isolation, noninteractive mode, and terminal restoration passed")
 
 

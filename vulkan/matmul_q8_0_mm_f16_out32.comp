@@ -27,7 +27,7 @@ const uint BN = 64u;
 const uint BK = 32u;
 const uint KK = BK / 4u;
 
-#define Q36_SWZ(i) (((i) >> 1u) & 7u)   /* mask is KK - 1 */
+#define P36_SWZ(i) (((i) >> 1u) & 7u)   /* mask is KK - 1 */
 shared f16vec4 As[BM][KK];
 shared f16vec4 Bs[BN][KK];
 shared float Ds[BM];
@@ -44,7 +44,7 @@ void main(void) {
 
     uint r_a = tid >> 3u;
     uint kk_a = tid & 7u;
-    uint swz_ra = kk_a ^ Q36_SWZ(r_a);
+    uint swz_ra = kk_a ^ P36_SWZ(r_a);
     uint base_a = (r_a * pc.blocks) * Q8_0_U16;
     uint q_off_a = 1u + kk_a * 2u;
 
@@ -58,15 +58,15 @@ void main(void) {
         uint kk = idx & 7u;
         uint col = col0 + c;
         c_b[i] = c;
-        b_k[i] = kk ^ Q36_SWZ(c);
+        b_k[i] = kk ^ P36_SWZ(c);
         live_b[i] = col < pc.n_tok;
         xbase_b[i] = live_b[i] ? (col * (pc.blocks * 8u) + kk) : 0u;
     }
 
-    uint swz_row = Q36_SWZ(row);
+    uint swz_row = P36_SWZ(row);
     uint swz_col[8];
     for (uint i = 0u; i < 8u; i++) {
-        swz_col[i] = Q36_SWZ(col_lane + i * 8u);
+        swz_col[i] = P36_SWZ(col_lane + i * 8u);
     }
 
     for (uint kb = 0u; kb < pc.blocks; kb++) {

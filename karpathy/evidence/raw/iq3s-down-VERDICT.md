@@ -1,29 +1,29 @@
 # IQ3_S down projection in the fused f32 expert path — ACCEPTED
 
 Date: 2026-09-21 · branch `trackB-ptq1_0` · base HEAD `e6c15ba`
-Model: `Qwen3.8-35B-A3B-IQ2_M.gguf` · guard `Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf`
+Model: `Qwen3.8-35B-A3B-IQ2_M.gguf` · guard `Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS.gguf`
 
 Closes HANDOFF-iq2s-20260920.md §5 item 3 ("explain/patch the q8-route
 residue") for this file.
 
 ## Root cause — measured, not guessed
 
-`Q36_VK_MOE_ROUTE_DEBUG=1` (env-gated diagnostic added to `q36.c`, prints on
+`P36_VK_MOE_ROUTE_DEBUG=1` (env-gated diagnostic added to `p36.c`, prints on
 every fused-path miss) at ctx 512, gen 8:
 
 ```
-q36: moe f32 route miss il=0 n_tok=1   gate=22 up=22 down=21
-q36: moe f32 route miss il=0 n_tok=256 gate=22 up=22 down=21
-q36: moe f32 route miss il=1 n_tok=1   gate=22 up=22 down=21
-q36: moe f32 route miss il=1 n_tok=256 gate=22 up=22 down=21
-q36: moe f32 route miss il=2 n_tok=1   gate=22 up=22 down=21
-q36: moe f32 route miss il=2 n_tok=256 gate=22 up=22 down=21
+p36: moe f32 route miss il=0 n_tok=1   gate=22 up=22 down=21
+p36: moe f32 route miss il=0 n_tok=256 gate=22 up=22 down=21
+p36: moe f32 route miss il=1 n_tok=1   gate=22 up=22 down=21
+p36: moe f32 route miss il=1 n_tok=256 gate=22 up=22 down=21
+p36: moe f32 route miss il=2 n_tok=1   gate=22 up=22 down=21
+p36: moe f32 route miss il=2 n_tok=256 gate=22 up=22 down=21
 ```
 
-Types are `q36_vk` tensor ids: 22 = `IQ2_S`, 21 = `IQ3_S`. Exactly three layers
+Types are `p36_vk` tensor ids: 22 = `IQ2_S`, 21 = `IQ3_S`. Exactly three layers
 (0, 1, 2) leave the fused path, on both prefill (`n_tok=256`) and decode
 (`n_tok=1`) — matching the 15 `moe_iq2s_gate_up` + 15 `moe_matvec` dispatches
-the prefill profile showed. `q36_gpu_moe_ffn_f32_tensor()` required gate, up
+the prefill profile showed. `p36_gpu_moe_ffn_f32_tensor()` required gate, up
 *and* down to be the same quant; IQ2_M's layers 0-2 mix an **IQ3_S down under
 IQ2_S gate/up** (confirmed independently from the GGUF tensor table:
 `ffn_down_exps` IQ2_S x37, IQ3_S x3 at il 0-2, Q8_0 x1 at il 40 (MTP)).
@@ -42,24 +42,24 @@ on the other 37 layers.
 ## Change
 
 - `vulkan/moe_down_q2k_sum_decode.comp` and `vulkan/moe_down_gemm.comp`: new
-  `-DQ36_MOE_IQ3S` builds (`moe_down_q2k_sum_decode_iq3s.spv`,
+  `-DP36_MOE_IQ3S` builds (`moe_down_q2k_sum_decode_iq3s.spv`,
   `moe_down_gemm_iq3s.spv`). Element slotting is unchanged from the IQ2_S
   variants; the IQ3_S branch decodes the 110-byte block
   `[d f16][64 qs][8 qh][32 signs][4 scales]` with the 9-bit grid index
   (8 qs bits + 1 qh bit per 4 weights) against the IQ3_S grid table already
-  present in the shared IQ tables buffer at word 2592 (`Q36_VK_TAB_*` layout:
+  present in the shared IQ tables buffer at word 2592 (`P36_VK_TAB_*` layout:
   XXS 2048 B + ksigns 128 B + IQ2_S 8192 B -> 2592). Scale is `d*(2*nib+1)`,
   the same convention as `dense_iq3_s_decode.comp`.
-- `q36_vulkan.c`: `iq2s` split into `gu_iq2s` (gate/up) and
+- `p36_vulkan.c`: `iq2s` split into `gu_iq2s` (gate/up) and
   `down_iq2s`/`down_iq3s`; `down_stride` is 82 or 110 bytes accordingly; the
-  down dispatch site picks the IQ3_S kernel; kernel create/destroy/`Q36_VK_KERNEL`
+  down dispatch site picks the IQ3_S kernel; kernel create/destroy/`P36_VK_KERNEL`
   entries added (7 bindings / 24 B push for the decode kernel, 6 / 24 for the
   GEMM, same as their IQ2_S twins).
-- `q36.c`: env-gated `Q36_VK_MOE_ROUTE_DEBUG` miss print (diagnostic only).
+- `p36.c`: env-gated `P36_VK_MOE_ROUTE_DEBUG` miss print (diagnostic only).
 - Makefile: the two `.spv` rules + list entries.
 
 The IQ2_XXS/Q2_K and legacy builds stay byte-identical: all new code is inside
-`#ifdef Q36_MOE_IQ3S`, and the widened guards only add the IQ3_S define.
+`#ifdef P36_MOE_IQ3S`, and the widened guards only add the IQ3_S define.
 
 ## Parity
 
@@ -81,8 +81,8 @@ IQ3_S expert tensors at all, so this is a pure no-op for it.
 
 ## Verdict
 
-7-rep interleaved A/B (`tests/bench_ab.sh /tmp/q36-bench-ref2 ./q36-bench
-<IQ2_M> 7`, ctx 512, gen 128, `Q36_AB_MIN_GAIN=3.4`):
+7-rep interleaved A/B (`tests/bench_ab.sh /tmp/p36-bench-ref2 ./p36-bench
+<IQ2_M> 7`, ctx 512, gen 128, `P36_AB_MIN_GAIN=3.4`):
 
 | arm | prefill median (MAD) | decode median (MAD) |
 |---|---|---|
@@ -94,12 +94,12 @@ Gate is MoE prefill >= 3.4% -> **PASS**, cleared ~3.5x. Decode separates
 cleanly rep-by-rep (A 75.23/75.26/75.44/75.44/74.93/75.43/74.94 vs B
 78.46/78.52/78.40/78.30/78.71/78.23/78.39), so the +4.17% is real, not spread.
 
-Also run: `./q36_test --vulkan-kernels` OK (routed gemm `mv_max_rel=3.9e-06`,
+Also run: `./p36_test --vulkan-kernels` OK (routed gemm `mv_max_rel=3.9e-06`,
 `gemm_max_rel=8.9e-03`); `./karpathy/compat_gate.sh` -> `COMPATIBILITY_GATE:
 PASS` (Swift smoke unchanged at 172.67 / 18.56, gpu-cpu-parity OK).
 
 **ACCEPTED, default ON.** No new env var — the IQ3_S kernels are chosen by
-tensor type inside the existing fused path; `Q36_VK_MOE_F32B=0` still reverts
+tensor type inside the existing fused path; `P36_VK_MOE_F32B=0` still reverts
 the whole fused path.
 
 `reconsider_if`: a future MoE file mixes `IQ2_S`/`IQ3_S` the *other* way

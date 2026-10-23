@@ -6,7 +6,7 @@ Branch: `experiment/radiance-transfer-bc250`. Baseline: committed `6964c87`
 ## Method
 
 The proposed stride ablation (halve the block count) scales weight loads and
-ALU together and cannot separate them. Instead a `Q36_Q2_0_ABLATE` mode was
+ALU together and cannot separate them. Instead a `P36_Q2_0_ABLATE` mode was
 temporarily added to `dense_extra_decode.comp`, changing only the hot loop:
 
 | mode | change |
@@ -17,7 +17,7 @@ temporarily added to `dense_extra_decode.comp`, changing only the hot loop:
 | 3 | `dotPacked4x8` on raw code bytes, no SWAR expansion (wrong math) |
 | 4 | shared-LUT expansion (same values as `q2_i8x4`), correct math |
 
-`Q36_VK_PROF_KERNEL=1`, `ctx 512 / gen 128`, soak gate ≤55 °C. The metric is
+`P36_VK_PROF_KERNEL=1`, `ctx 512 / gen 128`, soak gate ≤55 °C. The metric is
 the `op dense_extra_decode` `gpu_ms` row (128 decode tokens).
 
 ## Results
@@ -50,7 +50,7 @@ overlap; the SWAR expansion is the dominant removable ALU cost.
 
 `vulkan/dense_extra_decode.comp`: the Q2_0 path builds a 256-dword (1 KiB)
 `shared` table once per workgroup and replaces the 10-op SWAR spread with one
-LDS read per 4 codes. The non-Q2_0 path and `q36_vulkan.c` are unchanged.
+LDS read per 4 codes. The non-Q2_0 path and `p36_vulkan.c` are unchanged.
 
 ## Soak-gated interleaved A/B vs HEAD (3 pairs, ctx 512 / gen 128)
 

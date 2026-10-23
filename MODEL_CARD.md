@@ -1,6 +1,6 @@
 # Qwen3.6-35B-A3B model card synopsis
 
-This document summarizes the Q36 target model and GGUF facts that matter for
+This document summarizes the P36 target model and GGUF facts that matter for
 local inference, Vulkan development, and benchmark interpretation.
 
 Sources:
@@ -10,7 +10,7 @@ Sources:
 - Local GGUF inspected: `gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf`
 
 The GGUF repository currently has no detailed upstream model-card body. The
-facts below are taken from the target GGUF metadata and from Q36's runtime
+facts below are taken from the target GGUF metadata and from P36's runtime
 assumptions.
 
 ## Model Family
@@ -21,7 +21,7 @@ Qwen3.6-35B-A3B is a Qwen Mixture-of-Experts language model.
 |---|---:|---:|---:|
 | Qwen3.6-35B-A3B | 35B | about 3B | 256K tokens |
 
-Q36 is intentionally not a general GGUF runner. It targets this model family
+P36 is intentionally not a general GGUF runner. It targets this model family
 and, by default, the AntirezExperts GGUF:
 
 ```text
@@ -53,7 +53,7 @@ The inspected GGUF reports:
 | Full-attention interval | 4 |
 
 The model is not a plain full-attention transformer at every layer. The GGUF
-metadata includes the Qwen3.6 recurrent/SSM fields used by Q36's graph:
+metadata includes the Qwen3.6 recurrent/SSM fields used by P36's graph:
 
 | Field | Value |
 |---|---:|
@@ -63,13 +63,13 @@ metadata includes the Qwen3.6 recurrent/SSM fields used by Q36's graph:
 | SSM time-step rank | 32 |
 | SSM inner size | 4096 |
 
-Q36 maps these metadata values to a fixed Vulkan execution graph with full
+P36 maps these metadata values to a fixed Vulkan execution graph with full
 attention layers, recurrent layers, routed MoE, shared experts, and model
 specific RoPE handling.
 
 ## Precision And Weights
 
-The target GGUF uses an asymmetric quantization scheme designed for Q36's 16 GB
+The target GGUF uses an asymmetric quantization scheme designed for P36's 16 GB
 unified-memory target:
 
 | Tensor group | Quantization |
@@ -91,7 +91,7 @@ The inspected file has 733 tensors with this type count:
 
 The routed MoE tensors dominate the weight footprint, so quantizing only those
 paths yields a roughly 10-11 GB model while keeping non-expert components at
-higher precision. Q36's Vulkan path uploads GGML IQ codebook tables once and
+higher precision. P36's Vulkan path uploads GGML IQ codebook tables once and
 binds them to the routed MoE kernels. For the default GGUF, `IQ2_XXS` is the
 IQ table that is required by the gate/up experts; the runtime also keeps the
 `IQ2_S` and `IQ3_S` codebooks for generic routed-matvec coverage.
@@ -120,9 +120,9 @@ The GGUF tokenizer metadata is:
 | padding token ID | 248055 |
 | add BOS | false |
 
-Q36 renders ChatML prompts with Qwen protocol tokens such as `<|im_start|>` and
+P36 renders ChatML prompts with Qwen protocol tokens such as `<|im_start|>` and
 `<|im_end|>`. Thinking mode is controlled with native `<think>...</think>`
-blocks. Q36 defaults to thinking mode; explicit non-thinking requests render
+blocks. P36 defaults to thinking mode; explicit non-thinking requests render
 the chat-template flag equivalent of `enable_thinking=false`. Historical
 reasoning is preserved by default for stable autoregressive and KV-cache
 prefixes; clients can opt out with `preserve_thinking=false`.
@@ -130,17 +130,17 @@ prefixes; clients can opt out with `preserve_thinking=false`.
 Tool definitions are rendered in the system prompt inside `<tools>...</tools>`.
 Calls use Qwen3.6's native tagged form: `<tool_call>` contains a
 `<function=name>` block whose arguments are `<parameter=name>` blocks. These
-markers are plain ASCII and tokenize as ordinary BPE pieces, so Q36's streaming
+markers are plain ASCII and tokenize as ordinary BPE pieces, so P36's streaming
 parser treats them as syntax rather than special tokens.
 
 ## Local Running Notes
 
-Q36 targets AMD BC-250 on Linux using Vulkan/RADV and
+P36 targets AMD BC-250 on Linux using Vulkan/RADV and
 `VK_EXT_external_memory_host`, mapping the GGUF directly as a host-backed
 Vulkan buffer. The CPU backend exists for correctness checks and diagnostics.
 
 The model's native context is 256K tokens, but the live context window is
-limited by the memory left after weights and runtime scratch buffers. Q36's
+limited by the memory left after weights and runtime scratch buffers. P36's
 disk KV cache reuses prefixes across stateless API requests and server
 restarts; it does not extend the active context beyond the allocated window.
 
@@ -152,7 +152,7 @@ Default sampling metadata in the GGUF is:
 | top_p | 0.95 |
 | top_k | 20 |
 
-Q36 ignores the GGUF sampling metadata and defaults to `temperature=1.0`,
+P36 ignores the GGUF sampling metadata and defaults to `temperature=1.0`,
 `top_p=1.0`, `top_k=0`, and `min_p=0.05`: on the Q2 expert mix any fixed-mass
 or fixed-count truncation admits quantization-noise tail tokens, while the
 min-p floor scales with the top token's confidence.

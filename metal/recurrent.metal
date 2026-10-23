@@ -1,9 +1,9 @@
 // Qwen3.6 convolution, RoPE, steering, and gated delta-net kernels.
 
-kernel void q36_recurrent_window(device float *cache [[buffer(0)]],
+kernel void p36_recurrent_window(device float *cache [[buffer(0)]],
                                   device const float *cur [[buffer(1)]],
                                   device float *window [[buffer(2)]],
-                                  constant q36_recur_args &args [[buffer(3)]],
+                                  constant p36_recur_args &args [[buffer(3)]],
                                   uint c [[thread_position_in_grid]]) {
     if (c >= args.conv_dim) return;
     for (uint tok = 0; tok < args.tokens; tok++) {
@@ -21,12 +21,12 @@ kernel void q36_recurrent_window(device float *cache [[buffer(0)]],
     }
 }
 
-struct q36_conv_args { uint conv_dim; uint taps; uint tokens; };
+struct p36_conv_args { uint conv_dim; uint taps; uint tokens; };
 
-kernel void q36_conv_silu(device float *out [[buffer(0)]],
+kernel void p36_conv_silu(device float *out [[buffer(0)]],
                            device const float *window [[buffer(1)]],
                            device const float *weights [[buffer(2)]],
-                           constant q36_conv_args &args [[buffer(3)]],
+                           constant p36_conv_args &args [[buffer(3)]],
                            uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= args.conv_dim || gid.y >= args.tokens) return;
     ulong wb = (ulong)gid.y * args.taps * args.conv_dim;
@@ -38,12 +38,12 @@ kernel void q36_conv_silu(device float *out [[buffer(0)]],
         sum / (1.0f + exp(-sum));
 }
 
-kernel void q36_recurrent_conv_silu(
+kernel void p36_recurrent_conv_silu(
         device float *out [[buffer(0)]],
         device float *cache [[buffer(1)]],
         device const float *cur [[buffer(2)]],
         device const float *weights [[buffer(3)]],
-        constant q36_conv_args &args [[buffer(4)]],
+        constant p36_conv_args &args [[buffer(4)]],
         uint c [[thread_position_in_grid]]) {
     if (c >= args.conv_dim || args.taps == 0u) return;
     for (uint tok = 0; tok < args.tokens; tok++) {
@@ -61,9 +61,9 @@ kernel void q36_recurrent_conv_silu(
     }
 }
 
-struct q36_rope_args { uint heads; uint pos0; uint tokens; };
+struct p36_rope_args { uint heads; uint pos0; uint tokens; };
 
-struct q36_norm_rope_args {
+struct p36_norm_rope_args {
     uint src_stride;
     uint heads;
     uint pos0;
@@ -75,11 +75,11 @@ struct q36_norm_rope_args {
 // per-head weight and RMSNorm, then rotate the first 64 Qwen head dimensions.
 // The lane reduction and RoPE expressions mirror the standalone kernels so
 // this only changes dispatch and intermediate traffic, not the arithmetic.
-kernel void q36_rms_norm_rope_qwen_f32(
+kernel void p36_rms_norm_rope_qwen_f32(
         device float *dst [[buffer(0)]],
         device const float *src [[buffer(1)]],
         device const float *weight [[buffer(2)]],
-        constant q36_norm_rope_args &args [[buffer(3)]],
+        constant p36_norm_rope_args &args [[buffer(3)]],
         uint row [[threadgroup_position_in_grid]],
         uint lane [[thread_index_in_simdgroup]]) {
     const uint rows = args.heads * args.tokens;
@@ -112,8 +112,8 @@ kernel void q36_rms_norm_rope_qwen_f32(
         out[i] = in[i] * scale * weight[i];
 }
 
-kernel void q36_rope_qwen(device float *x [[buffer(0)]],
-                           constant q36_rope_args &args [[buffer(1)]],
+kernel void p36_rope_qwen(device float *x [[buffer(0)]],
+                           constant p36_rope_args &args [[buffer(1)]],
                            uint2 gid [[thread_position_in_grid]]) {
     uint pair = gid.x & 31u;
     uint head = gid.x >> 5u;
@@ -130,12 +130,12 @@ kernel void q36_rope_qwen(device float *x [[buffer(0)]],
     x[base + pair + 32u] = fma(a, sn, b * cs);
 }
 
-struct q36_steer_args { uint layer; uint width; uint rows; float scale; };
+struct p36_steer_args { uint layer; uint width; uint rows; float scale; };
 
-kernel void q36_directional_steering(
+kernel void p36_directional_steering(
         device float *x [[buffer(0)]],
         device const float *directions [[buffer(1)]],
-        constant q36_steer_args &args [[buffer(2)]],
+        constant p36_steer_args &args [[buffer(2)]],
         uint row [[threadgroup_position_in_grid]],
         uint lane [[thread_index_in_simdgroup]]) {
     if (row >= args.rows) return;
@@ -149,7 +149,7 @@ kernel void q36_directional_steering(
         x[xb + i] -= dotv * directions[db + i];
 }
 
-struct q36_delta_qkv_args {
+struct p36_delta_qkv_args {
     uint heads;
     uint groups;
     uint dim;
@@ -158,12 +158,12 @@ struct q36_delta_qkv_args {
     float eps;
 };
 
-kernel void q36_delta_qkv(
+kernel void p36_delta_qkv(
         device float *qout [[buffer(0)]],
         device float *kout [[buffer(1)]],
         device float *vout [[buffer(2)]],
         device const float *conv [[buffer(3)]],
-        constant q36_delta_qkv_args &args [[buffer(4)]],
+        constant p36_delta_qkv_args &args [[buffer(4)]],
         constant uint &write_v [[buffer(5)]],
         uint2 group [[threadgroup_position_in_grid]],
         uint lane [[thread_index_in_simdgroup]]) {
@@ -190,15 +190,15 @@ kernel void q36_delta_qkv(
     }
 }
 
-struct q36_delta_gate_args { uint heads; uint tokens; };
+struct p36_delta_gate_args { uint heads; uint tokens; };
 
-kernel void q36_delta_gates(
+kernel void p36_delta_gates(
         device float *out [[buffer(0)]],
         device const float *alpha [[buffer(1)]],
         device const float *beta [[buffer(2)]],
         device const float *dt [[buffer(3)]],
         device const float *acoef [[buffer(4)]],
-        constant q36_delta_gate_args &args [[buffer(5)]],
+        constant p36_delta_gate_args &args [[buffer(5)]],
         uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= args.heads || gid.y >= args.tokens) return;
     ulong src = (ulong)gid.y * args.heads + gid.x;
@@ -212,9 +212,9 @@ kernel void q36_delta_gates(
         : exp(b) / (1.0f + exp(b));
 }
 
-struct q36_delta_net_args { uint heads; uint dim; uint tokens; };
+struct p36_delta_net_args { uint heads; uint dim; uint tokens; };
 
-struct q36_recurrent_norm_gate_args {
+struct p36_recurrent_norm_gate_args {
     uint width;
     uint rows;
     float eps;
@@ -223,11 +223,11 @@ struct q36_recurrent_norm_gate_args {
 // Qwen3.5/3.6 recurrent output is laid out as 32 rows of 128 values. Fuse
 // the per-row RMSNorm with the following elementwise SiLU gate so the
 // normalized state never makes a round trip through device memory.
-kernel void q36_recurrent_norm_gate(
+kernel void p36_recurrent_norm_gate(
         device float *state [[buffer(0)]],
         device const float *gate [[buffer(1)]],
         device const float *weight [[buffer(2)]],
-        constant q36_recurrent_norm_gate_args &args [[buffer(3)]],
+        constant p36_recurrent_norm_gate_args &args [[buffer(3)]],
         uint row [[threadgroup_position_in_grid]],
         uint lane [[thread_index_in_simdgroup]]) {
     if (row >= args.rows) return;
@@ -247,14 +247,14 @@ kernel void q36_recurrent_norm_gate(
     }
 }
 
-kernel void q36_delta_net_decode(
+kernel void p36_delta_net_decode(
         device float *state [[buffer(0)]],
         device const float *q [[buffer(1)]],
         device const float *k [[buffer(2)]],
         device const float *v [[buffer(3)]],
         device const float *gb [[buffer(4)]],
         device float *out [[buffer(5)]],
-        constant q36_delta_net_args &args [[buffer(6)]],
+        constant p36_delta_net_args &args [[buffer(6)]],
         uint2 group [[threadgroup_position_in_grid]],
         uint lane [[thread_index_in_simdgroup]]) {
     uint head = group.x;
@@ -292,14 +292,14 @@ kernel void q36_delta_net_decode(
  * channel.  Four SIMD groups update four output channels per threadgroup and
  * each lane retains four state values in registers across the token loop.
  */
-kernel void q36_delta_net_decode_r4(
+kernel void p36_delta_net_decode_r4(
         device float *state [[buffer(0)]],
         device const float *q [[buffer(1)]],
         device const float *k [[buffer(2)]],
         device const float *v [[buffer(3)]],
         device const float *gb [[buffer(4)]],
         device float *out [[buffer(5)]],
-        constant q36_delta_net_args &args [[buffer(6)]],
+        constant p36_delta_net_args &args [[buffer(6)]],
         uint3 group [[threadgroup_position_in_grid]],
         uint lane [[thread_index_in_simdgroup]],
         uint simdgroup [[simdgroup_index_in_threadgroup]]) {
@@ -343,7 +343,7 @@ kernel void q36_delta_net_decode_r4(
     }
 }
 
-struct q36_kv_store_args {
+struct p36_kv_store_args {
     uint k_row;
     uint v_row;
     uint pos0;

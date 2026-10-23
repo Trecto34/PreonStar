@@ -10,7 +10,7 @@
  * approximate: proof is the same one that makes top2's two-pass shape exact
  * for K=2.
  *
- * Tie-break matches the CPU reference (q36_sample_top_p_min_p's insertion
+ * Tie-break matches the CPU reference (p36_sample_top_p_min_p's insertion
  * loop): higher value wins, equal value prefers the lower index. Sentinels
  * (id=-1, v=-inf) sort last under that same rule, so no special-casing is
  * needed for a thread whose grid-stride slice is empty (small count) or a

@@ -4,7 +4,7 @@
 
 ## Method
 
-`q36-bench --vulkan --gen-tokens 0 --dump-frontier-logits-dir DIR` walks the
+`p36-bench --vulkan --gen-tokens 0 --dump-frontier-logits-dir DIR` walks the
 token stream of `tests/long_context_story_prompt.txt` one frontier at a time:
 each frontier teacher-forces one more token and dumps the full-vocab logits.
 `p3stats.py` (this directory) computes the NLL of the *actual* next token
@@ -46,7 +46,7 @@ path" error, and the measured effect is zero at the median.  Isolating the
 dtype would need a diagnostic MMQ build with `vec2 sum[16]` — not built,
 because there is no signal to chase.
 
-## Arm B — f16 DeltaNet recurrent state (`Q36_VK_RECURRENT_STATE_F16=0` disables)
+## Arm B — f16 DeltaNet recurrent state (`P36_VK_RECURRENT_STATE_F16=0` disables)
 
 | window | n | mean NLL f16 / f32 | dNLL mean | median | MAD | mean\|d\| | worse / better | top-1 same |
 |---|---|---|---|---|---|---|---|---|
@@ -82,15 +82,15 @@ arm A at n >= 64 frontiers and look at the sign split again.
 ## Reproduce
 
 ```
-cd /home/server/q36
+cd /home/server/p36
 # tokens.json: the prompt's token ids, one JSON list, from tests/long_context_story_prompt.txt
-./q36-bench --vulkan -m /home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf \
+./p36-bench --vulkan -m /home/server/p36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf \
     --prompt-file tests/long_context_story_prompt.txt \
     --ctx-start 2048 --ctx-max 4096 --step-incr 64 --ctx-alloc 4224 \
     --gen-tokens 0 --prefill-chunk 256 --dump-frontier-logits-dir /tmp/p3i
-./q36-bench ... --prefill-chunk 1 --dump-frontier-logits-dir /tmp/p3j
+./p36-bench ... --prefill-chunk 1 --dump-frontier-logits-dir /tmp/p3j
 python3 p3stats.py tokens.json /tmp/p3i /tmp/p3j --dump
-Q36_VK_RECURRENT_STATE_F16=0 ./q36-bench ...   # f32 state arm
+P36_VK_RECURRENT_STATE_F16=0 ./p36-bench ...   # f32 state arm
 ```
 
 `run4.s` / `run5.s` in this directory are the exact sweep scripts; their output

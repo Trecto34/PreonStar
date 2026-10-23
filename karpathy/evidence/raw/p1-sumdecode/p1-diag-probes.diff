@@ -6,9 +6,9 @@ index 718c245..aa86154 100644
          uint m2 = u * pc.in_dim / 2u;
          float acc = 0.0;
  
--#ifdef Q36_MOE_IQ2S
-+#if defined(Q36_MOE_IQ2S) && defined(Q36_P1_LOADFLOOR)
-+        /* DIAGNOSTIC ONLY (Q36_P1_LOADFLOOR, 2026-09-24 P1).  Same workgroup /
+-#ifdef P36_MOE_IQ2S
++#if defined(P36_MOE_IQ2S) && defined(P36_P1_LOADFLOOR)
++        /* DIAGNOSTIC ONLY (P36_P1_LOADFLOOR, 2026-09-24 P1).  Same workgroup /
 +         * block / expert mapping, but the whole 82-byte superblock is read with
 +         * three coalesced 2-byte loads per lane (lane stride one word) instead
 +         * of the ~48 scattered per-lane byte loads the real IQ2_S dequant
@@ -25,12 +25,12 @@ index 718c245..aa86154 100644
 +            }
 +            acc += float(c);
 +        }
-+#elif defined(Q36_MOE_IQ2S) && defined(Q36_P1_ALUFLOOR)
-+        /* DIAGNOSTIC ONLY (Q36_P1_ALUFLOOR, 2026-09-24 P1).  The real IQ2_S
++#elif defined(P36_MOE_IQ2S) && defined(P36_P1_ALUFLOOR)
++        /* DIAGNOSTIC ONLY (P36_P1_ALUFLOOR, 2026-09-24 P1).  The real IQ2_S
 +         * field loads are kept verbatim (same 5 loads per element group, same
 +         * addresses, so no load can be dead-code eliminated) but the dequant
 +         * arithmetic around them is collapsed to a plain add.  Together with
-+         * Q36_P1_LOADFLOOR this splits the measured 315 ms into the cost of the
++         * P36_P1_LOADFLOOR this splits the measured 315 ms into the cost of the
 +         * scattered field loads and the cost of the ALU that consumes them. */
 +        for (uint i = ix; i < pc.blocks; i += 2u) {
 +            uint bb = base_bytes + i * IQ2S_BYTES;
@@ -50,7 +50,7 @@ index 718c245..aa86154 100644
 +                       float(word & 255u) + bv.x + bv.y;
 +            }
 +        }
-+#elif defined(Q36_MOE_IQ2S)
++#elif defined(P36_MOE_IQ2S)
          /* Same element slotting as the Q2_K path: this thread owns the two
           * elements at y_off + 16*p for p = 0..7 and each 16-element group
           * carries one IQ2_S scale, one grid index and one sign byte. */

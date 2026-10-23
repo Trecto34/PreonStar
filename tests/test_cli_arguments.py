@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed CLI regression coverage for every supported q36 entrypoint."""
+"""Fail-closed CLI regression coverage for every supported p36 entrypoint."""
 
 from __future__ import annotations
 
@@ -52,26 +52,26 @@ def require_failure(case: str, result: subprocess.CompletedProcess[str], needle:
 
 def test_compiled_entrypoints() -> int:
     cases = (
-        CliCase("q36", ("./q36",), ("--help",), ("--model=fake", "--help"),
+        CliCase("p36", ("./p36",), ("--help",), ("--model=fake", "--help"),
                 ("--model",), ("--modle",), ("--host", "127.0.0.1"),
                 ("--quality=true",)),
-        CliCase("q36-agent", ("./q36-agent",), ("--help",),
+        CliCase("p36-agent", ("./p36-agent",), ("--help",),
                 ("--thinking-budget=32", "--help"), ("--thinking-budget",),
                 ("--thinking-buget",), ("--host", "127.0.0.1"),
                 ("--non-interactive=true",)),
-        CliCase("q36-server", ("./q36-server",), ("--help",),
+        CliCase("p36-server", ("./p36-server",), ("--help",),
                 ("--port=9000", "--help"), ("--port",), ("--prot",),
                 ("--thinking-budget", "32"), ("--cors=true",)),
-        CliCase("q36-bench", ("./q36-bench",), ("--help",),
+        CliCase("p36-bench", ("./p36-bench",), ("--help",),
                 ("--gen-tokens=1", "--help"), ("--gen-tokens",),
                 ("--gen-token",), ("--port", "9000"), ("--quality=true",)),
-        CliCase("q36-eval", ("./q36-eval",), ("--help",),
+        CliCase("p36-eval", ("./p36-eval",), ("--help",),
                 ("--questions=1", "--help"), ("--questions",),
                 ("--question",), ("--cors",), ("--list-cases=true",)),
-        CliCase("q36_test", ("./q36_test",), ("--help",),
+        CliCase("p36_test", ("./p36_test",), ("--help",),
                 ("--model=fake", "--list"), ("--model",), ("--modle",),
                 ("--host", "127.0.0.1"), ("--all=true",)),
-        CliCase("q36_agent_test", ("./q36_agent_test",), ("--help",), None,
+        CliCase("p36_agent_test", ("./p36_agent_test",), ("--help",), None,
                 ("--terminal-fixtures",), ("--terminal-fixturs",),
                 ("--host", "127.0.0.1"), ("--terminal-driver=true",)),
         CliCase("qwen36-quantize", ("./gguf-tools/qwen36-quantize",), ("--help",),
@@ -97,7 +97,7 @@ def test_compiled_entrypoints() -> int:
             run(cli.program + cli.help_args + (INVALID,)),
         )
         checks += 1
-        if cli.name in ("q36-agent", "q36-eval"):
+        if cli.name in ("p36-agent", "p36-eval"):
             require_failure(
                 f"{cli.name} unknown help topic",
                 run(cli.program + ("--help", "definitely-not-a-topic")),
@@ -155,11 +155,11 @@ def test_script_entrypoints() -> int:
         require_failure(name, run(args), needle)
         checks += 1
 
-    with tempfile.NamedTemporaryFile(prefix="q36-cli-model-", dir=ROOT) as model:
+    with tempfile.NamedTemporaryFile(prefix="p36-cli-model-", dir=ROOT) as model:
         model.write(b"not a real model\n")
         model.flush()
         env = os.environ.copy()
-        env["Q36_SWIFT_MODEL"] = model.name
+        env["P36_SWIFT_MODEL"] = model.name
         for script in ("run_swift.sh", "run_swift_iq3_xxs.sh", "run_swift_iq4_xs.sh"):
             require_failure(script, run((f"./{script}", INVALID), env), "unknown option")
             checks += 1

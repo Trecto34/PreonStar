@@ -1,7 +1,7 @@
 #version 460
 
 /* Full-attention decode scores, port of the score loop in
- * q36_forward_full_attn(): scores[h][t] = dot(q_h, K[t][kvh]) / sqrt(head_dim)
+ * p36_forward_full_attn(): scores[h][t] = dot(q_h, K[t][kvh]) / sqrt(head_dim)
  * over the selected K cache type.  One invocation per (t, h, tok); query row tok sits
  * at absolute position pos0 + tok and attends keys 0..pos0+tok (causal), its
  * scores land at tok * score_stride packed [head][n_kv_tok].  The dot and

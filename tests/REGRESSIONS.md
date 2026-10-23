@@ -10,16 +10,16 @@ Model tests use the standard Qwen3.6 MoE unless `--model` overrides it. Run one
 heavy process at a time, as required by [SPEEDUP.md](../SPEEDUP.md).
 
 ```sh
-python3 tests/test_server_vision.py --output /tmp/q36-vision-check
-python3 tests/test_server_vision.py --slots 2 --output /tmp/q36-vision-batched
-python3 tests/test_server_vision.py --pi /usr/bin/pi --output /tmp/q36-pi-vision
+python3 tests/test_server_vision.py --output /tmp/p36-vision-check
+python3 tests/test_server_vision.py --slots 2 --output /tmp/p36-vision-batched
+python3 tests/test_server_vision.py --pi /usr/bin/pi --output /tmp/p36-pi-vision
 python3 tests/test_agent_compaction.py \
   --model gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf \
-  --ctx 8192 --tokens 2400 --output /tmp/q36-compaction-check
+  --ctx 8192 --tokens 2400 --output /tmp/p36-compaction-check
 python3 tests/test_agent_sessions.py \
   --vision gguf/Qwen3.6-35B-A3B-mmproj-F16.gguf \
-  --output /tmp/q36-session-check
-Q36_TEST_THREADS=16 ./q36_test --gpu-cpu-parity --ssd-streaming-parity --case short
+  --output /tmp/p36-session-check
+P36_TEST_THREADS=16 ./p36_test --gpu-cpu-parity --ssd-streaming-parity --case short
 ```
 
 `--pi-api openai-responses` selects an individual Pi API; `--ctx` sets the
@@ -42,7 +42,7 @@ directory and point only at the local server.
 The compaction test uses a real PTY. It fills the context, verifies tool execution
 after compaction, compiles 120 generated C functions across a generation boundary, checks
 the carried output budget, rejects an oversized user input, and checks recovery.
-`Q36_AGENT_CACHE_DIR` isolates its session cache without changing the user's home.
+`P36_AGENT_CACHE_DIR` isolates its session cache without changing the user's home.
 Terminal ANSI and model traces remain in its output directory for inspection.
 
 The session test saves and restores a chat, exits during generation, checks

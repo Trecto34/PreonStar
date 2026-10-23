@@ -31,7 +31,7 @@ layout(push_constant) uniform Push {
     float scale;
 } pc;
 
-#ifdef Q36_PQ2_0
+#ifdef P36_PQ2_0
 #define Q2_BLK_BYTES   34u
 #define Q2_BLK_PER_Q8K 2u
 #define Q2_LANE_SHIFT  2u

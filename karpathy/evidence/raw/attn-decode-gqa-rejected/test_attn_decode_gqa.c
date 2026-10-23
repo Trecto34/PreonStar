@@ -1,8 +1,8 @@
 /* Bit-exact parity + timing for attn_decode_split_gqa{6,8} against the per-head
  * attn_decode_split.  Dense Qwen3.8 (24 q / 4 kv heads) and 35B-A3B MoE (16 q / 2 kv
  * heads) shapes, head_dim 256, Q8_0 K, Q4_0 V, one-token decode past the first
- * 512-key span (n_tok >= 2 takes the GQA-tiled prefill kernels instead).  Both kernels run through the real q36_gpu_attn_decode_tensor
- * dispatch; Q36_VK_ATTN_DECODE_GQA selects which one (read per call).
+ * 512-key span (n_tok >= 2 takes the GQA-tiled prefill kernels instead).  Both kernels run through the real p36_gpu_attn_decode_tensor
+ * dispatch; P36_VK_ATTN_DECODE_GQA selects which one (read per call).
  * Exit status is nonzero if any output differs in any bit. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -14,8 +14,8 @@
 #include <math.h>
 #include <time.h>
 #include <unistd.h>
-#include "../q36.h"
-#include "../q36_gpu.h"
+#include "../p36.h"
+#include "../p36_gpu.h"
 
 static uint32_t rng = 12345u;
 static float frand(void) { /* uniform [-1, 1) */
@@ -50,7 +50,7 @@ static int run_case(uint32_t n_head, uint32_t n_head_kv, uint32_t n_tok, uint32_
     uint8_t *kh = malloc((size_t)kv_max * k_rb), *vh = malloc((size_t)kv_max * v_rb);
     float *oa = malloc(qf * 4), *ob = malloc(qf * 4);
     /* q scaled so post-1/16 scores span a few units: softmax is peaked, not flat. */
-    const char *qs_env = getenv("Q36_TEST_QSCALE"); /* stress peaked softmax */
+    const char *qs_env = getenv("P36_TEST_QSCALE"); /* stress peaked softmax */
     const float qs = qs_env ? (float)atof(qs_env) : 1.5f;
     for (uint64_t i = 0; i < qf; i++) qh[i] = qs * frand();
     for (uint64_t i = 0; i < 2 * qf; i++) qgh[i] = 2.0f * frand();
@@ -66,28 +66,28 @@ static int run_case(uint32_t n_head, uint32_t n_head_kv, uint32_t n_tok, uint32_
             for (int i = 0; i < 16; i++) vb[2 + i] = (uint8_t)(128.0f * frand() + 128.0f);
         }
     }
-    q36_gpu_tensor *q = q36_gpu_tensor_alloc(qf * 4), *qg = q36_gpu_tensor_alloc(qf * 8);
-    q36_gpu_tensor *kc = q36_gpu_tensor_alloc((uint64_t)kv_max * k_rb);
-    q36_gpu_tensor *vc = q36_gpu_tensor_alloc((uint64_t)kv_max * v_rb);
-    q36_gpu_tensor *out = q36_gpu_tensor_alloc(qf * 4);
-    q36_gpu_tensor_write(q, 0, qh, qf * 4);
-    q36_gpu_tensor_write(qg, 0, qgh, qf * 8);
-    q36_gpu_tensor_write(kc, 0, kh, (uint64_t)kv_max * k_rb);
-    q36_gpu_tensor_write(vc, 0, vh, (uint64_t)kv_max * v_rb);
-    q36_gpu_set_model_map(sinks, sinks_alloc);
+    p36_gpu_tensor *q = p36_gpu_tensor_alloc(qf * 4), *qg = p36_gpu_tensor_alloc(qf * 8);
+    p36_gpu_tensor *kc = p36_gpu_tensor_alloc((uint64_t)kv_max * k_rb);
+    p36_gpu_tensor *vc = p36_gpu_tensor_alloc((uint64_t)kv_max * v_rb);
+    p36_gpu_tensor *out = p36_gpu_tensor_alloc(qf * 4);
+    p36_gpu_tensor_write(q, 0, qh, qf * 4);
+    p36_gpu_tensor_write(qg, 0, qgh, qf * 8);
+    p36_gpu_tensor_write(kc, 0, kh, (uint64_t)kv_max * k_rb);
+    p36_gpu_tensor_write(vc, 0, vh, (uint64_t)kv_max * v_rb);
+    p36_gpu_set_model_map(sinks, sinks_alloc);
 
     double ms[2];
     for (int arm = 0; arm < 2; arm++) {
-        setenv("Q36_VK_ATTN_DECODE_GQA", arm ? "1" : "0", 1);
+        setenv("P36_VK_ATTN_DECODE_GQA", arm ? "1" : "0", 1);
         double best = 1e30;
         for (int it = 0; it < iters + 1; it++) {
             double t0 = now_ms();
-            if (!q36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL, sinks, sinks_alloc, 0, has_sinks,
+            if (!p36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL, sinks, sinks_alloc, 0, has_sinks,
                                             pos0, n_tok, n_head, n_head_kv, hd, 1, 2, k_rb, v_rb)) {
                 fprintf(stderr, "dispatch failed n_tok=%u pos0=%u arm=%d\n", n_tok, pos0, arm);
                 exit(1);
             }
-            q36_gpu_tensor_read(out, 0, arm ? ob : oa, qf * 4);
+            p36_gpu_tensor_read(out, 0, arm ? ob : oa, qf * 4);
             double dt = now_ms() - t0;
             if (it && dt < best) best = dt; /* it 0 is warmup */
         }
@@ -104,21 +104,21 @@ static int run_case(uint32_t n_head, uint32_t n_head_kv, uint32_t n_tok, uint32_
     printf("gqa%u n_tok=%4u pos0=%5u sinks=%d  per-head %8.3f ms  grouped %8.3f ms  (%.2fx)  mismatches=%llu max_abs=%.3g %s\n",
            n_head / n_head_kv, n_tok, pos0, has_sinks, ms[0], ms[1], ms[0] / ms[1],
            (unsigned long long)mism, max_abs, bad ? "FAIL" : "ok");
-    q36_gpu_tensor_free(q); q36_gpu_tensor_free(qg); q36_gpu_tensor_free(kc);
-    q36_gpu_tensor_free(vc); q36_gpu_tensor_free(out);
+    p36_gpu_tensor_free(q); p36_gpu_tensor_free(qg); p36_gpu_tensor_free(kc);
+    p36_gpu_tensor_free(vc); p36_gpu_tensor_free(out);
     free(qh); free(qgh); free(kh); free(vh); free(oa); free(ob);
     return bad;
 }
 
 int main(void) {
     /* Any of these off would route both arms to the same kernel. */
-    unsetenv("Q36_VK_ATTN_SPLITK");
-    unsetenv("Q36_VK_ATTN_QTILE");
-    unsetenv("Q36_VK_ATTN_FUSED");
+    unsetenv("P36_VK_ATTN_SPLITK");
+    unsetenv("P36_VK_ATTN_QTILE");
+    unsetenv("P36_VK_ATTN_FUSED");
     if (posix_memalign((void **)&sinks, (size_t)getpagesize(), sinks_alloc)) return 1;
     for (uint32_t h = 0; h < 24; h++) sinks[h] = 2.0f * frand();
-    if (!q36_gpu_init()) { fprintf(stderr, "q36_gpu_init failed\n"); return 1; }
-    q36_gpu_set_quality(false);
+    if (!p36_gpu_init()) { fprintf(stderr, "p36_gpu_init failed\n"); return 1; }
+    p36_gpu_set_quality(false);
     int bad = 0;
     for (int g = 0; g < 2; g++) {
         /* dense Qwen3.8 24/4, then 35B-A3B MoE 16/2 */
@@ -133,7 +133,7 @@ int main(void) {
         bad |= run_case(nh, nkv, 1, 1023, true, 10);    /* exactly two spans */
         bad |= run_case(nh, nkv, 1, 65535, false, 3);   /* ctx 64k */
     }
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     printf(bad ? "FAIL\n" : "PASS\n");
     return bad;
 }

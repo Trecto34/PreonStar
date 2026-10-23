@@ -6,7 +6,7 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY) || defined(Q36_Q3K_ONLY)
+#if defined(P36_Q4K_ONLY) || defined(P36_Q5K_ONLY) || defined(P36_Q3K_ONLY)
 layout(set = 0, binding = 0) readonly buffer Weights { uint ww[]; };
 #else
 layout(set = 0, binding = 0) readonly buffer Weights { uint16_t wh[]; };
@@ -29,24 +29,24 @@ const uint Q3_K = 11u;
 const uint Q4_K = 12u;
 const uint Q5_K = 13u;
 const uint Q6_K = 14u;
-#ifndef Q36_BOUNDS
-#define Q36_BOUNDS 1
+#ifndef P36_BOUNDS
+#define P36_BOUNDS 1
 #endif
 const uint ROWS = 4u;
 const uint Q8K_WORDS = 74u;
 
-#ifdef Q36_Q4K_ONLY
+#ifdef P36_Q4K_ONLY
 #define QTYPE Q4_K
-#elif defined(Q36_Q3K_ONLY)
+#elif defined(P36_Q3K_ONLY)
 #define QTYPE Q3_K
-#elif defined(Q36_Q5K_ONLY)
+#elif defined(P36_Q5K_ONLY)
 #define QTYPE Q5_K
 #else
 #define QTYPE pc.type
 #endif
 
 uint load_u8(uint off) {
-#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY) || defined(Q36_Q3K_ONLY)
+#if defined(P36_Q4K_ONLY) || defined(P36_Q5K_ONLY) || defined(P36_Q3K_ONLY)
     return (ww[off >> 2u] >> ((off & 3u) * 8u)) & 255u;
 #else
     return (uint(wh[off >> 1u]) >> ((off & 1u) * 8u)) & 255u;
@@ -54,7 +54,7 @@ uint load_u8(uint off) {
 }
 
 uint load_u32(uint off) {
-#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY) || defined(Q36_Q3K_ONLY)
+#if defined(P36_Q4K_ONLY) || defined(P36_Q5K_ONLY) || defined(P36_Q3K_ONLY)
     return ww[off >> 2u];
 #else
     uint i = off >> 1u;
@@ -67,7 +67,7 @@ int load_i8(uint off) {
 }
 
 float load_f16(uint off) {
-#if defined(Q36_Q4K_ONLY) || defined(Q36_Q5K_ONLY) || defined(Q36_Q3K_ONLY)
+#if defined(P36_Q4K_ONLY) || defined(P36_Q5K_ONLY) || defined(P36_Q3K_ONLY)
     return unpackHalf2x16(ww[off >> 2u] >> ((off & 2u) * 8u)).x;
 #else
     return unpackHalf2x16(uint(wh[off >> 1u])).x;
@@ -192,7 +192,7 @@ vec4 dequant_word(uint row, uint block, uint word) {
            float(load_i8(base + 192u + (idx >> 4u))) * qv;
 }
 
-#ifdef Q36_Q3K_ONLY
+#ifdef P36_Q3K_ONLY
 /* A Q3_K block is 110 bytes, so odd blocks start 2 bytes off a word boundary.
  * Fetch the 16 bytes at even offset `off` as four aligned words, funnel-shifted
  * when misaligned: 4-5 word loads instead of eight 16-bit ones. */
@@ -234,7 +234,7 @@ void main(void) {
         float yd = uintBitsToFloat(q8[b * Q8K_WORDS]);
         for (uint r = 0u; r < ROWS; r++) {
             uint row = first_row + r;
-#if Q36_BOUNDS
+#if P36_BOUNDS
             if (row >= pc.out_dim) continue;
 #endif
             if (QTYPE == Q4_K) {
@@ -258,7 +258,7 @@ void main(void) {
                 acc[r] = fma(yd, part, acc[r]);
                 continue;
             }
-#ifdef Q36_Q3K_ONLY
+#ifdef P36_Q3K_ONLY
             if (QTYPE == Q3_K) {
                 /* Value = lo2 + 4*hbit - 4: dot the 3-bit codes (0..7) and
                  * subtract 4*sum(q8).  Integer-exact, so identical to the
@@ -369,7 +369,7 @@ void main(void) {
         float total = subgroupAdd(acc[r]);
         uint row = first_row + r;
         if (lid == 0u
-#if Q36_BOUNDS
+#if P36_BOUNDS
             && row < pc.out_dim
 #endif
         ) y[row] = total * pc.scale;

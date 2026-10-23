@@ -1,5 +1,5 @@
 {
-  "schema": "q36-llamacpp-logprobs-v1",
+  "schema": "p36-llamacpp-logprobs-v1",
   "source": "llama.cpp-direct-logits",
   "model": "Qwen3.6-35B-A3B-Q8_0.gguf",
   "runtime": "llama.cpp",
@@ -14,12 +14,12 @@
     "top_logprobs": 20,
     "threads": 8,
     "think": false,
-    "template": "legacy-q36-nothink"
+    "template": "legacy-p36-nothink"
   },
   "prompt_tokens": 3967,
   "ctx": 16384,
   "top_k": 20,
-  "template": "legacy-q36-nothink",
+  "template": "legacy-p36-nothink",
   "steps": [
     {
       "step": 0,

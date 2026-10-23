@@ -19,12 +19,12 @@ case "$streaming" in
 esac
 stream_args=
 if [ "$streaming" = "--ssd-streaming" ]; then
-    stream_args="--ssd-streaming --ssd-streaming-cache-experts ${Q36_TEST_STREAM_CACHE_EXPERTS:-512}"
+    stream_args="--ssd-streaming --ssd-streaming-cache-experts ${P36_TEST_STREAM_CACHE_EXPERTS:-512}"
 fi
-model=${Q36_TEST_MODEL:-gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf}
-port=${Q36_TEST_SERVER_PORT:-$((18000 + $$ % 1000))}
+model=${P36_TEST_MODEL:-gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf}
+port=${P36_TEST_SERVER_PORT:-$((18000 + $$ % 1000))}
 base=http://127.0.0.1:$port
-tmp=$(mktemp -d /tmp/q36-server-live.XXXXXX)
+tmp=$(mktemp -d /tmp/p36-server-live.XXXXXX)
 pid=
 
 cleanup() {
@@ -37,8 +37,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # stream_args is either empty or two validated CLI options. The cache value is
-# validated again by q36-server.
-./q36-server -m "$model" "$backend" $stream_args --ctx 4096 --tokens 8 \
+# validated again by p36-server.
+./p36-server -m "$model" "$backend" $stream_args --ctx 4096 --tokens 8 \
     --host 127.0.0.1 --port "$port" --cors >"$tmp/server.log" 2>&1 &
 pid=$!
 
@@ -56,7 +56,7 @@ for _ in $(seq 1 120); do
 done
 if [ "$ready" != 1 ]; then
     cat "$tmp/server.log" >&2
-    echo "q36 server did not become ready" >&2
+    echo "p36 server did not become ready" >&2
     exit 1
 fi
 

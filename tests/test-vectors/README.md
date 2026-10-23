@@ -2,7 +2,7 @@
 
 These vectors are captured directly from `llama.cpp` through a tiny local
 `libllama` capture tool, using the same rendered Qwen chat prompt shape as
-`q36 --nothink`, greedy decode, and `top_logprobs=20`. The capture script now
+`p36 --nothink`, greedy decode, and `top_logprobs=20`. The capture script now
 defaults to
 `gguf/Qwen3.6-35B-A3B-Q8_0.gguf`;
 regenerate the fixtures before treating this directory as a refreshed Q8_0
@@ -27,15 +27,15 @@ make test-reference
 ```
 
 With a model present, the same command also scores the stored continuation
-against Q36. `Q36_TEST_MODEL` selects a different local GGUF.
+against P36. `P36_TEST_MODEL` selects a different local GGUF.
 
 The C runner consumes `llama.vec` directly:
 
 ```sh
-Q36_TEST_MODEL=gguf/Qwen3.6-35B-A3B-Q8_0.gguf ./q36_reference_test --logprob-vectors
+P36_TEST_MODEL=gguf/Qwen3.6-35B-A3B-Q8_0.gguf ./p36_reference_test --logprob-vectors
 ```
 
-The runner uses the normal non-quality path and compares q36 against the
+The runner uses the normal non-quality path and compares p36 against the
 llama.cpp reference fixture token-by-token by byte sequence.
 
 `llama.vec` is intentionally trivial to parse from C: each case points to a

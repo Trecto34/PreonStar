@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "quants.h"
-#include "../q36_cli_args.h"
+#include "../p36_cli_args.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -19,12 +19,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define Q36_GGUF_ALIGNMENT 32
-#define Q36_DEFAULT_IN "gguf/Qwen3.6-35B-A3B-Q8_0.gguf"
-#define Q36_KV_IMATRIX_FILE "quantize.imatrix.file"
-#define Q36_KV_IMATRIX_DATASET "quantize.imatrix.dataset"
-#define Q36_KV_IMATRIX_ENTRIES "quantize.imatrix.entries_count"
-#define Q36_KV_IMATRIX_CHUNKS "quantize.imatrix.chunks_count"
+#define P36_GGUF_ALIGNMENT 32
+#define P36_DEFAULT_IN "gguf/Qwen3.6-35B-A3B-Q8_0.gguf"
+#define P36_KV_IMATRIX_FILE "quantize.imatrix.file"
+#define P36_KV_IMATRIX_DATASET "quantize.imatrix.dataset"
+#define P36_KV_IMATRIX_ENTRIES "quantize.imatrix.entries_count"
+#define P36_KV_IMATRIX_CHUNKS "quantize.imatrix.chunks_count"
 
 typedef enum {
     GGUF_TYPE_UINT8 = 0,
@@ -60,8 +60,8 @@ typedef struct {
 typedef struct {
     char *name;
     int n_dims;
-    int64_t ne[Q36Q_MAX_DIMS];
-    q36q_type type;
+    int64_t ne[P36Q_MAX_DIMS];
+    p36q_type type;
     uint64_t old_offset;
     uint64_t new_offset;
     size_t size;
@@ -397,9 +397,9 @@ static size_t tensor_elems(const tensor *t) {
     return n;
 }
 
-static size_t tensor_size(q36q_type type, const int64_t *ne, int n_dims) {
+static size_t tensor_size(p36q_type type, const int64_t *ne, int n_dims) {
     if (n_dims < 1 || ne[0] <= 0) return 0;
-    size_t row = q36q_row_size(type, ne[0]);
+    size_t row = p36q_row_size(type, ne[0]);
     for (int i = 1; i < n_dims; i++) {
         if (ne[i] <= 0 || (uint64_t)ne[i] > SIZE_MAX) return 0;
         row = size_mul(row, (size_t)ne[i]);
@@ -440,7 +440,7 @@ static gguf gguf_open(const char *path, bool strip_nextn) {
     g.version = pull_u32(g.map, g.size, &p);
     g.n_tensors = pull_u64(g.map, g.size, &p);
     g.n_kv = pull_u64(g.map, g.size, &p);
-    g.alignment = Q36_GGUF_ALIGNMENT;
+    g.alignment = P36_GGUF_ALIGNMENT;
     if (g.n_kv > (g.size - p) / 12 || g.n_kv > (SIZE_MAX - 1) / 2)
         die("bad GGUF: metadata count exceeds file size");
 
@@ -521,14 +521,14 @@ static gguf gguf_open(const char *path, bool strip_nextn) {
     for (uint64_t i = 0; i < g.n_tensors; i++) {
         char *name = pull_str(g.map, g.size, &p);
         int n_dims = (int)pull_u32(g.map, g.size, &p);
-        if (n_dims < 1 || n_dims > Q36Q_MAX_DIMS) die("bad tensor rank");
-        int64_t ne[Q36Q_MAX_DIMS] = {0};
+        if (n_dims < 1 || n_dims > P36Q_MAX_DIMS) die("bad tensor rank");
+        int64_t ne[P36Q_MAX_DIMS] = {0};
         for (int j = 0; j < n_dims; j++) {
             uint64_t dim = pull_u64(g.map, g.size, &p);
             if (dim == 0 || dim > INT64_MAX) die("bad tensor shape");
             ne[j] = (int64_t)dim;
         }
-        q36q_type type = (q36q_type)pull_u32(g.map, g.size, &p);
+        p36q_type type = (p36q_type)pull_u32(g.map, g.size, &p);
         uint64_t old_offset = pull_u64(g.map, g.size, &p);
         size_t tsize = tensor_size(type, ne, n_dims);
         if (!tsize) {
@@ -651,7 +651,7 @@ static void imatrix_load_gguf(imatrix *im, const char *path) {
         tensor *sum = &g.tensors[i];
         const char *suffix = ".in_sum2";
         if (!ends(sum->name, suffix)) continue;
-        if (sum->type != Q36Q_TYPE_F32) die("GGUF imatrix in_sum2 tensor is not f32");
+        if (sum->type != P36Q_TYPE_F32) die("GGUF imatrix in_sum2 tensor is not f32");
 
         size_t base_len = strlen(sum->name) - strlen(suffix);
         char *base = xmalloc(base_len + 1);
@@ -668,7 +668,7 @@ static void imatrix_load_gguf(imatrix *im, const char *path) {
             exit(1);
         }
         tensor *counts = &g.tensors[cidx];
-        if (counts->type != Q36Q_TYPE_F32) die("GGUF imatrix counts tensor is not f32");
+        if (counts->type != P36Q_TYPE_F32) die("GGUF imatrix counts tensor is not f32");
 
         int64_t nval = tensor_nelems_i64(sum);
         int64_t ncounts = tensor_nelems_i64(counts);
@@ -849,21 +849,21 @@ static bool q4_layer(const params *pa, int layer) {
     return pa->q4_start >= 0 && layer >= pa->q4_start && layer <= pa->q4_end;
 }
 
-static decision classify_tensor(const tensor *t, const params *pa, q36q_type *type, const char **why) {
+static decision classify_tensor(const tensor *t, const params *pa, p36q_type *type, const char **why) {
     int layer = -1;
     char kind[32];
     if (parse_routed(t->name, &layer, kind, sizeof(kind))) {
         if (q4_layer(pa, layer)) {
-            *type = Q36Q_TYPE_Q4_K;
+            *type = P36Q_TYPE_Q4_K;
             *why = "routed expert q4 window";
             return DEC_Q4;
         }
         if (!strcmp(kind, "gate") || !strcmp(kind, "up")) {
-            *type = Q36Q_TYPE_IQ2_XXS;
+            *type = P36Q_TYPE_IQ2_XXS;
             *why = "routed expert gate/up";
             return DEC_GATE_UP;
         }
-        *type = Q36Q_TYPE_Q2_K;
+        *type = P36Q_TYPE_Q2_K;
         *why = "routed expert down/out";
         return DEC_DOWN;
     }
@@ -872,8 +872,8 @@ static decision classify_tensor(const tensor *t, const params *pa, q36q_type *ty
         fprintf(stderr, "error: tensor is neither routed expert nor explicit keep-list entry: %s\n", t->name);
         exit(1);
     }
-    *type = t->type == Q36Q_TYPE_BF16 || t->type == Q36Q_TYPE_F16 ?
-            Q36Q_TYPE_Q8_0 : t->type;
+    *type = t->type == P36Q_TYPE_BF16 || t->type == P36Q_TYPE_F16 ?
+            P36Q_TYPE_Q8_0 : t->type;
     *why = r;
     return DEC_KEEP;
 }
@@ -892,11 +892,11 @@ static int max_routed_layer(const gguf *in) {
 static size_t extra_imatrix_kv_size(const imatrix *im) {
     if (!im || !im->n_entries) return 0;
     size_t n = 0;
-    n = size_add(n, size_add(size_add(str_size(Q36_KV_IMATRIX_FILE), 4), str_size(im->file)));
-    n = size_add(n, size_add(str_size(Q36_KV_IMATRIX_ENTRIES), 12));
+    n = size_add(n, size_add(size_add(str_size(P36_KV_IMATRIX_FILE), 4), str_size(im->file)));
+    n = size_add(n, size_add(str_size(P36_KV_IMATRIX_ENTRIES), 12));
     if (im->dataset)
-        n = size_add(n, size_add(size_add(str_size(Q36_KV_IMATRIX_DATASET), 4), str_size(im->dataset)));
-    if (im->chunks > 0) n = size_add(n, size_add(str_size(Q36_KV_IMATRIX_CHUNKS), 12));
+        n = size_add(n, size_add(size_add(str_size(P36_KV_IMATRIX_DATASET), 4), str_size(im->dataset)));
+    if (im->chunks > 0) n = size_add(n, size_add(str_size(P36_KV_IMATRIX_CHUNKS), 12));
     return n;
 }
 
@@ -907,19 +907,19 @@ static uint64_t extra_imatrix_kv_count(const imatrix *im) {
 
 static void write_imatrix_kv(FILE *fp, const imatrix *im) {
     if (!im || !im->n_entries) return;
-    put_str(fp, Q36_KV_IMATRIX_FILE);
+    put_str(fp, P36_KV_IMATRIX_FILE);
     put_u32(fp, GGUF_TYPE_STRING);
     put_str(fp, im->file);
-    put_str(fp, Q36_KV_IMATRIX_ENTRIES);
+    put_str(fp, P36_KV_IMATRIX_ENTRIES);
     put_u32(fp, GGUF_TYPE_UINT64);
     put_u64(fp, (uint64_t)im->n_entries);
     if (im->dataset) {
-        put_str(fp, Q36_KV_IMATRIX_DATASET);
+        put_str(fp, P36_KV_IMATRIX_DATASET);
         put_u32(fp, GGUF_TYPE_STRING);
         put_str(fp, im->dataset);
     }
     if (im->chunks > 0) {
-        put_str(fp, Q36_KV_IMATRIX_CHUNKS);
+        put_str(fp, P36_KV_IMATRIX_CHUNKS);
         put_u32(fp, GGUF_TYPE_UINT64);
         put_u64(fp, (uint64_t)im->chunks);
     }
@@ -938,23 +938,23 @@ static plan make_plan(const gguf *in, const imatrix *im, const params *pa) {
         *dst = *src;
         while (dst->n_dims > 1 && dst->ne[dst->n_dims - 1] == 1) dst->n_dims--;
         const char *why = NULL;
-        q36q_type target = src->type;
+        p36q_type target = src->type;
         decision d = classify_tensor(src, pa, &target, &why);
         (void)why;
         if (d == DEC_GATE_UP) p.n_gate_up++;
         else if (d == DEC_DOWN) p.n_down++;
         else if (d == DEC_Q4) p.n_q4++;
         else p.n_keep++;
-        if (target != src->type && src->type != Q36Q_TYPE_Q8_0 &&
-            src->type != Q36Q_TYPE_BF16 && src->type != Q36Q_TYPE_F16 &&
-            src->type != Q36Q_TYPE_F32) {
+        if (target != src->type && src->type != P36Q_TYPE_Q8_0 &&
+            src->type != P36Q_TYPE_BF16 && src->type != P36Q_TYPE_F16 &&
+            src->type != P36Q_TYPE_F32) {
             fprintf(stderr, "error: unsupported quantization source: %s is %s\n",
-                    src->name, q36q_type_name(src->type));
+                    src->name, p36q_type_name(src->type));
             exit(1);
         }
-        if (q36q_can_quantize(target) && src->ne[0] % q36q_block_size(target)) {
+        if (p36q_can_quantize(target) && src->ne[0] % p36q_block_size(target)) {
             fprintf(stderr, "error: %s ne[0]=%" PRId64 " not divisible by %s block size %" PRId64 "\n",
-                    src->name, src->ne[0], q36q_type_name(target), q36q_block_size(target));
+                    src->name, src->ne[0], p36q_type_name(target), p36q_block_size(target));
             exit(1);
         }
         dst->type = target;
@@ -997,34 +997,34 @@ static void copy_bytes(FILE *fp, const uint8_t *p, size_t n) {
 
 static void decode_q8_rows(const uint8_t *src, int64_t ncols, int rows, float *dst) {
     const int64_t blocks = ncols / 32;
-    const size_t row_size = q36q_row_size(Q36Q_TYPE_Q8_0, ncols);
+    const size_t row_size = p36q_row_size(P36Q_TYPE_Q8_0, ncols);
     for (int r = 0; r < rows; r++) {
         const uint8_t *row = src + (size_t)r * row_size;
         float *out = dst + (size_t)r * (size_t)ncols;
         for (int64_t b = 0; b < blocks; b++) {
             const uint8_t *blk = row + (size_t)b * 34;
-            float d = q36q_f16_to_f32(get_u16(blk));
+            float d = p36q_f16_to_f32(get_u16(blk));
             const int8_t *q = (const int8_t *)(blk + 2);
             for (int j = 0; j < 32; j++) out[(size_t)b * 32 + (size_t)j] = d * (float)q[j];
         }
     }
 }
 
-static void decode_rows(q36q_type type, const uint8_t *src,
+static void decode_rows(p36q_type type, const uint8_t *src,
                         int64_t ncols, int rows, float *dst) {
-    if (type == Q36Q_TYPE_Q8_0) {
+    if (type == P36Q_TYPE_Q8_0) {
         decode_q8_rows(src, ncols, rows, dst);
         return;
     }
     size_t n = size_mul((size_t)rows, (size_t)ncols);
-    if (type == Q36Q_TYPE_F32) {
+    if (type == P36Q_TYPE_F32) {
         memcpy(dst, src, size_mul(n, sizeof(float)));
         return;
     }
-    if (type == Q36Q_TYPE_F16 || type == Q36Q_TYPE_BF16) {
+    if (type == P36Q_TYPE_F16 || type == P36Q_TYPE_BF16) {
         for (size_t i = 0; i < n; i++) {
             uint16_t v = get_u16(src + i * sizeof(uint16_t));
-            dst[i] = type == Q36Q_TYPE_F16 ? q36q_f16_to_f32(v) : q36q_bf16_to_f32(v);
+            dst[i] = type == P36Q_TYPE_F16 ? p36q_f16_to_f32(v) : p36q_bf16_to_f32(v);
         }
         return;
     }
@@ -1034,7 +1034,7 @@ static void decode_rows(q36q_type type, const uint8_t *src,
 static float *synthetic_imatrix(const tensor *t) {
     const int64_t ncols = t->ne[0];
     const int rows = tensor_rows(t);
-    const size_t src_row = q36q_row_size(t->type, ncols);
+    const size_t src_row = p36q_row_size(t->type, ncols);
     float *acc = xcalloc((size_t)ncols, sizeof(float));
     size_t row_bytes = size_mul((size_t)ncols, sizeof(float));
     int chunk = (int)((16u << 20) / row_bytes);
@@ -1074,7 +1074,7 @@ static void *quant_worker(void *arg) {
     quant_job *j = arg;
     size_t row_bytes = size_mul((size_t)j->ncols, sizeof(float));
     float *f32 = xmalloc(size_mul((size_t)j->chunk, row_bytes));
-    q36q_quantize_init(j->dst->type);
+    p36q_quantize_init(j->dst->type);
     for (;;) {
         pthread_mutex_lock(&j->lock);
         int r = j->next;
@@ -1097,7 +1097,7 @@ static void *quant_worker(void *arg) {
             imat = imatrix_row(j->im, j->src, r, j->ncols);
         }
         decode_rows(j->src->type, base + (size_t)r * j->src_row, j->ncols, nr, f32);
-        size_t n = q36q_quantize_chunk(j->dst->type, f32,
+        size_t n = p36q_quantize_chunk(j->dst->type, f32,
                                        j->out + (size_t)r * j->dst_row,
                                        0, nr, j->ncols, imat);
         if (n != (size_t)nr * j->dst_row) die("quantized chunk size mismatch");
@@ -1110,15 +1110,15 @@ static void convert_tensor(FILE *fp, const tensor *src, const tensor *dst,
                            const imatrix *im, bool synthetic_ok, int threads) {
     const int64_t ncols = src->ne[0];
     const int rows = tensor_rows(src);
-    const size_t src_row = q36q_row_size(src->type, ncols);
-    const size_t dst_row = q36q_row_size(dst->type, ncols);
-    bool use_imatrix = dst->type != Q36Q_TYPE_Q8_0;
+    const size_t src_row = p36q_row_size(src->type, ncols);
+    const size_t dst_row = p36q_row_size(dst->type, ncols);
+    bool use_imatrix = dst->type != P36Q_TYPE_Q8_0;
     const float *imat = use_imatrix ? imatrix_row(im, src, 0, ncols) : NULL;
     float *synthetic = NULL;
-    if (!imat && q36q_requires_imatrix(dst->type)) {
+    if (!imat && p36q_requires_imatrix(dst->type)) {
         if (!synthetic_ok) {
             fprintf(stderr, "error: %s needs imatrix for %s; pass --allow-synthetic-imatrix to use weight energy\n",
-                    src->name, q36q_type_name(dst->type));
+                    src->name, p36q_type_name(dst->type));
             exit(1);
         }
         synthetic = synthetic_imatrix(src);
@@ -1183,7 +1183,7 @@ static void write_gguf(const gguf *in, const plan *p, const imatrix *im, const p
         const tensor *src = &in->tensors[i];
         const tensor *dst = &p->tensors[i];
         fprintf(stderr, "[%4" PRIu64 "/%4" PRIu64 "] %s %s -> %s\n",
-                i + 1, p->n_tensors, src->name, q36q_type_name(src->type), q36q_type_name(dst->type));
+                i + 1, p->n_tensors, src->name, p36q_type_name(src->type), p36q_type_name(dst->type));
         if (src->type == dst->type) {
             copy_bytes(fp, src->data, src->size);
         } else {
@@ -1203,12 +1203,12 @@ static void write_audit(const gguf *in, const plan *p, const params *pa, const c
     fprintf(fp, "tensor\tsource_type\ttarget_type\tdecision\n");
     for (uint64_t i = 0; i < p->n_tensors; i++) {
         const char *why = NULL;
-        q36q_type type = in->tensors[i].type;
+        p36q_type type = in->tensors[i].type;
         classify_tensor(&in->tensors[i], pa, &type, &why);
         fprintf(fp, "%s\t%s\t%s\t%s\n",
                 in->tensors[i].name,
-                q36q_type_name(in->tensors[i].type),
-                q36q_type_name(p->tensors[i].type),
+                p36q_type_name(in->tensors[i].type),
+                p36q_type_name(p->tensors[i].type),
                 why);
     }
     fclose(fp);
@@ -1221,8 +1221,8 @@ static void print_plan(const gguf *in, const plan *p, const params *pa) {
             changed++;
             printf("type_change: %s %s -> %s\n",
                    in->tensors[i].name,
-                   q36q_type_name(in->tensors[i].type),
-                   q36q_type_name(p->tensors[i].type));
+                   p36q_type_name(in->tensors[i].type),
+                   p36q_type_name(p->tensors[i].type));
         }
     }
     if (pa->q4_start >= 0) printf("q4_expert_layers: %d-%d\n", pa->q4_start, pa->q4_end);
@@ -1254,7 +1254,7 @@ static bool exists(const char *path) {
 }
 
 static char *need(int argc, char **argv, int *i, const char *arg) {
-    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
+    if (*i + 1 >= argc || p36_cli_token_is_option(argv[*i + 1])) {
         fprintf(stderr, "error: missing value for %s\n", arg);
         exit(1);
     }
@@ -1267,8 +1267,8 @@ static void add_input(params *p, char *path) {
 }
 
 static void usage(const char *argv0) {
-    printf("usage: %s [--in MODEL.gguf ...] --imatrix q36.dat --out OUT.gguf [options]\n", argv0);
-    printf("\nQwen3.6/Q36 mixed quantizer. Inputs are mmaped and decoded in chunks.\n\n");
+    printf("usage: %s [--in MODEL.gguf ...] --imatrix p36.dat --out OUT.gguf [options]\n", argv0);
+    printf("\nQwen3.6/P36 mixed quantizer. Inputs are mmaped and decoded in chunks.\n\n");
     printf("recipe:\n");
     printf("  blk.N.ffn_gate_exps.weight -> iq2_xxs\n");
     printf("  blk.N.ffn_up_exps.weight   -> iq2_xxs\n");
@@ -1276,7 +1276,7 @@ static void usage(const char *argv0) {
     printf("  optional q4 expert window   -> q4_k for gate/up/down\n");
     printf("  explicit keep-list f16/bf16 tensors -> q8_0; f32 tensors stay f32\n\n");
     printf("options:\n");
-    printf("  --in FILE, --model FILE    input GGUF; repeat in shard order, default %s\n", Q36_DEFAULT_IN);
+    printf("  --in FILE, --model FILE    input GGUF; repeat in shard order, default %s\n", P36_DEFAULT_IN);
     printf("  --out FILE                 output GGUF\n");
     printf("  --imatrix FILE             llama-imatrix legacy .dat or GGUF imatrix file\n");
     printf("  --imatrix-strict           fail if any quantized tensor has no imatrix entry\n");
@@ -1285,7 +1285,7 @@ static void usage(const char *argv0) {
     printf("  -t, --threads N            quantization workers, default 1\n");
     printf("  --q4-expert-layers A-B     quantize routed experts in layers A..B as q4_k\n");
     printf("  --q4-expert-last N         quantize routed experts in the last N layers as q4_k\n");
-    printf("  --strip-nextn, --strip-mtp strip MTP/nextn layer 40 for q36 MoE compatibility\n");
+    printf("  --strip-nextn, --strip-mtp strip MTP/nextn layer 40 for p36 MoE compatibility\n");
     printf("  --dry-run                  parse metadata and print plan only\n");
     printf("  --force                    overwrite output\n");
     printf("  -h, --help                 show this help\n");
@@ -1339,12 +1339,12 @@ static params parse_args(int argc, char **argv) {
     if (!p.dry_run && !p.out) die("--out is required unless --dry-run is used");
     if (!p.imatrix && !p.synthetic_imatrix) die("--imatrix is required for iq2_xxs; or pass --allow-synthetic-imatrix");
     if (p.out && exists(p.out) && !p.force) die("output exists; use --force");
-    if (!p.n_inputs) add_input(&p, Q36_DEFAULT_IN);
+    if (!p.n_inputs) add_input(&p, P36_DEFAULT_IN);
     return p;
 }
 
 int main(int argc, char **argv) {
-    q36_cli_expand_long_equals(&argc, &argv, "qwen36-quantize");
+    p36_cli_expand_long_equals(&argc, &argv, "qwen36-quantize");
     params pa = parse_args(argc, argv);
     imatrix im = {0};
     if (pa.imatrix) imatrix_load(&im, pa.imatrix, pa.strict_imatrix);

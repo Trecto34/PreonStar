@@ -1,11 +1,11 @@
 # Compatibility
 
-Snapshot of what q36 loads and runs, taken from `README.md`, the loader in
-`q36.c` (`weights_validate_layout`, `tensor_type_is_routed_*`) and the shader
+Snapshot of what p36 loads and runs, taken from `README.md`, the loader in
+`p36.c` (`weights_validate_layout`, `tensor_type_is_routed_*`) and the shader
 set in `vulkan/`. Items marked *tested* were run on hardware; everything else is
 read from the code and may lag behind it.
 
-q36 is not a general GGUF loader. A file must match the expected tensor layout,
+p36 is not a general GGUF loader. A file must match the expected tensor layout,
 quantization mix and metadata for one of the models below.
 
 ## Models
@@ -15,14 +15,14 @@ quantization mix and metadata for one of the models below.
 | Qwen3.6-35B-A3B (MoE) | Primary target, *tested* | Q2 routed experts (IQ2_XXS gate/up, Q2_K down, Q8_0 rest); mixed Q2 + Q4_K on layers 34-39 |
 | Qwen3.8-27B (dense) | Supported, *tested* | `UD-IQ3_S`, Swift-1.5 / GSQ-RCO `IQ3_S` derivatives. IQ4_XS was dropped: too slow and triggered the host OOM killer |
 | Ternary-Bonsai-2-27B (PQ2_0) | Supported, *tested* | PQ2_0 / PTQ1_0 have dedicated kernels |
-| Ornith-1.5-35B-A3B and finetunes (e.g. CyberTiel) | Supported, *tested* | Q36 re-quants use IQ2_XXS gate/up, Q2_K down, and Q8_0 rest. The APEX-I NanoPlus mix is supported by specialized Vulkan prefill/decode kernels for its three expert recipes. Use `--strip-nextn` when building from a source that carries the MTP block. |
+| Ornith-1.5-35B-A3B and finetunes (e.g. CyberTiel) | Supported, *tested* | P36 re-quants use IQ2_XXS gate/up, Q2_K down, and Q8_0 rest. The APEX-I NanoPlus mix is supported by specialized Vulkan prefill/decode kernels for its three expert recipes. Use `--strip-nextn` when building from a source that carries the MTP block. |
 | Other GGUFs | No | |
 
 ## Quantization types
 
 "Loader" = accepted by the layout validator. "Kernel" = a Vulkan shader exists
 (judged from shader file names; a type may also be covered inside a generic
-shader, so confirm in `q36_vulkan.c` before relying on a gap).
+shader, so confirm in `p36_vulkan.c` before relying on a gap).
 
 | Tensor class | Loader accepts | Kernels found |
 | --- | --- | --- |

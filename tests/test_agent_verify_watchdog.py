@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""q36-agent --server against a scripted fake server: the verification-convergence watchdog.
+"""p36-agent --server against a scripted fake server: the verification-convergence watchdog.
 
 The scripted "model" fixes a file once and then keeps checking its own work, the failure seen in a
 real run (157 steps, ended BLOCKED).  Checks, all in remote mode and without a model:
@@ -9,7 +9,7 @@ real run (157 steps, ended BLOCKED).  Checks, all in remote mode and without a m
     report built from tracked facts, still not BLOCKED, and the whole session stays tiny;
   - nothing is limited before the first edit (read-only investigation is free);
   - 0 disables the budget.
-Usage: tests/test_agent_verify_watchdog.py [path/to/q36-agent]"""
+Usage: tests/test_agent_verify_watchdog.py [path/to/p36-agent]"""
 import json
 import subprocess
 import sys
@@ -17,7 +17,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-AGENT = sys.argv[1] if len(sys.argv) > 1 else "./q36-agent"
+AGENT = sys.argv[1] if len(sys.argv) > 1 else "./p36-agent"
 NOTICE = "VERIFICATION_BUDGET_EXHAUSTED"
 
 
@@ -58,7 +58,7 @@ def run(policy, extra=()):
 
     srv = HTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    d = tempfile.mkdtemp(prefix="q36vw-")
+    d = tempfile.mkdtemp(prefix="p36vw-")
     p = subprocess.run([AGENT, "--server", "http://127.0.0.1:%d" % srv.server_port,
                         "--chdir", d, "--non-interactive", "--max-verify-steps", "3", *extra,
                         "-p", "fix main.html and verify"],

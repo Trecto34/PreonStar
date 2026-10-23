@@ -1,8 +1,8 @@
 # Qwen3.8 headroom probe — 2026-09-20
 
 Box: BC-250, RADV GFX1013, 15.35 GiB UMA. Engine HEAD `bc7c31e` (branch
-`trackB-ptq1_0`, tree clean, `q36-bench` rebuilt from it). One GPU process at a
-time; entry temp 46-66 C. Model: `/home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf`.
+`trackB-ptq1_0`, tree clean, `p36-bench` rebuilt from it). One GPU process at a
+time; entry temp 46-66 C. Model: `/home/server/p36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf`.
 
 ## 1. Standing (ctx frontier, `--prefill-chunk 256`)
 
@@ -62,7 +62,7 @@ and it already emits packed f16.
   +40 % theoretical, but the dominant kernel already rejected rows8, integer
   sign-mask, f16-grid LDS and global-LUT variants.
 - **Speculative decode is closed, not open.** MTP audit session (worktree
-  `/home/server/q36-wt/mtp-audit`, branch `perf/mtp-iq3xxs-microbatch-kernel`,
+  `/home/server/p36-wt/mtp-audit`, branch `perf/mtp-iq3xxs-microbatch-kernel`,
   closed 2026-09-20): 20.40 tok/s plain vs 6.80-9.61 tok/s MTP with the new
   IQ3_XXS/IQ4_XS n_tok 2-8 micro-batch kernels; bottleneck is one GPU round trip
   per causally dependent draft token. Reopen only with a parallel drafter,

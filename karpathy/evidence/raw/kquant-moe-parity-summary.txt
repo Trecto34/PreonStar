@@ -1,4 +1,4 @@
-Guard (Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf, zero K-quant trunk
+Guard (Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS.gguf, zero K-quant trunk
 tensors) frontier-513, ref vs candidate: max_abs_diff = 0.0 (byte-identical),
 top-1 identical (5316).
 
@@ -22,8 +22,8 @@ preserved in every one of the 5 configurations tested above.
 Shader hashes: no .comp file touched by this change (host-dispatch only);
 all guard-relevant .spv hashes unchanged from HANDOFF-iq2s-20260920.md.
 
-Unit test: ./q36_test --vulkan-kernels passes, including
+Unit test: ./p36_test --vulkan-kernels passes, including
 test_vulkan_kquant_matvec (GPU-vs-CPU-reference dot product, tolerance
 2.0e-3), which now exercises the widened decode fast path for Q2_K/Q4_K/
 Q5_K/Q6_K for the first time (previously dead in this test context since
-q36_gpu_dense_model was never set true here).
+p36_gpu_dense_model was never set true here).

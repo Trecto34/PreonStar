@@ -1,7 +1,7 @@
-# Q36 Quality Testing
+# P36 Quality Testing
 
 This directory uses OpenRouter as the hosted Qwen3.6 reference and scores the
-local Q36 GGUF with the native Vulkan runtime.
+local P36 GGUF with the native Vulkan runtime.
 
 Hosted reference model:
 
@@ -44,15 +44,15 @@ gguf-tools/quality-testing/local/openrouter/responses/case_*.json
 ```
 
 `manifest.tsv` is the input for local scoring. The prompt text is rendered
-through the Q36 chat template inside the local scorer, and the OpenRouter
+through the P36 chat template inside the local scorer, and the OpenRouter
 continuation is scored token by token with local logits.
 
-## Local Q36 Score
+## Local P36 Score
 
 Build the scorer:
 
 ```sh
-make q36-quality-score
+make p36-quality-score
 ```
 
 Score the mixed model with Vulkan and SSD streaming:
@@ -69,7 +69,7 @@ gguf-tools/quality-testing/score_openrouter \
   --threads 12
 ```
 
-This path is for the mixed Q36 runtime. It avoids the full-RAM assumption by
+This path is for the mixed P36 runtime. It avoids the full-RAM assumption by
 using the runtime SSD-streaming mode and a bounded expert cache.
 
 To compare two local score files:
@@ -91,11 +91,11 @@ tool-format cases request a generic JSON schema.
 Render it for manual generation checks:
 
 ```sh
-python3 gguf-tools/quality-testing/render_q36_quality_prompts.py
+python3 gguf-tools/quality-testing/render_p36_quality_prompts.py
 ```
 
 These prompts are for quality checks. The imatrix workflow uses the larger
-Q36 imatrix dataset under `gguf-tools/imatrix/dataset/`.
+P36 imatrix dataset under `gguf-tools/imatrix/dataset/`.
 
 ## Strict validation and rendered prompts
 
@@ -109,7 +109,7 @@ Use `validate_scores.py --help` to validate complete score tables against an
 explicit manifest before comparing scores. The validator checks coverage,
 uniqueness, counts, finite values, and consistent aggregate rows.
 
-`q36-bench --dump-frontier-logits-dir DIR` writes complete float32 logit vectors
+`p36-bench --dump-frontier-logits-dir DIR` writes complete float32 logit vectors
 at each prefill frontier. `compare_frontier_logits.py` requires explicit model,
 backend, context, quantization, vocabulary, and frontier expectations and checks
 every finite float32 bit. Pass directories containing only the frontier JSON

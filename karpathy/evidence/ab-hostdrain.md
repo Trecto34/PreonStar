@@ -4,30 +4,30 @@
 reclassified as a profiling-tooling fix)
 **Raw:** `raw/ab-drain-swift.csv`, `raw/ab-drain-moe.csv`, `raw/ab-drain-verdicts.txt`
 
-- **A** = `/home/server/q36-opt-27b/q36-bench` built from `11bb345` (tree clean).
-- **B** = `/home/server/q36-wt/w6-drain/q36-bench`, one hunk off the same commit.
+- **A** = `/home/server/p36-opt-27b/p36-bench` built from `11bb345` (tree clean).
+- **B** = `/home/server/p36-wt/w6-drain/p36-bench`, one hunk off the same commit.
 - Caveat: **9 other `.spv` and our four other binaries are all default `make`** — same flavor on both sides.
 
 ## The change
 
-`q36_vulkan.c:2981-2983` (A) removed in B — the mid-dispatch query-pool drain:
+`p36_vulkan.c:2981-2983` (A) removed in B — the mid-dispatch query-pool drain:
 
 ```c
-if (q36_vk.prof_kernel && q36_vk.query_pool && q36_vk_prof_query_count + 2u > Q36_VK_PROF_QUERY_CAP) {
-    if (!q36_vk_flush_reason_unlocked("submit_wait_query_pool")) return 0;
+if (p36_vk.prof_kernel && p36_vk.query_pool && p36_vk_prof_query_count + 2u > P36_VK_PROF_QUERY_CAP) {
+    if (!p36_vk_flush_reason_unlocked("submit_wait_query_pool")) return 0;
 }
 ```
 
 Replaced by a comment. Safety was verified in source **before** building: the
-timestamp write further down self-limits (`+ 2u <= Q36_VK_PROF_QUERY_CAP`, and the
+timestamp write further down self-limits (`+ 2u <= P36_VK_PROF_QUERY_CAP`, and the
 counter only advances when a pair is really emitted), so deleting the drain
 cannot overflow the pool. The diff is exactly that one hunk (verified with
-`diff -u` against A's source; `q36_vulkan.o` 17:58 → binary 18:05).
+`diff -u` against A's source; `p36_vulkan.o` 17:58 → binary 18:05).
 
 Why it looked like a win: the per-kernel profile showed `dense_q4k_decode` with
 **55.751 ms** of record time for 592 dispatches ≈ **94 µs/dispatch**, when
 `record_ms` for the kernel's own work is ~2.6 ms. The rest was this synchronous
-4-fence drain (`q36_vk_flush_unlocked:2049` → ring-slot waits `:2053-2056`).
+4-fence drain (`p36_vk_flush_unlocked:2049` → ring-slot waits `:2053-2056`).
 
 ## Result — two models, both FAIL
 
@@ -57,8 +57,8 @@ prefill MAD of 6.7–9.3 t/s, consistent with the campaign's 3.4% MoE noise band
 
 ## Why this is a null *by construction*, not a small win
 
-`q36_vk.prof_kernel` is set **only** when `Q36_VK_PROF_KERNEL` is present in the
-environment (`q36_vulkan.c:3465-3474`), and the removed block was gated on
+`p36_vk.prof_kernel` is set **only** when `P36_VK_PROF_KERNEL` is present in the
+environment (`p36_vulkan.c:3465-3474`), and the removed block was gated on
 exactly that flag. `tests/bench_ab.sh` sets no profiler env, so in **both arms of
 this A/B the drained block could never execute** — the two binaries are
 behaviourally identical in the configuration that was measured. The experiment as

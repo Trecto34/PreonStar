@@ -7,7 +7,7 @@ IQ2_XS x9, IQ2_XXS x5 and one IQ1_M tensor (`blk.13.ffn_gate`, 5120 -> 17408, 19
 
 ## Baseline (HEAD 6dd3c89, ctx 1024, chunk 256, gen 16, 3 runs)
 prefill 169.22-170.38 t/s, decode 18.81-19.92 t/s (`baseline-*.csv`).
-Per-kernel profile, ctx 512, gen 32 (`prof.log`, `Q36_VK_PROF_KERNEL=1`):
+Per-kernel profile, ctx 512, gen 32 (`prof.log`, `P36_VK_PROF_KERNEL=1`):
 `dense_iq1_m` = 263.6 ms, **3.5% of GPU time for 0.16% of the weights**. The naive
 kernel dispatches one workgroup per (row, token), so prefill re-reads the whole
 tensor once per token. Every other type already routes to a tuned kernel.
@@ -15,8 +15,8 @@ tensor once per token. Every other type already routes to a tuned kernel.
 ## Change
 - `vulkan/dense_extra_mmq.comp`: IQ1_M arm in the generic main (same grid and
   element mapping as IQ1_S; block scale assembled from the four scale-word nibbles).
-- `q36_vulkan.c`: IQ1_M with `n_tok > 8`, not `--quality`, and
-  `Q36_VK_DENSE_IQ1M_MMQ` not 0 -> `dense_extra_mmq`. Decode and 2..8-row
+- `p36_vulkan.c`: IQ1_M with `n_tok > 8`, not `--quality`, and
+  `P36_VK_DENSE_IQ1M_MMQ` not 0 -> `dense_extra_mmq`. Decode and 2..8-row
   batches stay on `dense_iq1_m`. `dense_extra_mmq` added to the prewarm list.
 
 ## Correctness

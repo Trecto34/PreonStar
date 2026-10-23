@@ -1,8 +1,8 @@
 # W3 Verdict — `delta_net_cols` Prefill on BC-250
 
 ## 1. Context & Objective (Plan §W3)
-- Test whether enabling `delta_net_cols.comp` (columnar prefill with state loaded once, token loop, stored once) via `Q36_VK_DELTA_COL_PREFILL=1` provides a prefill throughput gain on BC-250.
-- Production default: `q36_vulkan.c:1225` explicitly sets `enabled = env ? env[0] != '0' : !q36_vk.bc250;`, disabling it by default on BC-250 in favor of `delta_net_decode_reg_f16`.
+- Test whether enabling `delta_net_cols.comp` (columnar prefill with state loaded once, token loop, stored once) via `P36_VK_DELTA_COL_PREFILL=1` provides a prefill throughput gain on BC-250.
+- Production default: `p36_vulkan.c:1225` explicitly sets `enabled = env ? env[0] != '0' : !p36_vk.bc250;`, disabling it by default on BC-250 in favor of `delta_net_decode_reg_f16`.
 - Gate: dense prefill gain ≥ 1.5% and frontier logits bit-exact.
 
 ## 2. Standard 7-Rep Interleaved A/B Benchmark (ctx 1024)
@@ -12,7 +12,7 @@ Harness: `tests/bench_ab.sh` on `Swift-Qwen3.8-27B-IQ3_XXS.gguf` at standard `ct
 - **Arm A (Stock baseline, `delta_net_decode_reg_f16`)**:
   - Prefill median: **170.77 tok/s** (MAD 0.500)
   - Decode median: **18.06 tok/s** (MAD 0.010)
-- **Arm B (Candidate, `Q36_VK_DELTA_COL_PREFILL=1`)**:
+- **Arm B (Candidate, `P36_VK_DELTA_COL_PREFILL=1`)**:
   - Prefill median: **166.54 tok/s** (MAD 0.500)
   - Decode median: **17.93 tok/s** (MAD 0.070)
 - **Delta (B vs A)**:
@@ -26,17 +26,17 @@ Diagnostic context length: single-run frontier dump at `ctx=512`, `gen=16`.
 
 1. **Pre-fix Parity Measurement (Catastrophic failure)**:
    - Raw artifact: `karpathy/evidence/raw/ab-w3-deltacol-parity.txt`.
-   - Comparing frontier 512 logits (`Q36_VK_DELTA_COL_PREFILL=0` vs `1`):
+   - Comparing frontier 512 logits (`P36_VK_DELTA_COL_PREFILL=0` vs `1`):
      - `max_abs_diff = 19.1229` at logit index 1973
      - `top-1` mismatch: ref=13 (21.11) vs cand=29 (10.12)
      - `top-64` overlap: **3 / 64**
 2. **Root Cause Analysis (Discovered by Claude)**:
    - `delta_net_cols.comp` partitions columns by `gl_SubgroupID` (0..3) and rows by `gl_SubgroupInvocationID` (0..31), hard-requiring wave32.
-   - `q36_vk_force_wave32` previously contained `"delta_net_cols.spv"`.
+   - `p36_vk_force_wave32` previously contained `"delta_net_cols.spv"`.
    - Under f16 recurrent state (Swift), the pipeline compiles `delta_net_cols_f16.spv`.
    - Because `"delta_net_cols.spv"` is not a substring of `"delta_net_cols_f16.spv"`, the f16 variant ran at BC-250's native wave64 (only 2 subgroups of 64 lanes). Columns 2..3 were never written, and lane indices reached 159 against row size 128 (out-of-bounds state corruption).
 3. **Verification of Wave32 Fix**:
-   - Widening `q36_vk_force_wave32` to match `"delta_net_cols"` forced `delta_net_cols_f16.spv` to wave32.
+   - Widening `p36_vk_force_wave32` to match `"delta_net_cols"` forced `delta_net_cols_f16.spv` to wave32.
    - Raw artifact: `karpathy/evidence/raw/ab-w3-deltacol-w32-parity.txt`.
    - Post-fix frontier 512 logits:
      - `top-1`: **identical** (ref=13, new=13)
@@ -51,9 +51,9 @@ Diagnostic context length: single-run frontier dump at `ctx=512`, `gen=16`.
 ## 4. Verdict & Actions
 - **Speed Lever: REJECTED & FROZEN.**
   - `delta_net_cols` is confirmed slower than `delta_net_decode_reg_f16` on BC-250 across all context lengths (-2.48% at ctx 1024, -7.20% at ctx 512).
-  - The guard condition `!q36_vk.bc250` in `q36_vulkan.c:1225` is verified correct and must remain frozen.
+  - The guard condition `!p36_vk.bc250` in `p36_vulkan.c:1225` is verified correct and must remain frozen.
 - **Correctness Fix: ACCEPTED & COMMITTED.**
-  - `q36_vk_force_wave32` widened to `"delta_net_cols"` in `q36_vulkan.c` so that if `delta_net_cols_f16` is ever dispatched, it enforces wave32 and avoids memory corruption.
+  - `p36_vk_force_wave32` widened to `"delta_net_cols"` in `p36_vulkan.c` so that if `delta_net_cols_f16` is ever dispatched, it enforces wave32 and avoids memory corruption.
 - **Evidence Files**:
   - `karpathy/evidence/raw/ab-w3-deltacol.csv` (7-rep interleaved CSV)
   - `karpathy/evidence/raw/ab-w3-deltacol-summary.txt` (summary block)

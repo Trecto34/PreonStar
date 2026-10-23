@@ -8,9 +8,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
-#include "../q36.h"
-#include "../q36_gpu.h"
-#include "../q36_cli_args.h"
+#include "../p36.h"
+#include "../p36_gpu.h"
+#include "../p36_cli_args.h"
 
 static double get_time_us(void) {
     struct timespec ts;
@@ -20,9 +20,9 @@ static double get_time_us(void) {
 
 static uint32_t kv_row_bytes(uint32_t type, uint32_t n) {
     uint32_t blocks = (n + 31u) / 32u;
-    if (type == Q36_KV_CACHE_F16) return n * 2u;
-    if (type == Q36_KV_CACHE_Q8_0) return blocks * 34u;
-    if (type == Q36_KV_CACHE_Q4_0) return blocks * 18u;
+    if (type == P36_KV_CACHE_F16) return n * 2u;
+    if (type == P36_KV_CACHE_Q8_0) return blocks * 34u;
+    if (type == P36_KV_CACHE_Q4_0) return blocks * 18u;
     return 0;
 }
 
@@ -31,8 +31,8 @@ static void run_bench(uint32_t pos0, int iters) {
     const uint32_t n_tok = 1;
     const uint32_t kv_max = pos0 + n_tok;
     const uint32_t cache_row = n_head_kv * head_dim;
-    const uint32_t k_type = Q36_KV_CACHE_Q8_0;
-    const uint32_t v_type = Q36_KV_CACHE_Q4_0;
+    const uint32_t k_type = P36_KV_CACHE_Q8_0;
+    const uint32_t v_type = P36_KV_CACHE_Q4_0;
     const uint32_t k_row_bytes = kv_row_bytes(k_type, cache_row);
     const uint32_t v_row_bytes = kv_row_bytes(v_type, cache_row);
     const uint64_t q_floats = (uint64_t)n_tok * n_head * head_dim;
@@ -55,49 +55,49 @@ static void run_bench(uint32_t pos0, int iters) {
     for (uint64_t i = 0; i < q_floats; i++) q_host[i] = 0.1f * ((int)(i % 17) - 8);
     for (uint64_t i = 0; i < qg_floats; i++) qg_host[i] = 0.05f * ((int)(i % 19) - 9);
 
-    q36_gpu_tensor *q = q36_gpu_tensor_alloc(q_floats * sizeof(float));
-    q36_gpu_tensor *qg = q36_gpu_tensor_alloc(qg_floats * sizeof(float));
-    q36_gpu_tensor *kc = q36_gpu_tensor_alloc((uint64_t)kv_max * k_row_bytes);
-    q36_gpu_tensor *vc = q36_gpu_tensor_alloc((uint64_t)kv_max * v_row_bytes);
-    q36_gpu_tensor *out = q36_gpu_tensor_alloc(out_floats * sizeof(float));
+    p36_gpu_tensor *q = p36_gpu_tensor_alloc(q_floats * sizeof(float));
+    p36_gpu_tensor *qg = p36_gpu_tensor_alloc(qg_floats * sizeof(float));
+    p36_gpu_tensor *kc = p36_gpu_tensor_alloc((uint64_t)kv_max * k_row_bytes);
+    p36_gpu_tensor *vc = p36_gpu_tensor_alloc((uint64_t)kv_max * v_row_bytes);
+    p36_gpu_tensor *out = p36_gpu_tensor_alloc(out_floats * sizeof(float));
 
-    q36_gpu_tensor_write(q, 0, q_host, q_floats * sizeof(float));
-    q36_gpu_tensor_write(qg, 0, qg_host, qg_floats * sizeof(float));
-    q36_gpu_tensor_write(kc, 0, kc_host, (uint64_t)kv_max * k_row_bytes);
-    q36_gpu_tensor_write(vc, 0, vc_host, (uint64_t)kv_max * v_row_bytes);
-    q36_gpu_set_model_map(sinks_raw, sinks_alloc);
-    q36_gpu_set_quality(false);
+    p36_gpu_tensor_write(q, 0, q_host, q_floats * sizeof(float));
+    p36_gpu_tensor_write(qg, 0, qg_host, qg_floats * sizeof(float));
+    p36_gpu_tensor_write(kc, 0, kc_host, (uint64_t)kv_max * k_row_bytes);
+    p36_gpu_tensor_write(vc, 0, vc_host, (uint64_t)kv_max * v_row_bytes);
+    p36_gpu_set_model_map(sinks_raw, sinks_alloc);
+    p36_gpu_set_quality(false);
 
     /* Warmup */
     for (int i = 0; i < 5; i++) {
-        q36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL,
+        p36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL,
                                    sinks_raw, sinks_alloc, 0, true,
                                    pos0, n_tok, n_head, n_head_kv,
                                    head_dim, k_type, v_type,
                                    k_row_bytes, v_row_bytes);
     }
-    q36_gpu_tensor_read(out, 0, out_host, out_floats * sizeof(float));
+    p36_gpu_tensor_read(out, 0, out_host, out_floats * sizeof(float));
 
     double t0 = get_time_us();
     for (int i = 0; i < iters; i++) {
-        q36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL,
+        p36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL,
                                    sinks_raw, sinks_alloc, 0, true,
                                    pos0, n_tok, n_head, n_head_kv,
                                    head_dim, k_type, v_type,
                                    k_row_bytes, v_row_bytes);
     }
-    q36_gpu_tensor_read(out, 0, out_host, out_floats * sizeof(float));
+    p36_gpu_tensor_read(out, 0, out_host, out_floats * sizeof(float));
     double t1 = get_time_us();
     double avg_us = (t1 - t0) / iters;
 
     printf("pos0=%u (ctx ~%u): avg latency = %.2f us (%d iters)\n",
            pos0, pos0 + 1, avg_us, iters);
 
-    q36_gpu_tensor_free(q);
-    q36_gpu_tensor_free(qg);
-    q36_gpu_tensor_free(kc);
-    q36_gpu_tensor_free(vc);
-    q36_gpu_tensor_free(out);
+    p36_gpu_tensor_free(q);
+    p36_gpu_tensor_free(qg);
+    p36_gpu_tensor_free(kc);
+    p36_gpu_tensor_free(vc);
+    p36_gpu_tensor_free(out);
     free(q_host);
     free(qg_host);
     free(kc_host);
@@ -107,10 +107,10 @@ static void run_bench(uint32_t pos0, int iters) {
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_attn_decode");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_attn_decode");
     if (cli_rc) return cli_rc;
-    if (!q36_gpu_init()) {
-        fprintf(stderr, "q36_gpu_init failed\n");
+    if (!p36_gpu_init()) {
+        fprintf(stderr, "p36_gpu_init failed\n");
         return 1;
     }
 
@@ -120,6 +120,6 @@ int main(int argc, char **argv) {
     run_bench(2048, 50);  /* Split (4 spans) */
     run_bench(4096, 50);  /* Split (8 spans) */
 
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     return 0;
 }

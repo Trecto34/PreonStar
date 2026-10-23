@@ -1,4 +1,4 @@
-# IQ3_XXS n_tok reached by the MTP loop, env-gated diagnostic Q36_VK_DBG_IQ3N
+# IQ3_XXS n_tok reached by the MTP loop, env-gated diagnostic P36_VK_DBG_IQ3N
 # (prints every dense_iq3_xxs dispatch: n_tok, in_dim, out_dim, branch)
 
 === --mtp-draft 3 (Swift, ctx 512, --mtp-margin 0; token counts include the 512-token prefill) ===

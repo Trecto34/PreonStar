@@ -12,58 +12,58 @@ index 8a923a5..15368de 100644
  	vulkan/dense_q4k_decode.spv \
 @@ -226,6 +227,9 @@ vulkan/dense_extra_mmq.spv: vulkan/dense_extra_mmq.comp
  vulkan/dense_extra_mmq_q2_0.spv: vulkan/dense_extra_mmq.comp
- 	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -o $@ $<
+ 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q2_0_ONLY=1 -o $@ $<
  
 +vulkan/dense_extra_mmq_q2_0_bn256.spv: vulkan/dense_extra_mmq.comp
-+	$(GLSLC) -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -DQ36_Q2_0_BN=256 -o $@ $<
++	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q2_0_ONLY=1 -DP36_Q2_0_BN=256 -o $@ $<
 +
  vulkan/predequant_b16.spv: vulkan/predequant_b16.comp
  	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
  
-diff --git a/q36_vulkan.c b/q36_vulkan.c
+diff --git a/p36_vulkan.c b/p36_vulkan.c
 index 4b89592..d715f7e 100644
---- a/q36_vulkan.c
-+++ b/q36_vulkan.c
+--- a/p36_vulkan.c
++++ b/p36_vulkan.c
 @@ -243,6 +243,7 @@ typedef struct {
-     q36_vk_kernel dense_extra_decode_q2_0;
-     q36_vk_kernel dense_extra_mmq;
-     q36_vk_kernel dense_extra_mmq_q2_0;
-+    q36_vk_kernel dense_extra_mmq_q2_0_bn256;
-     q36_vk_kernel dense_kquant_mmq;
-     q36_vk_kernel predequant_b16;
-     q36_vk_kernel dense_kquant_decode;
-@@ -3224,6 +3225,7 @@ int q36_gpu_init(void) {
-     q36_vk.dense_extra_decode_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
-     q36_vk.dense_extra_mmq = Q36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
-     q36_vk.dense_extra_mmq_q2_0 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
-+    q36_vk.dense_extra_mmq_q2_0_bn256 = Q36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0_bn256.spv", 4, 24, 1u << 2);
-     q36_vk.dense_kquant_mmq = Q36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
-     q36_vk.predequant_b16 = Q36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
-     q36_vk.dense_kquant_decode = Q36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
-@@ -3613,6 +3615,7 @@ void q36_gpu_cleanup(void) {
-     q36_vk_kernel_destroy(&q36_vk.dense_iq1_m);
-     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq);
-     q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0);
-+    q36_vk_kernel_destroy(&q36_vk.dense_extra_mmq_q2_0_bn256);
-     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode_q2_0);
-     q36_vk_kernel_destroy(&q36_vk.dense_extra_decode);
-     q36_vk_kernel_destroy(&q36_vk.dense_iq4_xs_mmq);
-@@ -8214,7 +8217,13 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
+     p36_vk_kernel dense_extra_decode_q2_0;
+     p36_vk_kernel dense_extra_mmq;
+     p36_vk_kernel dense_extra_mmq_q2_0;
++    p36_vk_kernel dense_extra_mmq_q2_0_bn256;
+     p36_vk_kernel dense_kquant_mmq;
+     p36_vk_kernel predequant_b16;
+     p36_vk_kernel dense_kquant_decode;
+@@ -3224,6 +3225,7 @@ int p36_gpu_init(void) {
+     p36_vk.dense_extra_decode_q2_0 = P36_VK_KERNEL("vulkan/dense_extra_decode_q2_0.spv", 4, 20, 1u << 2);
+     p36_vk.dense_extra_mmq = P36_VK_KERNEL("vulkan/dense_extra_mmq.spv", 4, 24, 1u << 2);
+     p36_vk.dense_extra_mmq_q2_0 = P36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0.spv", 4, 24, 1u << 2);
++    p36_vk.dense_extra_mmq_q2_0_bn256 = P36_VK_KERNEL("vulkan/dense_extra_mmq_q2_0_bn256.spv", 4, 24, 1u << 2);
+     p36_vk.dense_kquant_mmq = P36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
+     p36_vk.predequant_b16 = P36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
+     p36_vk.dense_kquant_decode = P36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
+@@ -3613,6 +3615,7 @@ void p36_gpu_cleanup(void) {
+     p36_vk_kernel_destroy(&p36_vk.dense_iq1_m);
+     p36_vk_kernel_destroy(&p36_vk.dense_extra_mmq);
+     p36_vk_kernel_destroy(&p36_vk.dense_extra_mmq_q2_0);
++    p36_vk_kernel_destroy(&p36_vk.dense_extra_mmq_q2_0_bn256);
+     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_q2_0);
+     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode);
+     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_mmq);
+@@ -8214,7 +8217,13 @@ int p36_gpu_matmul_iq_quant_q8_scaled_tensor(p36_gpu_tensor *out,
                      weight_type, scale,
                  };
-                 bool is_q2_0 = weight_type == Q36_VK_TENSOR_Q2_0;
--                q36_vk_kernel *mmq_kernel = is_q2_0 ?
+                 bool is_q2_0 = weight_type == P36_VK_TENSOR_Q2_0;
+-                p36_vk_kernel *mmq_kernel = is_q2_0 ?
 +                /* A 256-token tile reuses each Q2_0 weight tile twice as long.
 +                 * Restrict it to real, nearly full chunks; small tails keep
 +                 * the 128-token shader and its established scheduling. */
 +                bool bn256 = is_q2_0 && n_tok >= 192u &&
-+                             getenv("Q36_VK_Q2_MMQ_BN256") != NULL;
-+                q36_vk_kernel *mmq_kernel = bn256 ?
-+                    &q36_vk.dense_extra_mmq_q2_0_bn256 : is_q2_0 ?
-                     &q36_vk.dense_extra_mmq_q2_0 :
-                     &q36_vk.dense_extra_mmq;
-                 ok = q36_vk_run_unlocked(
-@@ -8222,7 +8231,8 @@ int q36_gpu_matmul_iq_quant_q8_scaled_tensor(q36_gpu_tensor *out,
++                             getenv("P36_VK_Q2_MMQ_BN256") != NULL;
++                p36_vk_kernel *mmq_kernel = bn256 ?
++                    &p36_vk.dense_extra_mmq_q2_0_bn256 : is_q2_0 ?
+                     &p36_vk.dense_extra_mmq_q2_0 :
+                     &p36_vk.dense_extra_mmq;
+                 ok = p36_vk_run_unlocked(
+@@ -8222,7 +8231,8 @@ int p36_gpu_matmul_iq_quant_q8_scaled_tensor(p36_gpu_tensor *out,
                      bindings, &push, sizeof(push),
                      is_q2_0 ? ((uint32_t)out_dim + 63u) / 64u :
                                ((uint32_t)out_dim + 31u) / 32u,
@@ -72,7 +72,7 @@ index 4b89592..d715f7e 100644
 +                            ((uint32_t)n_tok + 127u) / 128u, 1);
              }
          }
-         pthread_mutex_unlock(&q36_vk_mu);
+         pthread_mutex_unlock(&p36_vk_mu);
 diff --git a/vulkan/dense_extra_mmq.comp b/vulkan/dense_extra_mmq.comp
 index 28fd24c..874c92b 100644
 --- a/vulkan/dense_extra_mmq.comp
@@ -80,9 +80,9 @@ index 28fd24c..874c92b 100644
 @@ -1,12 +1,15 @@
  #version 460
  
- #ifdef Q36_Q2_0_ONLY
-+#ifndef Q36_Q2_0_BN
-+#define Q36_Q2_0_BN 128
+ #ifdef P36_Q2_0_ONLY
++#ifndef P36_Q2_0_BN
++#define P36_Q2_0_BN 128
 +#endif
  #extension GL_EXT_control_flow_attributes : enable
  #extension GL_EXT_shader_16bit_storage : require
@@ -90,7 +90,7 @@ index 28fd24c..874c92b 100644
  #extension GL_KHR_shader_subgroup_basic : require
  
 -layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
-+layout(local_size_x = Q36_Q2_0_BN, local_size_y = 1, local_size_z = 1) in;
++layout(local_size_x = P36_Q2_0_BN, local_size_y = 1, local_size_z = 1) in;
  
  layout(set = 0, binding = 0) readonly buffer Weights { uint wb[]; };
  layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
@@ -99,7 +99,7 @@ index 28fd24c..874c92b 100644
  
  const uint BM = 64u;
 -const uint BN = 128u;
-+const uint BN = Q36_Q2_0_BN;
++const uint BN = P36_Q2_0_BN;
  const uint BK = 32u;
  const uint STRIDE = BK / 2u + 1u;
  const uint Q8K_WORDS = 74u;

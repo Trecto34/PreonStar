@@ -1,16 +1,16 @@
-/q36
-/q36-server
-/q36-bench
-/q36-agent
-/q36-eval
-/q36_test
-/q36_reference_test
-/q36_llama_test
-/q36-vk
-/q36-server-vk
-/q36-bench-vk
-/q36_test_vk
-/q36moe.gguf
+/p36
+/p36-server
+/p36-bench
+/p36-agent
+/p36-eval
+/p36_test
+/p36_reference_test
+/p36_llama_test
+/p36-vk
+/p36-server-vk
+/p36-bench-vk
+/p36_test_vk
+/p36moe.gguf
 /SPEC.md
 /parity-report*
 /gguf/
@@ -30,12 +30,12 @@ tests/__pycache__/
 .*.swp
 .DS_Store
 /.opencode-tmp
-/tests/q36_layer_probe
-/tests/q36_parity_report
+/tests/p36_layer_probe
+/tests/p36_parity_report
 /tests/test_sampling
 /tests/test-vectors/local/
 /gguf-tools/quality-testing/local/
-q36_agent_test
+p36_agent_test
 TODO.md
 
 /tests/test_prompt_prefix
@@ -60,7 +60,7 @@ TODO.md
 /.optimizations/
 
 # Local BC-250 launcher scripts.  These hardcode one machine's paths
-# (/home/server/q36-opt, /home/server/.q36/kv-cache), bind 0.0.0.0:8000 and
+# (/home/server/p36-opt, /home/server/.p36/kv-cache), bind 0.0.0.0:8000 and
 # assume a specific thread count and KV budget, so they are deliberately not
 # part of the repository.  Keep your own copies untracked.
 /start-qwen36.sh
@@ -86,7 +86,7 @@ logs/bc250-sustained-20260918/*-validation/*.trace
 logs/bc250-sustained-20260918/*-validation/run-gpu-gates.sh
 logs/bc250-sustained-20260918/barrier-fix-*/*.txt
 logs/bc250-sustained-20260918/runs/
-logs/bc250-sustained-20260918/baseline/q36-bench
+logs/bc250-sustained-20260918/baseline/p36-bench
 logs/bc250-sustained-20260918/attn_parity
 logs/bc250-sustained-20260918/hadamard_parity
 logs/bc250-sustained-20260918/mmq_info
@@ -98,7 +98,7 @@ logs/bc250-sustained-20260918/swiglu_hadamard_parity
 /run_sustained_rerun.sh
 /mmq_info
 /tui.py
-/scripts/q36_tui.py
+/scripts/p36_tui.py
 /logs/sustained_2min_thermal_log.csv
 scripts/__pycache__/
 __pycache__/
@@ -106,10 +106,10 @@ __pycache__/
 # Machine-local launchers, scratch and salvage (hardcoded /home/server paths).
 *.pid
 *.bak-pre-opt
-/build-abliterated-q36.sh
+/build-abliterated-p36.sh
 /start-qwen38.sh
 /start-subagent.sh
-/q36_vision_api.py
+/p36_vision_api.py
 /tmp_frame.png
 /double_prompt.txt
 /sample_repos.txt

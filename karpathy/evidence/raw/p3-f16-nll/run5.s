@@ -6,13 +6,13 @@
 #   2. the audit's >=2048-token window for the f16 accumulator (dirs i/j)
 #   3. many paired samples for the recurrent state at long ctx   (dirs k/l)
 set -uo pipefail
-cd /home/server/q36
-SWIFT=/home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf
+cd /home/server/p36
+SWIFT=/home/server/p36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf
 STORY=tests/long_context_story_prompt.txt
 OUT=/tmp/p36/out3
 mkdir -p "$OUT"
-L=/tmp/q36-gpu.lock
-pgrep -x q36-bench >/dev/null && { echo "q36-bench already running, abort"; exit 1; }
+L=/tmp/p36-gpu.lock
+pgrep -x p36-bench >/dev/null && { echo "p36-bench already running, abort"; exit 1; }
 
 bench () {
     local name="$1"; shift
@@ -21,7 +21,7 @@ bench () {
     if [ "${1:-}" = "@" ]; then shift; model="$1"; shift; fi
     local st=$(date +%s)
     ( [ -n "$envp" ] && export $envp
-      flock -w 7200 "$L" ./q36-bench --vulkan -m "$model" --prompt-file "$STORY" "$@" ) \
+      flock -w 7200 "$L" ./p36-bench --vulkan -m "$model" --prompt-file "$STORY" "$@" ) \
         > "$OUT/$name.log" 2>&1
     echo "--- $name rc=$? $(( $(date +%s) - st ))s"
 }
@@ -41,7 +41,7 @@ echo "### 3. P3b recurrent state f16 vs f32, ctx 8192..16384 every 256 tokens"
 rm -rf /tmp/p36/p3h-k /tmp/p36/p3h-l; mkdir -p /tmp/p36/p3h-k /tmp/p36/p3h-l
 PC="--ctx-start 8192 --ctx-max 16384 --step-incr 256 --ctx-alloc 16512 --prefill-chunk 256 --gen-tokens 0"
 bench p3h-state2-f16 ""                             $PC --dump-frontier-logits-dir /tmp/p36/p3h-k
-bench p3h-state2-f32 "Q36_VK_RECURRENT_STATE_F16=0" $PC --dump-frontier-logits-dir /tmp/p36/p3h-l
+bench p3h-state2-f32 "P36_VK_RECURRENT_STATE_F16=0" $PC --dump-frontier-logits-dir /tmp/p36/p3h-l
 
 echo "### 4. P9 sampler gap: same model, greedy vs the default min-p sampler, short prompt"
 # The story file is ~34k tokens and cannot fit --ctx 700, which is why the run4
@@ -51,11 +51,11 @@ cli () { # cli NAME "ENV ..." extra...
     local envp="$1"; shift
     local st=$(date +%s)
     ( [ -n "$envp" ] && export $envp
-      flock -w 7200 "$L" ./q36 --vulkan -m "$SWIFT" -p "Write a long detailed story about a lazy duck who avoids work." "$@" < /dev/null ) \
+      flock -w 7200 "$L" ./p36 --vulkan -m "$SWIFT" -p "Write a long detailed story about a lazy duck who avoids work." "$@" < /dev/null ) \
         > "$OUT/$name.log" 2>&1
     echo "--- $name rc=$? $(( $(date +%s) - st ))s"
 }
-P9="Q36_VK_PROF_KERNEL=1 Q36_VK_PROF_DECODE=1 -n 128 -c 1400 --seed 42"
+P9="P36_VK_PROF_KERNEL=1 P36_VK_PROF_DECODE=1 -n 128 -c 1400 --seed 42"
 cli p9b-greedy  "$P9" --temp 0
 cli p9b-sampled "$P9" --temp 1
 

@@ -19,7 +19,7 @@ import termios
 import time
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--binary", type=Path, default=Path("./q36-agent"))
+parser.add_argument("--binary", type=Path, default=Path("./p36-agent"))
 parser.add_argument("--model", type=Path, required=True)
 parser.add_argument("--vision", type=Path)
 parser.add_argument("--prefix-file", type=Path)
@@ -54,7 +54,7 @@ if args.dspark:
     cmd += ["--dspark", "--mtp-model", str(args.dspark.resolve())]
 (out / "command.json").write_text(json.dumps(cmd))
 proc = subprocess.Popen(cmd, cwd=root, stdin=slave, stdout=slave, stderr=slave,
-                        env=dict(os.environ, Q36_AGENT_CACHE_DIR=str(cache), TERM="xterm-256color"), start_new_session=True)
+                        env=dict(os.environ, P36_AGENT_CACHE_DIR=str(cache), TERM="xterm-256color"), start_new_session=True)
 os.close(slave)
 raw = bytearray()
 pending = b""
@@ -114,7 +114,7 @@ def idle():
     return bool(states) and states[-1] == b"idle"
 
 def error():
-    return (re.search(rb"q36-agent: (not enough|context |compaction |compacted |user message)", raw[error_begin:]) is not None)
+    return (re.search(rb"p36-agent: (not enough|context |compaction |compacted |user message)", raw[error_begin:]) is not None)
 
 def snapshot(label):
     (out / (label + ".screen")).write_text(re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw.decode(errors="replace"))[-16000:])

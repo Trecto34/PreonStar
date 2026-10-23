@@ -9,7 +9,7 @@ index 1e9f563..1b07c86 100644
  #extension GL_EXT_shader_16bit_storage : require
  #extension GL_EXT_integer_dot_product : require
  #extension GL_KHR_shader_subgroup_basic : require
-@@ -29,7 +30,7 @@ const uint ROWS = Q36_ROWS;
+@@ -29,7 +30,7 @@ const uint ROWS = P36_ROWS;
  const uint Q8K_WORDS = 74u;
  const uint TAB_IQ3XXS_GRID = 3104u;
  

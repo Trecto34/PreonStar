@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate complete q36-bench frontier dumps and require exact finite float32 bits."""
+"""Validate complete p36-bench frontier dumps and require exact finite float32 bits."""
 
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ def validate_expectations(frontiers, ctx, model, backend, quality, quant_bits, v
         raise InvalidDump('expected quality must be boolean and quant_bits must be 0, 2, or 4')
     if type(vocab) is not int or not 0 < vocab <= INT_MAX:
         raise InvalidDump('expected vocab must be a positive signed C int')
-    return {'source': 'q36-bench', 'model': model, 'backend': backend,
+    return {'source': 'p36-bench', 'model': model, 'backend': backend,
             'quality': quality, 'quant_bits': quant_bits, 'ctx': ctx, 'vocab': vocab}
 
 
@@ -100,7 +100,7 @@ def validate_dump(path, expected, frontier, previous):
     except (ValueError, UnicodeError) as exc:
         raise InvalidDump(f'invalid JSON: {exc}') from exc
     if type(document) is not dict or set(document) != FIELDS:
-        raise InvalidDump('dump must have exactly the known q36-bench metadata and logits fields')
+        raise InvalidDump('dump must have exactly the known p36-bench metadata and logits fields')
     for key in ('source', 'model', 'backend'):
         if type(document[key]) is not str or document[key] != expected[key]:
             raise InvalidDump(f'{key}: does not match explicit expected metadata')

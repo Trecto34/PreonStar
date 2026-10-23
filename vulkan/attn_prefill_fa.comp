@@ -8,7 +8,7 @@
 /* Flash-attention prefill, head_dim 256, Q8_0 K cache / Q4_0 V cache.  Built
  * twice: HQ=6 (dense Qwen3.8 GQA 24/4, 8 tokens x 3 rows per rowset) replaces
  * attn_prefill_qtile2_gqa6, HQ=8 (Qwen3.6/3.8 35B-A3B MoE GQA 16/2, 4 tokens x
- * 2 rows) replaces attn_prefill_qtile2, when Q36_VK_ATTN_FA is on.  Both write
+ * 2 rows) replaces attn_prefill_qtile2, when P36_VK_ATTN_FA is on.  Both write
  * the same per-4096-key-group (acc, m, l) partials, so attn_combine is
  * unchanged.  The HQ=6 shape already sits at the 256-VGPR ceiling, which is
  * why HQ=8 trades tokens per workgroup for fewer rows per lane.
@@ -36,7 +36,7 @@
  * like the kernel it replaces.  It is NOT bit-identical to the decode kernels
  * (attn_decode_split/fused), which was the property qtile2 happened to have:
  * the LDS-staged tile order puts ~1e-8 of f32 reassociation into a batch row
- * (tests/q36_test.c, `fa_batch` drift print), below the f64 CPU reference's
+ * (tests/p36_test.c, `fa_batch` drift print), below the f64 CPU reference's
  * own 1.2e-8 spread and 4 orders inside the test's 2e-3 quality bound. */
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;

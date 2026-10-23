@@ -1,5 +1,5 @@
 Shader byte-identity check for the IQ2_S tuned decode/mmq kernel work.
-Confirms Q36_IQ2S_ONLY additions to dense_extra_decode.comp / dense_extra_mmq.comp
+Confirms P36_IQ2S_ONLY additions to dense_extra_decode.comp / dense_extra_mmq.comp
 do not change the SPIR-V for any pre-existing build variant (generic, Q2_0, PQ2_0)
 -- the ones the guard model (IQ2_XXS-based, zero IQ2_S tensors) and other
 Q2_0/PQ2_0/PTQ1_0-carrying files actually use.
@@ -18,4 +18,4 @@ dense_extra_mmq_pq2_0.spv:
 83ebd6fb5ba16d23f9ce2f0844ead4c757ef7df49d656134dca7c923ebc5a9fd  vulkan/dense_extra_mmq_pq2_0.spv
 
 All confirmed byte-identical to pre-change builds during development
-(verified via sha256sum against a fresh -DQ36_IQ2S_ONLY-free compile before landing).
+(verified via sha256sum against a fresh -DP36_IQ2S_ONLY-free compile before landing).

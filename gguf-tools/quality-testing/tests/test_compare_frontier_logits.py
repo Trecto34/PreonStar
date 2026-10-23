@@ -20,7 +20,7 @@ def fixture(frontier=2048, previous=0, values=None, **changes):
     values = [1.0, -2.0, 3.0, 0.0] if values is None else values
     values = [f32(value) for value in values]
     best = max(range(len(values)), key=values.__getitem__)
-    document = {'source': 'q36-bench', 'model': '/models/qwen', 'backend': 'vulkan',
+    document = {'source': 'p36-bench', 'model': '/models/qwen', 'backend': 'vulkan',
                 'quality': False, 'quant_bits': 2, 'prompt_tokens': frontier,
                 'frontier_tokens': frontier, 'prefill_tokens': frontier - previous,
                 'ctx': 8192, 'vocab': len(values), 'argmax_id': best,
@@ -136,8 +136,8 @@ class FrontierTests(unittest.TestCase):
     def test_duplicate_missing_extra_truncated_and_malformed_json_rejected(self):
         good = fixture()
         malformed = [b'', good[:-1], good[:-3], good + b'{}\n', b'[]\n',
-                     good.replace(b'{', b'{"source":"q36-bench",', 1),
-                     good.replace(b'"source": "q36-bench", ', b''),
+                     good.replace(b'{', b'{"source":"p36-bench",', 1),
+                     good.replace(b'"source": "p36-bench", ', b''),
                      good.replace(b'{', b'{"extra":1,', 1),
                      good.replace(b'"logits": [1,-2,3,0]', b'"logits": null'),
                      good.replace(b'"logits": [1,-2,3,0]', b'"logits": {"a":1,"a":2}'),

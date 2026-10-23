@@ -19,13 +19,13 @@ layout(push_constant) uniform Push {
     float scale;
 } pc;
 
-#ifndef Q36_ROWS
-#define Q36_ROWS 5
+#ifndef P36_ROWS
+#define P36_ROWS 5
 #endif
-#ifndef Q36_BOUNDS
-#define Q36_BOUNDS 1
+#ifndef P36_BOUNDS
+#define P36_BOUNDS 1
 #endif
-const uint ROWS = Q36_ROWS;
+const uint ROWS = P36_ROWS;
 const uint Q8K_WORDS = 74u;
 const uint TAB_IQ3XXS_GRID = 3104u;
 
@@ -71,7 +71,7 @@ void main(void) {
 
         for (uint r = 0u; r < ROWS; r++) {
             uint row = first_row + r;
-#if Q36_BOUNDS
+#if P36_BOUNDS
             if (row >= pc.out_dim) continue;
 #endif
             uint base = row * pc.row_bytes + 98u * b;
@@ -119,7 +119,7 @@ void main(void) {
         float total = subgroupAdd(acc[r]);
         uint row = first_row + r;
         if (lid == 0u
-#if Q36_BOUNDS
+#if P36_BOUNDS
             && row < pc.out_dim
 #endif
         )

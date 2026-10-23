@@ -10,7 +10,7 @@
  *
  * dense_iq3_xxs_decode_r4 is ALU-bound (5.4 VALU per weight MACC, P4), and the
  * K-quant MMQ tile it is replaced by for n_tok >= 2 costs a full 128-row tile
- * (q36_vulkan.c dense_iq3_xxs_mmq + predequant_b16).  Here the weight word is
+ * (p36_vulkan.c dense_iq3_xxs_mmq + predequant_b16).  Here the weight word is
  * unpacked once and feeds both rows: the loads and the grid/sign work are paid
  * once, only the FMA chain is duplicated.
  *

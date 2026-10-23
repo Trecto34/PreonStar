@@ -2,11 +2,11 @@
 
 This file is a rulebook for implementing new PreonStar speedups and kernel optimizations to improve prefill and decode tokens per second (t/s) for a target runtime (Vulkan, Metal) and a target model.
 
-* A speedup must remain effective as the context size grows. Benchmark `q36_bench.c` with multiple context sizes, such as 128, 2K, and 4K tokens. In some cases, also test 8K and 16K.
+* A speedup must remain effective as the context size grows. Benchmark `p36_bench.c` with multiple context sizes, such as 128, 2K, and 4K tokens. In some cases, also test 8K and 16K.
 
-* After a change brings a speedup, always verify that it is mathematically equivalent and produces logits consistent with the previous implementation. A good check is the parity test in `q36_test.c`:
+* After a change brings a speedup, always verify that it is mathematically equivalent and produces logits consistent with the previous implementation. A good check is the parity test in `p36_test.c`:
 
-  * CPU vs. llama: use 16 threads and short prompts only. This is required only if the `q36.c` CPU path was touched by the changes.
+  * CPU vs. llama: use 16 threads and short prompts only. This is required only if the `p36.c` CPU path was touched by the changes.
   * CPU vs. GPU (Vulkan or Metal): use short prompts and 16 CPU threads.
   * All parity thresholds from top-1 through top-64 must pass.
 
@@ -26,7 +26,7 @@ This file is a rulebook for implementing new PreonStar speedups and kernel optim
 * **Measure occupancy before changing a tile size, and get the shader names into the dump.** On
   RADV, `RADV_DEBUG=shaderstats` prints VGPR/SGPR/LDS and waves-per-SIMD per pipeline but does not
   name the shader, and the on-disk pipeline cache means a second run prints nothing at all. Run it
-  as `MESA_SHADER_CACHE_DISABLE=true Q36_VK_SHADER_TRACE=1 RADV_DEBUG=shaderstats ...`: the trace
+  as `MESA_SHADER_CACHE_DISABLE=true P36_VK_SHADER_TRACE=1 RADV_DEBUG=shaderstats ...`: the trace
   names each pipeline as it is built, immediately before its stats block, and disabling the cache
   forces every shader to be compiled again. Attribute the rows, then compute what actually limits
   the kernel — LDS bytes against 64 KB per CU, VGPRs against the register file — before proposing a

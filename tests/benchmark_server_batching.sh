@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-model=${Q36_TEST_MODEL:-gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf}
-port=${Q36_TEST_SERVER_PORT:-$((20000 + $$ % 1000))}
-tmp=$(mktemp -d /tmp/q36-server-bench.XXXXXX)
+model=${P36_TEST_MODEL:-gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf}
+port=${P36_TEST_SERVER_PORT:-$((20000 + $$ % 1000))}
+tmp=$(mktemp -d /tmp/p36-server-bench.XXXXXX)
 pid=
 
 cleanup() {
@@ -26,13 +26,13 @@ run_one() {
     batch_opt=
     if [ "$sessions" -gt 0 ]; then batch_opt="--batched-session $sessions"; fi
     if [ "$fallback" = 1 ]; then
-        Q36_VK_SESSION_BATCH=0 Q36_SERVER_BATCH_LOG=1 \
-        ./q36-server -m "$model" --vulkan --ctx 512 --prefill-chunk 8 \
+        P36_VK_SESSION_BATCH=0 P36_SERVER_BATCH_LOG=1 \
+        ./p36-server -m "$model" --vulkan --ctx 512 --prefill-chunk 8 \
             --tokens 24 $batch_opt --host 127.0.0.1 --port "$port" \
             >"$log" 2>&1 &
     else
-        Q36_SERVER_BATCH_LOG=1 \
-        ./q36-server -m "$model" --vulkan --ctx 512 --prefill-chunk 8 \
+        P36_SERVER_BATCH_LOG=1 \
+        ./p36-server -m "$model" --vulkan --ctx 512 --prefill-chunk 8 \
             --tokens 24 $batch_opt --host 127.0.0.1 --port "$port" \
             >"$log" 2>&1 &
     fi

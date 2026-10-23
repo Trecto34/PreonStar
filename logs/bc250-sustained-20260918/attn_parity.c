@@ -3,24 +3,24 @@
  * The D2 experiment (--attn-span 256 at ctx 512) changed generated tokens at
  * step 93.  This harness isolates the attention kernels: one synthetic decode
  * step per position (n_tok=1, f16 K/V caches), run through
- * q36_gpu_attn_decode_tensor at one span setting.  Inputs are a fixed-seed
+ * p36_gpu_attn_decode_tensor at one span setting.  Inputs are a fixed-seed
  * PRNG, identical across span settings, so two runs can be compared exactly.
  * Each run also computes a float64 CPU reference from the same inputs.
  *
- * span is cached process-wide by q36_vk_attn_span(), so run the binary once
+ * span is cached process-wide by p36_vk_attn_span(), so run the binary once
  * per span and compare the dumped outputs (see attn_parity_cmp.py).
  *
  * Build (from repo root, after `make`):
  *   cc -O2 -o logs/bc250-sustained-20260918/attn_parity \
  *      logs/bc250-sustained-20260918/attn_parity.c \
- *      q36_gpu_core.o q36_vulkan.o q36_ssd.o q36_prompt_prefix.o \
- *      q36_image.o -lm -pthread -ldl -lvulkan
+ *      p36_gpu_core.o p36_vulkan.o p36_ssd.o p36_prompt_prefix.o \
+ *      p36_image.o -lm -pthread -ldl -lvulkan
  * Run:
  *   ./logs/bc250-sustained-20260918/attn_parity 24 4 256 512 /tmp/attn-512.bin
  *   ./logs/bc250-sustained-20260918/attn_parity 24 4 256 256 /tmp/attn-256.bin
  */
 #define _GNU_SOURCE
-#include "q36_gpu.h"
+#include "p36_gpu.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -57,9 +57,9 @@ int main(int argc, char **argv) {
     uint32_t head_dim = (uint32_t)atoi(argv[3]);
     const char *span = argv[4];
     const char *outpath = argv[5];
-    setenv("Q36_VK_ATTN_SPAN", span, 1);
+    setenv("P36_VK_ATTN_SPAN", span, 1);
 
-    if (!q36_gpu_init()) { fprintf(stderr, "gpu init failed\n"); return 2; }
+    if (!p36_gpu_init()) { fprintf(stderr, "gpu init failed\n"); return 2; }
     size_t nq = (size_t)n_head * head_dim;
     uint32_t k_row = n_head_kv * head_dim * 2u, v_row = k_row;
     FILE *of = fopen(outpath, "wb");
@@ -67,12 +67,12 @@ int main(int argc, char **argv) {
 
     for (size_t pi = 0; pi < NPOS; pi++) {
         uint32_t pos0 = POS0S[pi], kv_max = pos0 + 1u;
-        q36_gpu_tensor *q  = q36_gpu_tensor_alloc(nq * sizeof(float));
-        q36_gpu_tensor *qg = q36_gpu_tensor_alloc(2u * nq * sizeof(float));
-        q36_gpu_tensor *kc = q36_gpu_tensor_alloc((uint64_t)kv_max * k_row);
-        q36_gpu_tensor *vc = q36_gpu_tensor_alloc((uint64_t)kv_max * v_row);
-        q36_gpu_tensor *sc = q36_gpu_tensor_alloc((uint64_t)n_head * kv_max * sizeof(float));
-        q36_gpu_tensor *oa = q36_gpu_tensor_alloc(nq * sizeof(float));
+        p36_gpu_tensor *q  = p36_gpu_tensor_alloc(nq * sizeof(float));
+        p36_gpu_tensor *qg = p36_gpu_tensor_alloc(2u * nq * sizeof(float));
+        p36_gpu_tensor *kc = p36_gpu_tensor_alloc((uint64_t)kv_max * k_row);
+        p36_gpu_tensor *vc = p36_gpu_tensor_alloc((uint64_t)kv_max * v_row);
+        p36_gpu_tensor *sc = p36_gpu_tensor_alloc((uint64_t)n_head * kv_max * sizeof(float));
+        p36_gpu_tensor *oa = p36_gpu_tensor_alloc(nq * sizeof(float));
         if (!q || !qg || !kc || !vc || !sc || !oa) { fprintf(stderr, "alloc failed\n"); return 2; }
 
         float *hq = malloc(nq * sizeof(float));
@@ -82,18 +82,18 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < nq; i++) { hq[i] = frnd(); hqg[i] = frnd(); hqg[nq + i] = frnd(); }
         for (size_t i = 0; i < (size_t)kv_max * k_row / 2u; i++) hk[i] = rnd_half();
         for (size_t i = 0; i < (size_t)kv_max * v_row / 2u; i++) hv[i] = rnd_half();
-        q36_gpu_tensor_write(q, 0, hq, nq * sizeof(float));
-        q36_gpu_tensor_write(qg, 0, hqg, 2u * nq * sizeof(float));
-        q36_gpu_tensor_write(kc, 0, hk, (uint64_t)kv_max * k_row);
-        q36_gpu_tensor_write(vc, 0, hv, (uint64_t)kv_max * v_row);
+        p36_gpu_tensor_write(q, 0, hq, nq * sizeof(float));
+        p36_gpu_tensor_write(qg, 0, hqg, 2u * nq * sizeof(float));
+        p36_gpu_tensor_write(kc, 0, hk, (uint64_t)kv_max * k_row);
+        p36_gpu_tensor_write(vc, 0, hv, (uint64_t)kv_max * v_row);
 
-        if (!q36_gpu_attn_decode_tensor(oa, q, qg, kc, vc, sc, NULL, 0, 0, false,
+        if (!p36_gpu_attn_decode_tensor(oa, q, qg, kc, vc, sc, NULL, 0, 0, false,
                                         pos0, 1, n_head, n_head_kv, head_dim,
                                         0, 0, k_row, v_row)) {
             fprintf(stderr, "pos0=%u attn_decode failed\n", pos0); return 2;
         }
         float *out = malloc(nq * sizeof(float));
-        q36_gpu_tensor_read(oa, 0, out, nq * sizeof(float));
+        p36_gpu_tensor_read(oa, 0, out, nq * sizeof(float));
         fwrite(out, sizeof(float), nq, of);
 
         /* float64 CPU reference from the same f16 inputs */
@@ -130,10 +130,10 @@ int main(int argc, char **argv) {
         }
         printf("span=%s pos0=%-5u n_kv=%-5u maxabs_gpu_ref=%.3e\n", span, pos0, kv_max, maxerr);
         free(hq); free(hqg); free(hk); free(hv); free(out);
-        q36_gpu_tensor_free(q); q36_gpu_tensor_free(qg); q36_gpu_tensor_free(kc);
-        q36_gpu_tensor_free(vc); q36_gpu_tensor_free(sc); q36_gpu_tensor_free(oa);
+        p36_gpu_tensor_free(q); p36_gpu_tensor_free(qg); p36_gpu_tensor_free(kc);
+        p36_gpu_tensor_free(vc); p36_gpu_tensor_free(sc); p36_gpu_tensor_free(oa);
     }
     fclose(of);
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     return 0;
 }

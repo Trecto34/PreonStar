@@ -1,6 +1,6 @@
-# Ternary-Bonsai-2-27B (prism-ml): can q36 run it?  — NO
+# Ternary-Bonsai-2-27B (prism-ml): can p36 run it?  — NO
 
-Probe date: 2026-09-17. Engine: /home/server/q36-opt-27b (baseline build).
+Probe date: 2026-09-17. Engine: /home/server/p36-opt-27b (baseline build).
 No model weights were downloaded: the verdict comes from the GGUF header,
 read with a 32 MB HTTP range request against
 `prism-ml/Ternary-Bonsai-2-27B-gguf` (sha `6ed5e12bf84b`).
@@ -33,17 +33,17 @@ Raw header dump: /tmp/hf-bonsai.json + output of /tmp/gguf-probe.py.
 
 ## Blocker 1 — quant type id 142 is outside the engine's type table
 
-q36's tensor-type enum (`q36.c:276-295`) is GGML-numeric and stops at 29:
+p36's tensor-type enum (`p36.c:276-295`) is GGML-numeric and stops at 29:
 
-    Q36_TENSOR_F32=0 F16=1 Q8_0=8 Q2_K=10 Q3_K=11 Q4_K=12 Q5_K=13 Q6_K=14
+    P36_TENSOR_F32=0 F16=1 Q8_0=8 Q2_K=10 Q3_K=11 Q4_K=12 Q5_K=13 Q6_K=14
     IQ2_XXS=16 IQ2_XS=17 IQ3_XXS=18 IQ1_S=19 IQ4_NL=20 IQ3_S=21 IQ2_S=22
     IQ4_XS=23 I32=26 IQ1_M=29
 
 The type-info table is indexed the same way, last entry `[29] = {"iq1_m", 256, 56}`.
 The loader reads the per-tensor type and asks `tensor_nbytes(type, elements, &bytes)`;
-on failure it prints and exits (`q36.c:3556-3559`):
+on failure it prints and exits (`p36.c:3556-3559`):
 
-    fprintf(stderr, "q36: unsupported tensor type %u for %.*s\n", ...);
+    fprintf(stderr, "p36: unsupported tensor type %u for %.*s\n", ...);
     exit(1);
 
 402 of 851 tensors are id 142, so the load dies at the tensor-info parse — i.e.
@@ -56,16 +56,16 @@ new engine work, not a load flag.
 
 The file declares `prism.hadamard.weight_names` / `inverse_weight_names`.
 `grep -ri hadamard --include=*.c --include=*.h --include=*.comp` over the repo
-returns **nothing** — q36 has no inverse-Hadamard step at load. Even with the
+returns **nothing** — p36 has no inverse-Hadamard step at load. Even with the
 type implemented, token embeddings and the listed projection weights would be
 consumed in the wrong basis. (This is why the card points users at the PrismML
 llama.cpp fork.)
 
 ## Not a blocker — architecture and size
 
-`qwen35` **is** a known arch to q36 (`q36.c:136`, non-MoE, with an SSM profile),
+`qwen35` **is** a known arch to p36 (`p36.c:136`, non-MoE, with an SSM profile),
 and the profile's SSM fields (`.n_ssm_conv=4, .n_ssm_state=128, .n_ssm_group=16,
-.n_ssm_dt_rank=48`, `q36.c:151-154`) match this file's declared `ssm.*` values —
+.n_ssm_dt_rank=48`, `p36.c:151-154`) match this file's declared `ssm.*` values —
 so the hybrid state-space path exists in-tree. Size is fine too: ~7.2 GB against
 15.35 GiB usable UMA and 54 GB free disk.
 

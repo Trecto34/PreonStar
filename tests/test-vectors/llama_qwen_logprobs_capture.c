@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "llama.h"
-#include "../../q36_cli_args.h"
+#include "../../p36_cli_args.h"
 
 typedef struct {
     llama_token id;
@@ -176,7 +176,7 @@ static token_prob *topk_from_logits(const float *logits, int n_vocab,
 
 static const char *cli_need_arg(int argc, char **argv, int *i,
                                 const char *option) {
-    if (*i + 1 >= argc || q36_cli_token_is_option(argv[*i + 1])) {
+    if (*i + 1 >= argc || p36_cli_token_is_option(argv[*i + 1])) {
         fprintf(stderr, "llama_qwen_logprobs_capture: missing value for %s\n",
                 option);
         exit(2);
@@ -185,7 +185,7 @@ static const char *cli_need_arg(int argc, char **argv, int *i,
 }
 
 int main(int argc, char **argv) {
-    q36_cli_expand_long_equals(&argc, &argv, "llama_qwen_logprobs_capture");
+    p36_cli_expand_long_equals(&argc, &argv, "llama_qwen_logprobs_capture");
     const char *model_path = NULL;
     const char *prompt_file = NULL;
     const char *out_path = NULL;
@@ -297,7 +297,7 @@ int main(int argc, char **argv) {
     fprintf(fp, "  \"ctx\": %d,\n", ctx);
     fprintf(fp, "  \"top_k\": %d,\n", top_k);
     fprintf(fp, "  \"template\": \"%s\",\n",
-            hf_template ? "hf-text-only" : "q36-fixed-nothink");
+            hf_template ? "hf-text-only" : "p36-fixed-nothink");
     fprintf(fp, "  \"steps\": [\n");
 
     {

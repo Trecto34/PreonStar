@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Teacher-forced quality from q36-bench frontier dumps.
+"""Teacher-forced quality from p36-bench frontier dumps.
 
 Usage: frontier_nll.py TOKENS_JSON DIR [DIR ...]
-TOKENS_JSON is `q36 --dump-tokens` output for the same --prompt-file.  For each
+TOKENS_JSON is `p36 --dump-tokens` output for the same --prompt-file.  For each
 frontier_NNNNNN.logits.json the true next token is tokens[NNNNNN]; prints mean
 NLL, top-1 accuracy, and the mean |NLL delta| vs the first DIR."""
 import json, math, os, re, sys

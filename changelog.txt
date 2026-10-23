@@ -12,11 +12,11 @@ QuarkStar Swift Qwen3.8-27B change log
 - Resumed and completed Swift-Qwen3.8-27B-IQ3_XXS.gguf; final size 11.67 GiB.
 - IQ3_XXS Vulkan inspection passed. Protected launcher smoke test returned
   READY at 39.92 tok/s prefill and 21.90 tok/s generation.
-- q36-bench IQ3_XXS baseline at 1024 context: 180.27 tok/s prefill and
+- p36-bench IQ3_XXS baseline at 1024 context: 180.27 tok/s prefill and
   23.01 tok/s generation with 8 greedy output tokens.
-- q36-bench with three-position MTP: 175.21 tok/s prefill and 21.73 tok/s
+- p36-bench with three-position MTP: 175.21 tok/s prefill and 21.73 tok/s
   generation. MTP draft=1 is therefore the new Swift launcher default; draft=3
-  remains available through Q36_SWIFT_MTP_DRAFT=3.
+  remains available through P36_SWIFT_MTP_DRAFT=3.
 - Attention span 128 measured 23.80 tok/s at 1024 context but regressed to
   19.10 tok/s at 2048 versus 22.02 tok/s with span 512. It was not enabled.
 - Local reference measurements: Qwen3.6 35B-A3B IQ2XXS reached 53.39 tok/s;
@@ -36,7 +36,7 @@ QuarkStar Swift Qwen3.8-27B change log
   177.84 prefill tok/s and 21.19 generation tok/s; no GPU process remained.
 - Fixed Ctrl-C cleanup in the shared Karpathy orchestrator and target gate:
   active commands now run in dedicated process groups and are terminated
-  together, preventing an orphaned `q36_test` from blocking the next pass.
+  together, preventing an orphaned `p36_test` from blocking the next pass.
 - Reduced the shared meta-agent provider watchdog from 900 seconds to 180
   seconds per tier, with explicit fallback-stage output and a
   `KARPATHY_META_TIMEOUT` override, so cadence audits cannot appear hung for
@@ -76,7 +76,7 @@ QuarkStar Swift Qwen3.8-27B change log
   rejected mechanism is now recorded in the target AlreadyTried ledger.
 
 2026-09-17: BC-250 vllm-mxfp4 transfer audit
-- New branch experiment/radiance-transfer-bc250; separate dirty q36-opt checkout
+- New branch experiment/radiance-transfer-bc250; separate dirty p36-opt checkout
   preserved. Added tests/benchmark_transfer.sh for serial, interrupt-safe,
   three-repetition Swift IQ3_XXS and Qwen3.6 IQ2_XXS benchmarking.
 - Reverted all tested shader candidates: 512-thread add/RMS regressed Swift

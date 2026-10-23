@@ -3,13 +3,13 @@
 Everything below runs unprivileged on the BC-250. Analysis and verdict live in
 `reports/decode_coalescing_audit.md`; this file is just the commands.
 
-Run from the repo root, and **only when the GPU is idle** — `pgrep -x q36-bench`
+Run from the repo root, and **only when the GPU is idle** — `pgrep -x p36-bench`
 must come back empty. Never build while a benchmark runs; that has corrupted a
 batch on this box before.
 
 ```sh
-cd /home/server/q36-opt-27b
-pgrep -x q36-bench || echo "GPU idle"
+cd /home/server/p36-opt-27b
+pgrep -x p36-bench || echo "GPU idle"
 make -j16                      # rebuilds the .spv too; they are gitignored
 ```
 
@@ -50,7 +50,7 @@ Bit-exact logits:
 ```sh
 for arm in base cand; do
   cp /path/to/$arm.spv vulkan/dense_extra_decode_q2_0.spv
-  flock -w 900 /tmp/q36-gpu.lock ./q36-bench --vulkan \
+  flock -w 900 /tmp/p36-gpu.lock ./p36-bench --vulkan \
     -m gguf/Ternary-Bonsai-2-27B-Q2_0-g64.gguf \
     --prompt-file tests/long_context_story_prompt.txt \
     --ctx-start 512 --ctx-max 512 --ctx-alloc 673 \
@@ -67,12 +67,12 @@ print(len(a), 'entries, max_abs_diff =', max(abs(x-y) for x,y in zip(a,b)))"
 
 Requirement: `max_abs_diff = 0` over 248,320 entries.
 
-Greedy generation must also be byte-identical. `q36-bench` does not print tokens,
+Greedy generation must also be byte-identical. `p36-bench` does not print tokens,
 so use the CLI (`--dump-tokens` only dumps the *prompt* tokenization, not the
 generation — don't reach for it):
 
 ```sh
-flock -w 900 /tmp/q36-gpu.lock ./q36 --vulkan \
+flock -w 900 /tmp/p36-gpu.lock ./p36 --vulkan \
   -m gguf/Ternary-Bonsai-2-27B-Q2_0-g64.gguf \
   -p "Explain how a memory-bound GPU kernel differs from a compute-bound one." \
   --temp 0 --seed 1 --nothink > /tmp/out-$arm.txt

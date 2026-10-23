@@ -1,4 +1,4 @@
-# removable fraction of q36_sample_full_vocab (binary labels its own logits source: synthetic when /tmp/p36/logits.f32 is absent; timing depends on loop count, not values)
+# removable fraction of p36_sample_full_vocab (binary labels its own logits source: synthetic when /tmp/p36/logits.f32 is absent; timing depends on loop count, not values)
 (synthetic logits)
 synthetic temp=1.00 max=10.418 best=17 survivors=1 expf=1
    full-vocab 2 loops    0.612 ms

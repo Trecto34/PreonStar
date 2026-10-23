@@ -7,7 +7,7 @@ python3 /home/server/Karpathy/experiments.py
 ```
 
 The local inner wrapper supplies `--target` as this checkout and stores records
-under `.karpathy/experiments`, so the unrelated `/home/server/q36-opt` campaign
+under `.karpathy/experiments`, so the unrelated `/home/server/p36-opt` campaign
 is not touched. Each trial gets a clean worktree, a report at
 `$EXPERIMENT_RESULT`, and a snapshot commit. Accepted trials are fast-forwarded
 only when the target is still unchanged.

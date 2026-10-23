@@ -34,7 +34,7 @@ int nearest_int(float f) {
     return int(floatBitsToUint(g) & 0x007fffffu) - 0x00400000;
 }
 
-/* f32 -> f16 round-to-nearest-even, bit-matching q36_quant_f32_to_f16().
+/* f32 -> f16 round-to-nearest-even, bit-matching p36_quant_f32_to_f16().
  * packHalf2x16 rounds toward zero on AMD and cannot be used for scales. */
 uint f16_rte(float f) {
     uint w = floatBitsToUint(f);

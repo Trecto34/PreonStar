@@ -1,7 +1,7 @@
 # Evaluation data
 
-`q36-eval` contains small, curated subsets of external benchmarks. They are
-integration tests for q36, not official benchmark distributions or
+`p36-eval` contains small, curated subsets of external benchmarks. They are
+integration tests for p36, not official benchmark distributions or
 leaderboard scores. Case IDs are retained so each prompt can be checked against
 its source.
 
@@ -30,11 +30,11 @@ Selected source IDs:
   `9ee37b9a04ab050936c86b2c5bb7abbaa0bc0e737d59a7bff9ba11e9b4069c1d`,
   `d7071c9ff5d9779e7ab955366d0ae8db40f785aadfe7ff0b5a7ede98c05c44ea`.
 - NIST Juliet reductions use the local IDs beginning with `juliet-` in
-  `q36_eval_cases.c`.
+  `p36_eval_cases.c`.
 
 The MMLU-Pro choices and keys are unchanged. OlympiadBench cases are English,
 text-only rows; only their published final answers are embedded. LiveBench's
-benchmark-specific output wrapper was removed because `q36-eval` supplies one
+benchmark-specific output wrapper was removed because `p36-eval` supplies one
 uniform final-answer instruction. The NIST cases are short, locally written
 reductions of Juliet weakness patterns rather than copies of complete Juliet
 test cases.
@@ -45,7 +45,7 @@ grading type and, where needed, a small list of equivalent surface forms. The
 
 The imported benchmark material retains its
 [Apache-2.0 terms](https://www.apache.org/licenses/LICENSE-2.0).
-q36's own source
+p36's own source
 remains under the repository's top-level MIT license.
 
 ## Core suite

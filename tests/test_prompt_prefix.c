@@ -1,5 +1,5 @@
-#include "q36_prompt_prefix.h"
-#include "q36_cli_args.h"
+#include "p36_prompt_prefix.h"
+#include "p36_cli_args.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,20 +22,20 @@ static void test_multiline(void) {
         " USER: this stays in the message\n"
         "ASSISTANT:\tfirst answer\n"
         "second answer\n";
-    q36_prompt_prefix prefix = {0};
+    p36_prompt_prefix prefix = {0};
     char error[256] = {0};
-    CHECK(q36_prompt_prefix_parse(&prefix, input, sizeof(input) - 1,
+    CHECK(p36_prompt_prefix_parse(&prefix, input, sizeof(input) - 1,
                                   error, sizeof(error)) == 0);
     CHECK(prefix.count == 2);
     if (prefix.count == 2) {
-        CHECK(prefix.turns[0].role == Q36_PROMPT_PREFIX_USER);
+        CHECK(prefix.turns[0].role == P36_PROMPT_PREFIX_USER);
         CHECK(!strcmp(prefix.turns[0].content,
                       "first line\nsecond line\n USER: this stays in the message"));
-        CHECK(prefix.turns[1].role == Q36_PROMPT_PREFIX_ASSISTANT);
+        CHECK(prefix.turns[1].role == P36_PROMPT_PREFIX_ASSISTANT);
         CHECK(!strcmp(prefix.turns[1].content,
                       "first answer\nsecond answer"));
     }
-    q36_prompt_prefix_free(&prefix);
+    p36_prompt_prefix_free(&prefix);
 }
 
 static void test_multiple_pairs_and_bom(void) {
@@ -44,9 +44,9 @@ static void test_multiple_pairs_and_bom(void) {
         "ASSISTANT: two\r\n"
         "USER: three\n"
         "ASSISTANT: four";
-    q36_prompt_prefix prefix = {0};
+    p36_prompt_prefix prefix = {0};
     char error[256] = {0};
-    CHECK(q36_prompt_prefix_parse(&prefix, input, sizeof(input) - 1,
+    CHECK(p36_prompt_prefix_parse(&prefix, input, sizeof(input) - 1,
                                   error, sizeof(error)) == 0);
     CHECK(prefix.count == 4);
     if (prefix.count == 4) {
@@ -55,13 +55,13 @@ static void test_multiple_pairs_and_bom(void) {
         CHECK(!strcmp(prefix.turns[2].content, "three"));
         CHECK(!strcmp(prefix.turns[3].content, "four"));
     }
-    q36_prompt_prefix_free(&prefix);
+    p36_prompt_prefix_free(&prefix);
 }
 
 static void expect_error(const char *input, const char *message) {
-    q36_prompt_prefix prefix = {0};
+    p36_prompt_prefix prefix = {0};
     char error[256] = {0};
-    CHECK(q36_prompt_prefix_parse(&prefix, input, strlen(input),
+    CHECK(p36_prompt_prefix_parse(&prefix, input, strlen(input),
                                   error, sizeof(error)) != 0);
     CHECK(strstr(error, message) != NULL);
     CHECK(prefix.turns == NULL);
@@ -80,27 +80,27 @@ static void test_errors(void) {
 
 static void test_load_file(void) {
     static const char input[] = "USER: loaded\nASSISTANT: yes\n";
-    char path[] = "/tmp/q36-prefix-test.XXXXXX";
+    char path[] = "/tmp/p36-prefix-test.XXXXXX";
     int fd = mkstemp(path);
     CHECK(fd >= 0);
     if (fd < 0) return;
     CHECK(write(fd, input, sizeof(input) - 1) == (ssize_t)(sizeof(input) - 1));
     CHECK(close(fd) == 0);
 
-    q36_prompt_prefix prefix = {0};
+    p36_prompt_prefix prefix = {0};
     char error[256] = {0};
-    CHECK(q36_prompt_prefix_load(&prefix, path, error, sizeof(error)) == 0);
+    CHECK(p36_prompt_prefix_load(&prefix, path, error, sizeof(error)) == 0);
     CHECK(prefix.count == 2);
     if (prefix.count == 2) {
         CHECK(!strcmp(prefix.turns[0].content, "loaded"));
         CHECK(!strcmp(prefix.turns[1].content, "yes"));
     }
-    q36_prompt_prefix_free(&prefix);
+    p36_prompt_prefix_free(&prefix);
     CHECK(unlink(path) == 0);
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_prompt_prefix");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_prompt_prefix");
     if (cli_rc) return cli_rc;
     test_multiline();
     test_multiple_pairs_and_bom();

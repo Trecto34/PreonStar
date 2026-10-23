@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interleaved A/B throughput comparison for q36 target models on BC-250.
+# Interleaved A/B throughput comparison for p36 target models on BC-250.
 #
 # Why this exists: tests/benchmark_transfer.sh runs A fully, then B fully. Anything
 # that drifts during a session (GPU state, page cache, background load) lands on the
@@ -23,11 +23,11 @@ usage="usage: bench_ab.sh <A_BIN> <B_BIN> <MODEL> [REPS]"
 a_bin="${1:?$usage}"
 b_bin="${2:?$usage}"
 model="${3:?$usage}"
-reps="${4:-${Q36_AB_REPS:-3}}"
-ctx="${Q36_AB_CTX:-1024}"
-gen="${Q36_AB_GEN:-16}"
-chunk="${Q36_AB_CHUNK:-256}"
-min_gain="${Q36_AB_MIN_GAIN:-1.5}"
+reps="${4:-${P36_AB_REPS:-3}}"
+ctx="${P36_AB_CTX:-1024}"
+gen="${P36_AB_GEN:-16}"
+chunk="${P36_AB_CHUNK:-256}"
+min_gain="${P36_AB_MIN_GAIN:-1.5}"
 
 for pair in "reps=$reps" "ctx=$ctx" "gen=$gen" "chunk=$chunk"; do
     name="${pair%%=*}"
@@ -37,8 +37,8 @@ done
 [[ -x "$a_bin" ]] || { echo "A binary not executable: $a_bin" >&2; exit 2; }
 [[ -x "$b_bin" ]] || { echo "B binary not executable: $b_bin" >&2; exit 2; }
 [[ -s "$model" ]] || { echo "model not found: $model" >&2; exit 2; }
-if pgrep -x q36-bench >/dev/null 2>&1 || pgrep -x q36_test >/dev/null 2>&1; then
-    echo "another q36 benchmark/test is running" >&2
+if pgrep -x p36-bench >/dev/null 2>&1 || pgrep -x p36_test >/dev/null 2>&1; then
+    echo "another p36 benchmark/test is running" >&2
     exit 2
 fi
 

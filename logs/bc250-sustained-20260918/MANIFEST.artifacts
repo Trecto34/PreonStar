@@ -1,4 +1,4 @@
-baseline/q36-bench
+baseline/p36-bench
 hadamard_parity
 runs/cont-timeline-decode.txt.gz
 runs/d2-diag-base/frontier_000512.logits.json

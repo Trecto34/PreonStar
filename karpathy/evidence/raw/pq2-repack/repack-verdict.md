@@ -21,7 +21,7 @@ PQ2_0 stride) for every variant, SoA included.
 
     streamed per token = 6806.64 - 322.07 = 6484.57 MiB = 6799.6 MB
 
-Live kernel, fresh, this session (`Q36_VK_PROF_KERNEL=1 Q36_VK_PROF_OP=1`, ctx 512, c128):
+Live kernel, fresh, this session (`P36_VK_PROF_KERNEL=1 P36_VK_PROF_OP=1`, ctx 512, c128):
 
     dense_extra_decode_pq2_0    51330 dispatches   2763.402 ms  ->  401.0 disp/tok, 21.589 ms/tok
     6799.6 MB / 0.021589 s = 315.0 GB/s
@@ -56,7 +56,7 @@ here 2x).
 ## 3. Probe methodology checks
 
 * **Per-dispatch-pair timestamps vs one span** — production brackets each dispatch with
-  `COMPUTE_SHADER_BIT` -> `BOTTOM_OF_PIPE` (`q36_vulkan.c:3185-3190`). The probe now reports
+  `COMPUTE_SHADER_BIT` -> `BOTTOM_OF_PIPE` (`p36_vulkan.c:3185-3190`). The probe now reports
   both. Span and production-convention pair-sum agree to 0.4% (228.5 vs 229.2 GB/s;
   295.6-span vs 296.4-pair). Inter-dispatch bubbles are NOT hiding in the probe number —
   the "probe absorbs launch gaps" hypothesis is refuted.

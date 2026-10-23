@@ -6,12 +6,12 @@ Mcode). Per HANDOFF §5 item 4 ("re-profile prefill with the current
 binary"): fresh differential profile on current HEAD (`5c53253`), same
 method HANDOFF §4 used so the two are directly comparable.
 
-Model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Binary `q36-bench` built at HEAD
-`5c53253` (verified current via `make q36-bench` — "up to date").
+Model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Binary `p36-bench` built at HEAD
+`5c53253` (verified current via `make p36-bench` — "up to date").
 
 ## Method
 
-- Decode: `Q36_VK_PROF_OP=1 Q36_VK_PROF_KERNEL=1 ./q36-bench --vulkan -m
+- Decode: `P36_VK_PROF_OP=1 P36_VK_PROF_KERNEL=1 ./p36-bench --vulkan -m
   <model> --prompt-file tests/long_context_story_prompt.txt --ctx-start 512
   --ctx-max 512 --ctx-alloc 640 --prefill-chunk 256 --gen-tokens {1,65}`,
   two separate runs (profiler counters are cumulative from process start),
@@ -73,9 +73,9 @@ throughput are different measures and won't reconcile exactly).
 
 ## The next lever: `dense_extra_mmq` / `dense_extra_decode` (~17% of both prefill and decode)
 
-**What it is, confirmed:** `q36_vk_run_unlocked("dense_extra_decode"/"dense_extra_mmq", ...)`
-has exactly one call site (`q36_vulkan.c:8366`), inside
-`q36_gpu_matmul_iq_quant_q8_scaled_tensor`'s `extra_type` branch —
+**What it is, confirmed:** `p36_vk_run_unlocked("dense_extra_decode"/"dense_extra_mmq", ...)`
+has exactly one call site (`p36_vulkan.c:8366`), inside
+`p36_gpu_matmul_iq_quant_q8_scaled_tensor`'s `extra_type` branch —
 reachable only for `{IQ2_XXS, IQ2_XS, IQ2_S, IQ1_S, IQ4_NL, PQ2_0, PTQ1_0}`.
 This GGUF's only tensor of those types is **IQ2_S** (confirmed via
 `gguf.GGUFReader`: 375 IQ2_S tensors, no IQ2_XXS/IQ2_XS/IQ1_S/IQ4_NL/PQ2_0/PTQ1_0
@@ -85,41 +85,41 @@ the tuned, batched `moe_iq2s_*` kernels above it in the table — the same
 (1b) and the IQ3_S route-miss (1c).
 
 **Ruled out:** the MoE routed-expert route-miss fallback that explained the
-old q8-route residue and that 1c fixed for IQ3_S. `Q36_VK_MOE_ROUTE_DEBUG=1`
+old q8-route residue and that 1c fixed for IQ3_S. `P36_VK_MOE_ROUTE_DEBUG=1`
 on a 3-token run at ctx 512 produced **zero** "route miss" lines — the fused
-f32 expert path (`q36_gpu_moe_ffn_f32_tensor`) is not missing for any layer
-now, so `q36_gpu_moe_ffn_q8_tensor` (the explicit q8 fallback, gated on
+f32 expert path (`p36_gpu_moe_ffn_f32_tensor`) is not missing for any layer
+now, so `p36_gpu_moe_ffn_q8_tensor` (the explicit q8 fallback, gated on
 `!routed_done`) never runs. Whatever is hitting `dense_extra_mmq/decode`
 is not routed-expert traffic.
 
 **Root cause, confirmed for a large fraction:** the **shared-expert**
 gate/up/down projections (`ffn_gate_shexp`/`ffn_up_shexp`/`ffn_down_shexp`,
-computed once per layer regardless of routing, `q36.c:8283-8307`). The
-engine's only fast path for these (`q36_gpu_shared_ffn_decode_tensor`,
-`q36.c:~8218`) requires all three tensors to be `Q8_0` — but this GGUF's
+computed once per layer regardless of routing, `p36.c:8283-8307`). The
+engine's only fast path for these (`p36_gpu_shared_ffn_decode_tensor`,
+`p36.c:~8218`) requires all three tensors to be `Q8_0` — but this GGUF's
 shared-expert tensors are IQ2_S on **38-40 of 41 layers** (confirmed via
 `gguf.GGUFReader` tensor-type audit; only 1 layer is Q8_0). So for ~40 of 41
-layers, all three shared-expert matmuls (`q36_gpu_tensor_matmul_q8_or_float_scaled`
-at `q36.c:8283`/`8288`, `q36_gpu_tensor_matmul_scaled` at `q36.c:8305`) fall
+layers, all three shared-expert matmuls (`p36_gpu_tensor_matmul_q8_or_float_scaled`
+at `p36.c:8283`/`8288`, `p36_gpu_tensor_matmul_scaled` at `p36.c:8305`) fall
 through to the generic path — accounting for **~120 of the 258
 dispatches/token** (40 layers x 3 tensors). The remaining ~138 dispatches/token
 are not yet traced to a specific call site — next step if this is picked up:
-instrument `q36_gpu_matmul_iq_quant_q8_scaled_tensor`'s IQ2_S branch with a
+instrument `p36_gpu_matmul_iq_quant_q8_scaled_tensor`'s IQ2_S branch with a
 one-off caller tag, or check whether some routed-expert bookkeeping also
 touches this path despite `routed_done=true`.
 
 **Why this is a real lever, not a re-run of 1c:** structurally identical
 opportunity to 1b/1c — a generic per-tensor quant fallback doing work a
 specialized/batched kernel family already exists for nearby quant types.
-`q36_gpu_shared_ffn_decode_tensor` (or a new IQ2_S-aware variant of it,
+`p36_gpu_shared_ffn_decode_tensor` (or a new IQ2_S-aware variant of it,
 following the exact pattern 1c used for IQ3_S in `moe_down_gemm.comp` /
 `moe_down_q2k_sum_decode.comp`) is the natural target. Not yet attempted;
-no A/B run. `Q36_N_EXPERT=256`, `Q36_N_EXPERT_USED=8` if useful context for
+no A/B run. `P36_N_EXPERT=256`, `P36_N_EXPERT_USED=8` if useful context for
 sizing the fix.
 
 ## Evidence
 
 Raw profiler dumps: `iq2m-reprof-gen1.txt`, `iq2m-reprof-gen65.txt` (decode
 diff inputs), `iq2m-reprof-prefill512.txt`, `iq2m-reprof-prefill1024.txt`
-(prefill single-shot), `iq2m-route-debug.txt` (`Q36_VK_MOE_ROUTE_DEBUG=1`,
+(prefill single-shot), `iq2m-route-debug.txt` (`P36_VK_MOE_ROUTE_DEBUG=1`,
 zero misses) — copied into `karpathy/evidence/raw/`.

@@ -5,29 +5,29 @@
 # though the profile also contains prefill rows).
 #
 #   stage A: Swift and guard at ctx 8K/16K/32K
-#   stage B: span sweep (Q36_VK_ATTN_SPAN) at ctx 16K
+#   stage B: span sweep (P36_VK_ATTN_SPAN) at ctx 16K
 set -uo pipefail
-cd /home/server/q36
-SWIFT=/home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf
-GUARD=/home/server/q36/gguf/Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf
+cd /home/server/p36
+SWIFT=/home/server/p36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf
+GUARD=/home/server/p36/gguf/Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS.gguf
 STORY=tests/long_context_story_prompt.txt
 OUT=/tmp/r5/out
 mkdir -p "$OUT"
-L=/tmp/q36-gpu.lock
+L=/tmp/p36-gpu.lock
 STAGE="${1:-A}"
-pgrep -x q36-bench >/dev/null && { echo "q36-bench already running, abort"; exit 1; }
+pgrep -x p36-bench >/dev/null && { echo "p36-bench already running, abort"; exit 1; }
 
 bench () { # bench NAME ENVP MODEL -- args...
     local name="$1"; shift
     local envp="$1"; shift
     local model="$1"; shift
     ( [ -n "$envp" ] && export $envp
-      flock -w 7200 "$L" ./q36-bench --vulkan -m "$model" --prompt-file "$STORY" "$@" ) \
+      flock -w 7200 "$L" ./p36-bench --vulkan -m "$model" --prompt-file "$STORY" "$@" ) \
         > "$OUT/$name.log" 2>&1
     echo "--- $name rc=$?"
 }
 
-PROF="Q36_VK_PROF_OP=1 Q36_VK_PROF_KERNEL=1"
+PROF="P36_VK_PROF_OP=1 P36_VK_PROF_KERNEL=1"
 RUN () { # RUN CTX GEN
     echo "$1" "$2"
 }
@@ -54,10 +54,10 @@ if [ "$STAGE" = A ]; then
 else
     for span in 512 1024 2048 4096; do
         for rep in 1 2; do
-            bench swift-span$span-r$rep "$PROF Q36_VK_ATTN_SPAN=$span" "$SWIFT" \
+            bench swift-span$span-r$rep "$PROF P36_VK_ATTN_SPAN=$span" "$SWIFT" \
                 --ctx-start 16384 --ctx-max 16384 --ctx-alloc 16896 \
                 --prefill-chunk 256 --gen-tokens 64 --mtp-margin 0
-            bench guard-span$span-r$rep "$PROF Q36_VK_ATTN_SPAN=$span" "$GUARD" \
+            bench guard-span$span-r$rep "$PROF P36_VK_ATTN_SPAN=$span" "$GUARD" \
                 --ctx-start 16384 --ctx-max 16384 --ctx-alloc 16896 \
                 --prefill-chunk 256 --gen-tokens 64 --mtp-margin 0
         done

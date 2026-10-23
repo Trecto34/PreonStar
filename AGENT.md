@@ -6,7 +6,7 @@ that decide a verdict, the open items ranked, the exact commands, and the closed
 dead ends (do not re-litigate those). `karpathy/AlreadyTried.md` is the
 authoritative rejection ledger and must be read before proposing a change.
 
-`q36.c` is a Qwen3.6-35B-A3B specific inference engine. It is not a generic
+`p36.c` is a Qwen3.6-35B-A3B specific inference engine. It is not a generic
 GGUF runner. The goal is a small, readable, high-performance C codebase.
 
 ## Goals
@@ -41,12 +41,12 @@ GGUF runner. The goal is a small, readable, high-performance C codebase.
 
 ## Layout
 
-- `q36.c`: model loading, tokenizer, CPU reference code, Vulkan graph scheduling,
+- `p36.c`: model loading, tokenizer, CPU reference code, Vulkan graph scheduling,
   sessions, disk-cache payload serialization.
-- `q36_cli.c`: command line, linenoise REPL, interactive transcript handling.
-- `q36_server.c`: OpenAI/Anthropic compatible HTTP API, worker queue, streaming,
+- `p36_cli.c`: command line, linenoise REPL, interactive transcript handling.
+- `p36_server.c`: OpenAI/Anthropic compatible HTTP API, worker queue, streaming,
   tool-call mapping, disk KV cache policy.
-- `q36_vulkan.c`: Vulkan runtime and kernel wrappers.
+- `p36_vulkan.c`: Vulkan runtime and kernel wrappers.
 - `vulkan/*.comp`: compute kernels.
 - `tests/`: unit and live integration tests.
 - `misc/`: ignored notes, experiments, and old planning material.

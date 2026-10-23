@@ -27,7 +27,7 @@ const uint TILE_WORDS = 1u + PAIR_TILE;
 const uint INVALID_PAIR = 0xffffffffu;
 const uint Q8K_WORDS = 74u;
 
-#ifdef Q36_MOE_IQ2S
+#ifdef P36_MOE_IQ2S
 /* IQ2_S superblock: [d f16][64 qs][8 qh][8 scales] = 82 bytes, 1024-entry
  * int8 grid, one 4-bit scale per 32-weight sub-block.  Same activation
  * layout (Q8_K) and the same ls = 2*nibble+1 / *0.125 folding as the
@@ -88,7 +88,7 @@ int signed_grid4(uint grid_word, uint signs, uint bit0, uint q8_word) {
     return sumi;
 }
 
-#ifdef Q36_MOE_IQ2S
+#ifdef P36_MOE_IQ2S
 /* IQ2_S grid entries are signed int8, unlike the unsigned IQ2_XXS codebook. */
 int signed_grid4_i8(uint grid_word, uint signs, uint bit0, uint q8_word) {
     int sumi = 0;
@@ -154,7 +154,7 @@ void main(void) {
                 up_lk[u] = 0;
             }
 
-#ifdef Q36_MOE_IQ2S
+#ifdef P36_MOE_IQ2S
             for (uint ib = 0u; ib < 8u; ib++) {
                 uint g_qh = gate_u8(gate_base + 66u + ib);
                 uint g_sc = gate_u8(gate_base + 74u + ib);

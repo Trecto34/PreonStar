@@ -10,9 +10,9 @@ the sibling track list (#2 lm_head requant, #3 wave32 clean-scan A/B) is untouch
 - HEAD `e8cb6de` — "moe: IQ2_S expert variants for the f32 identity decode pair";
   its parent `6ef9ceb` — "moe: IQ2_S expert variants for the fused gate/up and GEMM
   pair". `git status --porcelain` is empty.
-- Model: `/home/server/q36/gguf/Qwen3.8-35B-A3B-IQ2_M.gguf` (qwen35moe, 41 blocks,
+- Model: `/home/server/p36/gguf/Qwen3.8-35B-A3B-IQ2_M.gguf` (qwen35moe, 41 blocks,
   10.32 GB IQ2_S total, of which 10.06 GB is routed experts (0.26 GB dense/trunk)).
-- Guard model: `/home/server/q36/gguf/Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf`
+- Guard model: `/home/server/p36/gguf/Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS.gguf`
   (IQ2_XXS gate/up + Q2_K down + Q8_0 trunk — i.e. the mix every tuned path was
   built for; the IQ2_S work must leave it bit-identical).
 
@@ -30,7 +30,7 @@ Guard, same day, ctx 512: shipped GEMM `709.64 / 88.65`, `MOE_GEMM=0` `522.40 /
 
 ## 2. What landed
 
-Kernel sources recompiled from the **same** sources with `-DQ36_MOE_IQ2S`:
+Kernel sources recompiled from the **same** sources with `-DP36_MOE_IQ2S`:
 
 | file | IQ2_S variant | new bindings | push |
 | --- | --- | --- | --- |
@@ -40,9 +40,9 @@ Kernel sources recompiled from the **same** sources with `-DQ36_MOE_IQ2S`:
 | `vulkan/moe_gate_up_decode.comp` | `moe_gate_up_decode_iq2s.spv` (f32 acts, identity) | — (tables already 7) | 24 |
 | `vulkan/moe_down_q2k_sum_decode.comp` | `moe_down_q2k_sum_decode_iq2s.spv` (f32 mid + routing sum) | 7th: `tables` | 24 |
 
-Host (`q36_vulkan.c`): five new kernel members + registrations + destroys;
-`q36_vk_moe_gate_up_iq2_swiglu` accepts IQ2_S pairs at 82 bytes/block;
-`q36_gpu_moe_ffn_f32_tensor` accepts IQ2_S gate/up/down with 82-byte
+Host (`p36_vulkan.c`): five new kernel members + registrations + destroys;
+`p36_vk_moe_gate_up_iq2_swiglu` accepts IQ2_S pairs at 82 bytes/block;
+`p36_gpu_moe_ffn_f32_tensor` accepts IQ2_S gate/up/down with 82-byte
 `gu_stride`/`down_stride` and switches the down to the 7-binding sum-decode kernel.
 The IQ2_S admission predicate is:
 
@@ -66,12 +66,12 @@ nibble from `scales[ib32]` (low for `lg<2`), sign bit `j` of sign byte
 ## 3. Reproduce
 
 ```sh
-cd /home/server/q36-opt-27b && pgrep -x q36-bench || echo "GPU idle"
-make -j12 q36-bench                       # builds the *_iq2s.spv too; .spv are gitignored
+cd /home/server/p36-opt-27b && pgrep -x p36-bench || echo "GPU idle"
+make -j12 p36-bench                       # builds the *_iq2s.spv too; .spv are gitignored
 
-M=/home/server/q36/gguf/Qwen3.8-35B-A3B-IQ2_M.gguf
+M=/home/server/p36/gguf/Qwen3.8-35B-A3B-IQ2_M.gguf
 # single measurement
-flock -w 1800 /tmp/q36-gpu.lock ./q36-bench --vulkan -m "$M" \
+flock -w 1800 /tmp/p36-gpu.lock ./p36-bench --vulkan -m "$M" \
   --prompt-file tests/long_context_story_prompt.txt \
   --ctx-start 512 --ctx-max 512 --ctx-alloc 641 --prefill-chunk 256 --gen-tokens 128
 
@@ -83,7 +83,7 @@ CTX=512 GEN=128 logs/iq2s-decode-20260920/ab_decode_iq2s.sh 7 /tmp/ab2.csv "$M"
 ```
 
 Both drivers gate on a thermal soak (entry ≤ 55 °C, `SOAK_TEMP` overrides), run one
-GPU process at a time under `/tmp/q36-gpu.lock`, alternate arm order per pair, and
+GPU process at a time under `/tmp/p36-gpu.lock`, alternate arm order per pair, and
 report median + MAD. Never compare two sequential single runs.
 
 ### Parity — the instrument that actually works
@@ -96,8 +96,8 @@ gate the decode kernels.
 
 ```sh
 mkdir -p /tmp/ref /tmp/new      # the dump dir must exist
-flock -w 1800 /tmp/q36-gpu.lock env Q36_VK_MOE_GEMM=0 Q36_VK_MOE_GATE_UP=0 \
-  Q36_VK_MOE_DOWN_SUM_DECODE=0 ./q36-bench --vulkan -m "$M" \
+flock -w 1800 /tmp/p36-gpu.lock env P36_VK_MOE_GEMM=0 P36_VK_MOE_GATE_UP=0 \
+  P36_VK_MOE_DOWN_SUM_DECODE=0 ./p36-bench --vulkan -m "$M" \
   --prompt-file tests/long_context_story_prompt.txt \
   --ctx-start 513 --ctx-max 513 --ctx-alloc 642 --prefill-chunk 256 --gen-tokens 16 \
   --dump-frontier-logits-dir /tmp/ref
@@ -127,7 +127,7 @@ Current guard hashes: gate/up GEMM `b46fa81a…`, down GEMM `93a38508…`, q8 ga
 
 ## 4. Where IQ2_M's time goes now
 
-Per-token decode, differential profile (`Q36_VK_PROF_OP=1 Q36_VK_PROF_KERNEL=1`,
+Per-token decode, differential profile (`P36_VK_PROF_OP=1 P36_VK_PROF_KERNEL=1`,
 gen 1 vs gen 65, ctx 512, delta ÷ 64) — **22.235 ms/tok total GPU**, down from
 27.637 before the decode pair:
 
@@ -174,9 +174,9 @@ prefill lever too**.
    through q8. Same element mapping as the two ports above; the down one also needs
    the `tables` binding. Then widen the admission predicate.
 3. **Explain/patch the q8-route residue** (0.892 + 0.364 + 0.427 ms/tok ≈ 7.6%).
-   Something still calls `q36_gpu_moe_ffn_tensor` (which always takes the q8 route)
+   Something still calls `p36_gpu_moe_ffn_tensor` (which always takes the q8 route)
    on a 1-token forward — candidates: the MTP/nextn head, or layers with the bank
-   cache off. Find it with `Q36_VK_PROF_KERNEL=1` + `moe_iq2s_gate_up` dispatch count
+   cache off. Find it with `P36_VK_PROF_KERNEL=1` + `moe_iq2s_gate_up` dispatch count
    per layer, not by guesswork.
 4. **Re-profile prefill with the current binary** (the profile above predates the
    decode pair) and decide whether the trunk or the experts have the next prefill
@@ -191,14 +191,14 @@ A parallel instance owns `karpathy/PLAN-implementation-2026-09-20.md` and its
 W2…W8 (`dense_iq3_xxs_decode_r4.comp` ISA/ALU ablation, `delta_net_cols` gate,
 etc.); its §0 declares W1 — this workstream — mine and lists my files. **W1 is now
 done, so those files are free**: the five `vulkan/*.comp` above, their Makefile
-rules, and the IQ2_S host wiring in `q36_vulkan.c`. Its plan document was swept into
+rules, and the IQ2_S host wiring in `p36_vulkan.c`. Its plan document was swept into
 `e8cb6de` by `git add -A` (content unchanged, no edits made to it). Their plan says
 they will re-baseline W2–W8 against the new HEAD; the numbers they should use are
 the table in §1.
 
 ## 7. Traps that cost time here
 
-- `--vulkan-fusion-parity` **does not toggle** `Q36_VK_MOE_GATE_UP` (or the new
+- `--vulkan-fusion-parity` **does not toggle** `P36_VK_MOE_GATE_UP` (or the new
   IQ2_S kernels) and runs a 6-token prompt, so GEMM is off anyway: it can "pass"
   while comparing a kernel against itself. Not a gate for this work.
 - `--gpu-cpu-parity` decodes 10 GB of IQ2_S on the CPU — minutes per case, wrong
@@ -235,7 +235,7 @@ the table in §1.
 
 - `vulkan/dense_extra_mmq.comp`'s IQ2_S branch uses `unpack_i8` on grid bytes that
   the oracles treat as unsigned. Harmless **only** because every byte of
-  `q36_iq2s_grid` is ≤ 43 (< 128); a re-quantised table would silently break it.
+  `p36_iq2s_grid` is ≤ 43 (< 128); a re-quantised table would silently break it.
 - The repo has two "correct" IQ2_S decode postures: q8_K-quantised mid (matvec
   reference) and f32 mid (the `*_sum_decode` default). Parity numbers above are
   against both; the ledger records which is which.

@@ -50,8 +50,8 @@ def request_one(args, key, prompt):
         headers={
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost/q36-quality",
-            "X-Title": "q36-quality",
+            "HTTP-Referer": "http://localhost/p36-quality",
+            "X-Title": "p36-quality",
         },
         method="POST",
     )

@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
     VkCommandPool cp; CK(vkCreateCommandPool(dev, &(VkCommandPoolCreateInfo){ .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = 0 }, NULL, &cp));
     VkQueryPool qp; CK(vkCreateQueryPool(dev, &(VkQueryPoolCreateInfo){ .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 }, NULL, &qp));
     /* Production reports gpu_ms as the SUM of exclusive per-dispatch timestamp
-     * pairs (q36_vulkan.c:3185-3190), so inter-dispatch bubbles are excluded.
+     * pairs (p36_vulkan.c:3185-3190), so inter-dispatch bubbles are excluded.
      * One pair around the whole loop includes them.  Measure both. */
     if (2u * inner + 2u > 8000u) { fprintf(stderr, "inner too large for pair timestamps\n"); return 2; }
     VkQueryPool qp2; CK(vkCreateQueryPool(dev, &(VkQueryPoolCreateInfo){ .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2u * inner + 2u }, NULL, &qp2));

@@ -2,7 +2,7 @@
 
 /* GPU min-p prefilter for the default sampler (min_p 0.05, top_k 0).
  *
- * q36_sample_full_vocab's two full-vocab loops are ~0.6 ms/token of pure
+ * p36_sample_full_vocab's two full-vocab loops are ~0.6 ms/token of pure
  * single-core scalar work (151936 elements at ~4 cycles/element) and only a
  * handful of tokens ever survive `(v - max)/T > log(min_p)`. This kernel walks
  * the same vector on the GPU and hands the host nothing but the survivors, so
@@ -35,7 +35,7 @@ layout(push_constant) uniform Push {
     uint  cap;              /* survivors a block may record */
     uint  pass;
     float temperature;
-    float reject_scaled;    /* q36_sample_full_vocab's retreated logf(min_p) */
+    float reject_scaled;    /* p36_sample_full_vocab's retreated logf(min_p) */
 } pc;
 
 shared uint sh[256];

@@ -11,9 +11,9 @@
 #include <math.h>
 #include <time.h>
 #include <unistd.h>
-#include "../q36.h"
-#include "../q36_gpu.h"
-#include "../q36_cli_args.h"
+#include "../p36.h"
+#include "../p36_gpu.h"
+#include "../p36_cli_args.h"
 
 static double get_time_us(void) {
     struct timespec ts;
@@ -74,23 +74,23 @@ static void run_bench(uint32_t n_tok, uint32_t pos0, int iters) {
         }
     }
 
-    q36_gpu_tensor *q = q36_gpu_tensor_alloc(q_floats * sizeof(float));
-    q36_gpu_tensor *qg = q36_gpu_tensor_alloc(qg_floats * sizeof(float));
-    q36_gpu_tensor *kc = q36_gpu_tensor_alloc((uint64_t)kv_max * k_row_bytes);
-    q36_gpu_tensor *vc = q36_gpu_tensor_alloc((uint64_t)kv_max * v_row_bytes);
-    q36_gpu_tensor *out = q36_gpu_tensor_alloc(out_floats * sizeof(float));
+    p36_gpu_tensor *q = p36_gpu_tensor_alloc(q_floats * sizeof(float));
+    p36_gpu_tensor *qg = p36_gpu_tensor_alloc(qg_floats * sizeof(float));
+    p36_gpu_tensor *kc = p36_gpu_tensor_alloc((uint64_t)kv_max * k_row_bytes);
+    p36_gpu_tensor *vc = p36_gpu_tensor_alloc((uint64_t)kv_max * v_row_bytes);
+    p36_gpu_tensor *out = p36_gpu_tensor_alloc(out_floats * sizeof(float));
 
-    q36_gpu_tensor_write(q, 0, q_host, q_floats * sizeof(float));
-    q36_gpu_tensor_write(qg, 0, qg_host, qg_floats * sizeof(float));
-    q36_gpu_tensor_write(kc, 0, kc_host, (uint64_t)kv_max * k_row_bytes);
-    q36_gpu_tensor_write(vc, 0, vc_host, (uint64_t)kv_max * v_row_bytes);
-    q36_gpu_set_model_map(sinks_raw, sinks_alloc);
+    p36_gpu_tensor_write(q, 0, q_host, q_floats * sizeof(float));
+    p36_gpu_tensor_write(qg, 0, qg_host, qg_floats * sizeof(float));
+    p36_gpu_tensor_write(kc, 0, kc_host, (uint64_t)kv_max * k_row_bytes);
+    p36_gpu_tensor_write(vc, 0, vc_host, (uint64_t)kv_max * v_row_bytes);
+    p36_gpu_set_model_map(sinks_raw, sinks_alloc);
 
-    q36_gpu_set_quality(false);
+    p36_gpu_set_quality(false);
 
     /* Warmup */
     for (int i = 0; i < 3; i++) {
-        int ok = q36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL,
+        int ok = p36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL,
                                              sinks_raw, sinks_alloc, 0, true,
                                              pos0, n_tok, n_head, n_head_kv,
                                              head_dim, k_type, v_type,
@@ -101,17 +101,17 @@ static void run_bench(uint32_t n_tok, uint32_t pos0, int iters) {
         }
     }
 
-    q36_gpu_tensor_read(out, 0, out_host, out_floats * sizeof(float));
+    p36_gpu_tensor_read(out, 0, out_host, out_floats * sizeof(float));
 
     double t0 = get_time_us();
     for (int i = 0; i < iters; i++) {
-        q36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL,
+        p36_gpu_attn_decode_tensor(out, q, qg, kc, vc, NULL,
                                     sinks_raw, sinks_alloc, 0, true,
                                     pos0, n_tok, n_head, n_head_kv,
                                     head_dim, k_type, v_type,
                                     k_row_bytes, v_row_bytes);
     }
-    q36_gpu_tensor_read(out, 0, out_host, out_floats * sizeof(float));
+    p36_gpu_tensor_read(out, 0, out_host, out_floats * sizeof(float));
     double t1 = get_time_us();
     double avg_us = (t1 - t0) / iters;
 
@@ -124,11 +124,11 @@ static void run_bench(uint32_t n_tok, uint32_t pos0, int iters) {
            n_tok, pos0, pos0 + n_tok, avg_us, iters, hash,
            out_host[0], out_host[1], out_host[2], out_host[3]);
 
-    q36_gpu_tensor_free(q);
-    q36_gpu_tensor_free(qg);
-    q36_gpu_tensor_free(kc);
-    q36_gpu_tensor_free(vc);
-    q36_gpu_tensor_free(out);
+    p36_gpu_tensor_free(q);
+    p36_gpu_tensor_free(qg);
+    p36_gpu_tensor_free(kc);
+    p36_gpu_tensor_free(vc);
+    p36_gpu_tensor_free(out);
     free(q_host);
     free(qg_host);
     free(kc_host);
@@ -138,10 +138,10 @@ static void run_bench(uint32_t n_tok, uint32_t pos0, int iters) {
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_attn_prefill_qtile2");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_attn_prefill_qtile2");
     if (cli_rc) return cli_rc;
-    if (!q36_gpu_init()) {
-        fprintf(stderr, "q36_gpu_init failed\n");
+    if (!p36_gpu_init()) {
+        fprintf(stderr, "p36_gpu_init failed\n");
         return 1;
     }
 
@@ -151,6 +151,6 @@ int main(int argc, char **argv) {
     run_bench(1024, 1024, 10);   /* ctx 2048 */
     run_bench(1024, 3072, 10);   /* ctx 4096 */
 
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     return 0;
 }

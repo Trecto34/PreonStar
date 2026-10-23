@@ -1,7 +1,7 @@
 # BC-250 Ternary-Bonsai-2-27B (Q2_0/g64) Optimization Report
 
 Board: AMD BC-250 (`gfx1013`, RDNA2, 40 CU / 80 SIMD32, 256-bit GDDR6, 454.4 GB/s
-nominal, 15.35 GiB UMA). Engine: `q36` custom Vulkan runtime.
+nominal, 15.35 GiB UMA). Engine: `p36` custom Vulkan runtime.
 Model: `Ternary-Bonsai-2-27B-Q2_0-g64.gguf` (7.63 GB, ggml type 42, Hadamard-rotated).
 Campaign branch: `experiment/radiance-transfer-bc250`.
 
@@ -21,10 +21,10 @@ Campaign branch: `experiment/radiance-transfer-bc250`.
   from a Q2_0-specialized `dense_extra_mmq` (BM=64/BN=128/BK=32, f16 shared tiles).
 - **Decode closure was wrong, and R5 found why.** The earlier "closed" verdict
   (7 shader variants, LDS staging +18 %, swizzle sweep) was measured against the
-  SWAR kernel. A `Q36_Q2_0_ABLATE` decomposition showed the decode kernel time is
+  SWAR kernel. A `P36_Q2_0_ABLATE` decomposition showed the decode kernel time is
   almost exactly additive: 589 ms non-weight floor + 2348 ms weight streaming +
   166 ms `dotPacked4x8` + **1181 ms SWAR expansion** = 4284 ms. The expansion was
-  the tax, not DRAM, layout, or dispatch (the `Q36_VK_PROF_OP=1` trace still shows
+  the tax, not DRAM, layout, or dispatch (the `P36_VK_PROF_OP=1` trace still shows
   ~93 % GPU busy). Replacing it with a shared LUT recovers it. The SB288 offline
   reblock remains closed; the raw stream already runs at ~385 GB/s effective once
   the ALU is out of the way.
@@ -43,7 +43,7 @@ Final HEAD: `6964c87` (merge of the Q2_0 mmq). See §11 for the file inventory.
 | GPU | AMD BC-250, RADV GFX1013, 40 CU → 20 WGP → 80 SIMD32, subgroup 64 |
 | memory | 15.35 GiB UMA; GDDR6; mclk fixed single state 450 MHz; SCLK 1000/2000 MHz |
 | CPU | 6 cores (`-march=native`); 14 GB RAM total |
-| engine | `q36`, Vulkan generic BC-250 fast path, single queue |
+| engine | `p36`, Vulkan generic BC-250 fast path, single queue |
 | model | `Ternary-Bonsai-2-27B-Q2_0-g64.gguf`, 7,626,008,928 B, 851 tensors |
 | arch | `qwen35`, 64 layers (48 recurrent GDN + 16 full attn), n_embd 5120, n_ff 17408, ssm_inner 6144, group 16, dt_rank 48, state 128, 24/4 heads, head_dim 256 |
 | quant | 402 tensors type 42 (Q2_0), 96 bf16, 353 f32 |
@@ -73,12 +73,12 @@ training (grouped) V order, so its activation is permuted tiled→grouped
 ## 2. Benchmark methodology
 
 - **Command (decode+prefill frontier):**
-  `./q36-bench --vulkan -m <model> --prompt-file tests/long_context_story_prompt.txt
+  `./p36-bench --vulkan -m <model> --prompt-file tests/long_context_story_prompt.txt
    --ctx-start 512 --ctx-max 512 --gen-tokens 128`
-- **Coherence gate:** `./q36 --vulkan ... -n 160 --temp 0 -p "A farmer has 17
+- **Coherence gate:** `./p36 --vulkan ... -n 160 --temp 0 -p "A farmer has 17
   sheep. All but 9 run away. …"` must answer 9 sheep and Canberra.
 - **GPU exclusivity:** every run wrapped in
-  `flock -w 900 /tmp/q36-gpu.lock -c '<cmd>'`.
+  `flock -w 900 /tmp/p36-gpu.lock -c '<cmd>'`.
 - **Thermal gate:** `scripts/bench_soak.sh` waits for edge temp ≤55 °C before
   each trial and logs start/end temp + wall to `logs/thermal_run_log.csv`.
   Without it, tg128 spread across three reps was 3.4 t/s (24.54–27.96); with it,
@@ -89,8 +89,8 @@ training (grouped) V order, so its activation is permuted tiled→grouped
   7.06 GB is the per-token Q2_0 weight traffic (ffn 68 %, attn_qkv 10 %,
   attn_gate 6 %, ssm_out 6 %, attn_q/k/v/out 6 %, output 5 %; `token_embd` is a
   single-row lookup, not a matmul).
-- **Kernel timing:** `Q36_VK_PROF_KERNEL=1` (GPU timestamp queries per pipeline)
-  and `Q36_VK_PROF_OP=1` (per-op record/submit/flush accounting).
+- **Kernel timing:** `P36_VK_PROF_KERNEL=1` (GPU timestamp queries per pipeline)
+  and `P36_VK_PROF_OP=1` (per-op record/submit/flush accounting).
 
 ---
 
@@ -235,7 +235,7 @@ split-K had no fp32 atomics and M was already oversubscribed. Full narration:
 
 ### 7.3 Channel swizzle sweep
 
-Workgroup row-group swizzle via `Q36_Q2_0_SWIZZLE`, soak-gated 3 reps per stride
+Workgroup row-group swizzle via `P36_Q2_0_SWIZZLE`, soak-gated 3 reps per stride
 (§6 table). No stride beat linear; every swizzled stride was flat-to-worse on
 decode. **Verdict: rejected.** Evidence rows `swz-S*` in
 `logs/thermal_run_log.csv`; negative recorded on `experiment/bo-swz` (`894135e`,
@@ -243,7 +243,7 @@ not merged).
 
 ### 7.4 Why decode is closed: dispatch audit
 
-`Q36_VK_PROF_OP=1`, 64-token generate on the fused tree:
+`P36_VK_PROF_OP=1`, 64-token generate on the fused tree:
 
 ```
 dispatches=83671  record_ms=312.9  flushes=130  submit_wait_ms=522.9
@@ -254,7 +254,7 @@ generation 27.3 t/s -> 36.6 ms/step wall; ~34 ms/step is GPU decode work
 
 Sync audit: no per-dispatch host waits — `vkWaitForFences` only on ring
 exhaustion (`VK_NOT_READY`), `vkDeviceWaitIdle` only on init-fail/cleanup, plus
-the explicit `q36_gpu_sync` for host-read paths. Submission is ring-batched.
+the explicit `p36_gpu_sync` for host-read paths. Submission is ring-batched.
 
 Conclusion: the wall is kernel execution and DRAM latency, not dispatch
 structure. With streams-once weights and `n_tok=1` there is no reuse to exploit;
@@ -266,7 +266,7 @@ two independent dense kernels (this one and `dense_iq3_xxs` on Swift) both cap a
 ## 8. Prefill deep dive
 
 `dense_extra_mmq_q2_0.spv` is `dense_extra_mmq.comp` compiled with
-`-DQ36_Q2_0_ONLY`, using a 64×128 workgroup tile with `BK=32` and f16 shared
+`-DP36_Q2_0_ONLY`, using a 64×128 workgroup tile with `BK=32` and f16 shared
 A/B tiles, dispatched with `grid.x = out_dim/64`. Only Q2_0 selects it; all
 other quant types keep the generic kernel. Net: **+10.2 % prefill** at unchanged
 decode. Remaining headroom to the spec's 250 t/s target is ~25 %.
@@ -276,7 +276,7 @@ decode. Remaining headroom to the spec's 250 t/s target is ~25 %.
 ## 9. Regression guard (previous models)
 
 Interleaved A/B, `da03b05` (pre-Hadamard) vs `f1e3dc4`, ctx 1024 / prefill 1024 /
-gen 16, `q36-bench --vulkan` (`karpathy/evidence/raw/regression-hadamard.csv`):
+gen 16, `p36-bench --vulkan` (`karpathy/evidence/raw/regression-hadamard.csv`):
 
 | model | base decode | cur decode | base prefill | cur prefill |
 |---|---|---|---|---|
@@ -346,8 +346,8 @@ Commits: `b434f30` (harness/evidence), `5be1a22` (mmq), `6964c87` (merge),
 
 ## 13. R5 addendum — Q2_0 decode LUT (`c910941`)
 
-The ablation instrument was a temporary `Q36_Q2_0_ABLATE` mode in
-`dense_extra_decode.comp` (removed after measurement). `Q36_VK_PROF_KERNEL=1`,
+The ablation instrument was a temporary `P36_Q2_0_ABLATE` mode in
+`dense_extra_decode.comp` (removed after measurement). `P36_VK_PROF_KERNEL=1`,
 ctx 512 / gen 128, `gpu_ms` of `op dense_extra_decode` (128 decode tokens, soak
 gate ≤55 °C):
 

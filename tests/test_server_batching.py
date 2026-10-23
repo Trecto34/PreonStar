@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Concurrent deterministic isolation check for q36-server batching."""
+"""Concurrent deterministic isolation check for p36-server batching."""
 
 import argparse
 import concurrent.futures

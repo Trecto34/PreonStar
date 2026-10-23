@@ -2,7 +2,7 @@
 
 ## 1. Objective & Gate (Plan §W2)
 - Diagnostic to test whether IQ3_XXS decode is purely DRAM-bound ("234 GB/s logical") or ALU-taxed.
-- Method: `Q36_VK_PROF_KERNEL=1`, ctx 512, `--gen-tokens 1` vs `--gen-tokens 65` (differential per-token delta: `(gen65 - gen1) / 64`).
+- Method: `P36_VK_PROF_KERNEL=1`, ctx 512, `--gen-tokens 1` vs `--gen-tokens 65` (differential per-token delta: `(gen65 - gen1) / 64`).
 - Gate: Diagnostic only (no standalone performance claim without 7-rep interleaved A/B). Exit = written DRAM-bound vs ALU-bound verdict with ISA evidence.
 
 ## 2. Verified ISA & Occupancy Properties (via `VK_KHR_pipeline_executable_properties` / `mmq_info`)

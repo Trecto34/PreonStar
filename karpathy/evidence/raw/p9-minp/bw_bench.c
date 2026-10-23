@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 /* BC-250 single-core streaming read rate over the 608 KB logits vector, to see
- * whether the 0.61 ms of q36_sample_full_vocab's two full-vocab loops is the
+ * whether the 0.61 ms of p36_sample_full_vocab's two full-vocab loops is the
  * scan itself or the per-element branches. */
 #include <stdio.h>
 #include <math.h>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired statistics for q36-bench frontier dumps (frontier_nll.py only prints means).
+"""Paired statistics for p36-bench frontier dumps (frontier_nll.py only prints means).
 
 Usage: p3stats.py TOKENS_JSON DIR_REF DIR... [--dump]
 Prints per-frontier signed dNLL (DIR - REF), count of sign, top-1 agreement and

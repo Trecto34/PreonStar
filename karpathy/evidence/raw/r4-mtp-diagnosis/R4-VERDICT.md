@@ -6,8 +6,8 @@ yet, which the item allows to be reported instead of built.
 
 Model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`, greedy, ctx 512, `--mtp-margin 0`,
 story prompt, same binary for every arm. New env-gated phase timers
-(`Q36_MTP_TIMING`) plus a host-readback/flush counter pair
-(`q36_gpu_read_bytes` / `q36_gpu_read_flushes`) produce one line per cycle.
+(`P36_MTP_TIMING`) plus a host-readback/flush counter pair
+(`p36_gpu_read_bytes` / `p36_gpu_read_flushes`) produce one line per cycle.
 
 ## Absolute rates on the same binary (plain decode alongside)
 
@@ -22,7 +22,7 @@ story prompt, same binary for every arm. New env-gated phase timers
 Round-1's 6.88 t/s reproduces exactly (6.97 here). Both MTP depths are net
 losses on this hardware.
 
-## Per-cycle phase breakdown (`Q36_MTP_TIMING`, d3, nx ON)
+## Per-cycle phase breakdown (`P36_MTP_TIMING`, d3, nx ON)
 
 97-cycle run (gen 256, `--mtp-margin 0`, `accept=75.8%`, exits 37 gate-reject /
 29 partial / 31 full-accept, 1.94 tokens/cycle):
@@ -50,7 +50,7 @@ on a partial accept, 1940/1 on a gate-reject cycle).
   forward: **10x**.  With nx OFF the same phase is **638 ms** (4.10 t/s).  This
   single phase is what makes d3 a 3.3x loss.
 - `read_kb=4850` per full cycle = five 993 KB logits readbacks
-  (`Q36_N_VOCAB * 4`); `drains` = open-batch flushes, 3-4 per full cycle vs 1 on
+  (`P36_N_VOCAB * 4`); `drains` = open-batch flushes, 3-4 per full cycle vs 1 on
   a one-token cycle.  Profile: `submit_wait_ms` **563.0 (d3) vs 167.4 (plain)**,
   i.e. +395.7 ms over the 7 verify cycles = **+57 ms/cycle of pure queue drain**
   on top of the GPU work.
@@ -81,7 +81,7 @@ not the cost: `draft` is 5 ms and `mtp` inside `fwd` is 12 ms.
 
 ## Acceptance (measurement)
 
-`Q36_MTP_STATS`: d3 `calls=14 drafted=16 accepted=10 full=2 accept=62.5%`
+`P36_MTP_STATS`: d3 `calls=14 drafted=16 accepted=10 full=2 accept=62.5%`
 (round-1 with nx ON: 75.8%); d2 `calls=15 drafted=9 accepted=9 full=9` — 100%
 **by construction**, because `draft_cap = N-1 = 1` makes `verify_n = 1`, the
 `row_tops[i-1]` comparison loop never runs, and `commit_n == verify_n == 1` is

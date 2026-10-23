@@ -5,14 +5,14 @@
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#ifdef Q36_Q2_0_ONLY
+#ifdef P36_Q2_0_ONLY
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_integer_dot_product : require
 #endif
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-#ifdef Q36_Q2_0_ONLY
+#ifdef P36_Q2_0_ONLY
 layout(set = 0, binding = 0) readonly buffer Weights { uint wb[]; };
 #else
 layout(set = 0, binding = 0) readonly buffer Weights { uint8_t wb[]; };
@@ -43,13 +43,13 @@ const uint TAB_IQ2S = 544u;
 const uint TAB_IQ1S = 3360u;
 const uint TAB_IQ2XS = 7456u;
 
-#ifdef Q36_Q2_0_ONLY
+#ifdef P36_Q2_0_ONLY
 
 /* Q2_0 and PQ2_0 share the 2-bit codec and differ only in group size: 64
  * weights / 18 B against 128 / 34 B.  These are compile-time constants so the
  * hot loop keeps folding them, and so the Q2_0 build's token stream -- hence
  * its SPIR-V -- is byte-for-byte what it was before PQ2_0 existed. */
-#ifdef Q36_PQ2_0
+#ifdef P36_PQ2_0
 #define Q2_BLK_BYTES   34u
 #define Q2_BLK_PER_Q8K 2u
 #define Q2_LANE_SHIFT  2u
@@ -239,12 +239,12 @@ vec4 dequant_word(uint row, uint qb, uint word) {
     return d * v;
 }
 
-#ifdef Q36_IQ2S_ONLY
+#ifdef P36_IQ2S_ONLY
 /* IQ2_S-only specialization: identical math to the IQ2_S arm of the
  * generic block_dot() below (copied verbatim, not rederived), just without
  * the runtime pc.type branch chain every group/lane pays for on every one
  * of pc.blocks*8 iterations regardless of which type is actually live.
- * Q2_0/PQ2_0/PTQ1_0 already get this treatment via Q36_Q2_0_ONLY above;
+ * Q2_0/PQ2_0/PTQ1_0 already get this treatment via P36_Q2_0_ONLY above;
  * this is the same lever for the other quant that reaches this file. */
 float block_dot(uint row, uint qb, uint group, vec4 qv[8]) {
     uint base = row * pc.row_bytes + qb * 82u;

@@ -48,7 +48,7 @@ const uint INVALID = 0xffffffffu;
 const uint BM = 64u;
 const uint KK = 8u;
 
-#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_IQ3XXS) || defined(Q36_MOE_Q3K)
+#if defined(P36_MOE_IQ2S) || defined(P36_MOE_MIX_IQ2S_IQ2XXS) || defined(P36_MOE_IQ3XXS) || defined(P36_MOE_Q3K)
 /* IQ2_S superblock: [d f16][64 qs][8 qh][8 scales] = 82 bytes.  Two 4-bit
  * scales per 32-element group (low nibble = first 16, high = last 16), so
  * the group scale folds into f32 per half instead of once per group. */
@@ -63,7 +63,7 @@ uint u_u8(uint off) {
     return (uint(uw[off >> 1u]) >> (8u * (off & 1u))) & 255u;
 }
 #endif
-#ifdef Q36_MOE_Q3K
+#ifdef P36_MOE_Q3K
 /* Q3_K superblock: [32 hmask][64 qs][12 packed 6-bit scales][d f16] = 110
  * bytes, one scale per 16 elements (see moe_gate_up_decode.comp).  Values
  * stage as v/4 (-1..0.75, exact in f16) and the per-half scale d*sc*4 folds
@@ -92,7 +92,7 @@ vec4 q3k_vec(uint q, uint h, uint sh, uint hb) {
     return r;
 }
 #endif
-#ifdef Q36_MOE_IQ3XXS
+#ifdef P36_MOE_IQ3XXS
 const uint IQ3XXS_BYTES = 98u;
 const uint TAB_KSIGNS = 512u;
 const uint TAB_IQ3XXS_GRID = 3104u;
@@ -105,13 +105,13 @@ shared uint sh_grid[512];
  * two banks, an 8-way conflict.  The swizzle spreads them over all 32 banks at
  * no LDS cost and only permutes storage, so results are bit-identical: with the
  * register tile below, 1635 -> 1018 ms across a ctx-2048 run (MEASURED_ON_BC250). */
-#define Q36_SWZ(i) (((i) >> 1u) & 7u)   /* mask is KK - 1 */
+#define P36_SWZ(i) (((i) >> 1u) & 7u)   /* mask is KK - 1 */
 shared f16vec4 Ag[BM][KK];
 shared f16vec4 Au[BM][KK];
 shared f16vec4 Bs[SLOT_TILE][KK];
 shared float Dg[BM];
 shared float Du[BM];
-#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_Q3K)
+#if defined(P36_MOE_IQ2S) || defined(P36_MOE_MIX_IQ2S_IQ2XXS) || defined(P36_MOE_Q3K)
 shared float Dg2[BM];   /* high-nibble scale of the 32-element group */
 shared float Du2[BM];
 #endif
@@ -130,18 +130,18 @@ void main(void) {
         sh_slot[tid] = slot;
         sh_x4[tid] = (slot != INVALID ? slot / pc.n_used : 0u) * pc.blocks * 64u;
     }
-#if !defined(Q36_MOE_IQ2S) && !defined(Q36_MOE_IQ3XXS) && !defined(Q36_MOE_Q3K)
+#if !defined(P36_MOE_IQ2S) && !defined(P36_MOE_IQ3XXS) && !defined(P36_MOE_Q3K)
     for (uint w = tid; w < 512u; w += 256u) sh_grid[w] = tables[w];
 #endif
 
-#if defined(Q36_MOE_IQ2S)
+#if defined(P36_MOE_IQ2S)
     uint row_bytes = pc.blocks * IQ2S_BYTES;
-#elif defined(Q36_MOE_MIX_IQ2S_IQ2XXS)
+#elif defined(P36_MOE_MIX_IQ2S_IQ2XXS)
     uint grow_bytes = pc.blocks * IQ2S_BYTES;
     uint urow_u16 = pc.blocks * IQ2_U16;
-#elif defined(Q36_MOE_IQ3XXS)
+#elif defined(P36_MOE_IQ3XXS)
     uint row_bytes = pc.blocks * IQ3XXS_BYTES;
-#elif defined(Q36_MOE_Q3K)
+#elif defined(P36_MOE_Q3K)
     uint row_bytes = pc.blocks * Q3K_BYTES;
 #else
     uint row_u16 = pc.blocks * IQ2_U16;
@@ -149,9 +149,9 @@ void main(void) {
     uint ar = tid >> 2u;      /* staged row 0..63 */
     uint sub = tid & 3u;      /* 8-element group within the 32-block */
     uint row = row0 + ar;
-#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_IQ3XXS) || defined(Q36_MOE_Q3K)
+#if defined(P36_MOE_IQ2S) || defined(P36_MOE_IQ3XXS) || defined(P36_MOE_Q3K)
     uint base_bytes = (expert * pc.mid_dim + (row < pc.mid_dim ? row : 0u)) * row_bytes;
-#elif defined(Q36_MOE_MIX_IQ2S_IQ2XXS)
+#elif defined(P36_MOE_MIX_IQ2S_IQ2XXS)
     uint gbase_bytes = (expert * pc.mid_dim + (row < pc.mid_dim ? row : 0u)) * grow_bytes;
     uint ubase_u16 = (expert * pc.mid_dim + (row < pc.mid_dim ? row : 0u)) * urow_u16;
 #else
@@ -178,7 +178,7 @@ void main(void) {
     }
     barrier();
 
-    uint sa = Q36_SWZ(ar);
+    uint sa = P36_SWZ(ar);
     uint a_k0 = (sub * 2u) ^ sa;
     uint a_k1 = (sub * 2u + 1u) ^ sa;
     uint sbit = 7u * sub;
@@ -186,11 +186,11 @@ void main(void) {
     uint sub_shift = 8u * (sub & 1u);
 
     bool live_b = (bc < SLOT_TILE) && (sh_slot[bc] != INVALID);
-    uint b_k = (bc < SLOT_TILE) ? (bkk ^ Q36_SWZ(bc)) : 0u;
+    uint b_k = (bc < SLOT_TILE) ? (bkk ^ P36_SWZ(bc)) : 0u;
     uint b_base = (bc < SLOT_TILE && live_b) ? (sh_x4[bc] + bkk) : 0u;
 
-    uint swz_sl = Q36_SWZ(sl);
-    uint swz_ry = Q36_SWZ(ry);
+    uint swz_sl = P36_SWZ(sl);
+    uint swz_ry = P36_SWZ(ry);
     uint arow[4];
     for (uint i = 0u; i < 4u; i++) arow[i] = ry + 16u * i;
 
@@ -200,7 +200,7 @@ void main(void) {
         uint ib32 = kb & 7u;
         /* Stage gate and up: 64 rows x one 32-element scale group, one
          * 8-element grid word per thread. */
-#if defined(Q36_MOE_Q3K)
+#if defined(P36_MOE_Q3K)
         {
             /* This thread's 8 elements: qs/hmask bytes e = 8*sub..8*sub+7 of
              * the 32-run, shift 2*(ib32&3) and hmask bit 4*(ib32>>2)+(ib32&3). */
@@ -223,7 +223,7 @@ void main(void) {
                 else { Dg2[ar] = gd * 4.0; Du2[ar] = ud * 4.0; }
             }
         }
-#elif defined(Q36_MOE_IQ3XXS)
+#elif defined(P36_MOE_IQ3XXS)
         {
             uint bb = base_bytes + sb * IQ3XXS_BYTES;
             uint g32 = ib32;
@@ -262,7 +262,7 @@ void main(void) {
                 Du[ar] = ud * 16.0 * float(2u * (uaux >> 28u) + 1u);
             }
         }
-#elif defined(Q36_MOE_MIX_IQ2S_IQ2XXS)
+#elif defined(P36_MOE_MIX_IQ2S_IQ2XXS)
         {
             uint gbb = gbase_bytes + sb * IQ2S_BYTES;
             uint ub = ubase_u16 + sb * IQ2_U16;
@@ -298,7 +298,7 @@ void main(void) {
                 Du[ar] = ud * 0.25 * (0.5 + float(uss >> 28u)) * 64.0;
             }
         }
-#elif defined(Q36_MOE_IQ2S)
+#elif defined(P36_MOE_IQ2S)
         {
             uint bb = base_bytes + sb * IQ2S_BYTES;
             uint gnib = sub < 2u ? (g_u8(bb + 74u + ib32) & 15u) : (g_u8(bb + 74u + ib32) >> 4u);
@@ -378,7 +378,7 @@ void main(void) {
 
         f16vec2 pkg[4][2];
         f16vec2 pku[4][2];
-#if defined(Q36_MOE_IQ2S) || defined(Q36_MOE_MIX_IQ2S_IQ2XXS) || defined(Q36_MOE_Q3K)
+#if defined(P36_MOE_IQ2S) || defined(P36_MOE_MIX_IQ2S_IQ2XXS) || defined(P36_MOE_Q3K)
         /* Two 4-bit scales per 32-element group: the xor swizzle only permutes
          * the low three bits, so the four slots carrying the low nibble are
          * exactly the four kk in the half selected by bit 2 of swz_ry.  Fold
@@ -413,7 +413,7 @@ void main(void) {
                  * slot bit 2 equal to bit 2 of swz_ry, so which kk half that
                  * is flips with swz_ry. */
                 float dg = (h == (swz_ry >> 2u)) ? Dg[arow[i]] : Dg2[arow[i]];
-#ifdef Q36_MOE_MIX_IQ2S_IQ2XXS
+#ifdef P36_MOE_MIX_IQ2S_IQ2XXS
                 float du = Du[arow[i]];
 #else
                 float du = (h == (swz_ry >> 2u)) ? Du[arow[i]] : Du2[arow[i]];

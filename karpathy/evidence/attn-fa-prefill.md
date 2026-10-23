@@ -10,11 +10,11 @@ the cost that matters there. Target model: `Swift-Qwen3.8-27B-IQ3_XXS.gguf`
 
 ## 1. Baseline at agent-sized contexts
 
-`Q36_VK_PROF_OP=1 Q36_VK_PROF_KERNEL=1 ./q36-bench --vulkan -m <swift>
+`P36_VK_PROF_OP=1 P36_VK_PROF_KERNEL=1 ./p36-bench --vulkan -m <swift>
 --prompt-file tests/long_context_story_prompt.txt --ctx-start N --ctx-max N
 --ctx-alloc N+256 --prefill-chunk 256 --gen-tokens 0`
 
-| ctx | q36 prefill | llama.cpp `-fa 1` pp | attention share of GPU time |
+| ctx | p36 prefill | llama.cpp `-fa 1` pp | attention share of GPU time |
 |---|---|---|---|
 | 2048 | 145.89 t/s | – | 6.9% (`attn_prefill_qtile2_gqa6` 951.7 ms) |
 | 8192 | 104.96 t/s | 72.54 t/s | **20.8%** (16143.2 ms of 77588.7 ms) |
@@ -58,7 +58,7 @@ Q4_0 dequant is exact in f32). Q in registers; a 16-lane rowset owns 3 rows,
 lane j owns dims 64i+4j..+3, so K/V LDS reads are contiguous across the rowset
 and broadcast across rowsets; scores finished with a 16-lane clustered add.
 Same per-4096-key-group partials, so `attn_combine` is untouched. Gate:
-`Q36_VK_ATTN_FA` (default on, `=0` → qtile2).
+`P36_VK_ATTN_FA` (default on, `=0` → qtile2).
 
 ISA (`./mmq_info`): VGPRs 256 (no spills), LDS 32768 B, 4 subgroups/SIMD —
 vs qtile2 128 VGPRs / 16384 B / 8 subgroups.
@@ -84,7 +84,7 @@ would make both arms identical, one sinks buffer for the run.
 
 ## 5. Whole-model verdicts (ctx 8192, 5 interleaved reps, gen 16, chunk 256)
 
-Same binary both arms, wrappers differ only in `Q36_VK_ATTN_FA` (rule 5: flag ON in B).
+Same binary both arms, wrappers differ only in `P36_VK_ATTN_FA` (rule 5: flag ON in B).
 
 | model | A qtile2 prefill (MAD) | B FA prefill (MAD) | delta | reps disjoint? |
 |---|---|---|---|---|
@@ -122,7 +122,7 @@ reordering, so single-frontier max_abs is not a usable gate there:
 | qtile2 chunk 256 vs 128 (legit reorder) | 2.21 / 59 | 8.07 / **flipped** / 40 |
 
 So the gate used is teacher-forced NLL of the true next token at 16 frontiers
-7952..8192 (`karpathy/tools/frontier_nll.py`, tokens from `q36 --dump-tokens`),
+7952..8192 (`karpathy/tools/frontier_nll.py`, tokens from `p36 --dump-tokens`),
 with a chunk-128 baseline as the noise reference:
 
 | model | arm | mean NLL | top-1 | mean \|dNLL\| vs baseline |

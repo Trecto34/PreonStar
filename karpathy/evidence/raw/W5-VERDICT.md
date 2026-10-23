@@ -8,8 +8,8 @@
 ## 2. Parity Verification (Frontier 513 on Swift-27B)
 Raw artifact: `karpathy/evidence/raw/ab-w5-fusedrms-parity.txt`.
 - Evaluated frontier 513 across both prefill chunking (256-wide) and the single-token decode boundary (`n_tok == 1`).
-- Reference: `env Q36_VK_FUSED_RMS_Q8=0 ./q36-bench ...`
-- Candidate: `env Q36_VK_FUSED_RMS_Q8=1 ./q36-bench ...` (confirmed dispatching `vulkan/add_rms_norm_q8_k.spv`, 889 dispatches).
+- Reference: `env P36_VK_FUSED_RMS_Q8=0 ./p36-bench ...`
+- Candidate: `env P36_VK_FUSED_RMS_Q8=1 ./p36-bench ...` (confirmed dispatching `vulkan/add_rms_norm_q8_k.spv`, 889 dispatches).
 - Vocabulary tested: 248,320 logits.
 - `max_abs_diff`: **0** across all 248,320 logits (`ref = -4.576600`, `new = -4.576600`).
 - `top-1` agreement: **identical** (ref=5316, new=5316, logit 19.820942).
@@ -23,7 +23,7 @@ Harness: `tests/bench_ab.sh` on `Swift-Qwen3.8-27B-IQ3_XXS.gguf`, 7 interleaved 
 - **Arm A (Stock baseline, separate `add_rms_norm` and `quantize_q8_k` dispatches)**:
   - Prefill median: **170.38 tok/s** (MAD 0.610)
   - Decode median: **18.10 tok/s** (MAD 0.050)
-- **Arm B (Candidate, fused `add_rms_norm_q8_k` kernel via `Q36_VK_FUSED_RMS_Q8=1`)**:
+- **Arm B (Candidate, fused `add_rms_norm_q8_k` kernel via `P36_VK_FUSED_RMS_Q8=1`)**:
   - Prefill median: **169.83 tok/s** (MAD 0.140)
   - Decode median: **17.95 tok/s** (MAD 0.070)
 - **Delta (B vs A)**:
@@ -50,12 +50,12 @@ Raw hardware artifact: `karpathy/evidence/raw/ab-w5-isa-properties.txt` (`VK_KHR
   - Avoiding an L2 read/write is completely eclipsed by the 20 barriers, the increase in LDS to 25.6 KB, and the occupancy drop from 40 to 32 subgroups/SIMD.
 
 ## 5. Scope, Plumbing & Safety
-- Host changes in `q36.c` introduce `rt->inp_q8_valid` to track when `rt->inp_q8` has been populated by the fused norm.
-- When `Q36_VK_FUSED_RMS_Q8=1` is not set (default), `q36_gpu_add_rms_norm_q8_k_tensor` returns `0` immediately via `q36_vk_use_fused_rms_q8()` (`env && env[0] == '1'`). `inp_q8_valid` remains `false`, and every call site falls back cleanly to the stock `q36_gpu_add_rms_norm_tensor` path with zero change in control flow or performance.
-- Coverage disclosure: Bit-exact parity is verified on single-session incremental decode and prefill. Batched decode (`q36_sessions_eval_batch_vulkan`) and speculative MTP paths have not been independently tested under the candidate flag because the optimization is rejected and remains disabled by default.
+- Host changes in `p36.c` introduce `rt->inp_q8_valid` to track when `rt->inp_q8` has been populated by the fused norm.
+- When `P36_VK_FUSED_RMS_Q8=1` is not set (default), `p36_gpu_add_rms_norm_q8_k_tensor` returns `0` immediately via `p36_vk_use_fused_rms_q8()` (`env && env[0] == '1'`). `inp_q8_valid` remains `false`, and every call site falls back cleanly to the stock `p36_gpu_add_rms_norm_tensor` path with zero change in control flow or performance.
+- Coverage disclosure: Bit-exact parity is verified on single-session incremental decode and prefill. Batched decode (`p36_sessions_eval_batch_vulkan`) and speculative MTP paths have not been independently tested under the candidate flag because the optimization is rejected and remains disabled by default.
 
 ## 6. Verdict & Status
 - **Verdict: REJECTED & FROZEN (Gate Not Met).**
-- Implementation retained behind opt-in environment gate `Q36_VK_FUSED_RMS_Q8=1`, but defaults to disabled (`env && env[0] == '1'`) to preserve stock peak throughput.
+- Implementation retained behind opt-in environment gate `P36_VK_FUSED_RMS_Q8=1`, but defaults to disabled (`env && env[0] == '1'`) to preserve stock peak throughput.
 - `reconsider_if`: Target devices with very small L2 caches where intermediate activations spill to DRAM, or if a block-partitioned fused kernel architecture is developed that eliminates row-wide synchronization.
 - Evidence files: `karpathy/evidence/raw/ab-w5-fusedrms.csv`, `ab-w5-fusedrms-summary.txt`, `ab-w5-fusedrms-parity.txt`, `ab-w5-isa-properties.txt`.

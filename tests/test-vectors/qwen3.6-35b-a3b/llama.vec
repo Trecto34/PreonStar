@@ -1,4 +1,4 @@
-# q36-llama-logprob-vectors-v1
+# p36-llama-logprob-vectors-v1
 # case <id> <ctx> <steps> <prompt-file>
 # step <index> <selected-hex> <top-count>
 # top <token-hex> <llamacpp-logprob>

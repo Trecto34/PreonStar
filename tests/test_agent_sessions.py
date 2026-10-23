@@ -19,7 +19,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 ANSI = re.compile(rb'\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78]')
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--binary', type=Path, default=ROOT / 'q36-agent')
+parser.add_argument('--binary', type=Path, default=ROOT / 'p36-agent')
 parser.add_argument('--model', type=Path, default=ROOT / 'gguf/Qwen3.6-35B-A3B-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-v2-imatrix.gguf')
 parser.add_argument('--vision', type=Path)
 parser.add_argument('--web', action='store_true', help='Also test Google search and page visits; permits browser startup')
@@ -63,7 +63,7 @@ class Agent:
         self.proc = subprocess.Popen(cmd, cwd=ROOT, stdin=slave, stdout=slave,
                                      stderr=slave, start_new_session=True,
                                      env=dict(os.environ, TERM='xterm-256color',
-                                              Q36_AGENT_CACHE_DIR=str(out / 'cache')))
+                                              P36_AGENT_CACHE_DIR=str(out / 'cache')))
         os.close(slave)
 
     def collect(self, seconds=0.2):
@@ -129,7 +129,7 @@ class Agent:
 
         self.wait(done, label)
         part = self.trace()[start:]
-        assert 'Tool error:' not in decode_trace(part) and b'q36-agent: ' not in self.raw[output:], label
+        assert 'Tool error:' not in decode_trace(part) and b'p36-agent: ' not in self.raw[output:], label
         return part
 
     def save(self):
@@ -226,7 +226,7 @@ try:
         agent.quiet_cpu('after image save failure')
         start = len(agent.raw)
         os.write(agent.master, b'n\r')
-        agent.wait(lambda: b'q36-agent>' in agent.raw[start:] and agent.idle(), 'cancel exit')
+        agent.wait(lambda: b'p36-agent>' in agent.raw[start:] and agent.idle(), 'cancel exit')
         agent.turn('Without tools, reply with exactly CONTINUED.', 'continue image chat')
         start = len(agent.raw)
         agent.send('/new')

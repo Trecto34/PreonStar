@@ -1,6 +1,6 @@
 // Qwen3.6 full, compressed, split-K, and GQA-tiled attention kernels.
 
-kernel void q36_attention_f16(
+kernel void p36_attention_f16(
         device float *out [[buffer(0)]],
         device float *scores [[buffer(1)]],
         device const float *q [[buffer(2)]],
@@ -8,7 +8,7 @@ kernel void q36_attention_f16(
         device const half *kcache [[buffer(4)]],
         device const half *vcache [[buffer(5)]],
         device const float *sinks [[buffer(6)]],
-        constant q36_attention_args &args [[buffer(7)]],
+        constant p36_attention_args &args [[buffer(7)]],
         uint2 gid [[thread_position_in_grid]]) {
     uint head = gid.x, tok = gid.y;
     if (head >= args.heads) return;
@@ -58,7 +58,7 @@ kernel void q36_attention_f16(
     }
 }
 
-kernel void q36_attention_q8_q4_parallel(
+kernel void p36_attention_q8_q4_parallel(
         device float *out [[buffer(0)]],
         device float *scores [[buffer(1)]],
         device const float *q [[buffer(2)]],
@@ -66,7 +66,7 @@ kernel void q36_attention_q8_q4_parallel(
         device const uchar *kcache [[buffer(4)]],
         device const uchar *vcache [[buffer(5)]],
         device const float *sinks [[buffer(6)]],
-        constant q36_attention_args &args [[buffer(7)]],
+        constant p36_attention_args &args [[buffer(7)]],
         threadgroup float *shared [[threadgroup(0)]],
         uint2 group_id [[threadgroup_position_in_grid]],
         uint tid [[thread_index_in_threadgroup]],
@@ -90,7 +90,7 @@ kernel void q36_attention_q8_q4_parallel(
         float dotv = 0.0f;
         uint base = kvh * args.dim;
         for (uint j = lane; j < args.dim; j += 32u)
-            dotv = fma(qh[j], q36_kv_q8_value(kr, base + j), dotv);
+            dotv = fma(qh[j], p36_kv_q8_value(kr, base + j), dotv);
         dotv = simd_sum(dotv) * scale;
         if (lane == 0u) sh[pos] = dotv;
     }
@@ -131,7 +131,7 @@ kernel void q36_attention_q8_q4_parallel(
         uint base = kvh * args.dim + tid;
         for (uint pos = 0; pos < count; pos++) {
             device const uchar *vr = vcache + (ulong)pos * v_row_bytes;
-            value = fma(sh[pos], q36_kv_q4_value(vr, base), value);
+            value = fma(sh[pos], p36_kv_q4_value(vr, base), value);
         }
         device const float *gate = qg + (ulong)tok * args.qg_stride +
             (ulong)head * args.dim * 2u + args.dim;
@@ -143,17 +143,17 @@ kernel void q36_attention_q8_q4_parallel(
     }
 }
 
-struct q36_attention_split_args {
+struct p36_attention_split_args {
     uint pos0, heads, kv_heads, dim;
     uint qg_stride, has_sinks, n_spans;
 };
 
-kernel void q36_attention_q8_q4_split(
+kernel void p36_attention_q8_q4_split(
         device float *partials [[buffer(0)]],
         device const float *q [[buffer(1)]],
         device const uchar *kcache [[buffer(2)]],
         device const uchar *vcache [[buffer(3)]],
-        constant q36_attention_split_args &args [[buffer(4)]],
+        constant p36_attention_split_args &args [[buffer(4)]],
         threadgroup float *shared [[threadgroup(0)]],
         uint3 group_id [[threadgroup_position_in_grid]],
         uint tid [[thread_index_in_threadgroup]],
@@ -178,7 +178,7 @@ kernel void q36_attention_q8_q4_split(
         device const uchar *kr = kcache + (ulong)pos * k_row_bytes;
         float dotv = 0.0f;
         for (uint j = lane; j < args.dim; j += 32u)
-            dotv = fma(qh[j], q36_kv_q8_value(kr, base_dim + j), dotv);
+            dotv = fma(qh[j], p36_kv_q8_value(kr, base_dim + j), dotv);
         dotv = simd_sum(dotv) * attn_scale;
         if (lane == 0u) weights[pos - span0] = dotv;
     }
@@ -223,7 +223,7 @@ kernel void q36_attention_q8_q4_split(
         for (uint i = 0u; i < span_n; i++) {
             device const uchar *vr =
                 vcache + (ulong)(span0 + i) * v_row_bytes;
-            acc = fma(weights[i], q36_kv_q4_value(vr, base_dim + tid), acc);
+            acc = fma(weights[i], p36_kv_q4_value(vr, base_dim + tid), acc);
         }
         partials[pbase + tid] = acc;
     }
@@ -237,12 +237,12 @@ kernel void q36_attention_q8_q4_split(
 // serves all eight query heads that share a KV head and folds eight adjacent
 // 512-key spans into one partial.  K and V are therefore dequantized once
 // instead of once per query head.
-kernel void q36_attention_q8_q4_gqa8(
+kernel void p36_attention_q8_q4_gqa8(
         device float *partials [[buffer(0)]],
         device const float *q [[buffer(1)]],
         device const uchar *kcache [[buffer(2)]],
         device const uchar *vcache [[buffer(3)]],
-        constant q36_attention_split_args &args [[buffer(4)]],
+        constant p36_attention_split_args &args [[buffer(4)]],
         threadgroup float *shared [[threadgroup(0)]],
         uint3 group_id [[threadgroup_position_in_grid]],
         uint tid [[thread_index_in_threadgroup]],
@@ -284,7 +284,7 @@ kernel void q36_attention_q8_q4_gqa8(
         const uint span_n = span_end - span0;
 
         // The eight SIMD groups score eight keys at a time.  Every lane
-        // walks the same dimensions as q36_attention_q8_q4_split, but each
+        // walks the same dimensions as p36_attention_q8_q4_split, but each
         // dequantized K value feeds all eight queries sharing this KV head.
         for (uint key0 = span0; key0 < span_end; key0 += 8u) {
             const uint key = key0 + simdgroup;
@@ -295,7 +295,7 @@ kernel void q36_attention_q8_q4_gqa8(
                     kcache + (ulong)key * k_row_bytes;
                 const uint kbase = kvh * 256u;
                 for (uint d = lane; d < 256u; d += 32u) {
-                    const float kval = q36_kv_q8_value(kr, kbase + d);
+                    const float kval = p36_kv_q8_value(kr, kbase + d);
                     for (uint head = 0u; head < HQ; head++)
                         dots[head] = fma(
                             sh_q[head * 256u + d], kval, dots[head]);
@@ -351,7 +351,7 @@ kernel void q36_attention_q8_q4_gqa8(
         for (uint i = 0u; i < span_n; i++) {
             device const uchar *vr =
                 vcache + (ulong)(span0 + i) * v_row_bytes;
-            const float vv = q36_kv_q4_value(vr, kvh * 256u + tid);
+            const float vv = p36_kv_q4_value(vr, kvh * 256u + tid);
             for (uint head = 0u; head < HQ; head++)
                 sacc[head] = fma(
                     sh_w[head * 512u + i], vv, sacc[head]);
@@ -387,12 +387,12 @@ kernel void q36_attention_q8_q4_gqa8(
     }
 }
 
-kernel void q36_attention_gqa8_combine(
+kernel void p36_attention_gqa8_combine(
         device float *out [[buffer(0)]],
         device const float *partials [[buffer(1)]],
         device const float *qg [[buffer(2)]],
         device const float *sinks [[buffer(3)]],
-        constant q36_attention_split_args &args [[buffer(4)]],
+        constant p36_attention_split_args &args [[buffer(4)]],
         uint2 group_id [[threadgroup_position_in_grid]],
         uint tid [[thread_index_in_threadgroup]]) {
     const uint head = group_id.x, tok = group_id.y;
@@ -425,12 +425,12 @@ kernel void q36_attention_gqa8_combine(
         acc * (l > 0.0f ? 1.0f / l : 1.0f) * sigmoid;
 }
 
-kernel void q36_attention_split_combine(
+kernel void p36_attention_split_combine(
         device float *out [[buffer(0)]],
         device const float *partials [[buffer(1)]],
         device const float *qg [[buffer(2)]],
         device const float *sinks [[buffer(3)]],
-        constant q36_attention_split_args &args [[buffer(4)]],
+        constant p36_attention_split_args &args [[buffer(4)]],
         uint2 group_id [[threadgroup_position_in_grid]],
         uint tid [[thread_index_in_threadgroup]]) {
     const uint head = group_id.x, tok = group_id.y;
@@ -463,7 +463,7 @@ kernel void q36_attention_split_combine(
         acc * (l > 0.0f ? 1.0f / l : 1.0f) * sigmoid;
 }
 
-kernel void q36_attention_f16_parallel(
+kernel void p36_attention_f16_parallel(
         device float *out [[buffer(0)]],
         device float *scores [[buffer(1)]],
         device const float *q [[buffer(2)]],
@@ -471,7 +471,7 @@ kernel void q36_attention_f16_parallel(
         device const half *kcache [[buffer(4)]],
         device const half *vcache [[buffer(5)]],
         device const float *sinks [[buffer(6)]],
-        constant q36_attention_args &args [[buffer(7)]],
+        constant p36_attention_args &args [[buffer(7)]],
         threadgroup float *shared [[threadgroup(0)]],
         uint2 group_id [[threadgroup_position_in_grid]],
         uint tid [[thread_index_in_threadgroup]],

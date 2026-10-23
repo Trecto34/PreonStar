@@ -42,7 +42,7 @@ sampling defaults differ). Post-think leak and recovery are covered deterministi
 - Remote: thinking and context size were uninitialized in my first remote cut (reasoning 0, compaction never fired). Fixed.
 - Watchdog: ten identical succeeding edits bypassed it because writes reset it; now any back-to-back identical call is blocked, no-op edits return EDIT_NO_CHANGE.
 - Server (pre-existing): a tool request cut by `max_tokens` returns the model's thinking and a raw `</think>` as `content`.
-- `q36moe.gguf` is a dangling symlink (start-server.sh cannot start).
+- `p36moe.gguf` is a dangling symlink (start-server.sh cannot start).
 
 ## Limitations
 - Remote is plain http, no vision/saved sessions, first tool call per reply only, interactive TUI path untested.

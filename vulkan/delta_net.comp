@@ -1,7 +1,7 @@
 #version 460
 #extension GL_ARB_gpu_shader_int64 : require
 
-/* Delta-net recurrent decode, port of q36_delta_net_decode().  One
+/* Delta-net recurrent decode, port of p36_delta_net_decode().  One
  * workgroup per head; thread j owns state column j so the decay, rank-1
  * update, and both state matvecs touch each column exactly once, in the same
  * order as the CPU reference.  gb packs the precomputed per-head decay

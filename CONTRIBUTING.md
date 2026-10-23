@@ -22,26 +22,26 @@ make vulkan-generic
 make vulkan-bc250
 ```
 
-The C test runner is `q36_test`. Running it without arguments is equivalent to
+The C test runner is `p36_test`. Running it without arguments is equivalent to
 `--all` and includes model-backed groups. The default Makefile target runs the
-model-independent evaluator and agent tests plus selected Q36 unit, cache,
+model-independent evaluator and agent tests plus selected P36 unit, cache,
 protocol, fixture, and server groups:
 
 ```sh
 make test                  # default model-independent suite
-./q36_test --all           # every registered test; model/Vulkan required
+./p36_test --all           # every registered test; model/Vulkan required
 ```
 
 Useful narrower checks:
 
 ```sh
-./q36_test --server
-./q36_test --logprob-vectors
-./q36_test --long-context
-./q36_test --tool-call-quality
-./q36_test --qwen-tool-call-quality
-./q36_test --vulkan-kernels
-./q36_test --gpu-cpu-parity
+./p36_test --server
+./p36_test --logprob-vectors
+./p36_test --long-context
+./p36_test --tool-call-quality
+./p36_test --qwen-tool-call-quality
+./p36_test --vulkan-kernels
+./p36_test --gpu-cpu-parity
 ```
 
 What they cover:
@@ -53,23 +53,23 @@ What they cover:
   the llama.cpp reference fixtures in `tests/test-vectors/`. This catches
   tokenizer, template, attention, and logits regressions.
 - `--long-context`: runs the long-context security continuation regression from
-  `tests/long_context_security_prompt.txt` unless `Q36_TEST_LONG_PROMPT` is set.
+  `tests/long_context_security_prompt.txt` unless `P36_TEST_LONG_PROMPT` is set.
 - `--tool-call-quality`: exercises actual model behavior for tool-call emission
   in both fast and exact paths.
 - `--qwen-tool-call-quality`: exercises native Qwen tool-call emission through
   the OpenAI-compatible request path.
 - `--vulkan-kernels`: isolated Vulkan kernel numeric checks.
 - `--gpu-cpu-parity`: compares live CPU and Metal/Vulkan logits on the same
-  generated suffix with Q36 top-1 and top-k overlap gates.
+  generated suffix with P36 top-1 and top-k overlap gates.
 
-The runner defaults to the q36 model path compiled into `q36.h`. Override paths
+The runner defaults to the p36 model path compiled into `p36.h`. Override paths
 and fixtures when needed:
 
 ```sh
-Q36_TEST_MODEL=/path/to/model.gguf ./q36_test --logprob-vectors
-Q36_TEST_VECTOR_FILE=/path/to/llama.vec ./q36_test --logprob-vectors
-Q36_TEST_LONG_PROMPT=/path/to/prompt.txt ./q36_test --long-context
-Q36_TEST_VECTOR_CASE=short ./q36_test --gpu-cpu-parity
+P36_TEST_MODEL=/path/to/model.gguf ./p36_test --logprob-vectors
+P36_TEST_VECTOR_FILE=/path/to/llama.vec ./p36_test --logprob-vectors
+P36_TEST_LONG_PROMPT=/path/to/prompt.txt ./p36_test --long-context
+P36_TEST_VECTOR_CASE=short ./p36_test --gpu-cpu-parity
 ```
 
 For CPU portability, verify that the CPU-only target still builds:
@@ -89,7 +89,7 @@ GGUF, using greedy decoding, thinking disabled, and `top_logprobs=20`.
 Checkpoint-scoped directories keep fixtures from different model revisions
 separate; comparing by token bytes catches tokenizer/template/attention
 regressions before they become long generation failures. They're the default
-offline reference, so building and testing Q36 does not require llama.cpp or
+offline reference, so building and testing P36 does not require llama.cpp or
 GGML libraries.
 
 The default reference test consumes committed llama.cpp results and does not
@@ -117,7 +117,7 @@ make test-llama-long LLAMA_BUILD_DIR=llama.cpp/build
 Only `make test-vectors-refresh` updates the tracked reference corpus. Review
 its JSON, manifest, and compact vector diff together.
 
-Hosted official-model comparisons use OpenRouter and the native Q36 scorer;
+Hosted official-model comparisons use OpenRouter and the native P36 scorer;
 see `gguf-tools/quality-testing/README.md`. The API key and private response
 captures stay outside version control.
 
@@ -149,9 +149,9 @@ make release-build-check-metal # Metal release build with -Werror
 `make test-release` runs the complete sequence, including reference vectors.
 The manual hardware, server, agent, long-context, power and sign-off checklist
 is in [`QA_BEFORE_RELEASES.md`](QA_BEFORE_RELEASES.md). Distributed inference
-is outside Q36's release scope.
+is outside P36's release scope.
 
-`q36-eval --suite hard-smoke` selects 12 harder cases; `--suite hard` selects
+`p36-eval --suite hard-smoke` selects 12 harder cases; `--suite hard` selects
 all 50. The original 92 cases remain the default `core` suite. Use
 `--list-cases`, `--validate-cases`, and `--source`, `--domain`, or `--case-id`
 to inspect or filter cases; `--retry-incomplete` retries answers that hit
@@ -164,7 +164,7 @@ checks.
 
 ## Speed Regression Tests
 
-Use `q36-bench` for throughput regressions. It reports instantaneous prefill and
+Use `p36-bench` for throughput regressions. It reports instantaneous prefill and
 generation speed at context frontiers, not one whole-run average. Prefill is
 incremental: each row measures only the newly processed suffix since the
 previous frontier.
@@ -172,7 +172,7 @@ previous frontier.
 Short smoke benchmark:
 
 ```sh
-./q36-bench \
+./p36-bench \
   --prompt-file tests/long_context_story_prompt.txt \
   --ctx-start 32 \
   --ctx-max 64 \
@@ -183,14 +183,14 @@ Short smoke benchmark:
 Before/after backend benchmark:
 
 ```sh
-./q36-bench \
+./p36-bench \
   -m gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf \
   --prompt-file tests/long_context_security_prompt.txt \
   --ctx-start 2048 \
   --ctx-max 32768 \
   --step-incr 2048 \
   --gen-tokens 128 \
-  --csv /tmp/q36-speed.csv
+  --csv /tmp/p36-speed.csv
 ```
 
 Use the same machine, backend, model file, context sweep, power/thermal state,
@@ -203,7 +203,7 @@ greedy and skips EOS so each frontier gets the same number of generated tokens.
 For debugging a failing generation, keep the trace:
 
 ```sh
-./q36-server --trace /tmp/q36-trace.txt ...
+./p36-server --trace /tmp/p36-trace.txt ...
 ```
 
 Attach the trace, command line, model file, backend, context size, and whether
@@ -221,7 +221,7 @@ is no safe way to resume — restart the process.
 
 If it reproduces, lower `--prefill-chunk`; a chunk large enough to push one
 dispatch past the watchdog is the usual cause. On Linux with amdgpu, check
-`journalctl -k` for a ring timeout. `Q36_VK_FAULT_INJECT_LOST=<n>` forces the
+`journalctl -k` for a ring timeout. `P36_VK_FAULT_INJECT_LOST=<n>` forces the
 n-th submit to report device loss, so the unwind path can be exercised without
 a real hang (diagnostic only).
 
@@ -237,7 +237,7 @@ A cache file is:
 KVC fixed header, 48 bytes
 u32 rendered_text_bytes
 rendered_text_bytes of UTF-8-ish token text
-Q36 session payload, payload_bytes from the KVC header
+P36 session payload, payload_bytes from the KVC header
 optional tool-id map section
 ```
 
@@ -256,14 +256,14 @@ The fixed header is little-endian:
 20  u8[4]  reserved
 24  u64    creation Unix time
 32  u64    last-used Unix time
-40  u64    Q36 session payload byte count
+40  u64    P36 session payload byte count
 ```
 
 The rendered text is the tokenizer-decoded text for the cached token prefix.
 It is both the human-inspectable prefix and the lookup identity: its SHA1 is
 the filename, and a file is reusable only when those bytes are a prefix of
 the incoming rendered prompt. After load, the exact checkpoint tokens from
-the Q36 payload remain authoritative, and only the incoming text suffix after
+the P36 payload remain authoritative, and only the incoming text suffix after
 the cached bytes is tokenized.
 
 The optional tool-id map is present only when header extension bit 0 is set.
@@ -291,11 +291,11 @@ present in the client history and load just those mappings, so exact replay
 can survive server restarts even when the matching KV snapshot isn't the one
 ultimately used for the rendered-prefix hit.
 
-The Q36 session payload starts with fourteen little-endian `u32` fields for
+The P36 session payload starts with fourteen little-endian `u32` fields for
 version 2, or sixteen fields for typed-KV version 3:
 
 ```text
-0   magic = "Q36 "
+0   magic = "P36 "
 1   payload version = 2 (f16 KV) or 3 (typed KV)
 2   saved context size
 3   prefill chunk size
@@ -329,6 +329,6 @@ values saved immediately after the checkpoint tokens, so a loaded snapshot
 can sample or continue from the exact next-token distribution without one
 extra decode step. MTP draft logits/state are not persisted; after loading a
 disk checkpoint the draft state is invalidated and rebuilt by normal
-generation. The tensor payload is q36-specific KV/session state, not a
+generation. The tensor payload is p36-specific KV/session state, not a
 generic inference graph dump, and is expected to be portable only across
-compatible `q36.c` builds for this model layout.
+compatible `p36.c` builds for this model layout.

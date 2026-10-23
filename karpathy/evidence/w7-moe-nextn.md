@@ -1,33 +1,33 @@
 # w7 — the 41-block MoE loader fix (ACCEPTED as capability, NOT as a speed win)
 
 Worked-experiment record. Template: `ab-hostdrain.md`. Raw data in
-`evidence/raw/`. Commit: `f9d537d` (`q36.c`, +66/−22).
+`evidence/raw/`. Commit: `f9d537d` (`p36.c`, +66/−22).
 
 ## 1. Question
 
 `Qwen3.8-35B-A3B-IQ2_M` — a 41-block `qwen35moe` file (40 trunk blocks + one
 embedded NextN/MTP block, `nextn_predict_layers=1`, 753 tensors) — was refused by
-q36 3/3 with `q36: expected qwen35moe.block_count=40, got 41`, while upstream
+p36 3/3 with `p36: expected qwen35moe.block_count=40, got 41`, while upstream
 llama.cpp loads the identical file and posts **91.53 ± 2.11 decode**, the fastest
 MoE decode measured on this box.
 
-Can q36 load it without regressing the MoE guard?
+Can p36 load it without regressing the MoE guard?
 
 ## 2. Root cause (pre-established, not re-derived here)
 
 Three separate conditions were dense-gated: the block-count escape hatch, the
 tensor-count gate, and the embedded-MTP prewarm skip
-(`q36_tensor_is_disabled_embedded_mtp`). Mechanism walk and exact lines:
+(`p36_tensor_is_disabled_embedded_mtp`). Mechanism walk and exact lines:
 `AlreadyTried.md` §"Cross-engine MoE matrix + the IQ2_M loader wall".
 
 ## 3. Change
 
 | condition | before | after |
 |---|---|---|
-| block count (`config_validate_model`) | escape hatch required `Q36_MODEL_DENSE` | `embedded_nextn_block = nextn_layers == 1 && block_count == Q36_N_LAYER + 1`, any model kind |
+| block count (`config_validate_model`) | escape hatch required `P36_MODEL_DENSE` | `embedded_nextn_block = nextn_layers == 1 && block_count == P36_N_LAYER + 1`, any model kind |
 | tensor count | `+15`, dense-gated | `+15` dense / **`+20` MoE** (753 − 733) |
-| prewarm skip | `if (!e \|\| !Q36_MODEL_DENSE \|\| e->mtp_ready \|\| !t) return false;` | `!Q36_MODEL_DENSE` dropped; `e->mtp_ready` short-circuit retained |
-| trunk matrix types | Q4_K/Q5_K/Q6_K/Q8_0 whitelist | under `!Q36_MODEL_DENSE && n_tensors == Q36_TENSOR_COUNT + 20`: any type, **dims still validated** (`tensor_expect_cpu_matrix`) |
+| prewarm skip | `if (!e \|\| !P36_MODEL_DENSE \|\| e->mtp_ready \|\| !t) return false;` | `!P36_MODEL_DENSE` dropped; `e->mtp_ready` short-circuit retained |
+| trunk matrix types | Q4_K/Q5_K/Q6_K/Q8_0 whitelist | under `!P36_MODEL_DENSE && n_tensors == P36_TENSOR_COUNT + 20`: any type, **dims still validated** (`tensor_expect_cpu_matrix`) |
 
 **Routed expert tensors (`ffn_gate_exps`, `ffn_up_exps`, `ffn_down_exps`) are
 untouched** — they keep `tensor_expect_routed_gate_up` / `tensor_expect_routed_down`.
@@ -43,7 +43,7 @@ type set and still binding it to a dims check.
 The 3/3 refusal is gone.
 
 ### 4.2 Quality — the relaxed check is the thing being tested
-`q36_test --gpu-cpu-parity --case short_reasoning_plain` (`evidence/raw/w7-parity.txt`):
+`p36_test --gpu-cpu-parity --case short_reasoning_plain` (`evidence/raw/w7-parity.txt`):
 
 | model | step | top1 ref/cand | top5 | top15 | top64 | rms |
 |---|---|---|---|---|---|---|
@@ -83,7 +83,7 @@ are worth nothing; only the interleaved median is.**
 **ACCEPTED** — as a *capability* fix: a file the engine could not open now loads
 and decodes with verified parity, at zero measured cost to the guard.
 
-**NOT a speed win.** Under q36, IQ2_M is 4.5×/3.1× slower than upstream
+**NOT a speed win.** Under p36, IQ2_M is 4.5×/3.1× slower than upstream
 (116.51/29.29 vs 529.90/91.53). That gap is now characterized and is not the
 loader's fault:
 

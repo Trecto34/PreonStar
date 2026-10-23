@@ -2,10 +2,10 @@
 
 Here we collect prefill and generation speed obtained with the BC-250.
 
-Run `q36-bench` as:
+Run `p36-bench` as:
 
 ```
-./q36-bench \
+./p36-bench \
   -m gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf \
   --prompt-file tests/long_context_story_prompt.txt \
   --ctx-start 2048 \

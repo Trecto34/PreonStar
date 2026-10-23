@@ -16,7 +16,7 @@ B vs A prefill: +0.45%   decode: +0.43%   (gate: +1.50%)
 verdict: FAIL (prefill)
 ```
 
-## Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS (MoE guard, ctx 1024, 7 reps) — raw: ab-drain-moe.csv
+## Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS (MoE guard, ctx 1024, 7 reps) — raw: ab-drain-moe.csv
 
 ```
 bin  n     prefill_med    mad       decode_med     mad       source
@@ -43,6 +43,6 @@ verdict: FAIL (prefill)
    median of the raw values. A real MAD is always small (0.1–10 t/s here).
 
 Both arms are indistinguishable, which is the only possible outcome: the removed
-block was gated on `q36_vk.prof_kernel`, so with no profiler env set the two
+block was gated on `p36_vk.prof_kernel`, so with no profiler env set the two
 binaries cannot differ. The drain change is inert in production; it is profiling
 hygiene at best, not a speed lever. See `../ab-hostdrain.md`.

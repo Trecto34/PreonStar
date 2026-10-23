@@ -9,7 +9,7 @@ PAIRS = [("swift", "", 0.8, 0.05), ("moe", "", 0.8, 0.05),
 
 def body(path):
     t = open(path, "r", errors="replace").read()
-    m = re.search(r"processing \d+ input tokens[^\n]*\n(.*?)\nq36: prefill:", t, re.S)
+    m = re.search(r"processing \d+ input tokens[^\n]*\n(.*?)\np36: prefill:", t, re.S)
     if not m:
         return None
     return m.group(1)

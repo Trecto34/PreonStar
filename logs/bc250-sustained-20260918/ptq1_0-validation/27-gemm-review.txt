@@ -2,7 +2,7 @@ Reviewer (Code Reviewer preset OpenCode) independent review of PTQ1_0 LDS GEMM k
 
 1. Mathematical Equivalence:
    - Kernel preserves integer dot product accumulation across 128 weights in sum[8][4] before applying fma(wd * yd, float(sum), acc_f32).
-   - This exactly preserves the order-free integer arithmetic contract of q36_contract_mmq_ptq1_dot, avoiding the float16 precision drift observed in float GEMM attempts.
+   - This exactly preserves the order-free integer arithmetic contract of p36_contract_mmq_ptq1_dot, avoiding the float16 precision drift observed in float GEMM attempts.
 
 2. LDS Footprint & Bank Conflicts:
    - buf_a: 32 * 33 = 1056 bytes.

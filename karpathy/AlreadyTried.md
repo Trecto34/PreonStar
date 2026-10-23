@@ -5,7 +5,7 @@ This ledger starts from the completed Swift bring-up in `changelog.txt`.
 | Result | Finding |
 |---|---|
 | IQ4_XS rejected | Bounded streaming ran, but dense-weight turnover was about 0.11 tok/s; resident loading triggered the host OOM/SIGKILL path. |
-| IQ3_XXS accepted as baseline | Completed 11.67 GiB model; short protected smoke passed; q36-bench measured about 180 tok/s prefill and 23 tok/s generation at context 1024. |
+| IQ3_XXS accepted as baseline | Completed 11.67 GiB model; short protected smoke passed; p36-bench measured about 180 tok/s prefill and 23 tok/s generation at context 1024. |
 | MTP draft=3 rejected as default | Slower than draft=1 on the measured workload. |
 | attention span=128 rejected as default | Helped at context 1024 but regressed at context 2048; span 512 remains the stable default. |
 
@@ -70,7 +70,7 @@ Branch `experiment/bc250-sustained-20260918`, HEAD `c133a09`, model
   `prism-ml/Ternary-Bonsai-2-27B-gguf` publishes
   `Ternary-Bonsai-2-27B-PTQ1_0.gguf` (5.95 GB vs the local 7.63 GB, matching the
   bpw ratio), and `prism-llama.cpp` already has Vulkan shaders
-  (`ptq1_0.glsl`, `dequant_ptq1_0.comp`) to port. Blockers: q36 has no type-143
+  (`ptq1_0.glsl`, `dequant_ptq1_0.comp`) to port. Blockers: p36 has no type-143
   loader entry and no trit unpack — the current 256-entry `q2tab` LUT does not
   carry over, because one byte holds 5 trits, not 4 codes. Note this changes the
   quantization, so it is a new baseline needing a quality eval, **not** a
@@ -155,7 +155,7 @@ The NULLS do, and those are what this section exists for.
   order to expose a HOST_CACHED GTT type, and measured +20.3% dense decode.
   On this box `vulkaninfo` already reports HOST_CACHED types [5], [6] and [10]
   with unified heap ON (`/usr/share/drirc.d/00-radv-defaults.conf:135`), and
-  `q36_vulkan.c:1693-1698` already selects
+  `p36_vulkan.c:1693-1698` already selects
   HOST_VISIBLE|HOST_COHERENT|HOST_CACHED for every non-weight buffer, exactly
   as its own comment intends. Nothing to port, no gain available here.
 - **shader_core_count 24->40 split-K lever — NOT APPLICABLE.** This engine has
@@ -165,8 +165,8 @@ The NULLS do, and those are what this section exists for.
   earlier note in this entry was wrong on one point and it cost a re-check: it
   reasoned from *llama.cpp's* `warp size: 32` that the driver default is already
   32-wide, so the peer's `RADV_PERFTEST=cswave32` had "no premise". That is
-  llama.cpp's backend, not this engine — q36 prints `subgroup 64` on the same
-  device (`q36_vulkan.c:1569` forces only `delta_net_cols`, `rope_qwen`,
+  llama.cpp's backend, not this engine — p36 prints `subgroup 64` on the same
+  device (`p36_vulkan.c:1569` forces only `delta_net_cols`, `rope_qwen`,
   `rope_qwen_mrope`, `quantize_q8_0` and the `dense_*_mmq` family). So the
   premise WAS live here and the lever earned one run. It got it: Swift 27B,
   7 interleaved reps, ctx 1024, `tests/bench_cswave32.sh` — prefill **171.14 ->
@@ -175,7 +175,7 @@ The NULLS do, and those are what this section exists for.
   before the die settled at 66-68 C; steady-state A3-A7 median 18.58 vs B 18.67
   is a **tie**). Verdict: **no gain**, prefill negative in all seven pairs.
   Structural reason, from the shader census: the hot kernels are *already*
-  wave32-forced (`dense_*_mmq`, `q36_vulkan.c:1575`), so the flag only moved
+  wave32-forced (`dense_*_mmq`, `p36_vulkan.c:1575`), so the flag only moved
   kernels off the critical path. A per-kernel source widening of the
   one-cross-lane-op decode kernels is still possible but the measured ceiling is
   now ~0, so it is no longer ranked. Evidence: `evidence/raw/ab-cswave32.csv`.
@@ -184,13 +184,13 @@ The NULLS do, and those are what this section exists for.
   predicate is a *suffix* test:
   `strstr(k->path,"dense_") && strstr(k->path,"_mmq.spv")`.
   `dense_iq3_s_mmq_r4.spv` (built at `Makefile:198-202` with
-  `-DQ36_BM=4 -DQ36_BK=64`) ends `_mmq_r4.spv`, so it never matched and the
+  `-DP36_BM=4 -DP36_BK=64`) ends `_mmq_r4.spv`, so it never matched and the
   shader ran at wave64. That shader partitions its token tile by
   `gl_SubgroupID`: `tok = tok0 + warp_tok*32 + (tt>>1)*16 + thread_tok*2 +
   (tt&1)`, `thread_tok = lane>>2`, and the store covers a 128-token tile. At
   wave32 (4 subgroups) the formula reaches **127**; at wave64 (2 subgroups) it
   peaks at **79**, so **tokens 80-127 of every tile were written by nobody**.
-  Reachable from the `small_rows` selection site (`q36_vulkan.c:8160-8170`:
+  Reachable from the `small_rows` selection site (`p36_vulkan.c:8160-8170`:
   IQ3_S weights, `out_dim == 48 && n_tok <= 128`). Fix: predicate widened to
   `_mmq` and the eligibility comment now names both traps (`gl_Subgroup*` reads
   count as cross-lane use; a `gl_SubgroupID`-partitioned tile makes wave32 a
@@ -227,19 +227,19 @@ The NULLS do, and those are what this section exists for.
 
 ### llama.cpp head-to-head + the integer-dot dead end (2026-09-17)
 
-The peer wins begged a fair question: is the q36 work worth anything next to
+The peer wins begged a fair question: is the p36 work worth anything next to
 upstream? Measured it. Same box, same GGUF
-(`/home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf`), same ctx 1024,
+(`/home/server/p36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf`), same ctx 1024,
 `-ngl 99`, Vulkan, `llama-bench -p 1024 -n 16 -r 3`.
 
 | engine | prefill t/s | decode t/s |
 |---|---|---|
 | upstream llama.cpp `0cae430` (built Sep 7) | 107.81 (+/-4.84) | 21.47 (+/-0.61) |
 | upstream llama.cpp `972d231` (pulled + rebuilt) | 105.43 (+/-4.46) | 22.13 (+/-0.65) |
-| **this repo (q36)** | **171.09** | **23.19** |
+| **this repo (p36)** | **171.09** | **23.19** |
 
-- **q36 is +58.7% prefill / +8.0% decode over stock upstream.** Not useless.
-  The decode margin understates it: llama-bench `tg` is greedy, while q36's
+- **p36 is +58.7% prefill / +8.0% decode over stock upstream.** Not useless.
+  The decode margin understates it: llama-bench `tg` is greedy, while p36's
   23.19 carries the full temp-0.6 / top-k / top-p / min-p sampling chain.
 - **The upstream update bought nothing.** `0cae430` -> `972d231` plus a full
   reconfigure and rebuild moved prefill -2.2% and decode +3.1%, both inside the
@@ -269,8 +269,8 @@ upstream? Measured it. Same box, same GGUF
   `v_pk_fma_f16` (bit-identical output). Same story for the iq3_s GEMV port
   (+14.0%) — pre-convert the grid to `f16vec4` in LDS so the math runs packed.
   **General rule for this driver: dot-product intrinsics are unavailable, so
-  packed-native restructuring is the only lever.** Both llama.cpp and q36 run
-  under that handicap, which is what makes q36's 58.7% an engine result rather
+  packed-native restructuring is the only lever.** Both llama.cpp and p36 run
+  under that handicap, which is what makes p36's 58.7% an engine result rather
   than a build accident.
 - **Two corrections to this repo's own notes.** (a) The earlier "RADV exposes
   no shader-core-properties on GFX1013" was stale — all three arch-gate
@@ -290,26 +290,26 @@ upstream? Measured it. Same box, same GGUF
 Full table, asymmetries and raw CSVs: `evidence/cross-engine-matrix.md`.
 Same box, same GGUFs, ctx 1024, `-ngl 99`, `llama-bench -p 1024 -n 16 -r 3`.
 
-| model | q36 prefill / decode | llama.cpp `972d231` | delta |
+| model | p36 prefill / decode | llama.cpp `972d231` | delta |
 |---|---|---|---|
 | Qwen3.6-35B-A3B IQ2XXS (MoE guard) | 909.49 / 87.37 | 615.08 / 78.72 | **+47.9% / +11.0%** |
-| RavenX-35B-Q36-IQ2XXS | 717.36 / 89.47 | 545.46 / 77.96 | **+31.5% / +14.8%** |
+| RavenX-35B-P36-IQ2XXS | 717.36 / 89.47 | 545.46 / 77.96 | **+31.5% / +14.8%** |
 | Qwen3.8-35B-A3B-IQ2_M | refuses to load | 529.90 / **91.53** | n/a |
 
-- **`Qwen3.8-35B-A3B-IQ2_M` is a q36 loader limitation, not a bad file.** Upstream
+- **`Qwen3.8-35B-A3B-IQ2_M` is a p36 loader limitation, not a bad file.** Upstream
   loads it (35.5B params, 2.7 bpw, 99/99 layers on GPU) and posts the fastest MoE
-  decode measured on this box — 91.53 +/- 2.11, above q36's best (RavenX 89.47).
-  q36 stops it at `q36: expected qwen35moe.block_count=40, got 41` (3/3 reps,
+  decode measured on this box — 91.53 +/- 2.11, above p36's best (RavenX 89.47).
+  p36 stops it at `p36: expected qwen35moe.block_count=40, got 41` (3/3 reps,
   exit 1). This is the highest-value open item in the repo and it is a loader
   condition, not a kernel.
 
   **Root cause located (2026-09-17, do not re-derive):** the guard is
-  `q36.c:5377-5381` in `config_validate_model`, and it *already contains the
-  escape hatch this file needs* — but it is gated on `Q36_MODEL_DENSE`:
+  `p36.c:5377-5381` in `config_validate_model`, and it *already contains the
+  escape hatch this file needs* — but it is gated on `P36_MODEL_DENSE`:
 
   ```c
-  if (block_count != Q36_N_LAYER &&
-      !(Q36_MODEL_DENSE && nextn_layers == 1 && block_count == Q36_N_LAYER + 1)) {
+  if (block_count != P36_N_LAYER &&
+      !(P36_MODEL_DENSE && nextn_layers == 1 && block_count == P36_N_LAYER + 1)) {
   ```
 
   Read from the GGUF itself (`gguf-py`): IQ2_M is `block_count=41`,
@@ -318,12 +318,12 @@ Same box, same GGUFs, ctx 1024, `-ngl 99`, `llama-bench -p 1024 -n 16 -r 3`.
   ffn_gate_inp, shared-expert tensors). The guard has 40 blocks / 733 tensors and
   no `nextn` key; RavenX likewise. So IQ2_M is a 40-block model **plus one
   NextN/MTP block** — structurally the shape the *dense* path already accepts.
-  A second dense-gated check at `q36.c:5419-5420` allows
-  `Q36_TENSOR_COUNT + 15` (dense NextN = +15 tensors; MoE NextN = +20 by
+  A second dense-gated check at `p36.c:5419-5420` allows
+  `P36_TENSOR_COUNT + 15` (dense NextN = +15 tensors; MoE NextN = +20 by
   arithmetic on 753 vs 733). The engine has a non-dense MTP binder
-  (`mtp_weights_bind`, `q36.c:4454`) but the embedded-MTP *skip* is dense-only:
-  `q36_tensor_is_disabled_embedded_mtp` returns false when `!Q36_MODEL_DENSE`
-  (`q36.c:5177`).
+  (`mtp_weights_bind`, `p36.c:4454`) but the embedded-MTP *skip* is dense-only:
+  `p36_tensor_is_disabled_embedded_mtp` returns false when `!P36_MODEL_DENSE`
+  (`p36.c:5177`).
 
   ⇒ **Reconsider_if:** extend both gates to the MoE shape *and* route block 40
   through the embedded-MTP skip. **RESOLVED 2026-09-17 — implemented, measured
@@ -340,11 +340,11 @@ Same box, same GGUFs, ctx 1024, `-ngl 99`, `llama-bench -p 1024 -n 16 -r 3`.
 
 ## Host query-pool drain removal — REJECTED as a speed lever (2026-09-17)
 
-- **Removing the mid-dispatch query-pool drain at `q36_vulkan.c:2981-2983`** —
+- **Removing the mid-dispatch query-pool drain at `p36_vulkan.c:2981-2983`** —
   the thing that produced the "94 us/dispatch" `dense_q4k_decode` anomaly — is
-  **INERT in production**. The block was gated on `q36_vk.prof_kernel`, and that
-  flag is only set when `Q36_VK_PROF_KERNEL` is present in the environment
-  (`q36_vulkan.c:3465-3474`). Interleaved 7-rep A/B on Swift at ctx 1024:
+  **INERT in production**. The block was gated on `p36_vk.prof_kernel`, and that
+  flag is only set when `P36_VK_PROF_KERNEL` is present in the environment
+  (`p36_vulkan.c:3465-3474`). Interleaved 7-rep A/B on Swift at ctx 1024:
   A 170.91 (MAD 0.650) vs B 171.68 (MAD 0.550) → **+0.45% prefill, +0.43%
   decode, FAIL** against the +1.5% gate. The MoE guard run agrees: **712.75
   (MAD 6.660) vs 711.95 (MAD 9.330) → −0.11% prefill, −0.25% decode, FAIL**,
@@ -369,19 +369,19 @@ Same box, same GGUFs, ctx 1024, `-ngl 99`, `llama-bench -p 1024 -n 16 -r 3`.
 
 ## w7: the 41-block loader fix — ACCEPTED as a capability fix, NOT a speed win (2026-09-17)
 
-Commit `f9d537d` on `experiment/w7-moe-nextn` (off `56126ca`), `q36.c` only,
+Commit `f9d537d` on `experiment/w7-moe-nextn` (off `56126ca`), `p36.c` only,
 +66/−22. All three dense-gated conditions identified above were extended to the
 MoE shape:
 
 - `config_validate_model`: `embedded_nextn_block = nextn_layers == 1 &&
-  block_count == Q36_N_LAYER + 1`, now accepted for any model kind; the
+  block_count == P36_N_LAYER + 1`, now accepted for any model kind; the
   tensor-count gate is `+15` dense / **`+20` MoE** (753 − 733).
-- `q36_tensor_is_disabled_embedded_mtp`: `!Q36_MODEL_DENSE` dropped, so the
-  `blk.<Q36_N_LAYER>.` prefix skip applies to MoE too. `e->mtp_ready` still
+- `p36_tensor_is_disabled_embedded_mtp`: `!P36_MODEL_DENSE` dropped, so the
+  `blk.<P36_N_LAYER>.` prefix skip applies to MoE too. `e->mtp_ready` still
   short-circuits, so sidecar-MTP runs are unaffected; a 40-block file has no
   `blk.40`, so the guard is unchanged by construction.
 - `weights_validate_layout(w, mixed_moe_quants)`: new `tensor_expect_moe_matrix()`
-  helper. Under the predicate `!Q36_MODEL_DENSE && n_tensors == Q36_TENSOR_COUNT + 20`
+  helper. Under the predicate `!P36_MODEL_DENSE && n_tensors == P36_TENSOR_COUNT + 20`
   (exactly the 753-tensor IQ2_M shape) the trunk/non-expert matrix types are
   accepted with dims still validated (`tensor_expect_cpu_matrix`) instead of the
   Q4_K/Q5_K/Q6_K/Q8_0 whitelist. **The routed experts keep their original strict
@@ -393,7 +393,7 @@ MoE shape:
 Measured:
 
 - **Loads and runs:** `116.51 / 29.29` tps (profiled). The 3/3 refusal is gone.
-- **Quality, specifically targeting the relaxed check:** `q36_test --gpu-cpu-parity`
+- **Quality, specifically targeting the relaxed check:** `p36_test --gpu-cpu-parity`
   **OK** on IQ2_M — top1 `ref == cand` at all 3 steps (16/16, 21/21, 248046/248046),
   rms 0.263/0.208/0.272, top15 15/15, 14/15, 13/15. Guard parity also **OK**
   (top1 16/21/248046 match, rms 0.31/0.24/0.32). A mis-dispatched quant type would
@@ -406,7 +406,7 @@ Measured:
   (704.62 → 737.83) also reclassifies the earlier single-run reading of `686.84`
   as cold-run noise, not a signal.
 - **Merged tree re-verified after the merge + rebuild of the main checkout**
-  (main `q36-bench`, 19:25): IQ2_M `117.98 / 32.36` exit 0, guard `715.16 / 88.63`
+  (main `p36-bench`, 19:25): IQ2_M `117.98 / 32.36` exit 0, guard `715.16 / 88.63`
   exit 0 — the committed source is what produced the accepted numbers, not just
   the worktree build.
 - Raw: `evidence/raw/ab-w7-guard.csv`, `w7-parity.txt`, `w7-iq2m-prof.txt`,
@@ -421,7 +421,7 @@ Measured:
 ## IQ2_M's slowness is kernel SELECTION, not the loader (2026-09-17, decisive)
 
 **Do not look for another loader fix, and do not read "it loads" as a win.**
-IQ2_M under q36 is 4.5×/3.1× slower than upstream on the identical file
+IQ2_M under p36 is 4.5×/3.1× slower than upstream on the identical file
 (116.51 / 29.29 vs 529.90 ± 11.48 / 91.53 ± 2.11).
 
 - **Quant inventory** (`gguf-py` `GGUFReader`): IQ2_M's trunk is **375× `IQ2_S`
@@ -435,7 +435,7 @@ IQ2_M under q36 is 4.5×/3.1× slower than upstream on the identical file
   `dense_extra_*`) — so the lever is **quant-aware dispatch into the per-quant
   prefill GEMM family**, i.e. in-tree prior art, not new shader work.
 - Corollary, recorded so it is not re-derived: the "IQ2_M is the fastest MoE
-  decode on this box" thesis **does not transfer to q36** until that dispatch
+  decode on this box" thesis **does not transfer to p36** until that dispatch
   exists. Ranking the loader fix as a *speed* item was this campaign's error.
 
 
@@ -446,16 +446,16 @@ has IQ2_S members, so `Qwen3.8-35B-A3B-IQ2_M` stops falling into `moe_matvec`.
 
 - **What changed.** `moe_gate_up.comp` (q8_K activations), `moe_gate_up_gemm.comp`
   and `moe_down_gemm.comp` gain an IQ2_S decode, built from the *same* sources with
-  `-DQ36_MOE_IQ2S` into `moe_gate_up_iq2s.spv` / `moe_gate_up_gemm_iq2s.spv` /
-  `moe_down_gemm_iq2s.spv`. Host side: `q36_vk_moe_gate_up_iq2_swiglu` accepts
-  IQ2_S pairs at 82 bytes/block, and `q36_gpu_moe_ffn_f32_tensor` accepts IQ2_S
+  `-DP36_MOE_IQ2S` into `moe_gate_up_iq2s.spv` / `moe_gate_up_gemm_iq2s.spv` /
+  `moe_down_gemm_iq2s.spv`. Host side: `p36_vk_moe_gate_up_iq2_swiglu` accepts
+  IQ2_S pairs at 82 bytes/block, and `p36_gpu_moe_ffn_f32_tensor` accepts IQ2_S
   gate/up/down with 82-byte `gu_stride`/`down_stride` plus a sixth `tables`
   binding for the down GEMM. The IQ2_XXS/Q2_K builds are **byte-identical** to the
   pre-change binaries (`b46fa81a…` gate/up GEMM, `93a38508…` down GEMM,
   `601d56a9…` q8 gate/up), so the guard is untouched *by construction*, not by
   measurement.
 - **Measured (7-rep interleaved, soak-gated entry ≤55 °C, actual 52-56 °C, sclk
-  500 MHz, ctx 512, gen 128, `Q36_VK_MOE_GEMM=0 Q36_VK_MOE_GATE_UP=0` as arm A):**
+  500 MHz, ctx 512, gen 128, `P36_VK_MOE_GEMM=0 P36_VK_MOE_GATE_UP=0` as arm A):**
   prefill **108.21 → 241.20 t/s = 2.23×** (paired per-pair 2.188-2.254, MAD
   0.49 → 1.40), decode **29.52 → 34.81 t/s = 1.18×** (MAD 0.87 → 0.07).
 - **Profile at ctx 512:** `moe_matvec` 6355 ms (arm A) → `moe_iq2s_gate_up_gemm`
@@ -471,10 +471,10 @@ has IQ2_S members, so `Qwen3.8-35B-A3B-IQ2_M` stops falling into `moe_matvec`.
   max_abs 1.89, not as garbage; the fix is `h == (swz_ry >> 2u)` in the fold.
   Compare `iq2s-gemm-parity-prefix.txt` against `iq2s-gemm-parity.txt`.
 - **Do not trust `--vulkan-fusion-parity` as the gate here.** Its env list toggles
-  `Q36_VK_MOE_GEMM` but **not** `Q36_VK_MOE_GATE_UP`, so it can pass while comparing
+  `P36_VK_MOE_GEMM` but **not** `P36_VK_MOE_GATE_UP`, so it can pass while comparing
   the new kernel against itself; with a 6-token prompt `gemm` is off anyway. The
-  gate used was the frontier logits dump with `Q36_VK_MOE_GEMM=0
-  Q36_VK_MOE_GATE_UP=0`.
+  gate used was the frontier logits dump with `P36_VK_MOE_GEMM=0
+  P36_VK_MOE_GATE_UP=0`.
 - Raw: `evidence/raw/iq2s-gemm-ab-iq2m.csv`, `iq2s-gemm-ab.sh`,
   `iq2s-gemm-matvec-ref.txt`, `iq2s-gemm-new-prof.txt`, `iq2s-gemm-parity.txt`,
   `iq2s-gemm-parity-prefix.txt`, `iq2s-gemm-guard-calibration.txt`,
@@ -494,13 +494,13 @@ pair the guard's own decode uses (`moe_gate_up_decode` + `moe_down_q2k_sum_decod
 was IQ2_XXS/Q2_K-only, so the host guard dropped IQ2_S back to the q8 route.
 
 - **What changed.** Both shaders gain an IQ2_S decode built from the same sources
-  with `-DQ36_MOE_IQ2S` (`moe_gate_up_decode_iq2s.spv`,
+  with `-DP36_MOE_IQ2S` (`moe_gate_up_decode_iq2s.spv`,
   `moe_down_q2k_sum_decode_iq2s.spv`; the down one gains a 7th `tables` binding).
   The host predicate is now `iq2s && !(gemm || (identity && down_sum_decode))` — the
   2..31-token small-batch kernels (`moe_gate_up_f32b`, `moe_down_q2k_f32b`) are still
   IQ2_XXS/Q2_K-only and must not see 82-byte blocks.
 - **Measured (7-rep interleaved, soak-gated entry ≤55 °C, ctx 512, gen 128; arm A =
-  `Q36_VK_MOE_DOWN_SUM_DECODE=0`, i.e. the previous default posture on the same
+  `P36_VK_MOE_DOWN_SUM_DECODE=0`, i.e. the previous default posture on the same
   binary):** decode **34.97 → 47.14 t/s = 1.34×** (paired 1.273-1.356, MAD 0.28 →
   0.16). Prefill is the null control and it is flat: 241.56 → 241.27 (**1.002**),
   which is what proves the two arms differ only on the decode path.
@@ -536,7 +536,7 @@ Branch `trackB-ptq1_0`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`. Full write-up:
 
 - **Diagnostic question settled:** "234 GB/s logical = DRAM-bound" is NOT a
   complete description. `dense_iq3_xxs_decode_r4` was tested under
-  `Q36_IQ3XXS_ABLATE` (keep loads, drop decode ALU): baseline production decode
+  `P36_IQ3XXS_ABLATE` (keep loads, drop decode ALU): baseline production decode
   26.578 ms/token (282.2 GB/s, 62.1% of roofline) vs ablated 20.081 ms/token
   (373.5 GB/s, 82.2% of the 454.4 GB/s hardware roofline).
 - **Exposed ALU cost is 6.497 ms/token (24.44% of kernel execution time).** The
@@ -557,23 +557,23 @@ Branch `trackB-ptq1_0`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`. Full write-up:
 Branch `trackB-ptq1_0`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`. Full write-up:
 `karpathy/evidence/raw/W3-VERDICT.md`.
 
-- **Tested via `Q36_VK_DELTA_COL_PREFILL=1`**: 7-rep interleaved A/B at ctx 1024,
+- **Tested via `P36_VK_DELTA_COL_PREFILL=1`**: 7-rep interleaved A/B at ctx 1024,
   gen 16. Prefill **170.77 (MAD 0.500) → 166.54 (MAD 0.500) = -2.48%** (FAIL vs
   ≥+1.5% gate, negative in all 7 pairs), decode **18.06 → 17.93 = -0.72%**.
   Ctx 512 diagnostic corroborates: **184.32 → 171.04 = -7.20%**.
 - **Latent correctness bug found and fixed:** `delta_net_cols` hard-assumes
   wave32 (`gl_SubgroupID` 0..3 for 4 columns, `gl_SubgroupInvocationID` 0..31 for
-  rows), but `q36_vk_force_wave32` previously matched `"delta_net_cols.spv"`.
+  rows), but `p36_vk_force_wave32` previously matched `"delta_net_cols.spv"`.
   When Swift runs f16 recurrent state, the dispatched pipeline is
   `delta_net_cols_f16.spv`, which missed the pattern and ran at BC-250's native
   wave64 (only 2 subgroups), skipping half the state columns and writing OOB up
   to row 159 (row size 128), producing catastrophic parity failure (`max_abs`
   19.12, top-1 flip 13 vs 29, top-64 overlap 3/64). Widening the pattern in
-  `q36_vulkan.c` to `"delta_net_cols"` restored parity (`max_abs` 0.767, top-1
+  `p36_vulkan.c` to `"delta_net_cols"` restored parity (`max_abs` 0.767, top-1
   identical 13/13, top-64 61/64).
 - **Verdict: REJECTED & FROZEN.** `delta_net_cols` is slower on BC-250 than the
   native wave64 register recurrence (`delta_net_decode_reg_f16`). The default
-  guard `!q36_vk.bc250` at `q36_vulkan.c:1225` is verified correct and remains
+  guard `!p36_vk.bc250` at `p36_vulkan.c:1225` is verified correct and remains
   frozen. The wave32 force fix is committed as a latent correctness fix.
 - Raw evidence: `karpathy/evidence/raw/ab-w3-deltacol.csv`,
   `ab-w3-deltacol-summary.txt`, `ab-w3-deltacol-parity.txt`,
@@ -584,7 +584,7 @@ Branch `trackB-ptq1_0`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`. Full write-up:
 Branch `trackB-ptq1_0`, models `Qwen3.8-35B-A3B-IQ2_M.gguf` and Guard MoE.
 Full write-up: `karpathy/evidence/raw/W4-VERDICT.md`.
 
-- **Tested via `Q36_VK_WAVE32_CLEAN=1`**: forcing wave32 across the clean-scan
+- **Tested via `P36_VK_WAVE32_CLEAN=1`**: forcing wave32 across the clean-scan
   shader set (`karpathy/evidence/wave32-eligibility.md` §3b: `moe_matvec.spv`,
   `moe_matvec_fast.spv`, `matmul_q8_0_decode*.spv`, `add_rms_norm.spv`,
   `rms_norm*.spv`, `kv_store_quant.spv`).
@@ -619,7 +619,7 @@ Full write-up: `karpathy/evidence/raw/W5-VERDICT.md`.
   - `quantize_q8_k` operates on 256-element blocks with 64 threads (20 workgroups per token row, distributed as 5,120 independent workgroups across 40 CUs with 1,536 B LDS and 40 subgroups/SIMD).
   - Fusing them inside a 1024-thread workgroup serializes the 20 blocks across 2 rounds with 10 workgroup-wide barriers per round (20 barriers total), requires 25,600 B LDS (vs 8,192 B for stock norm), and drops subgroup occupancy from 40 to 32.
   - On BC-250, the 20 KB activation sits in L2 cache between separate dispatches; avoiding the L2 round-trip is outweighed by the 20-barrier serialization cost and occupancy drop.
-- **Verdict: REJECTED & FROZEN.** Default remains separate dispatches (`Q36_VK_FUSED_RMS_Q8=0`, gated on `env && env[0] == '1'`). Scaffolding retained behind opt-in flag.
+- **Verdict: REJECTED & FROZEN.** Default remains separate dispatches (`P36_VK_FUSED_RMS_Q8=0`, gated on `env && env[0] == '1'`). Scaffolding retained behind opt-in flag.
 - Raw evidence: `karpathy/evidence/raw/ab-w5-fusedrms.csv`, `ab-w5-fusedrms-summary.txt`, `ab-w5-fusedrms-parity.txt`, `ab-w5-isa-properties.txt`.
 
 
@@ -639,8 +639,8 @@ Branch `trackB-ptq1_0`, base `6b74da5`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`
   178.56 -> 197.42 t/s (+10.6%) — the ceiling, and the reason to implement
   rather than reject. Probe reverted; `dense_iq3_xxs_mmq.spv` md5 unchanged.
 - **Implemented**: new `vulkan/dense_iq3_xxs_mmq_pair.comp` (bindings: gate w,
-  up w, gate out, up out, tables, b16) + `q36_gpu_matmul_iq3_xxs_pair_mmq_tensor()`
-  in `q36_vulkan.c`, called from `q36_forward_ffn_vulkan_model` (`q36.c`).
+  up w, gate out, up out, tables, b16) + `p36_gpu_matmul_iq3_xxs_pair_mmq_tensor()`
+  in `p36_vulkan.c`, called from `p36_forward_ffn_vulkan_model` (`p36.c`).
   BM/BN/BK, per-matrix accumulation order and store mapping are the unfused
   kernel's, so each element is bit-identical. `sum[32]` costs 16 VGPRs, +2176 B LDS.
 - **Coverage 94/110 layer-instances (85.5%)**: the 16 that stay on the single path
@@ -650,17 +650,17 @@ Branch `trackB-ptq1_0`, base `6b74da5`, model `Swift-Qwen3.8-27B-IQ3_XXS.gguf`
   binary — `max_abs_diff = 0` over all 248,320 logits, argmax 5316 (19.820942)
   both arms, top-64 overlap 64/64.
 - **7-rep interleaved A/B on Swift 27B (ctx 1024, gen 16, chunk 256)**, one
-  binary, wrappers differing only in `Q36_VK_DENSE_IQ3_PAIR`:
+  binary, wrappers differing only in `P36_VK_DENSE_IQ3_PAIR`:
   - Arm A (pair off): prefill **169.25 tok/s** (MAD 0.140), decode **18.12 tok/s** (MAD 0.100).
   - Arm B (pair on): prefill **173.01 tok/s** (MAD 0.440), decode **18.22 tok/s** (MAD 0.080).
   - Delta: prefill **+2.22%** (PASSES the dense ≥ +0.70% gate, 3.2x it), decode
     **+0.55%** (inside the 9.4% decode spread — neutral). Arms do not overlap:
     max A 170.48 < min B 171.90.
-- **Attribution** (ctx 512, gen 0, `Q36_VK_PROF_*`): gate/up 937.6 -> 858.9 ms
+- **Attribution** (ctx 512, gen 0, `P36_VK_PROF_*`): gate/up 937.6 -> 858.9 ms
   (**-8.4%**), mmq 1892.9 -> 1089.5 + 728.0 = 1817.5 ms (-4.0%), whole-run kernel
   total 2792.7 -> 2670.9 ms (-4.36%). The spv dispatch drop 510 -> 322 is exactly
   the 188 removed singles (94 pairs x 2).
-- **Verdict: ACCEPTED, default ON** (`Q36_VK_DENSE_IQ3_PAIR=0` disables).
+- **Verdict: ACCEPTED, default ON** (`P36_VK_DENSE_IQ3_PAIR=0` disables).
   The earlier "staging/barrier/LDS is CLOSED for this kernel" note (item 3b,
   codex double-buffered restructure, -0.11%) still holds *within one projection*;
   what pays is sharing the stage **across the gate/up pair**, not restaging it
@@ -679,7 +679,7 @@ Hardware: AMD BC-250 (40 CUs, RADV GFX1013). Model: `Swift-Qwen3.8-27B-IQ3_XXS.g
 Full audit report: `karpathy/evidence/raw/W7-VERDICT.md`, audit tool `karpathy/evidence/raw/w7_streamk_audit.py`.
 
 - **Hypothesis**: Stream-K dynamically partitions workgroup grids across compute units to eliminate wave-quantization tail waste in GEMM/MMQ kernels.
-- **Audit Steps**: For every MMQ shape executed in Swift-27B prefill, computed `grid / (40 CU * resident WGs/CU)` across 40 CUs for both realistic occupancy models ($R=2$, 80 GPU slots; $R=4$, 160 GPU slots). Measured actual GPU time per shape via `Q36_VK_PROF_SHAPE`.
+- **Audit Steps**: For every MMQ shape executed in Swift-27B prefill, computed `grid / (40 CU * resident WGs/CU)` across 40 CUs for both realistic occupancy models ($R=2$, 80 GPU slots; $R=4$, 160 GPU slots). Measured actual GPU time per shape via `P36_VK_PROF_SHAPE`.
 - **Findings**:
   1. Down-projection (`17408x5120`, 575 ms, 23.4% MMQ share): Grid is exactly 320 WGs. $320/80 = 4.00$ waves ($R=2$), $320/160 = 2.00$ waves ($R=4$). **Tail loss is exactly 0.00%**.
   2. QKV-projection (`5120x10240`, 176 ms, 7.1% MMQ share): Grid is exactly 640 WGs. $640/80 = 8.00$ waves ($R=2$), $640/160 = 4.00$ waves ($R=4$). **Tail loss is exactly 0.00%**.
@@ -694,32 +694,32 @@ Full audit report: `karpathy/evidence/raw/W7-VERDICT.md`, audit tool `karpathy/e
 ## Dense K-quant fast path widened to MoE models — ACCEPTED (2026-09-21)
 
 Branch `trackB-ptq1_0`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Guard:
-`Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf`.
+`Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS.gguf`.
 
 - **HANDOFF-iq2s-20260920.md's ranked item #1 was misdiagnosed and this
   supersedes it.** It attributed the `dense_kquant`/`matmul_kquant.spv`
   hotspot (48.2% of IQ2_M decode, 10.7 ms/tok at the time) to "non-expert
   IQ2_S tensors" and proposed writing a new IQ2_S decode shader. Reproducing
-  the differential profile on current HEAD (`Q36_VK_PROF_KERNEL=1`, gen 1 vs
+  the differential profile on current HEAD (`P36_VK_PROF_KERNEL=1`, gen 1 vs
   gen 65, ctx 512) still showed **9.453 ms/tok, 41 dispatches/tok** — the
   figure hadn't moved across W2-W7. Parsing the GGUF header directly
   (`gguf-tools`-style tensor listing) instead of trusting the label showed
   the 41 tensors are **40x `Q4_K` `blk.N.attn_qkv.weight` + 1x `Q5_K`
   `output.weight`** — real K-quants, not IQ2_S at all.
-- **Root cause**: `q36_gpu_matmul_k_quant_q8_scaled_tensor()` (`q36_vulkan.c`)
+- **Root cause**: `p36_gpu_matmul_k_quant_q8_scaled_tensor()` (`p36_vulkan.c`)
   has tuned decode (`n_tok==1`) and mmq (`n_tok>1`) branches that dispatch
   `dense_kquant_decode`/`dense_q4k_decode`/`dense_q5k_decode`/
   `dense_kquant_mmq` — kernels that read only the one tensor's own
   `in_dim`/`out_dim`/`blocks`/`row_bytes`/`type`/`scale` from push constants,
-  nothing model-wide. Both branches were gated on `q36_gpu_dense_model`, true
-  only for the dense Swift-27B/UD-IQ3_S launches (`q36_gpu_set_dense_model`
-  is called once per engine open with `Q36_MODEL_DENSE`). Nobody widened it
+  nothing model-wide. Both branches were gated on `p36_gpu_dense_model`, true
+  only for the dense Swift-27B/UD-IQ3_S launches (`p36_gpu_set_dense_model`
+  is called once per engine open with `P36_MODEL_DENSE`). Nobody widened it
   when a MoE model started shipping its own K-quant trunk tensors, so IQ2_M's
   Q4_K/Q5_K rows fell through to the generic AVX2-style 8-rows-x-8-lanes
   `matmul_kquant` fallback unconditionally, on both prefill and decode.
-- **Fix**: `q36_vulkan.c`, two-line change — drop `q36_gpu_dense_model &&`
-  from both branch conditions. Also widened `q36_gpu_set_dense_model()` to
-  always call `q36_vk_prepare_dense_kernels()` (was `if (dense)` only), so
+- **Fix**: `p36_vulkan.c`, two-line change — drop `p36_gpu_dense_model &&`
+  from both branch conditions. Also widened `p36_gpu_set_dense_model()` to
+  always call `p36_vk_prepare_dense_kernels()` (was `if (dense)` only), so
   MoE models get the same pipeline prewarm at model-open instead of paying a
   multi-second RADV pipeline-compile stall on the first live decode/prefill
   token — caught by an independent review (Claude2, since Codex was over its
@@ -738,10 +738,10 @@ Branch `trackB-ptq1_0`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Guard:
   248,320 logits (mean 0.19 on a ~29-wide logit range), consistent with
   `output.weight` directly producing every logit so any kernel-order
   floating-point reassociation shows up everywhere, not concentrated on a
-  handful of tokens the way a real bug would look. `./q36_test
+  handful of tokens the way a real bug would look. `./p36_test
   --vulkan-kernels` (CPU-reference dot-product oracle, tolerance 2e-3) also
   passes and, for the first time, actually exercises this decode path — it
-  was dead code in that test before this change since `q36_gpu_dense_model`
+  was dead code in that test before this change since `p36_gpu_dense_model`
   was never set true there.
 - **7-rep interleaved A/B** (`tests/bench_ab.sh`, ctx 512, gen 128, matching
   HANDOFF's own IQ2_M convention): prefill **244.35 (MAD 2.360) -> 507.87
@@ -749,7 +749,7 @@ Branch `trackB-ptq1_0`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Guard:
   +59.61%**. Gate is MoE prefill >=3.4%; cleared by ~32x. Both arms show
   tight spread and no overlap.
 - **Verdict: ACCEPTED, default ON** (same env vars as before,
-  `Q36_VK_DENSE_KQUANT_DECODE=0` / `Q36_VK_DENSE_KQUANT_MMQ=0` still disable
+  `P36_VK_DENSE_KQUANT_DECODE=0` / `P36_VK_DENSE_KQUANT_MMQ=0` still disable
   each branch individually if needed — nothing new to opt into).
   `reconsider_if`: a future MoE model whose non-expert K-quant tensor shapes
   don't hit the `out_dim % 4 == 0` "full" variant (would still take the
@@ -765,11 +765,11 @@ Branch `trackB-ptq1_0`, model `Qwen3.8-35B-A3B-IQ2_M.gguf`. Guard:
 ## QT-widening mechanism REJECTED (VGPR ceiling), scratch-cache UNEXPLORED (2026-09-21)
 
 Branch `trackB-ptq1_0`. Models: guard `Huihui-Qwen3.6-35B-A3B-Abliterated-
-Q36-IQ2XXS.gguf` (MoE), `Swift-Qwen3.8-27B-IQ3_XXS.gguf` (dense).
+P36-IQ2XXS.gguf` (MoE), `Swift-Qwen3.8-27B-IQ3_XXS.gguf` (dense).
 
 - **Step 1, per the plan (`PLAN-implementation-2026-09-20.md` §W8): measure
   attention's prefill share at ctx 4096/8192 before touching any shader.**
-  `Q36_VK_PROF_KERNEL=1 ./q36-bench --vulkan -m <model> --prompt-file
+  `P36_VK_PROF_KERNEL=1 ./p36-bench --vulkan -m <model> --prompt-file
   tests/long_context_story_prompt.txt --ctx-start N --ctx-max N
   --prefill-chunk 256 --gen-tokens 0`, single-frontier runs (no sweep, no
   decode), attention kernel's `pct` from the per-kernel GPU-time report:
@@ -836,16 +836,16 @@ Closes `HANDOFF-iq2s-20260920.md` §5 item 3 for this file. Full write-up:
 `karpathy/evidence/raw/iq3s-down-VERDICT.md`.
 
 - **Root cause (measured with a diagnostic, not inferred).** The new
-  `Q36_VK_MOE_ROUTE_DEBUG=1` print in `q36.c` fires on every fused-f32-path
+  `P36_VK_MOE_ROUTE_DEBUG=1` print in `p36.c` fires on every fused-f32-path
   miss and pins the residue exactly: layers **0, 1, 2 only**, on both prefill
   and decode, with `gate=22 up=22 down=21` (22 = `IQ2_S`, 21 = `IQ3_S`).
-  `q36_gpu_moe_ffn_f32_tensor()` required all three expert tensors to share one
+  `p36_gpu_moe_ffn_f32_tensor()` required all three expert tensors to share one
   quant, and those three layers ship an **IQ3_S down under IQ2_S gate/up**
   (GGUF tensor table: `ffn_down_exps` IQ2_S x37, IQ3_S x3 at il 0-2, Q8_0 x1 at
   il 40 = the MTP block). They fell to the q8_K route, whose
   `moe_iq2s_gate_up` + `moe_matvec` + `moe_tiles` cost 19.6% of profiled
   prefill GPU and 6.8% of decode per token.
-- **Fix**: `-DQ36_MOE_IQ3S` builds of `moe_down_q2k_sum_decode.comp` and
+- **Fix**: `-DP36_MOE_IQ3S` builds of `moe_down_q2k_sum_decode.comp` and
   `moe_down_gemm.comp` (`moe_down_q2k_sum_decode_iq3s.spv`,
   `moe_down_gemm_iq3s.spv`) + host wiring: `iq2s` split into `gu_iq2s` /
   `down_iq2s` / `down_iq3s`, `down_stride` 82 or 110 bytes, the down dispatch
@@ -853,7 +853,7 @@ Closes `HANDOFF-iq2s-20260920.md` §5 item 3 for this file. Full write-up:
   = 110 B, 9-bit grid index (8 qs bits + 1 qh bit per 4 weights) against the
   IQ3_S grid already in the shared IQ tables buffer at word 2592, scale
   `d*(2*nib+1)` — same convention as `dense_iq3_s_decode.comp`. All new code is
-  inside `#ifdef Q36_MOE_IQ3S`; IQ2_S/legacy builds stay byte-identical.
+  inside `#ifdef P36_MOE_IQ3S`; IQ2_S/legacy builds stay byte-identical.
 - **Parity** (frontier dumps vs the `e6c15ba` binary, 248,320 logits): IQ2_M
   frontier 512 (`max_abs` 0.762, mean 0.112, top-1 match, top64 62/64);
   frontier 513 (0.865, mean 0.138, top-1 match, top64 61/64); guard frontier
@@ -862,12 +862,12 @@ Closes `HANDOFF-iq2s-20260920.md` §5 item 3 for this file. Full write-up:
   own accepted calibration (0.907/62-64) and smaller than it; spread across
   ~all logits (7.7%/15.0% of logits above 0.25, max ~2x p99), not localized.
 - **7-rep interleaved A/B** (`tests/bench_ab.sh`, ctx 512, gen 128,
-  `Q36_AB_MIN_GAIN=3.4`): prefill **497.00 (MAD 15.150) -> 556.21 (MAD 12.400)
+  `P36_AB_MIN_GAIN=3.4`): prefill **497.00 (MAD 15.150) -> 556.21 (MAD 12.400)
   = +11.91%**, decode **75.26 (MAD 0.180) -> 78.40 (MAD 0.100) = +4.17%**
   (decode separates rep-by-rep, no overlap). Gate is MoE prefill >= 3.4% ->
-  PASS, ~3.5x. `./q36_test --vulkan-kernels` OK; `compat_gate.sh` PASS.
+  PASS, ~3.5x. `./p36_test --vulkan-kernels` OK; `compat_gate.sh` PASS.
 - **Verdict: ACCEPTED, default ON** (no new env var; type-driven inside the
-  existing fused path, `Q36_VK_MOE_F32B=0` still disables it).
+  existing fused path, `P36_VK_MOE_F32B=0` still disables it).
   `reconsider_if`: a file mixes the other way (IQ3_S gate/up under an IQ2_S or
   IQ3_S down) — that needs the gate/up side ported and is still rejected into
   the q8 route (safe, unchanged); or an IQ3_S expert tensor whose
@@ -890,16 +890,16 @@ unstarted work).
   generic `dense_extra_decode` path individually — 2 dispatches, 2
   independent Q8_K quantizations of the same activation. New
   `vulkan/dense_extra_decode_iq2s_pair.comp` +
-  `q36_gpu_matmul_iq2s_pair_scaled_tensor()` (`q36_vulkan.c`) fuse both into
+  `p36_gpu_matmul_iq2s_pair_scaled_tensor()` (`p36_vulkan.c`) fuse both into
   one dispatch sharing one Q8_K read, mirroring the existing
-  `q36_gpu_matmul_q8_0_pair_scaled_tensor` pattern (same shape, IQ2_S
-  instead of Q8_0). Wired into `q36_forward_recurrent_vulkan`'s existing
-  `pair_projected` fallback chain (`q36.c`), gated on both tensors being
+  `p36_gpu_matmul_q8_0_pair_scaled_tensor` pattern (same shape, IQ2_S
+  instead of Q8_0). Wired into `p36_forward_recurrent_vulkan`'s existing
+  `pair_projected` fallback chain (`p36.c`), gated on both tensors being
   exactly `IQ2_S` — inert by construction for any model where that's not
   the type (e.g. the guard, which is IQ2_XXS-based; not separately
-  A/B'd for that reason). Default on, `Q36_VK_IQ2S_PAIR=0` disables.
+  A/B'd for that reason). Default on, `P36_VK_IQ2S_PAIR=0` disables.
 - **Parity: bit-exact.** Frontier-512 first-decode-token logits,
-  `Q36_VK_IQ2S_PAIR=1` vs `=0`, same binary: `max_abs_diff = 0.0` across all
+  `P36_VK_IQ2S_PAIR=1` vs `=0`, same binary: `max_abs_diff = 0.0` across all
   248,320 logits, argmax and top-64 identical. Expected — the dequant math
   is copied verbatim from `dense_extra_decode.comp`'s IQ2_S branch of
   `block_dot()`, just evaluated twice per Q8_K block instead of once per
@@ -916,7 +916,7 @@ unstarted work).
   generic prefill-gain semantics and doesn't apply to a decode-only fix —
   read the medians, not the label, same as prior sessions' notes on this
   harness.
-- **Binaries built in isolated worktrees** (`/home/server/q36-wt/
+- **Binaries built in isolated worktrees** (`/home/server/p36-wt/
   iq2s-ssm-pair{,-base}`) from a clean `b738610` checkout, not the shared
   main worktree — a second instance had uncommitted, unrelated changes
   (small-batch IQ2_S kernels, HANDOFF §5 item 2) mid-flight in the same
@@ -949,16 +949,16 @@ shared-expert gate/up/down), vs 1e's overhead-bound small-tensor half
   generic kernels that runtime-branch on `pc.type` to serve
   IQ2_XXS/IQ2_XS/IQ2_S/IQ1_S/IQ4_NL/Q2_0 from one shader (Q2_0/PQ2_0/PTQ1_0
   already get their own compile-time-specialized variant via
-  `Q36_Q2_0_ONLY`, precedent cited in the source comments: "-19..28% on
+  `P36_Q2_0_ONLY`, precedent cited in the source comments: "-19..28% on
   dense_extra_decode_q2_0" from a LUT). Added the same treatment for IQ2_S:
-  a `Q36_IQ2S_ONLY` `#ifdef` in both files producing
+  a `P36_IQ2S_ONLY` `#ifdef` in both files producing
   `dense_extra_decode_iq2s.spv` / `dense_extra_mmq_iq2s.spv`, math copied
   verbatim from the existing `pc.type == IQ2_S` arm (same block layout,
   same `signed_grid`/`tables` lookups, same accumulation order), just
   without the runtime type-branch chain. Wired into
-  `q36_gpu_matmul_iq_quant_q8_scaled_tensor`'s decode/mmq kernel selection,
-  gated on `weight_type == IQ2_S` and `Q36_VK_IQ2S_EXTRA` (default on).
-  Both new kernels added to `q36_vk_prepare_dense_kernels()`'s prewarm list
+  `p36_gpu_matmul_iq_quant_q8_scaled_tensor`'s decode/mmq kernel selection,
+  gated on `weight_type == IQ2_S` and `P36_VK_IQ2S_EXTRA` (default on).
+  Both new kernels added to `p36_vk_prepare_dense_kernels()`'s prewarm list
   (along with 1e's `dense_extra_decode_iq2s_pair`, missed there originally)
   so the RADV pipeline-compile cost lands at model-open, not the first live
   token — same class of fix 1b needed for its kernels.
@@ -981,7 +981,7 @@ shared-expert gate/up/down), vs 1e's overhead-bound small-tensor half
 - **Shader byte-identity**: `dense_extra_decode.spv` / `_q2_0` / `_pq2_0`
   and `dense_extra_mmq.spv` / `_q2_0` / `_pq2_0` (the builds the guard model
   and any Q2_0/PQ2_0/PTQ1_0-carrying file actually use) are sha256-identical
-  before and after — the new `Q36_IQ2S_ONLY` branch is additive, the
+  before and after — the new `P36_IQ2S_ONLY` branch is additive, the
   existing branches are untouched. Guard not separately A/B'd for this
   reason, same as 1e.
 - **ISA, checked before building anything real** (`mmq_info`,
@@ -998,7 +998,7 @@ shared-expert gate/up/down), vs 1e's overhead-bound small-tensor half
   good enough on its own.
 - **Resolved by kernel-level profiling instead of more reps** — a cleaner
   instrument than fighting session noise with rep count. Differential
-  profile (`Q36_VK_PROF_KERNEL=1`, gen 1 vs gen 65 delta/64) isolates the
+  profile (`P36_VK_PROF_KERNEL=1`, gen 1 vs gen 65 delta/64) isolates the
   kernel directly: decode op cost **1.891 -> 1.822 ms/tok (-3.7%)**, which
   is ~0.58% of the 11.9-12.0 ms/tok whole-model decode budget — matching
   the noisy end-to-end +0.52% almost exactly, not a coincidence. Single-shot
@@ -1025,8 +1025,8 @@ shared-expert gate/up/down), vs 1e's overhead-bound small-tensor half
   (kernel-level profile and, for prefill, a controlled single-shot total),
   bit-exact, zero measured downside anywhere, and the one real bug found
   during construction was caught by review before it ever reached a
-  benchmark. Default on, `Q36_VK_IQ2S_EXTRA=0` disables.
-- A/B'd in isolated worktrees (`q36-wt/iq2s-tuned-kernel{,-base}`) built
+  benchmark. Default on, `P36_VK_IQ2S_EXTRA=0` disables.
+- A/B'd in isolated worktrees (`p36-wt/iq2s-tuned-kernel{,-base}`) built
   from clean `44143d8`, not the shared main worktree — the same concurrent
   instance from 1e was still mid-flight on HANDOFF item 2 (small-batch
   IQ2_S kernels) in the main worktree the whole time this was built; two
@@ -1051,23 +1051,23 @@ file outside the GEMM range. Full write-up:
   and the whole MoE FFN took the q8 route. Ported the same IQ2_S element
   mapping the decode and GEMM ports already use (82-byte block, `d` f16 at 0,
   `qs[64]` at 2, signs at 34, `qh[8]` at 66, `scales[8]` at 74, grid at table
-  word 544) into both kernels behind `#ifdef Q36_MOE_IQ2S`, added the `tables`
+  word 544) into both kernels behind `#ifdef P36_MOE_IQ2S`, added the `tables`
   binding the down kernel needed (6 vs 5), and widened the predicate to
   `if (iq2s && !(gemm || down_iq2s || (identity && down_sum_decode))) return 0;`.
   Coverage is `n_tok` 2..127, wider than HANDOFF's stated 2..31
-  (`Q36_VK_MOE_PAIR_TILE = 8`, `Q36_VK_MOE_GEMM_MIN` default 128).
+  (`P36_VK_MOE_PAIR_TILE = 8`, `P36_VK_MOE_GEMM_MIN` default 128).
 - **Scope is `down_iq2s`-only on purpose**: the IQ3_S-down layers (`il=0,1,2`,
   entry 1c) still fall back to q8 outside the GEMM range, so this change cannot
   put an IQ2_S kernel in front of a 110-byte block.
 - **Route-miss evidence that the change is live, not the A/B's assumption**
-  (`Q36_VK_MOE_ROUTE_DEBUG=1`, ctx 512, `--prefill-chunk 16`, `--gen-tokens 0`):
+  (`P36_VK_MOE_ROUTE_DEBUG=1`, ctx 512, `--prefill-chunk 16`, `--gen-tokens 0`):
   A `44143d8` = **1280** misses, B = **96**, and the surviving 96 are exactly
   `il=0,1,2 × 32 forwards` — i.e. 37 IQ2_S-down layers × 32 forwards moved onto
   the new kernels. Remaining misses belong to 1c's scope, not this one.
 - **A bug was caught before the benchmark, by measurement not by review.** The
   first draft hand-derived the IQ2_S slotting and was wrong — `max_abs` 7.86 vs
   the q8 route, top64 41/64. Isolating it at `n_tok=1` by forcing identity
-  forwards (`Q36_VK_MOE_DOWN_SUM_DECODE=1` vs `=0`) pinned the fault to the down
+  forwards (`P36_VK_MOE_DOWN_SUM_DECODE=1` vs `=0`) pinned the fault to the down
   kernel. Replaced the custom layout with the accepted sum-decode IQ2_S loop
   copied verbatim (`y_off = 128*(itid>>3) + 2*(itid&7)`, `i += 2`, inner
   `p = 0..7`): 7.86 -> 0.858 vs sum-decode, 0.788 vs q8. Copying an accepted
@@ -1085,7 +1085,7 @@ file outside the GEMM range. Full write-up:
   (`n_tok=256` -> `gemm`, changed dispatch site not on the path) reads +3.23%
   with B MAD 17.08 and fully overlapping ranges: inside the 3.4% MoE floor, no
   signal, which is the correct result for an untouched path. Decode has no
-  mechanism for a regression (`Q36_VK_MOE_DOWN_SUM_DECODE` defaults on, so the
+  mechanism for a regression (`P36_VK_MOE_DOWN_SUM_DECODE` defaults on, so the
   1-token pair was already admitted) and both deltas sit inside the 9.4% spread.
 - Base builds byte-identical: `vulkan/moe_down_q2k_f32b.spv`
   `0ce317941dbef148…` and `vulkan/moe_gate_up_f32b.spv` `9701f0330b5b5d73…`,
@@ -1095,11 +1095,11 @@ file outside the GEMM range. Full write-up:
   existing harness can be made to dispatch `n_tok ∈ 2..31` at all; a chunk-256
   A/B would have measured nothing and looked like a null result for a correct
   change. (2) The baseline must be a worktree at the *candidate's* HEAD, not a
-  stale `/tmp/q36-*` copy: the first attempt used a `b738610` baseline and would
+  stale `/tmp/p36-*` copy: the first attempt used a `b738610` baseline and would
   have folded the other session's -2.01% `ssm-pair` prefill into this delta.
   (3) `tests/bench_ab.sh` has no `flock`, so its bare `pgrep` check bounces
   whenever a *parallel instance* runs a benchmark — two attempts failed that way
-  before the run was queued behind `/tmp/q36-gpu.lock`.
+  before the run was queued behind `/tmp/p36-gpu.lock`.
 - Caveat: the target workload (a batched server with concurrent requests) cannot
   be measured here — `bench_ab.sh` has no concurrency knob — so chunk 16 is a
   proxy for the routing, not a serving measurement.
@@ -1127,7 +1127,7 @@ file outside the GEMM range. Full write-up:
   (dense) or 4 tokens x 8 heads (MoE) per workgroup, K/V dequantized once per
   16-key tile into LDS as f32 (exact for Q8_0/Q4_0), Q in registers, 16-lane
   clustered score reduction. Same per-4096-key-group partials, `attn_combine`
-  untouched. `Q36_VK_ATTN_FA=0` falls back. Branch `perf/attn-prefill-fa`.
+  untouched. `P36_VK_ATTN_FA=0` falls back. Branch `perf/attn-prefill-fa`.
 - **Measured.** Kernel: 2.4–2.6x (GQA 6), 3.0–3.5x (GQA 8) at pos0 >= 3968,
   18/18 parity cases PASS (max_abs <= 8e-5 even with very peaked softmax).
   Whole model, ctx 8192, 5 interleaved reps: Swift 27B prefill **97.98 ->
@@ -1159,7 +1159,7 @@ Model `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` (402 PQ2_0 tensors, dense 27B).
   server decode.
 - **Change.** New kernel: one wave64 per 2 rows streams each row once, expands
   it through the decode kernel's LUT once, and dots it against up to 8 tokens.
-  Host takes it for `n_tok <= Q36_VK_Q2_SMALL_MAX` (default 16), and for a
+  Host takes it for `n_tok <= P36_VK_Q2_SMALL_MAX` (default 16), and for a
   ragged tail (`n_tok % 128 <= 16`) after an mmq over the aligned head.
 - **Parity: bit-exact** against n one-token decode calls — per token the integer
   sums, fma order and subgroupAdd are the decode kernel's.
@@ -1230,7 +1230,7 @@ Model `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0.gguf` (402 PQ2_0 tensors, dense 27B).
   "+11% at 8k" and "+23% at 2k", both artifacts — see next entry.
 - End-to-end numbers: `raw/ab-attn-decode-gqa-ctx{1k,2k,8k}.{csv,summary}`.
   Kernel parity/timing is `tests/test_attn_decode_gqa.c` (the per-call env gate
-  was `Q36_VK_ATTN_DECODE_GQA`; only `n_tok == 1` reaches the split-K path, so
+  was `P36_VK_ATTN_DECODE_GQA`; only `n_tok == 1` reaches the split-K path, so
   batches of 2+ would have tested nothing).
 - Patch (shader + host wiring + test, unapplied), shader and test source:
   `raw/attn-decode-gqa-rejected.patch` and `raw/attn-decode-gqa-rejected/`.
@@ -1277,7 +1277,7 @@ decompose the kernel's 313.2 ms into DRAM floor, field-load, and ALU cost.
   no half-wave idles.  Only the non-IQ2S/Q2_K build reports VGPR 64 /
   16 subgroups.  Nothing to force, nothing to fix.
 - **Probe C — "experts in parallel" — NEGATIVE.** 3 interleaved env pairs of
-  `Q36_VK_MOE_DOWN_SUM_DECODE=0` (falls back to the per-expert parallel down
+  `P36_VK_MOE_DOWN_SUM_DECODE=0` (falls back to the per-expert parallel down
   kernels) vs default: decode **70.65/71.07/70.95** vs **74.46/74.42/74.39 t/s**,
   prefill unchanged.  The serial 8-expert combine with one `subgroupAdd` per
   expert already wins by 4.8%; the audit's "experts in parallel" suggestion is
@@ -1285,13 +1285,13 @@ decompose the kernel's 313.2 ms into DRAM floor, field-load, and ALU cost.
 - **Probe D — load shape — POSITIVE, 3.23x.** A diagnostic IQ2_S body that
   keeps the workgroup/block/expert mapping but reads the whole 82 B superblock
   with **3 lane-strided 2-byte loads** (and does no dequant, no mid, no
-  tables - `Q36_P1_LOADFLOOR`, `diag.comp` + `p1-diag-probes.diff`) runs
+  tables - `P36_P1_LOADFLOOR`, `diag.comp` + `p1-diag-probes.diff`) runs
   **97.10/97.74/97.69 ms** against the stock **314.88/315.51/315.52 ms** for the
   *same 12.72 GB*: 131 GB/s achievable vs 40.6 GB/s delivered.  End to end the
   run drops 1465 -> 1246 ms of decode GPU, decode 74.4 -> 85.0 t/s.
 - **Probe E — ALU is only 51 ms.** The same diagnostic with the stock ~40
   scattered field loads kept verbatim and the dequant arithmetic collapsed to an
-  add (`Q36_P1_ALUFLOOR`) runs **263.93/264.40/264.53 ms**, so
+  add (`P36_P1_ALUFLOOR`) runs **263.93/264.40/264.53 ms**, so
   `315.4 = 97.0 floor + 167.2 field loads + 51.2 ALU`.  The kernel is
   load-shape-bound, not ALU-bound and not fp64-bound.
 - **Why it does not beat the Q2_K branch:** both experts' byte footprints are
@@ -1325,12 +1325,12 @@ agent transcript).  Raw: `evidence/raw/p2-mtp/*.log`.
   margin 3), 91/91 (code), 77/77 (agent).  Depth 2 (`--mtp-draft 3`,
   `draft_cap = 2`): 100 calls committed both drafts out of at most 144 two-draft
   calls, so the second draft is accepted at least 69.4% of the time (the
-  `Q36_MTP_STATS` `drafted` count gives the exact denominator).  The audit's
+  `P36_MTP_STATS` `drafted` count gives the exact denominator).  The audit's
   >= 60% P7 gate is met.
-- **CORRECTION — the `q36: MTP stats ... accept=100.0%` line is not an
-  acceptance rate at the default setting.**  `q36_mtp_stats_add(verify_n,
+- **CORRECTION — the `p36: MTP stats ... accept=100.0%` line is not an
+  acceptance rate at the default setting.**  `p36_mtp_stats_add(verify_n,
   commit_n, ...)` is only called on calls that carry a draft, and
-  `--mtp-draft N` sets `draft_cap = N - 1` (`q36.c:12366`), so at the published
+  `--mtp-draft N` sets `draft_cap = N - 1` (`p36.c:12366`), so at the published
   default of 2 `verify_n` is always 1 and `commit_n` is always 1: the line is
   100% by construction (earlier runs read `drafted=60 accepted=60 full=60`, and
   so on).  Set the margin to 0 and/or draft to 3+ before quoting acceptance.
@@ -1341,7 +1341,7 @@ agent transcript).  Raw: `evidence/raw/p2-mtp/*.log`.
   (186-191 t/s in every arm).
 - **Why, and it is structural: at `draft_cap = 1` the verify row is a new
   position, so it costs a whole extra forward.**  `histogram=k` counts *tokens
-  committed per call* (`1 + commit_n`, `q36.c:12483`), so solving the two
+  committed per call* (`1 + commit_n`, `p36.c:12483`), so solving the two
   `--mtp-margin 0` arms (340 calls: 168 committing 1, 172 committing 2, 24.22 s;
   452 calls: 392 / 60, 24.29 s) gives **47.5 ms per one-token spec call and
   94.4 ms per two-token spec call = 47.2 ms/token, against 44.19 ms for a plain
@@ -1351,7 +1351,7 @@ agent transcript).  Raw: `evidence/raw/p2-mtp/*.log`.
   hurting.
 - **The default margin gate is pure cost.**  `--mtp-margin 0` beats the shipped
   margin 3 on tokens/call by 33% with no measurable decode change; the
-  `s->mtp_draft_token != q36_session_argmax(s)` check that cannot be turned off
+  `s->mtp_draft_token != p36_session_argmax(s)` check that cannot be turned off
   is already the free, exact filter.  Backoff then spends 1-4 draftless tokens
   after each miss, which is why only ~47% of calls carry a draft at margin 0
   (172/340) and ~13% at margin 3 (60/452).
@@ -1361,11 +1361,11 @@ agent transcript).  Raw: `evidence/raw/p2-mtp/*.log`.
   ~187 t/s.  The same algebra puts a two-draft call at ~1.1 s, i.e. ~0.4 s per
   committed token, 8-9x a plain step; the direct evidence is the per-kernel
   decode profile in `evidence/raw/p6-smallbatch/`.  Mechanism: for IQ3_XXS only
-  `n_tok == 1` is given a decode kernel (`q36_vulkan.c:8687-8730`), so the
+  `n_tok == 1` is given a decode kernel (`p36_vulkan.c:8687-8730`), so the
   moment the verify carries a *second* row it takes `dense_iq3_xxs_mmq` (a
   `ceil(n_tok/128)` grid) plus a `predequant_b16` pass — the 128-token prefill
-  tile.  `q36_vk_micro_batch` exists but is only wired for Q8_0
-  (`q36_vulkan.c:5173`).  This is the audit's P6, measured from the outside.
+  tile.  `p36_vk_micro_batch` exists but is only wired for Q8_0
+  (`p36_vulkan.c:5173`).  This is the audit's P6, measured from the outside.
 - `reconsider_if`: the small-batch (n_tok 2..8) decode kernel from P6 lands — at
   draft depth 1 there is nothing to fix (one verify row is one row), so the win
   has to come from depth 2, which is exactly the case that is broken today.  The
@@ -1448,7 +1448,7 @@ probe (1k/2k/8k end-to-end only) could not see.  The new evidence is a per-`pos0
 kernel curve for both model shapes, from the harness the rejection stored: shader
 and test rebuilt from `evidence/raw/attn-decode-gqa-rejected/` and verified
 byte-identical to it (`diff`), rewired behind the same per-call env gate
-(`Q36_VK_ATTN_DECODE_GQA`), wiring reverted out of the tree again afterwards.
+(`P36_VK_ATTN_DECODE_GQA`), wiring reverted out of the tree again afterwards.
 
 - **Parity holds, exactly as before.**  18/18 cases bit-exact
   (`mismatches=0 max_abs=0`): dense 24 q / 4 kv and MoE 16 q / 2 kv, head_dim
@@ -1495,13 +1495,13 @@ byte-identical to it (`diff`), rewired behind the same per-call env gate
 ## Prefill f16 accumulator and f16 DeltaNet state — NLL check, no measurable regression (2026-09-24)
 
 Audit §P3 ("measurement only").  Not a rejection of an earlier attempt: the
-ledger has no entry for either dtype, and `Q36_VK_RECURRENT_STATE_F16` was
+ledger has no entry for either dtype, and `P36_VK_RECURRENT_STATE_F16` was
 landed on throughput with no quality probe behind it.  Mechanism under test:
 `vulkan/dense_iq3_xxs_mmq.comp` accumulates the whole K dimension (up to 17408,
 68 blocks) in `f16vec2 sum[16]` while the decode path accumulates in f32, and
 the DeltaNet recurrent state can be stored f16 or f32.
 
-- **Method.** `q36-bench --gen-tokens 0 --dump-frontier-logits-dir` walks
+- **Method.** `p36-bench --gen-tokens 0 --dump-frontier-logits-dir` walks
   `tests/long_context_story_prompt.txt` one frontier at a time (each frontier
   teacher-forces one more token and dumps full-vocab logits); `p3stats.py`
   computes per-frontier NLL of the actual next token and the *paired* signed
@@ -1520,7 +1520,7 @@ the DeltaNet recurrent state can be stored f16 or f32.
   are set by a handful of frontiers where the distribution is nearly flat
   (frontier 832 +6.53, 1408 -3.00, 1664 +2.92; the 2048..4096 window sits at
   NLL ~13 nats).
-- **Arm B, f16 vs f32 recurrent state (`Q36_VK_RECURRENT_STATE_F16=0`):** the
+- **Arm B, f16 vs f32 recurrent state (`P36_VK_RECURRENT_STATE_F16=0`):** the
   usable sample is ctx 8192..16384 n=33 -> mean NLL 15.0033 (f16) vs 15.3388
   (f32), **median -0.0053**, MAD 1.3570, mean|d| 3.0220, worse/better 14/19,
   top-1 **30/33**.  The two small windows agree in direction and add nothing:
@@ -1539,7 +1539,7 @@ the DeltaNet recurrent state can be stored f16 or f32.
   Isolating the dtype needs a diagnostic MMQ build with `vec2 sum[16]`, which
   was not built because there is no signal to chase.
 - Raw: `evidence/raw/p3-f16-nll/` (`VERDICT.md`, `p3stats.py`, the five paired
-  statistic files, the eleven `q36-bench` logs, and the sweep scripts/outputs
+  statistic files, the eleven `p36-bench` logs, and the sweep scripts/outputs
   `run4.s|out`, `run5.s|out`).
 - `reconsider_if`: a criterion that is sensitive to a *flat* distribution (an
   exact-match rate over many short completions, paired per token, n >= 64)
@@ -1561,7 +1561,7 @@ expert pair` (2026-09-21) — same shape of fix, different format; what was *not
 reopened is any of the rejected IQ3_XXS decode variants (sign mask, f16 grid,
 rows 8, global LUT), all of which keep the per-weight cvt+fma that P4 killed.
 
-- **Mechanism.** `q36_vulkan.c:8774-8813` gives `n_tok == 1` a purpose-built
+- **Mechanism.** `p36_vulkan.c:8774-8813` gives `n_tok == 1` a purpose-built
   decode kernel and sends everything else to the 128-row MMQ tile
   (`dense_iq3_xxs_mmq` + `predequant_b16`).  A 2-row step therefore pays a whole
   128-row tile.  The new kernel unpacks each weight word once and walks the two
@@ -1570,9 +1570,9 @@ rows 8, global LUT), all of which keep the per-weight cvt+fma that P4 killed.
   `dense_iq3_xxs_decode_r4`, so each row is *bit-identical* to a separate
   one-token dispatch — that is the parity gate, not a max_abs tolerance.
 - **Landed.** `vulkan/dense_iq3_xxs_decode_nx.comp` (local_size 64, ROWS 4,
-  NTOK 2), `tests/test_dense_iq3xxs_nx.c`, and a `q36_vulkan.c:8814-8835`
+  NTOK 2), `tests/test_dense_iq3xxs_nx.c`, and a `p36_vulkan.c:8814-8835`
   branch gated on `weight_type == IQ3_XXS && out_dim % 4 == 0 && n_tok == 2 &&
-  Q36_VK_DENSE_IQ3_NX` (default on; `=0` restores the MMQ tile).
+  P36_VK_DENSE_IQ3_NX` (default on; `=0` restores the MMQ tile).
 - **Kernel cost, real weights 5120x17408 x 68 blocks (the `attn_qkv` shape), 200
   iters, best-of:** two one-token dispatches **0.242 ms** vs one two-token
   dispatch **0.167 ms** = **1.44x**, i.e. 0.121 vs **0.084 ms/token = 0.70x the
@@ -1611,17 +1611,17 @@ rows 8, global LUT), all of which keep the per-weight cvt+fma that P4 killed.
   is what makes the rest of P7 measurable at all.
 - Honest limitations: (a) nx is bit-exact with the *one-token decode path*, not
   with the MMQ tile it replaces — anyone who needs the shipped d3 token stream
-  byte-for-byte has to keep `Q36_VK_DENSE_IQ3_NX=0`; (b) only `n_tok == 2` was
+  byte-for-byte has to keep `P36_VK_DENSE_IQ3_NX=0`; (b) only `n_tok == 2` was
   built.  The kernel loops over `t0 < n_tok` in steps of 2, so 4/6/8 rows is a
   dispatch-condition change, deliberately not made (audit scope was 2..8; the
   measured target was the single 2-row step); (c) the guard is untouched by
-  construction — the branch is Q36_VK_TENSOR_IQ3_XXS-only and the guard's tensors
+  construction — the branch is P36_VK_TENSOR_IQ3_XXS-only and the guard's tensors
   are IQ2XXS, confirmed by `dense_iq3_xxs_decode_nx` never appearing in its
   profile.
 - **Gates.** `karpathy/compat_gate.sh` **PASS** (Swift 1024/177.23 prefill tps +
-  guard).  `./q36_test --vulkan-kernels` fails, but **on an attention test:**
-  `tests/q36_test.c:4958` (`memcmp(out_host, out_single)` after replaying each
-  batch row of `q36_gpu_attn_decode_tensor` as a decode step).  Reproduced on
+  guard).  `./p36_test --vulkan-kernels` fails, but **on an attention test:**
+  `tests/p36_test.c:4958` (`memcmp(out_host, out_single)` after replaying each
+  batch row of `p36_gpu_attn_decode_tensor` as a decode step).  Reproduced on
   unmodified HEAD by stashing the whole change and rebuilding — **pre-existing,
   not caused by this kernel**, and out of P6's scope (`git stash` / `pop` used;
   the routed-gemm oracle lines `mv_max_rel=3.93391e-06 gemm_max_rel=0.00894794`
@@ -1643,12 +1643,12 @@ Audit §P8 ("add the shared expert as a 9th slot in `moe_gate_up_decode` /
 `moe_down_q2k_sum_decode` IQ2_S builds").  Not a rejection of an earlier
 attempt: the ledger has no entry for the shared expert, and the audit's argument
 was a *dispatch count* (`ffn_*_shexp` are IQ2_S so they miss the Q8_0-only fused
-path at `q36.c:8278-8320` and fall through to `q36.c:8337-8361`, three matvecs +
+path at `p36.c:8278-8320` and fall through to `p36.c:8337-8361`, three matvecs +
 swiglu + one mid `q8_k_quant`).  What was measured is that the dispatch count is
 right and the cost model behind it is not.
 
-- **Method.** `Q36_VK_PROF=1 Q36_VK_PROF_SHAPE=1` on IQ2_M, ctx 512, gen 128 —
-  per-shape op rows, and `q36_vk_prof_iq3_shape` (`q36_vulkan.c:700-733`) names a
+- **Method.** `P36_VK_PROF=1 P36_VK_PROF_SHAPE=1` on IQ2_M, ctx 512, gen 128 —
+  per-shape op rows, and `p36_vk_prof_iq3_shape` (`p36_vulkan.c:700-733`) names a
   `n_tok == 1` matvec `dense_<kind>_decode_<in_dim>x<out_dim>_n1`, so the shared
   expert's two shapes are identifiable: `2048x512` (gate and up, 2048 -> 512) and
   `512x2048` (down, 512 -> 2048).  Byte model: IQ2_S = 2.5625 bpw = 0.3203 B per
@@ -1673,9 +1673,9 @@ right and the cost model behind it is not.
   IQ2_M decode**, at or under the audit's 3.4% MoE bar, for two new shader paths
   plus host wiring plus a new parity surface.  The 5 fewer dispatches per layer
   are irrelevant precisely because the path is not dispatch-bound.
-- **Cheaper capture point identified, not taken.**  `q36_gpu_matmul_iq2s_pair_scaled_tensor`
-  (`q36_vulkan.c:8429`) already pairs two IQ2_S projections off one Q8_K input,
-  and is already used for `ssm_beta`/`ssm_alpha` (`q36.c:8722`).  The shexp
+- **Cheaper capture point identified, not taken.**  `p36_gpu_matmul_iq2s_pair_scaled_tensor`
+  (`p36_vulkan.c:8429`) already pairs two IQ2_S projections off one Q8_K input,
+  and is already used for `ssm_beta`/`ssm_alpha` (`p36.c:8722`).  The shexp
   gate/up is the identical call shape (two 2048->512 projections, one input
   quant) and would save ~1 dispatch/layer, ~1% — the same order as the fold's
   dispatch saving and a fraction of its cost.  Recorded as the first thing to try
@@ -1697,7 +1697,7 @@ right and the cost model behind it is not.
 
 Audit §P9(a). Not a reopening of a closed line, but it does finally *price* a
 sentence that had been asserted for months: `AlreadyTried.md` "engine comparison"
-claims q36's 23.19 t/s "carries the full temp-0.6 / top-k / top-p / min-p sampling
+claims p36's 23.19 t/s "carries the full temp-0.6 / top-k / top-p / min-p sampling
 chain" against llama-bench's greedy `tg`, i.e. that the sampler costs something —
 never measured. The two closed-line entries that touch readback
 (`MOVNTDQA streaming loads`, `HOST_CACHED readback lever`) are about the readback
@@ -1707,7 +1707,7 @@ never measured. The two closed-line entries that touch readback
   first pass argued "the filter touches the same 608 KB as the existing readback,
   same memory-traffic shape, nothing to win" and was headed for a negative
   write-up. Measured instead, on the CPU, on both sides of the argument:
-  `sampler_bench3.c` reproduces `q36_sample_full_vocab`'s `top_p >= 1.0f` branch
+  `sampler_bench3.c` reproduces `p36_sample_full_vocab`'s `top_p >= 1.0f` branch
   on real Swift logits — **full-vocab two loops 0.612 ms/token, survivor-only
   loops 0.000 ms, removable 0.612 ms (100%)**, of which the max+filter scan alone
   is 0.022 ms. `bw_bench.c` then streams the same 608 KB single-core: `sum` 0.131
@@ -1723,22 +1723,22 @@ never measured. The two closed-line entries that touch readback
   into fixed-capacity per-block buckets. The order-preserving uint is what lets
   the max travel without a shared-float reset between tokens, and the
   block-indexed buckets are what remove the global prefix sum. Host:
-  `q36_session_sample_packed` (`q36.c:11932`) hooked into `q36_session_sample`
-  before `q36_session_ensure_logits_host` (`q36.c:12043`), buffer
-  `Q36_GPU_MINP_BYTES(Q36_N_VOCAB)` (80.8 KB at vocab 151936), gated by
-  `Q36_VK_MINP_PACK` (default ON).
+  `p36_session_sample_packed` (`p36.c:11932`) hooked into `p36_session_sample`
+  before `p36_session_ensure_logits_host` (`p36.c:12043`), buffer
+  `P36_GPU_MINP_BYTES(P36_N_VOCAB)` (80.8 KB at vocab 151936), gated by
+  `P36_VK_MINP_PACK` (default ON).
 - **Bit-identity is structural, not lucky.** `expf`, the sum and the draw stay on
   the CPU — a GPU `expf` is not the CPU's `expf` and one ulp in the sum moves the
   drawn token — and the packed list is emitted in ascending token order (blocks
   in index order, order-preserving compaction inside a block), which is exactly
-  `q36_sample_full_vocab`'s scan order at `q36.c:10481-10499`. Confirmed
+  `p36_sample_full_vocab`'s scan order at `p36.c:10481-10499`. Confirmed
   byte-identical on four configurations, seed 42, 64 tokens each:
   Swift temp 0.8 / min_p 0.05 328/328 bytes, MoE 0.8 / 0.05 299/299, MoE temp
   1.0 / 0.05 333/333, Swift temp 0.8 / min_p 0.2 334/334, pack ON vs OFF.
 - **Fallback is the correctness boundary, not the bucket size.** The packed path
   returns -1 — and the scalar path runs unchanged — on `top_k != 0`,
   `top_p < 1.0`, `min_p` outside `(0, 1]`, a non-Vulkan runtime, `have_reject`
-  unfound, **any block whose recorded count exceeds `Q36_GPU_MINP_CAP` (16)**, or
+  unfound, **any block whose recorded count exceeds `P36_GPU_MINP_CAP` (16)**, or
   zero survivors. Measured survivors on real logits: 1 at temp 0.8, 3 at temp
   1.0, so cap 16 is ~5x headroom; the overflow check means a wrong cap can only
   cost a fallback, never a wrong token.
@@ -1750,7 +1750,7 @@ never measured. The two closed-line entries that touch readback
   (12.604 -> 11.648 ms/token, worst rep pairing +7.45%). Every rep moves the same
   way and the delta is 4-7x the MAD. The MoE win is larger than the 0.61 ms/token
   the CPU probe predicts because the packed path also skips the full 608 KB
-  logits readback (`q36_session_ensure_logits_host` is not reached) and the
+  logits readback (`p36_session_ensure_logits_host` is not reached) and the
   sampler is on the critical path behind the last GPU flush.
 - **Ceiling cross-check.** Sweep 13, greedy vs sampled, same prompt and ctx:
   Swift 23.74/23.45/23.50 greedy vs 23.21/23.02/23.13 sampled (-1.7%); MoE
@@ -1763,8 +1763,8 @@ never measured. The two closed-line entries that touch readback
   (ON) Swift, 125.820 / 128.860 MoE, with per-rep spread of 117-150 t/s on MoE
   (chunked prefilling). The change is downstream of the logits.
 - **Gates:** `./karpathy/compat_gate.sh` PASS (including the CPU/GPU logits parity
-  step, which never sees the sampler); `./q36_test --vulkan-kernels` still fails at
-  `tests/q36_test.c:4958` (`attn decode n_tok invariance` memcmp) exactly as it does
+  step, which never sees the sampler); `./p36_test --vulkan-kernels` still fails at
+  `tests/p36_test.c:4958` (`attn decode n_tok invariance` memcmp) exactly as it does
   on unmodified HEAD — reproduced this pass, unchanged, out of scope. Dispatch
   confirmed in the profile: `logits_minp_max` 16 disp / `logits_minp_reduce` 16 disp
   for 16 generated tokens, 15520 groups, no extra flush.
@@ -1772,7 +1772,7 @@ never measured. The two closed-line entries that touch readback
   8 parity logs, `prof-on.txt`, `cpu-probes.txt`, `sampler_bench3.c`, `bw_bench.c`,
   `vulkan-kernels.txt`).
 - `reconsider_if`: someone wants the sampler off the host entirely (then the
-  precision argument above is the thing to beat, not the speed); `Q36_GPU_MINP_CAP`
+  precision argument above is the thing to beat, not the speed); `P36_GPU_MINP_CAP`
   overflows on a real prompt family (the fallback makes this a no-op, but the cap
   is one line); or the top-k / top_p < 1 path is ever made the default, which this
   path deliberately does not cover.
@@ -1801,7 +1801,7 @@ rows and nx only fires on the accepted-prefix replay (`commit_n == 2`)".  That
 premise is false.
 
 - **What the MTP loop actually dispatches.**  An env-gated diagnostic
-  (`Q36_VK_DBG_IQ3N`, kept — it is the instrument, not a semantic variant) prints
+  (`P36_VK_DBG_IQ3N`, kept — it is the instrument, not a semantic variant) prints
   every `dense_iq3_xxs` dispatch as `n_tok in out branch`.  Swift, ctx 512,
   `--mtp-margin 0`, whole run including the 512-token prefill:
   `--mtp-draft 3`: n_tok=1 (r4) 1530 disp, **n_tok=2 (nx) 161 disp**, n_tok=256
@@ -1816,7 +1816,7 @@ premise is false.
   `vulkan/dense_iq3_xxs_decode_nx.comp` now guards the partial tail chunk with
   `tn = min(NTOK, n_tok - t0)` (the per-row FMA chains are independent, so the
   rows a partial chunk *does* compute keep their exact operand order) and the
-  dispatch at `q36_vulkan.c:8858` is `n_tok >= 2u && n_tok <= 8u` instead of
+  dispatch at `p36_vulkan.c:8858` is `n_tok >= 2u && n_tok <= 8u` instead of
   `== 2u`.  `tests/test_dense_iq3xxs_nx.c` now takes `n_tok` and checks every row
   against its own one-token `dense_iq3_xxs_decode_r4` dispatch:
   **mismatches=0 max_abs=0 at n_tok 2, 3, 4 and 8** (real weights, attn_qkv shape
@@ -1862,10 +1862,10 @@ premise is false.
   second forward.  Verdict: **not built**; the audit's P7 lever, as written,
   does not exist.
 - **Gates:** `karpathy/compat_gate.sh` **PASS** (Swift 1024/177.96 prefill tps +
-  guard).  `./q36_test --vulkan-kernels` fails at `tests/q36_test.c:4958`
+  guard).  `./p36_test --vulkan-kernels` fails at `tests/p36_test.c:4958`
   (`attn decode n_tok invariance` memcmp) exactly as on unmodified HEAD —
   reproduced this pass, unchanged, out of scope.  Guard untouched by
-  construction (the branch is `Q36_VK_TENSOR_IQ3_XXS`-only; the guard's tensors
+  construction (the branch is `P36_VK_TENSOR_IQ3_XXS`-only; the guard's tensors
   are IQ2XXS).
 - Honest limitation: the widened dispatch range is **unreachable today**.  It is
   kept because it is the condition P6 recorded, it is covered by a bit-exact
@@ -1884,19 +1884,19 @@ premise is false.
 
 ## Flash-attention prefill vs the `n_tok`-invariance test — stale expectation, fixed the test, not the kernel (2026-09-25)
 
-Closes the paragraph P7 left open ("`q36_test --vulkan-kernels` fails at
-`tests/q36_test.c:4958` exactly as on unmodified HEAD — reproduced this pass,
+Closes the paragraph P7 left open ("`p36_test --vulkan-kernels` fails at
+`tests/p36_test.c:4958` exactly as on unmodified HEAD — reproduced this pass,
 unchanged, out of scope").  Round-2 R1.
 
 - **Bisect.**  `git bisect run` between `8e8e788` (last commit CAMPAIGN §1c
-  records as PASS) and `e6a442b`, harness = rebuild `q36_test`, exit 1 iff
-  `q36_test.c:4958` appears in the log.  First bad commit: **`9d54dc7`**
+  records as PASS) and `e6a442b`, harness = rebuild `p36_test`, exit 1 iff
+  `p36_test.c:4958` appears in the log.  First bad commit: **`9d54dc7`**
   ("flash-attention prefill for GQA 8 MoE too").  Raw: `evidence/raw/r1-fa-gate/`
   (`bisect.log`, `bisect-check.sh`).
 - **Which arm, and how far off.**  The failing assertion is `test_vulkan_attn_case`'s
   "a batch row must reproduce the per-row decode step bit for bit" memcmp.  A
   temporary diagnostic print (removed) pinned it to one shape: `pos0=129 n_tok=3`
-  with the production KV pair `k=Q36_KV_CACHE_Q8_0 / v=Q36_KV_CACHE_Q4_0`, i.e.
+  with the production KV pair `k=P36_KV_CACHE_Q8_0 / v=P36_KV_CACHE_Q4_0`, i.e.
   exactly the arm `attn_prefill_fa.comp` takes over.  FA on: **11137 of 12288
   floats differ, all by <= 1.02445e-08**, and that same batch output sits
   **1.18406e-08** from the f64 CPU reference the test already computes; FA off
@@ -1918,15 +1918,15 @@ unchanged, out of scope").  Round-2 R1.
 - **Fix = make the test FA-aware.**  `test_vulkan_attn_case` gains an `n_head`
   parameter (ratio 6 and 8 are now both reachable) and a `fa_batch` predicate that
   mirrors the dispatcher (head_dim 256, K q8_0, V q4_0, ratio 6 or 8, FA not
-  disabled; `q36_vk_use_attn_fa()` is static to `q36_vulkan.o` so the env default
+  disabled; `p36_vk_use_attn_fa()` is static to `p36_vulkan.o` so the env default
   is repeated).  FA arms assert `drift <= 4.0e-5f` — ~4000x the measured drift,
   four orders inside the test's own 2e-3 quality bound, so a broken FA reduction
   still trips it — and print the drift.  Every other arm keeps the bitwise memcmp.
   Coverage widened with three production-KV arms: `129/3` and `2100/12` at ratio
   6, `2100/12` at ratio 8.  `attn_prefill_fa.comp`'s header now says outright that
   it is not bit-identical to `attn_decode_split/fused` and by how much.
-- **Gates:** `./q36_test --vulkan-kernels` **exit 0, "vulkan-kernels: OK"** with FA
-  on and with `Q36_VK_ATTN_FA=0`; drift printed 1.02445e-08 at `129/3` and
+- **Gates:** `./p36_test --vulkan-kernels` **exit 0, "vulkan-kernels: OK"** with FA
+  on and with `P36_VK_ATTN_FA=0`; drift printed 1.02445e-08 at `129/3` and
   1.00117e-08 at `2100/12`, identical at both ratios.
   `karpathy/compat_gate.sh` **PASS** (Swift 1024/177.46 prefill tps).  No
   performance delta: test + comment only, no kernel touched.
@@ -1943,7 +1943,7 @@ Reopens round-1 **P1** (`## MoE IQ2_S down sum-decode — audited levers NEGATIV
 shape CONFIRMED as the lever, not built`), whose `reconsider_if` is "someone builds
 the coalesced fetch and it measures".  Round-2 R2.  It measures, and it is a no-op.
 
-- **What was built.**  `vulkan/moe_down_q2k_sum_decode.comp` `Q36_MOE_IQ2S` branch
+- **What was built.**  `vulkan/moe_down_q2k_sum_decode.comp` `P36_MOE_IQ2S` branch
   only: the per-element `wb_u8()` field reads are replaced by a staged LDS copy of
   the 82-byte superblock -- the 16 lanes of one `ix` half fetch its 41 words in three
   consecutive rounds (`k = itid; k < 41; k += 16`, so each round covers one contiguous
@@ -1987,7 +1987,7 @@ the coalesced fetch and it measures".  Round-2 R2.  It measures, and it is a no-
   `moe_q2k_down_sum_decode`, 62 GB/s) and for `moe_iq2s_gate_up_decode` (~150 GB/s,
   and not a sum-decode kernel at all).  The premise is refuted on the kernel where it
   was strongest, so porting it buys the same nothing for the same work.
-- **Gates:** `karpathy/compat_gate.sh` **PASS**; `./q36_test --vulkan-kernels` **OK**
+- **Gates:** `karpathy/compat_gate.sh` **PASS**; `./p36_test --vulkan-kernels` **OK**
   (R1 fix, `e77871d`).  Shipped blob restored byte-identically (`md5 2603136d…`).
 - Raw: `evidence/raw/r2-iq2s-wideload/` (`R2-VERDICT.md`, `wideload-rejected.patch`,
   `isa-{old,wideload}.asm.txt`, `opmix-main-loop.txt`,
@@ -2007,9 +2007,9 @@ LANDED, +62.6% on MTP draft 3`) only to ask the question P6 never asked: the nx
 kernel has exactly one remaining multi-row user, `--batched-session N`, and it
 had never been measured.  Round-2 R3.  Measurement only, no source change.
 
-- **Setup.**  Swift (`IQ3_XXS`, 24/4 heads), `q36-server --batched-session N
+- **Setup.**  Swift (`IQ3_XXS`, 24/4 heads), `p36-server --batched-session N
   --ctx 1024 --prefill-chunk 256`, 4 fixed greedy streaming clients (one prompt
-  each, ~430 tokens) with 64 generated tokens per stream, `Q36_VK_DENSE_IQ3_NX`
+  each, ~430 tokens) with 64 generated tokens per stream, `P36_VK_DENSE_IQ3_NX`
   0 vs 1, 2 interleaved reps (arm order flipped in rep 2).  `aggregate_tps`
   includes TTFT; `decode-only agg` excludes each stream's own TTFT.
 - **nx pays on aggregate, and shrinks as N grows.**  N=1 **11.779 -> 11.677
@@ -2041,7 +2041,7 @@ had never been measured.  Round-2 R3.  Measurement only, no source change.
   iq4xs 11%, residual iq3 13%) - the *class* does (69%).  This is the same
   kernel set that makes R4's two-row MTP verify cost 391 ms.
 - **Probe: the tile is not a defect a naive fallback fixes.**
-  `Q36_VK_DENSE_KQUANT_MMQ=0` (the one switch that reroutes `n_tok > 1` K-quant
+  `P36_VK_DENSE_KQUANT_MMQ=0` (the one switch that reroutes `n_tok > 1` K-quant
   work to the generic 8x8 `matmul_kquant`) at N=4, nx ON: **4.228/4.201 t/s vs
   5.743/5.744 = -26%**, TTFT 23.4/26.6 s vs 9.7 s (the flag also drops prefill
   off its tile).  The only thing that ever beat the tile for this shape is a
@@ -2069,10 +2069,10 @@ the two-row verify is **not** served by nx for three of the four dense trunk
 types.  Round-2 R4.
 
 - **Diagnostic added (env-gated, kept - it is the instrument).**
-  `Q36_MTP_TIMING` prints one line per speculative cycle from
-  `q36_session_eval_speculative_argmax` (`fwd`, each draft, `snap`, `verify`,
-  `commit`, total, `read_kb`, `drains`), plus `q36_gpu_read_bytes()` /
-  `q36_gpu_read_flushes()` counters in `q36_vulkan.c` / `q36_gpu.h`.  No
+  `P36_MTP_TIMING` prints one line per speculative cycle from
+  `p36_session_eval_speculative_argmax` (`fwd`, each draft, `snap`, `verify`,
+  `commit`, total, `read_kb`, `drains`), plus `p36_gpu_read_bytes()` /
+  `p36_gpu_read_flushes()` counters in `p36_vulkan.c` / `p36_gpu.h`.  No
   semantic change; inert when unset.
 - **Absolute rates, same binary, Swift ctx 512 margin 0, plain alongside:**
   plain 32 tok **22.68 t/s**, plain 256 tok **23.04**; `--mtp-draft 2`
@@ -2133,8 +2133,8 @@ share is recovered from the combine/split dispatch ratio.  Round-2 R5.
 
 - **Setup.**  Fresh process per (model, ctx), Swift and the guard at ctx
   8192/16384/32768 (2/2/3 reps), `--prefill-chunk 256 --gen-tokens 64
-  --mtp-margin 0`, `Q36_VK_PROF_OP=1 Q36_VK_PROF_KERNEL=1`.  Stages B/C sweep
-  `Q36_VK_ATTN_SPAN` 128/256/1024/2048/4096 at ctx 16384, 1 rep each (512 is
+  --mtp-margin 0`, `P36_VK_PROF_OP=1 P36_VK_PROF_KERNEL=1`.  Stages B/C sweep
+  `P36_VK_ATTN_SPAN` 128/256/1024/2048/4096 at ctx 16384, 1 rep each (512 is
   stage A's 2 reps).
 - **Reproducibility.**  0.3-1.4% on `split_ms/call` everywhere except Swift at
   ctx 32768, which disagrees with itself by 7% (1.0221 vs 1.0943 ms/call, 15.40
@@ -2154,8 +2154,8 @@ share is recovered from the combine/split dispatch ratio.  Round-2 R5.
   1.252 ns) and 9.9% on the guard at 128, but the **guard's 256 arm is an
   outlier** (+4.0% where the 128/512 trend puts it at ~-3%).  The narrow side is
   closed anyway: single-rep, not bit-exact, and it **fails the kernel gate** -
-  `Q36_VK_ATTN_SPAN=128 ./q36_test --vulkan-kernels` gives 3 failures and `=256`
-  gives 1, all at `tests/q36_test.c:4988` (bitwise batch-vs-step-replay), 0 at
+  `P36_VK_ATTN_SPAN=128 ./p36_test --vulkan-kernels` gives 3 failures and `=256`
+  gives 1, all at `tests/p36_test.c:4988` (bitwise batch-vs-step-replay), 0 at
   512, reproducibly.  The failing arms are the 132-key ones: single-span (fused)
   at 512, 2 spans at 128 - so the split path is not `n_tok`-invariant for that
   shape, and 512 is the setting that property is verified at.  FA arms unaffected
@@ -2226,9 +2226,9 @@ share is recovered from the combine/split dispatch ratio.  Round-2 R5.
   `k_q8_dot_pair` already does for K, hoist `tmax` - is the same class R2
   **rejected** on `moe_iq2s_down_sum_decode` (fewer/wider loads bought 0.06% on
   an instruction-issue-bound kernel), so it is not proposed.  The stale
-  "narrower buys occupancy" claim in the `q36_vk_attn_span()` comment
-  (`q36_vulkan.c:1282`) is corrected in place with these numbers.
-- `Q36_VK_ATTN_SPAN` is a **diagnostic switch, not a semantic variant**: it is
+  "narrower buys occupancy" claim in the `p36_vk_attn_span()` comment
+  (`p36_vulkan.c:1282`) is corrected in place with these numbers.
+- `P36_VK_ATTN_SPAN` is a **diagnostic switch, not a semantic variant**: it is
   not bit-exact, and any use needs the NLL check rather than the byte-identical
   one (the drift grows with the span count, which is also why 1-rep evidence is
   not enough to move the default).
@@ -2251,7 +2251,7 @@ Every type already reached a tuned kernel except IQ1_M. Its one tensor
 - **Change.** An IQ1_M arm in the generic `dense_extra_mmq.comp` main. It uses
   the IQ1_S grid and mapping, with the block scale assembled from the scale-word
   nibbles. IQ1_M routes there only for `n_tok > 8`, not `--quality`, and not
-  `Q36_VK_DENSE_IQ1M_MMQ=0`. `dense_extra_mmq` joins the prewarm list.
+  `P36_VK_DENSE_IQ1M_MMQ=0`. `dense_extra_mmq` joins the prewarm list.
 - **Correctness.** `tests/test_dense_iq1m_mmq`: rms_rel 0.0104, equal to the shipped
   IQ1_S arm's f16 floor. A fault-injected delta flip gives 0.32. With the route
   off, Swift logits are byte-identical to the pre-change build. KL vs the f32
@@ -2264,12 +2264,12 @@ Every type already reached a tuned kernel except IQ1_M. Its one tensor
   profiled cost of the old kernel; that gap is unexplained. At 64 generated
   tokens decode is +0.54% (flat).
 - **Mistakes caught by the adversarial review, kept here so they are not
-  repeated.** (1) The P3 frontier-NLL recipe with `q36 --dump-tokens` targets
+  repeated.** (1) The P3 frontier-NLL recipe with `p36 --dump-tokens` targets
   gave 6-27 nat NLLs on confident predictions. The targets are misaligned, so do
   not use it for dNLL; use KL against a `--prefill-chunk 1` reference instead.
   (2) `env "A=x B=y" cmd` sets one variable; that invalidated a gate-off run.
   (3) `bench_ab.sh` inherits the cwd, and `shader_root` = cwd wins over the exe
-  dir, so an A snapshot needs `Q36_SHADER_DIR` in a wrapper.
+  dir, so an A snapshot needs `P36_SHADER_DIR` in a wrapper.
 - `compat_gate.sh`: infra timeout (exit 124) in the MoE CPU capture from the
   external HDD. Not applicable, since neither gate model has an affected tensor.
   Not a pass.

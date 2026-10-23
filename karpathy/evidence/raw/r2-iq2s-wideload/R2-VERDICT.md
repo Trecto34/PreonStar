@@ -7,7 +7,7 @@ fetch and it measures".
 
 ## What was built
 
-`vulkan/moe_down_q2k_sum_decode.comp`, `Q36_MOE_IQ2S` branch only.  The per-element
+`vulkan/moe_down_q2k_sum_decode.comp`, `P36_MOE_IQ2S` branch only.  The per-element
 `wb_u8()` reads (33 `buffer_load_ushort` in the hot basic block, each lane a
 different 2-byte address) are replaced by a staged LDS copy of the 82-byte
 superblock: the 16 lanes of one `ix` half fetch its 41 words in three consecutive
@@ -33,7 +33,7 @@ did move to LDS.  It just does not matter — see below.
 
 ## Measurements
 
-Kernel (`Q36_VK_PROF_OP=1 Q36_VK_PROF_KERNEL=1 Q36_VK_PROF_DECODE=1`, ctx 512,
+Kernel (`P36_VK_PROF_OP=1 P36_VK_PROF_KERNEL=1 P36_VK_PROF_DECODE=1`, ctx 512,
 chunk 256, gen 128), same 4736 dispatches / 9699328 groups in both arms:
 
 | arm | `gpu_ms` | share of IQ2_M decode |
@@ -51,7 +51,7 @@ gen 128, IQ2_M; plain decode, no MTP):
 | wide-load | 615.01 (7.36) | **82.32 (0.290)** |
 
 decode **+0.21%** with MADs that overlap, prefill **-0.33%** (the kernel is
-decode-only: `identity = n_tok == 1u` in `q36_vulkan.c:9503`, so prefill should not
+decode-only: `identity = n_tok == 1u` in `p36_vulkan.c:9503`, so prefill should not
 move and does not).  Verdict: **no effect**, reject.
 
 Parity was clean: frontier dumps 512/520 on both IQ2_M and the guard, 2 reps per arm,
@@ -105,7 +105,7 @@ same cost for the same nothing.
 
 ## Gates
 
-`./karpathy/compat_gate.sh` **PASS**; `./q36_test --vulkan-kernels` **OK**
+`./karpathy/compat_gate.sh` **PASS**; `./p36_test --vulkan-kernels` **OK**
 (the R1 fix, commit `e77871d`).  Shipped blob restored byte-identically
 (`md5 2603136d…`); the variant lives only in this directory.
 

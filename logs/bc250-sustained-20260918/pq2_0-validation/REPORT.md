@@ -1,9 +1,9 @@
 # PQ2_0 (type 142) GPU validation on BC-250
 
-Commit `c0e7c1a` plus the uncommitted Track A working tree (`Makefile`, `q36.c`,
-`q36_vulkan.c`, `vulkan/dense_extra_decode.comp`, `vulkan/dense_extra_mmq.comp`).
+Commit `c0e7c1a` plus the uncommitted Track A working tree (`Makefile`, `p36.c`,
+`p36_vulkan.c`, `vulkan/dense_extra_decode.comp`, `vulkan/dense_extra_mmq.comp`).
 Device: AMD BC-250 (RADV GFX1013), 40 CU, wave64, 15.35 GiB UMA, Mesa 26.2.2.
-Kernel 7.2.6-1-cachyos. All runs serialized under `flock /tmp/q36-gpu.lock`.
+Kernel 7.2.6-1-cachyos. All runs serialized under `flock /tmp/p36-gpu.lock`.
 
 This run establishes GPU-path sanity, numerical behaviour against g64, sustained
 stability, and a paired performance result. **It is not a full reference
@@ -12,10 +12,10 @@ and remains outstanding.
 
 ## Interface deviations from the directive
 
-The directive named `./q36-generate` and `./ab_decode.sh --baseline/--candidate/--pairs`.
+The directive named `./p36-generate` and `./ab_decode.sh --baseline/--candidate/--pairs`.
 Neither exists. The real interfaces were used instead:
 
-* generation: `./q36 --vulkan -m FILE -p TEXT --temp 0 --seed 1 --nothink`
+* generation: `./p36 --vulkan -m FILE -p TEXT --temp 0 --seed 1 --nothink`
 * paired A/B: `logs/bc250-sustained-20260918/ab_model.sh PAIRS OUT.csv A.gguf B.gguf`
   (`ab_decode.sh` swaps two `.spv` on one model; this is a *format* change, so
   the model file is what must be swapped)
@@ -24,14 +24,14 @@ Frontier logits are emitted as `frontier_*.logits.json`, not `logs/frontier-512-
 
 ## 1. Execution -- PASS
 
-`Q36_VK_SHADER_TRACE=1` shows the only dense-extra pipelines ever built:
+`P36_VK_SHADER_TRACE=1` shows the only dense-extra pipelines ever built:
 
-    q36: building pipeline vulkan/dense_extra_mmq_pq2_0.spv
-    q36: building pipeline vulkan/dense_extra_decode_pq2_0.spv
+    p36: building pipeline vulkan/dense_extra_mmq_pq2_0.spv
+    p36: building pipeline vulkan/dense_extra_decode_pq2_0.spv
 
 Pipelines are built lazily on first use, so the generic `dense_extra_decode.spv`
 and the `dense_extra_decode_q2_0.spv` sibling were never instantiated.
-`Q36_VK_PROF_KERNEL=1` confirms where the work landed (64-token run):
+`P36_VK_PROF_KERNEL=1` confirms where the work landed (64-token run):
 
     vulkan/dense_extra_decode_pq2_0.spv dispatches=25665 gpu_ms=1358.019 pct=59.9
     vulkan/dense_extra_mmq_pq2_0.spv    dispatches=400   gpu_ms= 605.531 pct=26.7
@@ -40,9 +40,9 @@ and the `dense_extra_decode_q2_0.spv` sibling were never instantiated.
 No CPU fallback:
 
 * statically, a failed GPU matmul on this path is `return false` propagated up
-  `q36_gpu_tensor_matmul_dense_q8_scaled` (q36.c:8336, :8734) -- a hard abort of
+  `p36_gpu_tensor_matmul_dense_q8_scaled` (p36.c:8336, :8734) -- a hard abort of
   the forward pass, not a silent CPU detour;
-* the type-142 host guard (q36_vulkan.c:8251) refuses loudly and returns 0 if
+* the type-142 host guard (p36_vulkan.c:8251) refuses loudly and returns 0 if
   int-dot / subgroup64 / subgroup-arithmetic are unavailable;
 * measured CPU busy during the 508 s sustained decode: median 2.2 %, max 15.5 %
   (the max is model load). A host dequant+matmul of a 27B model cannot hide there.
@@ -103,7 +103,7 @@ both arms are the same GPU backend.
 
 ### Control: the Track A patch did not move the existing g64 path
 
-The pre-patch binary (`logs/bc250-sustained-20260918/baseline/q36-bench`, built
+The pre-patch binary (`logs/bc250-sustained-20260918/baseline/p36-bench`, built
 07:15, `strings | grep -c pq2_0` = 0) and the current binary produce **byte-identical**
 g64 frontier logits: `max|d| = 0.0000`, KL 0.000e+00.
 
@@ -188,7 +188,7 @@ that range was a target, not a prediction, and is not treated as confirmation.
 * A and B use identical bench parameters, context, generation length, warmup and
   clock policy; only `-m` differs. Both arms run the same binary and the same
   shader set -- the kernel is chosen from the weight type at runtime.
-* `pp512_tps` / `decode_tps` are timed inside `q36-bench` and exclude model load.
+* `pp512_tps` / `decode_tps` are timed inside `p36-bench` and exclude model load.
 * Failed arms print `NO RESULT` and return non-zero; they are not silently dropped
   into the median. All 10 pairs completed.
 * **Defect found and fixed:** the harness always ran A before B. Soak-gating
@@ -224,7 +224,7 @@ Occupancy, register pressure, LDS, spills and the memory-instruction mix are
 arithmetic. Static ISA therefore does not explain the speedup and no bandwidth,
 cache-hit or latency claim is inferred from it.
 
-Runtime counters do isolate it (`Q36_VK_PROF_KERNEL=1`, ctx 512, 128 tokens,
+Runtime counters do isolate it (`P36_VK_PROF_KERNEL=1`, ctx 512, 128 tokens,
 identical dispatch and group counts in both arms -- 51330 / 132850944):
 
     dense_extra_decode_q2_0.spv   gpu_ms 2918.083   (32.1 % of GPU time)
@@ -264,12 +264,12 @@ PQ2_0 is not claimed production-ready on the strength of these tests.
 
 Run after the report above, to close the one cheap gate still outstanding. It
 compares the GPU dense-quant kernels against a CPU reference built from
-`q36_quant_dequantize`, so unlike everything above it does **not** depend on
+`p36_quant_dequantize`, so unlike everything above it does **not** depend on
 PQ2_0 and g64 containing the same weights.
 
 ## The gate was vacuous, then wrong, before it was useful
 
-1. **Vacuous.** `./q36_test --dense-quant-model-rows --model <PQ2_0>` printed
+1. **Vacuous.** `./p36_test --dense-quant-model-rows --model <PQ2_0>` printed
    `dense-quant-model-rows: OK`. The test's `types[]` list was
    `{10..14, 16..23}`; the ternary models contain only types 0, 30 and 142, so
    every iteration hit `continue` and the test compared nothing. A pass that
@@ -331,9 +331,9 @@ The oracle now walks one tensor per **distinct input width** (not just the
 first tensor): for type 142 that is in_dim 5120, 6144 and 17408, so the wide
 FFN and SSM MMQ shapes are covered rather than only `output.weight`.
 
-Files touched: `tests/q36_test.c` (`test_dense_quant_model_rows`,
-`test_dense_quant_type_name`, parity diagnostics), `q36.c`/`q36.h`
-(`q36_engine_debug_tensor_of_type_at`).
+Files touched: `tests/p36_test.c` (`test_dense_quant_model_rows`,
+`test_dense_quant_type_name`, parity diagnostics), `p36.c`/`p36.h`
+(`p36_engine_debug_tensor_of_type_at`).
 
 ---
 
@@ -349,13 +349,13 @@ failures (top-1 0/5 overlap, `max_abs` ~19), while the intended Qwen models
 pass the same gate on this box (Qwen3.8-35B-A3B-IQ2_M: top-1 all match, OK).
 Root cause: the Ternary-Bonsai files carry `prism.hadamard` metadata; the
 Qwen files do not. Commit `e50a3e1` wired the forward PRISM Hadamard activation
-transform into the **Vulkan** path only (`q36_forward_*_vulkan*`), and the CPU
+transform into the **Vulkan** path only (`p36_forward_*_vulkan*`), and the CPU
 reference never received it — it applied the embedding inverse but not the
 forward rotation for `attn_qkv`/`attn_gate`/`q`/`k`/`v`/`ffn_*`/`attn_output`/
 `ssm_out`/`output`. A hidden architecture gap, not a Track A regression.
 
-Fixed in this session: `q36_hadamard_forward_host` (signs*scale then FWHT),
-`q36_hadamard_forward_grouped_host` (tiled->grouped permute for the GDN
+Fixed in this session: `p36_hadamard_forward_host` (signs*scale then FWHT),
+`p36_hadamard_forward_grouped_host` (tiled->grouped permute for the GDN
 `ssm_out`, mirroring the Vulkan `is_grouped` path), and the activation rotation
 at every CPU matmul site (decode and batch), gated on `t->hadamard_rotate` so
 non-PRISM models are untouched. The flag is parsed as before; a per-tensor
@@ -380,8 +380,8 @@ The f16 MMQ was the hypothesis for the residual. **It was tested and is not the
 dominant cause.** `dense_extra_mmq.comp` does accumulate in `f16vec2`
 (`sum[32]`, `sum[16]`) — now confirmed directly, not inferred. To make the
 oracle contract-correct, the CPU parity reference gained a shared f16-MMQ
-emulation (`q36_mmq_contract.h`), used when `Q36_CPU_MMQ_CONTRACT=1`
-(set automatically by `--gpu-cpu-parity`; `Q36_TEST_PARITY_F32=1` selects the
+emulation (`p36_mmq_contract.h`), used when `P36_CPU_MMQ_CONTRACT=1`
+(set automatically by `--gpu-cpu-parity`; `P36_TEST_PARITY_F32=1` selects the
 plain f32 diagnostic). The oracle now proves GPU≡f16-contract bit-exact,
 f16≠f32 in 9/9 cases, and prints the f16-vs-f32 drift (max_abs 0.008-0.014,
 rms 0.002-0.005 per matmul) as a diagnostic.
@@ -395,11 +395,11 @@ residual:
     contract + f32 SSM state
       + matched f16 KV           0.450343    0.869700    16/20         ERR
 
-(The third row disables `Q36_VK_RECURRENT_STATE_F16` and pins both engines'
+(The third row disables `P36_VK_RECURRENT_STATE_F16` and pins both engines'
 KV cache to f16.) None of the modeled GPU fast paths accounts for the gap.
 
 Two controls localize it:
-* **GPU vs GPU is bit-exact** (`Q36_TEST_PARITY_REF=vulkan`: rms 0, max_abs 0,
+* **GPU vs GPU is bit-exact** (`P36_TEST_PARITY_REF=vulkan`: rms 0, max_abs 0,
   20/20 and 64/64 overlap, OK). The harness and the GPU path are deterministic;
   the entire delta is CPU-reference-vs-GPU.
 * **g64 fails identically** to PQ2_0, so it is not the format.
@@ -426,7 +426,7 @@ match (0/4 steps, max_abs ~19).
 
 ---
 
-# Policy change: q36 is GPU-first (2026-09-18, after this report)
+# Policy change: p36 is GPU-first (2026-09-18, after this report)
 
 Whole-model CPU↔GPU numerical equivalence is **no longer a release blocker**.
 The production target is the BC-250 GPU path, so effort stops on chasing
@@ -441,7 +441,7 @@ accumulated CPU-reference-vs-GPU drift.
 
 What is still allowed: cheap, deterministic kernel/format oracles — the PQ2_0
 layout oracle, scalar dequantization, q8_K representation check, the shared
-f16/MMQ contract reference (`q36_mmq_contract.h`). They catch indexing, packing,
+f16/MMQ contract reference (`p36_mmq_contract.h`). They catch indexing, packing,
 stride and arithmetic bugs; they are not another inference backend.
 
 Track A is now validated with GPU-relevant gates only:

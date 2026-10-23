@@ -1,18 +1,18 @@
 #!/bin/sh
 set -eu
 
-model=${Q36_TEST_MODEL:-gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf}
-prompt=${Q36_RELEASE_BENCH_PROMPT:-tests/long_context_story_prompt.txt}
-min_prefill=${Q36_RELEASE_MIN_PREFILL_TPS:-50}
-min_decode=${Q36_RELEASE_MIN_DECODE_TPS:-40}
-warm=$(mktemp /tmp/q36-release-bench-warm.XXXXXX)
-run1=$(mktemp /tmp/q36-release-bench-1.XXXXXX)
-run2=$(mktemp /tmp/q36-release-bench-2.XXXXXX)
-run3=$(mktemp /tmp/q36-release-bench-3.XXXXXX)
+model=${P36_TEST_MODEL:-gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf}
+prompt=${P36_RELEASE_BENCH_PROMPT:-tests/long_context_story_prompt.txt}
+min_prefill=${P36_RELEASE_MIN_PREFILL_TPS:-50}
+min_decode=${P36_RELEASE_MIN_DECODE_TPS:-40}
+warm=$(mktemp /tmp/p36-release-bench-warm.XXXXXX)
+run1=$(mktemp /tmp/p36-release-bench-1.XXXXXX)
+run2=$(mktemp /tmp/p36-release-bench-2.XXXXXX)
+run3=$(mktemp /tmp/p36-release-bench-3.XXXXXX)
 trap 'rm -f "$warm" "$run1" "$run2" "$run3"' EXIT INT TERM
 
 run_bench() {
-    ./q36-bench -m "$model" --vulkan --prompt-file "$prompt" \
+    ./p36-bench -m "$model" --vulkan --prompt-file "$prompt" \
         --ctx-start 256 --ctx-max 256 --ctx-alloc 512 --gen-tokens 16 \
         --csv "$1"
 }

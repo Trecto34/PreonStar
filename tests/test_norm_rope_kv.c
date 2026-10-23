@@ -9,9 +9,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
-#include "../q36.h"
-#include "../q36_gpu.h"
-#include "../q36_cli_args.h"
+#include "../p36.h"
+#include "../p36_gpu.h"
+#include "../p36_cli_args.h"
 
 static double get_time_us(void) {
     struct timespec ts;
@@ -40,42 +40,42 @@ static void run_bench(uint32_t n_tok, int iters) {
     for (uint64_t i = 0; i < k_floats; i++) k_host[i] = 0.05f * ((int)(i % 23) - 11);
     for (uint64_t i = 0; i < v_floats; i++) v_host[i] = 0.03f * ((int)(i % 19) - 9);
 
-    q36_gpu_tensor *k_t = q36_gpu_tensor_alloc(k_floats * sizeof(float));
-    q36_gpu_tensor *v_t = q36_gpu_tensor_alloc(v_floats * sizeof(float));
-    q36_gpu_tensor *kc = q36_gpu_tensor_alloc((uint64_t)cap * k_row_bytes);
-    q36_gpu_tensor *vc = q36_gpu_tensor_alloc((uint64_t)cap * v_row_bytes);
+    p36_gpu_tensor *k_t = p36_gpu_tensor_alloc(k_floats * sizeof(float));
+    p36_gpu_tensor *v_t = p36_gpu_tensor_alloc(v_floats * sizeof(float));
+    p36_gpu_tensor *kc = p36_gpu_tensor_alloc((uint64_t)cap * k_row_bytes);
+    p36_gpu_tensor *vc = p36_gpu_tensor_alloc((uint64_t)cap * v_row_bytes);
 
-    q36_gpu_tensor_write(k_t, 0, k_host, k_floats * sizeof(float));
-    q36_gpu_tensor_write(v_t, 0, v_host, v_floats * sizeof(float));
-    q36_gpu_set_quality(false);
+    p36_gpu_tensor_write(k_t, 0, k_host, k_floats * sizeof(float));
+    p36_gpu_tensor_write(v_t, 0, v_host, v_floats * sizeof(float));
+    p36_gpu_set_quality(false);
 
     /* Warmup */
     for (int i = 0; i < 5; i++) {
-        int ok = q36_gpu_rms_norm_rope_qwen_kv_store_quant_tensor(
+        int ok = p36_gpu_rms_norm_rope_qwen_kv_store_quant_tensor(
             kc, vc, k_t, v_t,
             w_raw, head_dim * sizeof(float), 0,
             head_dim, n_head, pos0, n_tok, cap, eps,
             k_row_bytes, v_row_bytes);
         if (!ok) {
-            fprintf(stderr, "q36_gpu_rms_norm_rope_qwen_kv_store_quant_tensor failed at n_tok=%u\n", n_tok);
+            fprintf(stderr, "p36_gpu_rms_norm_rope_qwen_kv_store_quant_tensor failed at n_tok=%u\n", n_tok);
             exit(1);
         }
     }
 
     uint8_t *kc_host = malloc((uint64_t)cap * k_row_bytes);
-    q36_gpu_tensor_read(kc, 0, kc_host, (uint64_t)cap * k_row_bytes);
+    p36_gpu_tensor_read(kc, 0, kc_host, (uint64_t)cap * k_row_bytes);
 
     double t0 = get_time_us();
     for (int i = 0; i < iters; i++) {
-        q36_gpu_rms_norm_rope_qwen_kv_store_quant_tensor(
+        p36_gpu_rms_norm_rope_qwen_kv_store_quant_tensor(
             kc, vc, k_t, v_t,
             w_raw, head_dim * sizeof(float), 0,
             head_dim, n_head, pos0, n_tok, cap, eps,
             k_row_bytes, v_row_bytes);
     }
-    q36_gpu_tensor_read(kc, 0, kc_host, (uint64_t)cap * k_row_bytes);
+    p36_gpu_tensor_read(kc, 0, kc_host, (uint64_t)cap * k_row_bytes);
     uint8_t *vc_host = malloc((uint64_t)cap * v_row_bytes);
-    q36_gpu_tensor_read(vc, 0, vc_host, (uint64_t)cap * v_row_bytes);
+    p36_gpu_tensor_read(vc, 0, vc_host, (uint64_t)cap * v_row_bytes);
     double t1 = get_time_us();
     double avg_us = (t1 - t0) / iters;
 
@@ -92,20 +92,20 @@ static void run_bench(uint32_t n_tok, int iters) {
     free(kc_host);
     free(vc_host);
 
-    q36_gpu_tensor_free(k_t);
-    q36_gpu_tensor_free(v_t);
-    q36_gpu_tensor_free(kc);
-    q36_gpu_tensor_free(vc);
+    p36_gpu_tensor_free(k_t);
+    p36_gpu_tensor_free(v_t);
+    p36_gpu_tensor_free(kc);
+    p36_gpu_tensor_free(vc);
     free(k_host);
     free(v_host);
     free(w_raw);
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_norm_rope_kv");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_norm_rope_kv");
     if (cli_rc) return cli_rc;
-    if (!q36_gpu_init()) {
-        fprintf(stderr, "q36_gpu_init failed\n");
+    if (!p36_gpu_init()) {
+        fprintf(stderr, "p36_gpu_init failed\n");
         return 1;
     }
 
@@ -115,6 +115,6 @@ int main(int argc, char **argv) {
     run_bench(512, 50);   /* medium prefill */
     run_bench(1024, 50);  /* 1k prefill chunk */
 
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     return 0;
 }

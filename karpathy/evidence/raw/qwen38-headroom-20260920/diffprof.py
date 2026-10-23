@@ -3,10 +3,10 @@ import re, sys
 def ops(p):
     d = {}
     for l in open(p):
-        m = re.match(r'q36:\s+op (\S+)\s+.*gpu_ms=([\d.]+)', l)
+        m = re.match(r'p36:\s+op (\S+)\s+.*gpu_ms=([\d.]+)', l)
         if m:
             d[m.group(1)] = float(m.group(2))
-        m = re.match(r'q36:\s+(\S+)\.spv\s+.*gpu_ms=([\d.]+)', l)
+        m = re.match(r'p36:\s+(\S+)\.spv\s+.*gpu_ms=([\d.]+)', l)
         if m:
             d['SPV:' + m.group(1)] = float(m.group(2))
     return d

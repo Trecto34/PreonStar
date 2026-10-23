@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Real-execution regression suite for the q36-agent control features.
+"""Real-execution regression suite for the p36-agent control features.
 
 Runs the actual agent (local model or --server) on small coding tasks and checks
 artifacts plus trace/summary evidence.  Needs a model (local) or a running
-q36-server (remote); never run local and the server on a 16 GB machine at once.
+p36-server (remote); never run local and the server on a 16 GB machine at once.
 
   tests/agent_regression.py --mode local  --model gguf/X.gguf --out /tmp/reg-local.json
   tests/agent_regression.py --mode remote --server http://127.0.0.1:8000 --out /tmp/reg-remote.json
@@ -23,7 +23,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--mode", choices=["local", "remote"])
 ap.add_argument("--model")
 ap.add_argument("--server")
-ap.add_argument("--agent", default="./q36-agent")
+ap.add_argument("--agent", default="./p36-agent")
 ap.add_argument("--ctx", type=int, default=16384)
 ap.add_argument("--thinking-budget", type=int, default=768)
 ap.add_argument("--action-budget", type=int, default=384)
@@ -86,7 +86,7 @@ if not args.mode:
 
 
 def run_agent(prompt, setup=None, budgets=None, extra=()):
-    d = tempfile.mkdtemp(prefix="q36reg-")
+    d = tempfile.mkdtemp(prefix="p36reg-")
     if setup:
         setup(d)
     trace = os.path.join(d, ".trace")

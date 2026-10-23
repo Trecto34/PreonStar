@@ -1,12 +1,12 @@
 # R5 — decode attention at long context: occupancy, not redundancy
 
 Diagnosis item.  No semantic source change; the only knob exercised is the
-host-side `Q36_VK_ATTN_SPAN` (stages B/C).  Swift = `Swift-Qwen3.8-27B-IQ3_XXS.gguf`
+host-side `P36_VK_ATTN_SPAN` (stages B/C).  Swift = `Swift-Qwen3.8-27B-IQ3_XXS.gguf`
 (64 layers, 16 full-attention with 24 q heads / 4 kv heads, ratio 6, head_dim
-256, K Q8_0 / V Q4_0), guard = `Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf`
+256, K Q8_0 / V Q4_0), guard = `Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS.gguf`
 (10 full-attention layers of 40, 16 q / 2 kv, ratio 8).  Fresh process per
 (model, ctx), `tests/long_context_story_prompt.txt`, `--prefill-chunk 256`,
-`--gen-tokens 64 --mtp-margin 0`, `Q36_VK_PROF_OP=1 Q36_VK_PROF_KERNEL=1`.
+`--gen-tokens 64 --mtp-margin 0`, `P36_VK_PROF_OP=1 P36_VK_PROF_KERNEL=1`.
 
 ## Method (why the profile is usable without a prefill subtraction)
 
@@ -47,7 +47,7 @@ round 1 recorded, now localized to the longest arm.  The *share* is still stable
 
 ## Stages B/C — span sweep at ctx 16384 (the cheap experiment)
 
-`Q36_VK_ATTN_SPAN` only changes how the same key range is cut into partials
+`P36_VK_ATTN_SPAN` only changes how the same key range is cut into partials
 (`n_head * n_spans` workgroups) and regrouped by `attn_combine`.  1 rep per arm,
 fresh process, everything else identical to stage A; 512 is stage A's 2 reps.
 `attn ms/token = L x split_ms/call + combine_ms/token`.
@@ -84,8 +84,8 @@ fresh process, everything else identical to stage A; 512 is stage A's 2 reps.
    where the trend from 128 and 512 puts it at ~-3%.  Single reps, so the
    narrow side is *not* established - and two independent things close it out
    beyond the single-rep caveat: it is not bit-exact (below), and **it trips the
-   kernel gate**.  `Q36_VK_ATTN_SPAN=128 ./q36_test --vulkan-kernels` reports 3
-   failures and `=256` reports 1, all at `tests/q36_test.c:4988` (the bitwise
+   kernel gate**.  `P36_VK_ATTN_SPAN=128 ./p36_test --vulkan-kernels` reports 3
+   failures and `=256` reports 1, all at `tests/p36_test.c:4988` (the bitwise
    batch-vs-single-step-replay check), against 0 at 512, reproducibly.  The arms
    that fail are the ones whose causal range is 132 keys: at span 512 they are
    single-span and take the *fused* path, at 128 they become 2 spans and the
@@ -185,13 +185,13 @@ host-tunable `span_keys` - brackets the saturation knee and leaves **at most
 ~1% (Swift) / ~2-3% (guard, single rep) of the decode token** on the narrow side,
 only by spending a non-bit-exact regrouping of the softmax reduction plus the
 combine's ~1 us per extra partial - and it fails the `n_tok`-invariance check in
-`./q36_test --vulkan-kernels` (3 failures at span 128, 1 at 256, 0 at 512).  Not
+`./p36_test --vulkan-kernels` (3 failures at span 128, 1 at 256, 0 at 512).  Not
 landed: 1-rep evidence, not bit-exact, and gated.  The rewrite the accounting names - vectorise the V extraction the way
 `k_q8_dot_pair` already vectorises K, hoist `tmax` - is the same class R2
 measured and **rejected** on `moe_iq2s_down_sum_decode` (fewer, wider loads
 bought 0.06% on an instruction-issue-bound kernel), so it is not proposed.
 
-Numeric note: `Q36_VK_ATTN_SPAN` is **not** bit-exact - it regroups the
+Numeric note: `P36_VK_ATTN_SPAN` is **not** bit-exact - it regroups the
 online-softmax reduction in `attn_combine`, so the drift grows with the span
 count - which is the other reason not to move the default on 1-rep evidence.
 Any future use needs the NLL check, not the byte-identical one.

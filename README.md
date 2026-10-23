@@ -6,7 +6,7 @@
 **Qwen3.8-27B**.
 It is self-contained and deliberately narrow, not a general GGUF runner. 
 The main paths are `qwen35moe`-specific Vulkan and Metal graph executors with
-Q36-specific loading, prompt rendering, tool calls, KV state, HTTP server,
+P36-specific loading, prompt rendering, tool calls, KV state, HTTP server,
 and coding agent. The repository also includes tools and data for GGUF,
 imatrix, quality, and speed.
 
@@ -53,7 +53,7 @@ QuarkStar has two native GPU backends:
   automatically. Follow [BC250.md](BC250.md) for the RADV, UMA, kernel-memory,
   governor, build, and optional 40-CU setup.
 * **Apple Silicon M1 or newer** with macOS 11 or newer. Build with
-  `make metal` and run with `./q36 --metal`.
+  `make metal` and run with `./p36 --metal`.
 
 Windows is not currently a build target. The Metal backend uses unified-memory,
 mmap-backed model buffers and is independent of the Vulkan build.
@@ -78,7 +78,7 @@ AI-assisted code, this project is not for you.
 QuarkStar is a port of [DwarfStar](https://github.com/antirez/ds4) by
 Salvatore Sanfilippo (antirez), redesigned for Vulkan and retargeted at
 Qwen3.6-35B-A3B; the Apple/Metal runtime also retains and specializes
-DwarfStar's Metal kernel library. `q36.c` does not link against GGML, but
+DwarfStar's Metal kernel library. `p36.c` does not link against GGML, but
 exists thanks to the path opened by [`llama.cpp`](https://github.com/ggml-org/llama.cpp)
 and GGML — kernels, quantization formats, and the GGUF ecosystem. Some
 source-level pieces (GGUF quant layouts/tables, CPU quant/dot logic, certain
@@ -104,7 +104,7 @@ and offline tooling. For normal usage, keep reading the next sections.
 - [QA_BEFORE_RELEASES.md](QA_BEFORE_RELEASES.md): the complete release test
   matrix.
 - [MODEL_CARD.md](MODEL_CARD.md): the fixed Qwen3.6 architecture, tokenizer,
-  quantization, and sampling assumptions used by Q36.
+  quantization, and sampling assumptions used by P36.
 - [gguf-tools/README.md](gguf-tools/README.md): offline GGUF generation,
   imatrix collection, quantization tooling, and quality checks.
 - [gguf-tools/imatrix/dataset/README.md](gguf-tools/imatrix/dataset/README.md):
@@ -112,7 +112,7 @@ and offline tooling. For normal usage, keep reading the next sections.
 - [gguf-tools/quality-testing/README.md](gguf-tools/quality-testing/README.md):
   how local GGUFs are scored against OpenRouter continuations.
 - [dir-steering/README.md](dir-steering/README.md): the preserved DS4 vector
-  generation experiment that informed Q36's directional-steering runtime.
+  generation experiment that informed P36's directional-steering runtime.
 - [tests/test-vectors/README.md](tests/test-vectors/README.md): tracked
   llama.cpp continuation vectors used for regression checks.
 
@@ -127,29 +127,29 @@ behave well and call tools reliably under coding agents.
 Start dense Qwen3.8-27B explicitly:
 
 ```sh
-./q36-server \
+./p36-server \
   -m gguf/Qwen3.8-27B-UD-IQ3_S.gguf \
   --vulkan
 ```
 
 ### Vision
 
-Q36 accepts the matching Qwen3-VL projector as a disk-backed sidecar. It maps
+P36 accepts the matching Qwen3-VL projector as a disk-backed sidecar. It maps
 the file without copying the model and streams one weight tensor at a time
 through a reusable Vulkan buffer. The full 0.9 GiB projector is never retained
 in RAM or VRAM, and streamed pages are released after each dispatch.
 
 ```sh
-./q36 --vision gguf/Qwen3.6-35B-A3B-mmproj-F16.gguf
-./q36 -m gguf/Qwen3.8-27B-UD-IQ3_S.gguf \
+./p36 --vision gguf/Qwen3.6-35B-A3B-mmproj-F16.gguf
+./p36 -m gguf/Qwen3.8-27B-UD-IQ3_S.gguf \
   --vision gguf/Qwen3.8-27B-mmproj-F16.gguf
 ```
 
 At the interactive prompt, `/read photo.jpg` and `/read image.png` submit an
 image turn, optionally with a prompt (`/read photo.jpg Describe this image`).
 JPEG/PNG decoding is built in. Vision prompt execution currently requires
-Vulkan. `q36-agent --vision FILE` exposes `view_image` for local files;
-`q36-server --vision FILE` accepts OpenAI image data URIs, Responses image
+Vulkan. `p36-agent --vision FILE` exposes `view_image` for local files;
+`p36-server --vision FILE` accepts OpenAI image data URIs, Responses image
 blocks, and Anthropic base64 images (remote image URLs are rejected). The
 server caches at most 32 MiB of decoded image embeddings; projector weights
 stay streamed from disk. Vision sessions currently cannot be saved as agent
@@ -178,7 +178,7 @@ Choose one. The first target matches the compiled default path. Select the
 second explicitly:
 
 ```sh
-./q36 -m gguf/Qwen3.6-35B-A3B-Layers34-39Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-Q8Rest-imatrix.gguf \
+./p36 -m gguf/Qwen3.6-35B-A3B-Layers34-39Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-Q8Rest-imatrix.gguf \
   --ssd-streaming -p "Hello"
 ```
 
@@ -186,7 +186,7 @@ The script downloads Qwen3.6 models from
 `https://huggingface.co/Ninnix96/Qwen3.6-35B-A3B-gguf` and dense Qwen3.8-27B
 from `https://huggingface.co/unsloth/Qwen3.8-27B-GGUF`. It stores files under
 `./gguf/`, resumes partial downloads with `curl -C -`, and updates
-`./q36moe.gguf` to point at the selected model for older scripts.
+`./p36moe.gguf` to point at the selected model for older scripts.
 
 For the reasoning-efficient Swift derivative, the practical tier for this
 16 GB BC-250 is IQ3_XXS, from
@@ -199,7 +199,7 @@ For the reasoning-efficient Swift derivative, the practical tier for this
 
 `run_swift.sh` uses a 4096-token default context and binds the embedded MTP
 draft head, but defaults to one draft position because the BC-250 benchmark
-was faster without speculative verification. Set `Q36_SWIFT_MTP_DRAFT=3` to
+was faster without speculative verification. Set `P36_SWIFT_MTP_DRAFT=3` to
 opt into three-position MTP. IQ4_XS had a dedicated bounded-memory
 profile, but its 14.6 GiB file was removed because it was unusably slow on this
 hardware and full residency triggered the host OOM killer.
@@ -226,8 +226,8 @@ Salvatore Sanfilippo and distributed under its included MIT license.
 
 `gguf/Qwen3.6-35B-A3B-AntirezExperts-IQ2XXS-gateup-Q2K-down-Q8rest.gguf` is
 the default model path used by all runtime binaries. Pass `-m` to select another
-supported GGUF from `./gguf/`. Run `./q36 --help` and
-`./q36-server --help` for the full flag list.
+supported GGUF from `./gguf/`. Run `./p36 --help` and
+`./p36-server --help` for the full flag list.
 
 If you want to regenerate GGUF files, quantize community fine-tunes / abliterated models
 (via `--strip-nextn`), or collect a new imatrix, see
@@ -304,14 +304,14 @@ one BC-250 at 8192 ctx, 5 interleaved reps per arm:
 | Qwen3.6-35B-A3B IQ2_XXS (MoE) | 386.47 t/s | 491.38 t/s | +27.15% |
 
 Decode is unchanged. The gain grows with context and is small at 1-2k. It is
-on by default; `Q36_VK_ATTN_FA=0` restores the previous kernel. Numbers,
+on by default; `P36_VK_ATTN_FA=0` restores the previous kernel. Numbers,
 parity and quality checks: `karpathy/evidence/attn-fa-prefill.md`.
 
 Metal benchmark numbers (M2 Pro) were dropped from this README since the
 primary tested/tuned device is the BC-250; the Metal backend is still fully
 supported (see Requirements above), just not benchmarked here.
 
-Use `q36-bench` for reproducible prefill and decode measurements. Release
+Use `p36-bench` for reproducible prefill and decode measurements. Release
 builds also have a conservative BC-250 performance gate under
 `make benchmark-gate`; record results on the same board and power state when
 comparing changes.
@@ -328,32 +328,32 @@ static weights and the minimum working cache leave insufficient room. Startup
 logs show the resolved context and model budgets.
 
 ```sh
-./q36 --metal --ssd-streaming -p "Explain radix trees."
-./q36 --vulkan --ssd-streaming --ssd-streaming-cache-experts 256 -p "Hello"
-./q36 --metal --ssd-streaming --ssd-streaming-cache-experts 1GB -p "Hello"
+./p36 --metal --ssd-streaming -p "Explain radix trees."
+./p36 --vulkan --ssd-streaming --ssd-streaming-cache-experts 256 -p "Hello"
+./p36 --metal --ssd-streaming --ssd-streaming-cache-experts 1GB -p "Hello"
 ```
 
-`NGB` is a routed-expert byte budget. Q36 converts it to the number of expert
+`NGB` is a routed-expert byte budget. P36 converts it to the number of expert
 slots that fit the release GGUF. A plain integer requests an expert-slot count;
 both forms are capped to leave room for the configured contexts.
 Non-routed weights, KV cache, activations, and graph scratch need additional
 memory. Startup prints the resolved slot count and actual cache allocation.
 
-A built-in or `Q36_VK_STREAMING_EXPERT_HOTLIST` profile biases eviction
+A built-in or `P36_VK_STREAMING_EXPERT_HOTLIST` profile biases eviction
 without reading expert weights at startup. It does not fill the cache with
 arbitrary experts when no profile exists. Use `--ssd-streaming-cold` for an
 empty cache, or `--ssd-streaming-preload-experts N` to request an explicit
 weight preload. Metal stores mixed expert sizes in component-wise padded cache
 slots, so the IQ2/Q2 and Q4 routed layers share one bounded cache and one
 hotlist policy. Vulkan retains its original single-size-class behavior. The
-`Q36_VK_STREAMING_EXPERT_HOTLIST` and
-`Q36_VK_DISABLE_STREAMING_EXPERT_HOTLIST` names are retained for compatibility
+`P36_VK_STREAMING_EXPERT_HOTLIST` and
+`P36_VK_DISABLE_STREAMING_EXPERT_HOTLIST` names are retained for compatibility
 and apply to both graph runtimes.
 
 As in DS4, an explicit routed prefix can stay fully resident:
 
 ```sh
-./q36 --ssd-streaming --ssd-streaming-full-layers 4 -p "Hello"
+./p36 --ssd-streaming --ssd-streaming-full-layers 4 -p "Hello"
 ```
 
 Full layers are charged at their actual byte size and the remaining budget
@@ -369,7 +369,7 @@ size uses `recommendedMaxWorkingSetSize`.
 
 ## Native Agent
 
-Q36 includes a native coding agent. Inference is controlled inside the agent
+P36 includes a native coding agent. Inference is controlled inside the agent
 itself, without a socket or API boundary, so the transcript and live KV state
 are one session. The tools and system prompt use Qwen3.6's native tagged tool
 format directly. This provides a few advantages:
@@ -385,9 +385,9 @@ format directly. This provides a few advantages:
 Start the agent in the current directory, another project, or one-shot mode:
 
 ```sh
-./q36-agent
-./q36-agent --chdir /path/to/project
-./q36-agent --non-interactive -p "Inspect the tests and fix the failure."
+./p36-agent
+./p36-agent --chdir /path/to/project
+./p36-agent --non-interactive -p "Inspect the tests and fix the failure."
 ```
 
 `--thinking-budget` is a hard maximum for each thinking block and defaults to
@@ -429,7 +429,7 @@ chunk width practical at long contexts. CPU uses F16 KV. SSD-streamed model
 weights also default to a 100000-token context with F16 KV.
 Explicit `--ctx`, `-ctk`, and `-ctv` values override the preset.
 
-`q36-agent --chdir` loads its model and runtime assets from the launch directory,
+`p36-agent --chdir` loads its model and runtime assets from the launch directory,
 then changes to the requested project for agent tools. Built-in path tools also
 expand `~` to the current user's home directory.
 
@@ -443,7 +443,7 @@ Use `/hints on` for occasional short explanations of programming concepts behind
 the current work, rendered as teal blockquotes. `/hints off` disables them. This
 setting lasts for the current process and is reapplied after context compaction.
 
-Both `q36` and `q36-agent` accept `--prefix-file FILE`. The file contains alternating
+Both `p36` and `p36-agent` accept `--prefix-file FILE`. The file contains alternating
 `USER:` and `ASSISTANT:` lines, starting with a user and ending with an assistant.
 Turn content may span multiple lines. The CLI prefills this conversation before
 the first interactive prompt; the agent keeps it through reset and compaction.
@@ -454,7 +454,7 @@ USER: Our project uses C99 and has no external dependencies.
 ASSISTANT: I will follow those constraints.
 ```
 
-Sessions are stored in `~/.q36/kvcache`. Use `/save` to persist the current
+Sessions are stored in `~/.p36/kvcache`. Use `/save` to persist the current
 session, `/list` to show saved sessions, and `/switch <sha>` to resume one.
 The session ID remains stable across later saves. `/del <sha>` removes a saved
 session. `/strip <sha>` keeps its transcript and title but removes the KV
@@ -476,7 +476,7 @@ adds prompt text. Defaults are conservative and every control can be turned off.
 | `--max-repeat-tool N` | 1 | Identical read-only calls allowed against an unchanged workspace. Any write/edit/bash resets the memory. The same call back to back is blocked for every tool. Blocked calls return `REPEAT_CALL_BLOCKED`. |
 | `--max-stagnant-turns N` | 2 | Blocked or identically failing calls in a row before a recovery. |
 | `--max-verify-steps N` | 8 | The controller is in phase `IMPLEMENT` (default), `VERIFY` or `FINALIZE_REQUIRED`. Reads, searches and listings never enter `VERIFY`, so recovering after compaction is free; a known test/check command (`node --check`, `pytest`, `make test`, lint, headless browser), a verification-helper run or a page visit after a target edit does, and the agent then gets N steps to check its work. A target edit returns to `IMPLEMENT` and resets the count, as does a tool result with a `MISSING:` / `- item` block (concrete evidence work is absent), which also blocks `VERIFY`; edits to disposable verification helpers (temp-dir scripts, or files the agent created itself named like `verify`, `probe`, `mock`) do not. A repeated or near-identical check costs 2. When spent, the state is `FINALIZE_REQUIRED`: further tool calls are refused with `VERIFICATION_BUDGET_EXHAUSTED` and the model must report what is confirmed working, confirmed failing and unresolved. If it keeps calling tools the controller ends the turn with a stop report built from tracked facts (not a success claim). `0` disables. Read-only investigations before the first edit are not limited. |
-| `--workspace DIR` | launch dir | Workspace jail root. File tools (`read`, `write`, `edit`, `search`, `list`, `view_image`) are refused with `WORKSPACE_ESCAPE_BLOCKED` unless the canonical path is inside it (`..`, absolute paths and symlink escapes included). `bash` runs under bubblewrap: cwd is the root, only the root is writable, system dirs are read-only, other home/project directories do not exist, scratch lives in `DIR/.q36-tmp`. The root is shown as `WORKSPACE_ROOT` in the compacted task state and cannot be changed by the model. |
+| `--workspace DIR` | launch dir | Workspace jail root. File tools (`read`, `write`, `edit`, `search`, `list`, `view_image`) are refused with `WORKSPACE_ESCAPE_BLOCKED` unless the canonical path is inside it (`..`, absolute paths and symlink escapes included). `bash` runs under bubblewrap: cwd is the root, only the root is writable, system dirs are read-only, other home/project directories do not exist, scratch lives in `DIR/.p36-tmp`. The root is shown as `WORKSPACE_ROOT` in the compacted task state and cannot be changed by the model. |
 | `--yolo` | off | Explicit opt-out of the whole jail (file tools and shell); prints a startup warning. |
 | `--unsafe-filesystem` | off | File tools may leave the workspace; the shell stays confined. |
 | `--max-implementation-steps N` | 96 | Emergency ceiling on tool steps spent in the IMPLEMENT phase per turn. Unlike the progress counters, target edits do not reset it, so mutation thrashing ends in an INCOMPLETE/STOPPED report (never VERIFY, never BLOCKED). `0` disables. |
@@ -501,11 +501,11 @@ share, prefill/decode tok/s).
 #### Remote agent
 
 ```sh
-q36-agent --server http://192.168.3.50:8000 --server-model MODEL \
+p36-agent --server http://192.168.3.50:8000 --server-model MODEL \
   --think --thinking-budget 768 --action-budget 384 --chdir repo
 ```
 
-Inference runs on a `q36-server`; tools, shell, watchdog, recovery and
+Inference runs on a `p36-server`; tools, shell, watchdog, recovery and
 compaction state stay local. The server owns the chat template, tokenizer,
 reasoning split, KV and exact tool-call replay; the client sends OpenAI-format
 messages with structured `tools` and streams the reply. `--api-key` adds a
@@ -548,7 +548,7 @@ and `tests/bench_agent_loop.py` for overhead checks.
 
 ## Benchmarking
 
-`q36-bench` measures instantaneous prefill and generation throughput at
+`p36-bench` measures instantaneous prefill and generation throughput at
 context frontiers instead of reporting one whole-run average. It loads the
 model once, walks a fixed token sequence to frontiers such as 2048, 4096, and
 6144, and uses incremental prefill so each row measures only the newly added
@@ -557,20 +557,20 @@ generates a fixed greedy non-EOS probe, restores the snapshot, and continues
 prefill.
 
 ```sh
-./q36-bench --vulkan --prompt-file tests/long_context_story_prompt.txt \
+./p36-bench --vulkan --prompt-file tests/long_context_story_prompt.txt \
   --ctx-start 2048 --ctx-max 32768 --gen-tokens 128
 ```
 
 ## Capability Evaluation
 
-`q36-eval` is a real-model integration benchmark, not a leaderboard runner.
+`p36-eval` is a real-model integration benchmark, not a leaderboard runner.
 Its 92 embedded questions are a regression subset: 25 GPQA Diamond, 25
 curated SuperGPQA, 25 AIME 2025, and 17 COMPSEC cases. It loads the GGUF,
 renders Qwen3.6 chat prompts, streams sampled tokens in a TUI, grades the final
 answers, and prints prompt-token, generated-token, and pass/fail results.
 
 ```sh
-./q36-eval --trace /tmp/q36-eval.txt
+./p36-eval --trace /tmp/p36-eval.txt
 ```
 
 The default run uses a 16000-token generation budget and thinking mode. The
@@ -584,7 +584,7 @@ and scorer on a saved trace without loading the model. A short deterministic
 smoke run is:
 
 ```sh
-./q36-eval --plain --questions 4 --tokens 2048 --temp 0 --seed 1
+./p36-eval --plain --questions 4 --tokens 2048 --temp 0 --seed 1
 ```
 
 ## CLI
@@ -592,20 +592,20 @@ smoke run is:
 One-shot prompt:
 
 ```sh
-./q36 -p "Explain Redis streams in one paragraph."
+./p36 -p "Explain Redis streams in one paragraph."
 ```
 
-Without `-p`, Q36 starts an interactive multi-turn chat:
+Without `-p`, P36 starts an interactive multi-turn chat:
 
 ```sh
-./q36
-q36>
+./p36
+p36>
 ```
 
 The CLI keeps the rendered transcript and live graph KV checkpoint, so each
 turn extends the previous conversation. Useful commands are `/help`, `/think`,
 `/think-max`, `/nothink`, `/ctx N`, `/read FILE [PROMPT]`, and `/quit`. Ctrl+C interrupts
-the current generation and returns to `q36>`.
+the current generation and returns to `p36>`.
 
 Thinking mode is enabled by default. Use `/nothink` or `--nothink` for direct
 answers. `--mtp MTP.gguf --mtp-draft 2` enables the optional MTP speculative
@@ -617,17 +617,17 @@ currently an experimental slight-speedup path.
 Start a local OpenAI/Anthropic-compatible server:
 
 ```sh
-./q36-server --vulkan --ctx 32768 \
-  --kv-disk-dir /tmp/q36-kv --kv-disk-space-mb 8192
+./p36-server --vulkan --ctx 32768 \
+  --kv-disk-dir /tmp/p36-kv --kv-disk-space-mb 8192
 
-./q36-server --metal --ctx 32768 \
-  --kv-disk-dir /tmp/q36-kv --kv-disk-space-mb 8192
+./p36-server --metal --ctx 32768 \
+  --kv-disk-dir /tmp/p36-kv --kv-disk-space-mb 8192
 ```
 
 On an 8 GB Mac, reduce context and use the bounded Metal cache:
 
 ```sh
-./q36-server --metal --ssd-streaming \
+./p36-server --metal --ssd-streaming \
   --ssd-streaming-cache-experts 512 --ctx 4096
 ```
 
@@ -639,7 +639,7 @@ token zero.
 `--batched-session N` opts into `N` independent resident sessions:
 
 ```sh
-./q36-server --ctx 32768 --batched-session 4
+./p36-server --ctx 32768 --batched-session 4
 ```
 
 Use `--mixed-prefill-quantum N` to tune how many prefill tokens a batched
@@ -669,9 +669,9 @@ recurrent state, and graph scratch fit. Backend behavior is:
 | Vulkan SSD streaming | Deterministic ordered fallback, preserving expert-cache ownership. |
 | Metal resident, 2-8 decode-ready rows | Native row-batched graph execution where the kernel shape is supported; ordered exact fallback otherwise. |
 | Metal SSD streaming | Deterministic ordered fallback, preserving bounded expert-cache ownership. |
-| CPU, batches above 8, or forced `Q36_VK_SESSION_BATCH=0` | Deterministic ordered fallback. The compatibility environment variable also controls Metal session batching. |
+| CPU, batches above 8, or forced `P36_VK_SESSION_BATCH=0` | Deterministic ordered fallback. The compatibility environment variable also controls Metal session batching. |
 
-Batch size one calls `q36_session_eval()` directly. If a batched step fails,
+Batch size one calls `p36_session_eval()` directly. If a batched step fails,
 all members are invalidated so none can silently continue from a partially
 advanced frontier. Ordered fallback preserves concurrency and scheduling
 fairness, but does not provide the aggregate throughput gain of native GPU
@@ -696,7 +696,7 @@ back to OpenAI tool calls.
 
 Flash attention is built in, so there is no `-fa` switch (unlike llama.cpp).
 Vulkan prefill uses the flash-attention kernels `attn_prefill_fa_gqa6/gqa8`
-(on by default; `Q36_VK_ATTN_FA=0` falls back to the qtile2 kernel for A/B
+(on by default; `P36_VK_ATTN_FA=0` falls back to the qtile2 kernel for A/B
 checks), and decode uses split-K flash-decoding (`attn_decode_split` +
 `attn_combine`). llama.cpp flags such as `-fa on` are not accepted.
 
@@ -704,7 +704,7 @@ Server sampling defaults apply when a request omits a field; explicit request
 values always win:
 
 ```
-q36-server --temp 0.2 --top-p 0.9 --min-p 0.05 --top-k 40 --repeat-penalty 1.05
+p36-server --temp 0.2 --top-p 0.9 --min-p 0.05 --top-k 40 --repeat-penalty 1.05
 ```
 
 `--temp` (0..100), `--top-k` (0 = off), `--top-p` (0..1), `--min-p` (0..1) and
@@ -727,7 +727,7 @@ Both Qwen3.6 and Qwen3.8 accept the fixed-template controls:
 `preserve_thinking` defaults to `true`, retaining earlier assistant reasoning
 verbatim so later prompts remain a prefix-cache match. Set it to `false` to
 strip reasoning before the latest user query. System and user messages may also
-contain `<|think_on|>` or `<|think_off|>`; Q36 removes the control marker before
+contain `<|think_on|>` or `<|think_off|>`; P36 removes the control marker before
 rendering and applies it to subsequent turns.
 
 When omitted by the client, Qwen uses `temperature=1`, `top_p=1`, no top-k cap,
@@ -786,7 +786,7 @@ re-rendered those objects slightly differently, the rendered byte prefix
 would no longer match the live KV checkpoint** and the next turn would have
 to be rebuilt.
 
-All markers are plain ASCII. Q36 keeps the exact replay and canonicalization
+All markers are plain ASCII. P36 keeps the exact replay and canonicalization
 machinery inherited from `ds4`, because a sampled call and its next-turn API
 rendering must still be byte-identical to avoid silent KV drift.
 
@@ -831,12 +831,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### Agent Client Usage
 
-`q36-server` can be used by local coding agents that speak OpenAI-compatible
+`p36-server` can be used by local coding agents that speak OpenAI-compatible
 chat completions. Start the server first, and set the client context limit
 no higher than the `--ctx` value you started the server with:
 
 ```sh
-./q36-server --ctx 32768 --kv-disk-dir /tmp/q36-kv --kv-disk-space-mb 8192
+./p36-server --ctx 32768 --kv-disk-dir /tmp/p36-kv --kv-disk-space-mb 8192
 ```
 
 On a BC-250 with 16 GB of unified memory, weights take ~10–11 GB at Q2,
@@ -857,16 +857,16 @@ For **opencode**, add a provider and agent entry to
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
-    "q36": {
-      "name": "q36.c (local)",
+    "p36": {
+      "name": "p36.c (local)",
       "npm": "@ai-sdk/openai-compatible",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "q36-local"
+        "apiKey": "p36-local"
       },
       "models": {
         "qwen3.6-35b-a3b": {
-          "name": "Qwen 3.6 MoE (q36.c local)",
+          "name": "Qwen 3.6 MoE (p36.c local)",
           "limit": {
             "context": 32768,
             "output": 262144
@@ -876,9 +876,9 @@ For **opencode**, add a provider and agent entry to
     }
   },
   "agent": {
-    "q36": {
-      "description": "Qwen 3.6 MoE served by local q36-server",
-      "model": "q36/qwen3.6-35b-a3b",
+    "p36": {
+      "description": "Qwen 3.6 MoE served by local p36-server",
+      "model": "p36/qwen3.6-35b-a3b",
       "temperature": 0
     }
   }
@@ -890,11 +890,11 @@ For **Pi**, add a provider to `~/.pi/agent/models.json`:
 ```json
 {
   "providers": {
-    "q36": {
-      "name": "q36.c local",
+    "p36": {
+      "name": "p36.c local",
       "baseUrl": "http://127.0.0.1:8000/v1",
       "api": "openai-completions",
-      "apiKey": "q36-local",
+      "apiKey": "p36-local",
       "compat": {
         "supportsStore": false,
         "supportsDeveloperRole": false,
@@ -908,7 +908,7 @@ For **Pi**, add a provider to `~/.pi/agent/models.json`:
       "models": [
         {
           "id": "qwen3.6-35b-a3b",
-          "name": "Qwen 3.6 MoE (q36.c local)",
+          "name": "Qwen 3.6 MoE (p36.c local)",
           "reasoning": true,
           "thinkingLevelMap": {
             "off": null,
@@ -938,25 +938,25 @@ Optionally make it the default Pi model in `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "defaultProvider": "q36",
+  "defaultProvider": "p36",
   "defaultModel": "qwen3.6-35b-a3b"
 }
 ```
 
 For **Claude Code**, use the Anthropic-compatible endpoint. A wrapper like
-this matches the local `~/bin/claude-q36` setup:
+this matches the local `~/bin/claude-p36` setup:
 
 ```sh
 #!/bin/sh
 unset ANTHROPIC_API_KEY
 
-export ANTHROPIC_BASE_URL="${Q36_ANTHROPIC_BASE_URL:-http://127.0.0.1:8000}"
-export ANTHROPIC_AUTH_TOKEN="${Q36_API_KEY:-q36-local}"
+export ANTHROPIC_BASE_URL="${P36_ANTHROPIC_BASE_URL:-http://127.0.0.1:8000}"
+export ANTHROPIC_AUTH_TOKEN="${P36_API_KEY:-p36-local}"
 export ANTHROPIC_MODEL="qwen3.6-35b-a3b"
 
 export ANTHROPIC_CUSTOM_MODEL_OPTION="qwen3.6-35b-a3b"
-export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Qwen 3.6 MoE local q36"
-export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="q36.c local GGUF"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Qwen 3.6 MoE local p36"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="p36.c local GGUF"
 
 export ANTHROPIC_DEFAULT_SONNET_MODEL="qwen3.6-35b-a3b"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="qwen3.6-35b-a3b"
@@ -1004,12 +1004,12 @@ Mapping of API thinking controls to prompt rendering:
 
 ## KV Cache Quantization
 
-Q36 supports `f16`, `q8_0`, and `q4_0` KV rows. Select key and value types
+P36 supports `f16`, `q8_0`, and `q4_0` KV rows. Select key and value types
 independently with `-ctk` and `-ctv`:
 
 ```sh
-./q36 -ctk q8_0 -ctv q4_0 -p "Explain radix trees."
-./q36-server -ctk f16 -ctv f16
+./p36 -ctk q8_0 -ctv q4_0 -p "Explain radix trees."
+./p36-server -ctk f16 -ctv f16
 ```
 
 Resident Metal and Vulkan frontends default to Q8_0 keys and Q4_0 values. CPU
@@ -1020,7 +1020,7 @@ model weight quantization or extend Qwen3.6's 262144-token native context.
 ## Disk KV Cache
 
 Chat/completion APIs are stateless: agent clients usually resend the whole
-conversation every request. `q36-server` first tries the cheap exact
+conversation every request. `p36-server` first tries the cheap exact
 token-prefix check, then falls back to comparing rendered prompt bytes with
 decoded checkpoint bytes. The live in-memory checkpoint covers the current
 session; the disk KV cache makes useful prefixes survive session switches
@@ -1034,11 +1034,11 @@ re-processing if it was written to the disk KV cache.
 Enable it with:
 
 ```sh
-./q36-server --kv-disk-dir /tmp/q36-kv --kv-disk-space-mb 8192
+./p36-server --kv-disk-dir /tmp/p36-kv --kv-disk-space-mb 8192
 ```
 
 The cache key is the SHA1 of the rendered byte prefix, and files are named
-`<sha1>.kv`. The Q36 payload still stores the exact token IDs and graph
+`<sha1>.kv`. The P36 payload still stores the exact token IDs and graph
 state for that prefix. This matters for continued chats: the model may have
 generated one token whose decoded text is later sent back by a client as two
 canonical prompt tokens. A rendered byte-prefix hit can still reuse the
@@ -1055,7 +1055,7 @@ and fall back to canonical JSON-to-Qwen rendering.
 
 Each cache file (`<sha1>.kv`) holds a small header, the human-readable
 rendered prefix text (both the lookup key source and the check against BPE
-re-tokenization drift), the full Q36 session payload (checkpoint tokens,
+re-tokenization drift), the full P36 session payload (checkpoint tokens,
 next-token logits, and per-layer K/V or recurrent state), and an optional
 tool-call exact-replay map so restarted servers can still render client tool
 history byte-for-byte. See
@@ -1109,17 +1109,17 @@ conversation with the same prefix restores it instead of recomputing it.
 
 ## Backends
 
-Q36 is multi-runtime at the source and API level, but Metal and Vulkan are
+P36 is multi-runtime at the source and API level, but Metal and Vulkan are
 separate native builds rather than one fat executable. Each build produces the
-same command names—`q36`, `q36-server`, `q36-bench`, `q36-agent`, `q36-eval`,
-and `q36_test`—linked to the selected graph runtime:
+same command names—`p36`, `p36-server`, `p36-bench`, `p36-agent`, `p36-eval`,
+and `p36_test`—linked to the selected graph runtime:
 
 | Platform/runtime | Build | Explicit invocation |
 | --- | --- | --- |
-| Linux / generic Vulkan | `make` or `make vulkan-generic` | `./q36 --vulkan -p "Hello"` |
-| Linux / BC-250 checked Vulkan | `make vulkan-bc250` | `./q36 --vulkan -p "Hello"` |
-| macOS / Metal | `make metal` | `./q36 --metal -p "Hello"` |
-| CPU reference | `make cpu` | `./q36 --cpu -p "Hello"` |
+| Linux / generic Vulkan | `make` or `make vulkan-generic` | `./p36 --vulkan -p "Hello"` |
+| Linux / BC-250 checked Vulkan | `make vulkan-bc250` | `./p36 --vulkan -p "Hello"` |
+| macOS / Metal | `make metal` | `./p36 --metal -p "Hello"` |
+| CPU reference | `make cpu` | `./p36 --cpu -p "Hello"` |
 
 Building another runtime overwrites those local executable names. Use separate
 worktrees or copy build artifacts if Metal, Vulkan, and CPU binaries must be
@@ -1153,7 +1153,7 @@ so scratch is sized for the chunk that will actually run rather than the one
 requested — scratch grows with chunk width, and sizing for an unclamped request
 reserves memory that is never touched.
 
-`Q36_VK_PREFILL_CHUNK_UNSAFE=1` restores the raw value. It is not recommended:
+`P36_VK_PREFILL_CHUNK_UNSAFE=1` restores the raw value. It is not recommended:
 beyond the watchdog risk, a chunk wider than the clamp has measured *slower* on
 this hardware as well as larger, so the clamp costs nothing in practice. Sweep
 `--prefill-chunk` on your own board if you want to confirm the optimum for it.
@@ -1161,8 +1161,8 @@ this hardware as well as larger, so the clamp costs nothing in practice. Sweep
 #### Optional GPU fast paths
 
 Two kernel variants trade bit-exactness for speed. Both are **off by default**,
-both are available as flags on every front end (`q36`, `q36-server`, `q36-bench`,
-`q36-eval`, `q36-agent`), and both also read an equivalent `Q36_VK_*` environment
+both are available as flags on every front end (`p36`, `p36-server`, `p36-bench`,
+`p36-eval`, `p36-agent`), and both also read an equivalent `P36_VK_*` environment
 variable.
 
 | flag | what it changes | exactness |
@@ -1183,7 +1183,7 @@ Prefill attention uses the flash-attention kernel by default (see
 [Speed](#long-context-prefill-flash-attention)). It is **not bit-exact** with
 the previous `attn_prefill_qtile2` kernel: f32 sums are added in a different
 order. On a teacher-forced next-token check at 8k it moved scores less than
-changing `--prefill-chunk` from 256 to 128 does. Set `Q36_VK_ATTN_FA=0` to go
+changing `--prefill-chunk` from 256 to 128 does. Set `P36_VK_ATTN_FA=0` to go
 back for A/B comparisons.
 
 `--attn-span` trades sequential `attn_combine` rescale cost against split-K
@@ -1196,7 +1196,7 @@ depends on CU count, thermal headroom, and context.
 ### Metal device and compatibility policy
 
 Like DS4, a normal local Metal process uses `MTLCreateSystemDefaultDevice`.
-Apple Silicon exposes its unified GPU as one logical Metal device, so Q36
+Apple Silicon exposes its unified GPU as one logical Metal device, so P36
 needs no device list for M1/M2/M3/M4+; one process owns one default device
 and one model, with no layer split or multi-Mac mode.
 
@@ -1206,28 +1206,28 @@ code defaults to the Apple M1 instruction baseline so a binary built on a
 newer Mac stays usable on M1 (`NATIVE_CPU_FLAG=-mcpu=native make metal` for a
 local-only build). Routed MoE prefill uses DS4's expert-major batch-MM
 dispatch where the shape is supported, falling back to the exact matvec path
-otherwise (`Q36_METAL_MOE_MM=0` forces that fallback). Cache auto-sizing uses
+otherwise (`P36_METAL_MOE_MM=0` forces that fallback). Cache auto-sizing uses
 `recommendedMaxWorkingSetSize`; all model buffers use unified storage, with
 no discrete-GPU/eGPU path.
 
 Metal shaders compile at runtime from `metal/*.metal` — run frontends from
 the project tree and ship the `metal` directory with binary packages. A
 frontend that changes working directory before model startup must set
-absolute paths via `Q36_METAL_DENSE_SOURCE`, `Q36_METAL_MOE_SOURCE`,
-`Q36_METAL_NORM_SOURCE`, `Q36_METAL_OPS_SOURCE`,
-`Q36_METAL_RECURRENT_SOURCE`, `Q36_METAL_KV_SOURCE`, and
-`Q36_METAL_ATTN_SOURCE`.
+absolute paths via `P36_METAL_DENSE_SOURCE`, `P36_METAL_MOE_SOURCE`,
+`P36_METAL_NORM_SOURCE`, `P36_METAL_OPS_SOURCE`,
+`P36_METAL_RECURRENT_SOURCE`, `P36_METAL_KV_SOURCE`, and
+`P36_METAL_ATTN_SOURCE`.
 
 ### CPU reference runtime
 
-Do not treat the CPU path as the production target. The CLI and `q36-server`
+Do not treat the CPU path as the production target. The CLI and `p36-server`
 support the CPU backend for reference/debug use and share the same KV
 session and snapshot format as Metal and Vulkan, but normal inference should
 use a GPU graph runtime.
 
 ## Steering
 
-Q36 can edit attention and FFN outputs with the same projection used by DS4:
+P36 can edit attention and FFN outputs with the same projection used by DS4:
 
 ```text
 y = y - scale * direction[layer] * dot(direction[layer], y)
@@ -1239,7 +1239,7 @@ direction; negative scales amplify it. FFN steering defaults to `1` when a
 file is supplied without an explicit scale:
 
 ```sh
-./q36 -p "Write tersely" \
+./p36 -p "Write tersely" \
   --dir-steering-file qwen-direction.f32 \
   --dir-steering-ffn 0.8
 ```
@@ -1255,9 +1255,9 @@ When a generation looks wrong, three small tools are usually enough to get
 a first answer:
 
 ```sh
-./q36 --dump-tokens -p "..."
-./q36 --dump-logprobs /tmp/out.json --logprobs-top-k 20 --temp 0 -p "..."
-./q36-server --trace /tmp/q36-trace.txt ...
+./p36 --dump-tokens -p "..."
+./p36 --dump-logprobs /tmp/out.json --logprobs-top-k 20 --temp 0 -p "..."
+./p36-server --trace /tmp/p36-trace.txt ...
 ```
 
 - `--dump-tokens` tokenizes the `-p`/`--prompt-file` string exactly as
@@ -1267,7 +1267,7 @@ a first answer:
 - `--dump-logprobs` stores a greedy continuation with the top local
   alternatives at each step, separating sampling choices from logit/model
   issues.
-- `q36-server --trace` writes rendered prompts, cache decisions, generated
+- `p36-server --trace` writes rendered prompts, cache decisions, generated
   text, and tool-parser events for a whole agent session.
 
 A GPU hang (most often the kernel watchdog firing) destroys the Vulkan
@@ -1285,6 +1285,6 @@ reworked by Ben Gnomino. All credit to Salvatore.
 ## Testing, QA, and Regression Checks
 
 Release testing (correctness/speed regression `make` targets, the release QA
-checklist, test vectors, and extended `q36-eval` suites) lives in
+checklist, test vectors, and extended `p36-eval` suites) lives in
 [CONTRIBUTING.md](CONTRIBUTING.md) and [QA_BEFORE_RELEASES.md](QA_BEFORE_RELEASES.md) —
 **read those before sending a pull request**.

@@ -4,13 +4,13 @@ uname: Linux bc250 7.2.6-1-cachyos #1 SMP PREEMPT_DYNAMIC Thu, 17 Sep 2026 10:26
 
 === git status ===
  M Makefile
- M q36.c
- M q36_vulkan.c
+ M p36.c
+ M p36_vulkan.c
  M vulkan/dense_extra_decode.comp
  M vulkan/dense_extra_mmq.comp
 ?? logs/bc250-sustained-20260918/ab_model.sh
 ?? logs/bc250-sustained-20260918/attn_parity
-?? logs/bc250-sustained-20260918/baseline/q36-bench
+?? logs/bc250-sustained-20260918/baseline/p36-bench
 ?? logs/bc250-sustained-20260918/hadamard_parity
 ?? logs/bc250-sustained-20260918/logit_divergence.py
 ?? logs/bc250-sustained-20260918/mmq_info
@@ -21,8 +21,8 @@ uname: Linux bc250 7.2.6-1-cachyos #1 SMP PREEMPT_DYNAMIC Thu, 17 Sep 2026 10:26
 
 === dirty diffstat vs HEAD ===
  Makefile                       |  8 ++++++++
- q36.c                          | 34 +++++++++++++++++++++++++++++++++
- q36_vulkan.c                   | 43 +++++++++++++++++++++++++++++++++++-------
+ p36.c                          | 34 +++++++++++++++++++++++++++++++++
+ p36_vulkan.c                   | 43 +++++++++++++++++++++++++++++++++++-------
  vulkan/dense_extra_decode.comp | 22 ++++++++++++++++++---
  vulkan/dense_extra_mmq.comp    | 19 +++++++++++++++++--
  5 files changed, 114 insertions(+), 12 deletions(-)

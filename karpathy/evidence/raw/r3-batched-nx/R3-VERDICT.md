@@ -1,12 +1,12 @@
 # R3 — what the P6 nx small-batch kernel actually buys: `--batched-session`
 
 Measurement item (no source change in the measured binary; the R4 commit that
-later added `Q36_MTP_TIMING` counters is inert for all of this).
+later added `P36_MTP_TIMING` counters is inert for all of this).
 
-Model: `/home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf`, `--vulkan
+Model: `/home/server/p36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf`, `--vulkan
 --ctx 1024 --prefill-chunk 256 --batched-session N`, 4 fixed greedy streaming
 clients (one prompt each, ~430 tokens), 64 generated tokens per stream,
-`Q36_VK_DENSE_IQ3_NX` 0 vs 1, 2 interleaved reps (arm order flipped in rep 2).
+`P36_VK_DENSE_IQ3_NX` 0 vs 1, 2 interleaved reps (arm order flipped in rep 2).
 
 ## Aggregate / per-stream / decode-only
 
@@ -76,7 +76,7 @@ residual iq3 13%) — the *class* does (69%).
 ## Probe: is the 128-row tile itself the defect?
 
 The one existing switch that reroutes `n_tok > 1` K-quant work is
-`Q36_VK_DENSE_KQUANT_MMQ=0` (it falls through to the generic 8x8
+`P36_VK_DENSE_KQUANT_MMQ=0` (it falls through to the generic 8x8
 `matmul_kquant`).  N=4, nx ON, 2 reps each:
 
 | arm | agg t/s | TTFT s |

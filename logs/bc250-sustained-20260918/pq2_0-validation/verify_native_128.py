@@ -22,7 +22,7 @@ import struct
 import subprocess
 import sys
 
-PQ2 = "/home/server/q36-opt-27b/gguf/Ternary-Bonsai-2-27B-PQ2_0.gguf"
+PQ2 = "/home/server/p36-opt-27b/gguf/Ternary-Bonsai-2-27B-PQ2_0.gguf"
 HF = "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/main/"
 F16 = HF + "Ternary-Bonsai-2-27B-F16.gguf"
 

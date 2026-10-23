@@ -1,6 +1,6 @@
 import struct, sys, collections
 
-f = open('/home/server/q36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf', 'rb')
+f = open('/home/server/p36/gguf/Swift-Qwen3.8-27B-IQ3_XXS.gguf', 'rb')
 magic, ver = struct.unpack('<4sI', f.read(8))
 n_tensors, n_kv = struct.unpack('<QQ', f.read(16))
 

@@ -35,8 +35,8 @@ also saving it under the experiment store:
 
 Automation can use the equivalent `KARPATHY_VERBOSE=1` environment variable.
 
-The shared orchestrator never starts concurrent `q36`, `q36-bench`, or
-`q36_test` jobs. The default context and generation lengths are deliberately
+The shared orchestrator never starts concurrent `p36`, `p36-bench`, or
+`p36_test` jobs. The default context and generation lengths are deliberately
 short enough for this 16 GB UMA machine. Override target/model paths with
 `KARPATHY_TARGET_DIR`, `KARPATHY_SWIFT_MODEL`, and `KARPATHY_QWEN35_MODEL`.
 Ctrl-C is handled by the shared orchestrator, which terminates the active gate,

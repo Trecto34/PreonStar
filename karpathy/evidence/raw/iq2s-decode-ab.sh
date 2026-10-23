@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interleaved, soak-gated A/B of the IQ2_S fused MoE gate/up path against the
 # generic matvec fallback on one model file.  Both arms run the same binary;
-# the arm is selected by Q36_VK_MOE_GATE_UP=0 (fallback) vs unset (fused).
+# the arm is selected by P36_VK_MOE_GATE_UP=0 (fallback) vs unset (fused).
 #
 #   logs/iq2s-gateup-20260920/ab_iq2s_gate_up.sh PAIRS OUT.csv MODEL.gguf
 #
@@ -32,12 +32,12 @@ run_arm () {  # $1 pair $2 arm $3 order
     local t0 sc pw t1 out pp dec BP
     t0=$(( $(cat "$HW") / 1000 ))
     if [ "$ARM" = ref ]; then
-        flock -w 1800 /tmp/q36-gpu.lock env Q36_VK_MOE_DOWN_SUM_DECODE=0 ./q36-bench --vulkan -m "$MODEL" \
+        flock -w 1800 /tmp/p36-gpu.lock env P36_VK_MOE_DOWN_SUM_DECODE=0 ./p36-bench --vulkan -m "$MODEL" \
             --prompt-file tests/long_context_story_prompt.txt \
             --ctx-start "$CTX" --ctx-max "$CTX" --ctx-alloc "$ALLOC" \
             --prefill-chunk 256 --gen-tokens "$GEN" > "$TMP/run" 2>&1 &
     else
-        flock -w 1800 /tmp/q36-gpu.lock ./q36-bench --vulkan -m "$MODEL" \
+        flock -w 1800 /tmp/p36-gpu.lock ./p36-bench --vulkan -m "$MODEL" \
             --prompt-file tests/long_context_story_prompt.txt \
             --ctx-start "$CTX" --ctx-max "$CTX" --ctx-alloc "$ALLOC" \
             --prefill-chunk 256 --gen-tokens "$GEN" > "$TMP/run" 2>&1 &

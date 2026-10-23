@@ -6,7 +6,7 @@ Hardware soak gate ≤55 °C on every run.
 
 ## 1. Method
 
-`Q36_VK_PROF_OP=1 Q36_VK_PROF_KERNEL=1`, ctx 512, `--gen-tokens 1` vs
+`P36_VK_PROF_OP=1 P36_VK_PROF_KERNEL=1`, ctx 512, `--gen-tokens 1` vs
 `--gen-tokens 65` (identical 512-token prefill). The per-op delta divided by 64
 isolates exactly one decode token's cost per op, free of the prefill
 contribution. Wall-step at this point: **30.03 ms/token** (33.30 t/s); the
@@ -72,8 +72,8 @@ inherent KV scan at ctx 512).
 
 ### 4.1 Ablation
 
-Temporary `Q36_Q2_0_MMQ_ABLATE` in `dense_extra_mmq.comp`, `--gen-tokens 1`,
-`Q36_VK_PROF_KERNEL=1`, `gpu_ms` of `op dense_extra_mmq` (512 prefill tokens):
+Temporary `P36_Q2_0_MMQ_ABLATE` in `dense_extra_mmq.comp`, `--gen-tokens 1`,
+`P36_VK_PROF_KERNEL=1`, `gpu_ms` of `op dense_extra_mmq` (512 prefill tokens):
 
 | mode | change | gpu_ms | pp512 t/s |
 |---|---|---|---|

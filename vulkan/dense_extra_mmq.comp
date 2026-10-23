@@ -1,10 +1,10 @@
 #version 460
 
-#ifdef Q36_Q2_0_ONLY
+#ifdef P36_Q2_0_ONLY
 /* Q2_0 and PQ2_0 share the 2-bit codec; only the group size differs (64
  * weights / 18 B against 128 / 34 B).  Compile-time so the Q2_0 build's
  * SPIR-V is unchanged -- see dense_extra_decode.comp for the same block. */
-#ifdef Q36_PQ2_0
+#ifdef P36_PQ2_0
 #define Q2_BLK_BYTES   34u
 #define Q2_BLK_PER_Q8K 2u
 #define Q2_LANE_SHIFT  2u
@@ -321,14 +321,14 @@ vec4 dequant_word(uint row, uint qb, uint word) {
     return d * v;
 }
 
-#ifdef Q36_IQ2S_ONLY
+#ifdef P36_IQ2S_ONLY
 /* IQ2_S-only specialization of the generic main() below: identical math
  * (the pc.type == IQ2_S arm, copied verbatim -- same weight_scale block
  * size, same signed_grid/tables lookups, same accumulation order), just
  * without the runtime pc.type branch chain every (qb, slice, lane) triple
  * pays for on every dispatch regardless of which type is actually live.
- * Same lever as Q36_Q2_0_ONLY above and dense_extra_decode.comp's
- * Q36_IQ2S_ONLY block_dot(). */
+ * Same lever as P36_Q2_0_ONLY above and dense_extra_decode.comp's
+ * P36_IQ2S_ONLY block_dot(). */
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
     uint row0 = gl_WorkGroupID.x * BM;

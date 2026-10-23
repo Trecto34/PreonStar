@@ -19,7 +19,7 @@ Bit-exact (file `16`), prefill: 2.69 → 3.60 tok/s (chunk 64, file `17`).
 
 **Root cause #2 (step 1 complete: 8-token tiling with weight decode reuse):**
 Implemented `TOK_TILE = 8u` in `vulkan/dense_extra_mmq_ptq1_0.comp` and threaded
-grid_y `((uint32_t)n_tok + 7u) / 8u` in `q36_vulkan.c`:
+grid_y `((uint32_t)n_tok + 7u) / 8u` in `p36_vulkan.c`:
 1. Decodes 2 weights per thread once per `(row, pb)` into registers and reuses
    them across up to 8 tokens.
 2. Correctness: verified bit-exact vs CPU oracle across all tensors/rows/token counts
@@ -47,7 +47,7 @@ Shifted from reduction-loop kernel to full LDS GEMM tile:
 2. Staging: `buf_a[32*33]` (1,056 B) and `buf_b[64*33]` (2,112 B) in int8 LDS (3.17 KB total).
 3. Integer register accumulation: `int sum[8][4]` accumulates order-free integer dot products
    over 128 weights, then converts to float with `fma(wd * yd, float(sum), acc_f32)`.
-   Preserves exact mathematical equivalence to `q36_contract_mmq_ptq1_dot` without float16 drift.
+   Preserves exact mathematical equivalence to `p36_contract_mmq_ptq1_dot` without float16 drift.
 4. Barrier elimination: Completely eliminates all 2,176 inner-loop reduction barriers;
    only 2 barriers per 32-weight slice for LDS loading.
 5. Correctness: verified bit-exact vs CPU oracle across all tensors/rows/token counts
@@ -57,7 +57,7 @@ Shifted from reduction-loop kernel to full LDS GEMM tile:
    +271% over step 2 (9.13 tok/s), and **12.61x over original baseline (2.69 tok/s)**.
 8. Independent review: delegated to Reviewer via Maestri canvas, approved
    (file `27-gemm-review.txt`).
-9. Long-term memory: Persistently recorded in `mem0` vector store (`q36-opt-27b`).
+9. Long-term memory: Persistently recorded in `mem0` vector store (`p36-opt-27b`).
 
 **Root cause #2 (step 4 complete: Direct zero-copy 128-weight LDS staging):**
 Refined the LDS architecture to eliminate intermediate staging copies:
@@ -175,7 +175,7 @@ across `pb` sub-blocks (not started).
   - `49-i16vec2-review.txt`: independent review from Reviewer (OpenCode) via Maestri (APPROVED).
 - Canvas notes "Recent Optimizations", "Optimizations & Speedups", and "Track B Coordination"
   updated in real time via Maestri CLI.
-- GPU lock `/tmp/q36-gpu.lock` free, no process holding it at stand-down.
+- GPU lock `/tmp/p36-gpu.lock` free, no process holding it at stand-down.
 
 ## Traps still true from the PQ2_0 handoff
 

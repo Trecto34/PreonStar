@@ -1,6 +1,6 @@
 # PQ2_0/Q2_0 small-batch matmul — `TERNARY-BONSAI-2-27B-DERISKED-PQ2_0` (2026-09-23)
 
-Worktree `/home/server/q36-wt/pq2-persist`, branch `experiment/pq2-smallbatch`
+Worktree `/home/server/p36-wt/pq2-persist`, branch `experiment/pq2-smallbatch`
 (from `5e3c440`). Uncommitted by instruction. Verdicts are in
 `karpathy/AlreadyTried.md`; this is the running record with the raw pointers.
 
@@ -26,9 +26,9 @@ kernel's LUT **once**, and dots it against up to 8 tokens. Per token the integer
 sums, fma order and `subgroupAdd` are the decode kernel's, so the batched result
 must reproduce n one-token calls bit for bit — and does.
 
-Host takes it when `n_tok <= Q36_VK_Q2_SMALL_MAX` (default 16), and for the
+Host takes it when `n_tok <= P36_VK_Q2_SMALL_MAX` (default 16), and for the
 ragged tail (`n_tok % 128 <= 16`) after an mmq pass over the aligned head, which
-is what fixes prompt tails rather than only tiny batches. `Q36_VK_Q2_SMALL_MAX=0`
+is what fixes prompt tails rather than only tiny batches. `P36_VK_Q2_SMALL_MAX=0`
 disables it.
 
 | check | result |
@@ -100,7 +100,7 @@ direction. This cost two false positives in §4 before it was recognised.
 ## 6. State and next levers
 
 Landed in the worktree: `vulkan/dense_extra_small_q2.comp`, its two build rules,
-the kernel slot/registration/wave64 pin, the dispatch split in `q36_vulkan.c`,
+the kernel slot/registration/wave64 pin, the dispatch split in `p36_vulkan.c`,
 `tests/test_pq2_small.c` (+ Makefile target), and the two doc-layer files. Skips
 worth recording: the `ssm_alpha`/`ssm_beta` fusion was **not attempted** — the
 IQ2_S precedent for that exact fusion measured +1.42% on a MoE file, and this

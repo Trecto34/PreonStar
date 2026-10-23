@@ -1,9 +1,9 @@
-cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only -c -o q36_gpu_core.o q36.c
+cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only -c -o p36_gpu_core.o p36.c
 ./glslc -O --target-env=vulkan1.1 -o vulkan/dense_extra_decode.spv vulkan/dense_extra_decode.comp
-./glslc -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -o vulkan/dense_extra_decode_q2_0.spv vulkan/dense_extra_decode.comp
-./glslc -O --target-env=vulkan1.1 -DQ36_Q2_0_ONLY=1 -DQ36_Q2_ROWS8=1 -o vulkan/dense_extra_decode_q2_0_rows8.spv vulkan/dense_extra_decode.comp
+./glslc -O --target-env=vulkan1.1 -DP36_Q2_0_ONLY=1 -o vulkan/dense_extra_decode_q2_0.spv vulkan/dense_extra_decode.comp
+./glslc -O --target-env=vulkan1.1 -DP36_Q2_0_ONLY=1 -DP36_Q2_ROWS8=1 -o vulkan/dense_extra_decode_q2_0_rows8.spv vulkan/dense_extra_decode.comp
 vulkan/dense_extra_decode.comp
 vulkan/dense_extra_decode.comp
 vulkan/dense_extra_decode.comp
-cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only  -c -o q36_vulkan.o q36_vulkan.c
-cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only -o q36-bench q36_bench.o q36_ssd.o q36_prompt_prefix.o q36_gpu_core.o q36_vulkan.o q36_image.o -lm -pthread -ldl -lvulkan
+cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only  -c -o p36_vulkan.o p36_vulkan.c
+cc -O3 -ffast-math -march=native -Wall -Wextra -std=c99  -D_GNU_SOURCE -fno-finite-math-only -o p36-bench p36_bench.o p36_ssd.o p36_prompt_prefix.o p36_gpu_core.o p36_vulkan.o p36_image.o -lm -pthread -ldl -lvulkan

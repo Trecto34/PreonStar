@@ -152,7 +152,7 @@ def capture_record(spec: dict, capture_bin: Path, model: Path, prompt_path: Path
         )
 
     return {
-        "schema": "q36-llamacpp-logprobs-v1",
+        "schema": "p36-llamacpp-logprobs-v1",
         "source": "llama.cpp-direct-logits",
         "model": model.name,
         "runtime": "llama.cpp",
@@ -167,19 +167,19 @@ def capture_record(spec: dict, capture_bin: Path, model: Path, prompt_path: Path
             "top_logprobs": TOP_LOGPROBS,
             "threads": threads,
             "think": False,
-            "template": "hf-text-only" if hf_template else "q36-fixed-nothink",
+            "template": "hf-text-only" if hf_template else "p36-fixed-nothink",
         },
         "prompt_tokens": raw.get("prompt_tokens"),
         "ctx": raw.get("ctx"),
         "top_k": raw.get("top_k"),
-        "template": raw.get("template", "hf-text-only" if hf_template else "q36-fixed-nothink"),
+        "template": raw.get("template", "hf-text-only" if hf_template else "p36-fixed-nothink"),
         "steps": steps,
     }
 
 
 def write_compact_fixture(root: Path, manifest: dict) -> None:
     lines = [
-        "# q36-llama-logprob-vectors-v1",
+        "# p36-llama-logprob-vectors-v1",
         "# case <id> <ctx> <steps> <prompt-file>",
         "# step <index> <selected-hex> <top-count>",
         "# top <token-hex> <llamacpp-logprob>",
@@ -223,7 +223,7 @@ def main() -> int:
 
     if args.hf_template and not args.out:
         raise SystemExit("--hf-template requires --out; the tracked corpus in "
-                         f"{DEFAULT_OUT} uses the Q36 chat render")
+                         f"{DEFAULT_OUT} uses the P36 chat render")
     root = Path(args.out or Path(DEFAULT_OUT) / DEFAULT_CHECKPOINT)
     checkpoint = args.checkpoint or root.name
     model = Path(args.model)
@@ -240,9 +240,9 @@ def main() -> int:
 
     wanted = set(args.only or [])
     selected = [spec for spec in PROMPTS if not wanted or spec["id"] in wanted]
-    template = "hf-text-only" if args.hf_template else "q36-fixed-nothink"
+    template = "hf-text-only" if args.hf_template else "p36-fixed-nothink"
     manifest = {
-        "schema": "q36-test-vector-manifest-v1",
+        "schema": "p36-test-vector-manifest-v1",
         "checkpoint": checkpoint,
         "source": "llama.cpp-direct-logits",
         "template": template,

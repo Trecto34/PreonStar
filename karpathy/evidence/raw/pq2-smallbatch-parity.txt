@@ -1,6 +1,6 @@
-q36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
-q36: Vulkan generic backend, BC-250 fast path, subgroup 64
-q36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+p36: Vulkan device AMD BC-250 (RADV GFX1013), 15.35 GiB UMA
+p36: Vulkan generic backend, BC-250 fast path, subgroup 64
+p36: Vulkan queue family 0: graphics fallback (1 queue exposed)
 PASS in= 5120 out=17408 n_tok=  1  mismatches=0 max_abs=0  batched 0.240 ms  one-token 0.240 ms  ratio 1.00x
 PASS in= 5120 out=17408 n_tok=  2  mismatches=0 max_abs=0  batched 0.394 ms  one-token 0.241 ms  ratio 1.63x
 PASS in= 5120 out=17408 n_tok=  3  mismatches=0 max_abs=0  batched 0.542 ms  one-token 0.240 ms  ratio 2.25x

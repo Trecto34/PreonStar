@@ -9,9 +9,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
-#include "../q36.h"
-#include "../q36_gpu.h"
-#include "../q36_cli_args.h"
+#include "../p36.h"
+#include "../p36_gpu.h"
+#include "../p36_cli_args.h"
 
 static double get_time_us(void) {
     struct timespec ts;
@@ -188,37 +188,37 @@ static void run_bench(uint32_t mid_dim, uint32_t in_dim, uint32_t out_dim, uint3
     }
 #endif
 
-    q36_gpu_tensor *x_t = q36_gpu_tensor_alloc((uint64_t)n_tok * in_dim * sizeof(float));
-    q36_gpu_tensor *selected_t = q36_gpu_tensor_alloc((uint64_t)n_tok * n_used * sizeof(uint32_t));
-    q36_gpu_tensor *weights_t = q36_gpu_tensor_alloc((uint64_t)n_tok * n_used * sizeof(float));
-    q36_gpu_tensor *out_t = q36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * sizeof(float));
+    p36_gpu_tensor *x_t = p36_gpu_tensor_alloc((uint64_t)n_tok * in_dim * sizeof(float));
+    p36_gpu_tensor *selected_t = p36_gpu_tensor_alloc((uint64_t)n_tok * n_used * sizeof(uint32_t));
+    p36_gpu_tensor *weights_t = p36_gpu_tensor_alloc((uint64_t)n_tok * n_used * sizeof(float));
+    p36_gpu_tensor *out_t = p36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * sizeof(float));
 
     if (!x_t || !selected_t || !weights_t || !out_t) {
         fprintf(stderr, "Tensor alloc failed\n");
         exit(1);
     }
 
-    q36_gpu_tensor_write(x_t, 0, x_host, (uint64_t)n_tok * in_dim * sizeof(float));
-    q36_gpu_tensor_write(selected_t, 0, selected_host, (uint64_t)n_tok * n_used * sizeof(uint32_t));
-    q36_gpu_tensor_write(weights_t, 0, weights_host, (uint64_t)n_tok * n_used * sizeof(float));
+    p36_gpu_tensor_write(x_t, 0, x_host, (uint64_t)n_tok * in_dim * sizeof(float));
+    p36_gpu_tensor_write(selected_t, 0, selected_host, (uint64_t)n_tok * n_used * sizeof(uint32_t));
+    p36_gpu_tensor_write(weights_t, 0, weights_host, (uint64_t)n_tok * n_used * sizeof(float));
 
-    setenv("Q36_VK_MOE_GEMM_MIN", "8", 1);
-    setenv("Q36_VK_MOE_F32B", "1", 1);
+    setenv("P36_VK_MOE_GEMM_MIN", "8", 1);
+    setenv("P36_VK_MOE_F32B", "1", 1);
 
-    q36_gpu_moe_weight gate = { gate_offset, 16, gsc_offset, true };
-    q36_gpu_moe_weight up = { up_offset, 16, usc_offset, true };
-    q36_gpu_moe_weight down = { down_offset, 10, dsc_offset, true };
+    p36_gpu_moe_weight gate = { gate_offset, 16, gsc_offset, true };
+    p36_gpu_moe_weight up = { up_offset, 16, usc_offset, true };
+    p36_gpu_moe_weight down = { down_offset, 10, dsc_offset, true };
 
-    q36_gpu_set_model_map(model, model_alloc);
+    p36_gpu_set_model_map(model, model_alloc);
 
     for (int i = 0; i < 3; i++) {
-        int ok = q36_gpu_moe_ffn_f32_tensor(out_t, model, model_alloc, &gate, &up, &down,
+        int ok = p36_gpu_moe_ffn_f32_tensor(out_t, model, model_alloc, &gate, &up, &down,
                                             selected_t, weights_t, 0, n_used, x_t, n_tok,
                                             in_dim, mid_dim, out_dim, n_expert);
         if (!ok) { fprintf(stderr, "Warmup failed\n"); exit(1); }
     }
 
-    q36_gpu_tensor_read(out_t, 0, out_host, (uint64_t)n_tok * out_dim * sizeof(float));
+    p36_gpu_tensor_read(out_t, 0, out_host, (uint64_t)n_tok * out_dim * sizeof(float));
     float max_err = 0.0f;
     for (uint64_t i = 0; i < (uint64_t)n_tok * out_dim; i++) {
         float err = fabsf(out_host[i] - ref_out[i]);
@@ -227,11 +227,11 @@ static void run_bench(uint32_t mid_dim, uint32_t in_dim, uint32_t out_dim, uint3
 
     double t0 = get_time_us();
     for (int i = 0; i < iters; i++) {
-        q36_gpu_moe_ffn_f32_tensor(out_t, model, model_alloc, &gate, &up, &down,
+        p36_gpu_moe_ffn_f32_tensor(out_t, model, model_alloc, &gate, &up, &down,
                                    selected_t, weights_t, 0, n_used, x_t, n_tok,
                                    in_dim, mid_dim, out_dim, n_expert);
     }
-    q36_gpu_tensor_read(out_t, 0, out_host, (uint64_t)n_tok * out_dim * sizeof(float));
+    p36_gpu_tensor_read(out_t, 0, out_host, (uint64_t)n_tok * out_dim * sizeof(float));
     double t1 = get_time_us();
     double avg_us = (t1 - t0) / iters;
     double avg_ms = avg_us / 1000.0;
@@ -244,10 +244,10 @@ static void run_bench(uint32_t mid_dim, uint32_t in_dim, uint32_t out_dim, uint3
     printf("moe_gate_up shape [tok=%u mid=%u in=%u out=%u exp=%u used=%u]: avg = %.3f ms (%d iters) [max_err=%.6f hash=%08x]\n",
            n_tok, mid_dim, in_dim, out_dim, n_expert, n_used, avg_ms, iters, max_err, hash);
 
-    q36_gpu_tensor_free(x_t);
-    q36_gpu_tensor_free(selected_t);
-    q36_gpu_tensor_free(weights_t);
-    q36_gpu_tensor_free(out_t);
+    p36_gpu_tensor_free(x_t);
+    p36_gpu_tensor_free(selected_t);
+    p36_gpu_tensor_free(weights_t);
+    p36_gpu_tensor_free(out_t);
     free(model);
     free(x_host);
     free(out_host);
@@ -259,10 +259,10 @@ static void run_bench(uint32_t mid_dim, uint32_t in_dim, uint32_t out_dim, uint3
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_moe_gate_up");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_moe_gate_up");
     if (cli_rc) return cli_rc;
-    if (!q36_gpu_init()) {
-        fprintf(stderr, "q36_gpu_init failed\n");
+    if (!p36_gpu_init()) {
+        fprintf(stderr, "p36_gpu_init failed\n");
         return 1;
     }
 
@@ -271,6 +271,6 @@ int main(int argc, char **argv) {
     run_bench(7168, 2048, 2048, 1024, 8, 2, 10);
     run_bench(2048, 7168, 2048, 1024, 8, 2, 10);
 
-    q36_gpu_cleanup();
+    p36_gpu_cleanup();
     return 0;
 }

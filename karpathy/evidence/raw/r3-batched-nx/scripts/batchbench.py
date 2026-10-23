@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""N concurrent greedy streaming clients against a q36-server, measuring TTFT,
+"""N concurrent greedy streaming clients against a p36-server, measuring TTFT,
 per-stream decode tok/s and aggregate tok/s.
 
 Fixed prompts (one per stream index, identical across arms), fixed max_tokens,

@@ -7,9 +7,9 @@ Plan: `karpathy/PLAN-implementation-2026-09-20.md` §W6.
 ## What changed
 
 New shader `vulkan/dense_iq3_xxs_mmq_pair.comp` + one host entry point
-`q36_gpu_matmul_iq3_xxs_pair_mmq_tensor()` in `q36_vulkan.c`, called from
-`q36_forward_ffn_vulkan_model` (`q36.c`) in place of the two separate
-`q36_gpu_tensor_matmul_q8_or_float_scaled` gate/up prefill dispatches.
+`p36_gpu_matmul_iq3_xxs_pair_mmq_tensor()` in `p36_vulkan.c`, called from
+`p36_forward_ffn_vulkan_model` (`p36.c`) in place of the two separate
+`p36_gpu_tensor_matmul_q8_or_float_scaled` gate/up prefill dispatches.
 
 Geometry is unchanged from `dense_iq3_xxs_mmq.comp` (BM 32 x BN 128 x BK 32,
 local_size 128, wave32-forced by the existing `dense_" … "_mmq` suffix rule).
@@ -21,7 +21,7 @@ the single-projection kernel's, so every output element is bit-identical to the
 unfused path. Costs: `sum[32]` (16 more VGPRs) and +2176 B LDS for the second
 A tile.
 
-Gating: default ON; `Q36_VK_DENSE_IQ3_PAIR=0` disables. Only
+Gating: default ON; `P36_VK_DENSE_IQ3_PAIR=0` disables. Only
 `gate_type == IQ3_XXS && up_type == IQ3_XXS && n_tok > 1` takes the pair; mixed
 type pairs, decode (`n_tok == 1`) and every refusal fall through to the existing
 two dispatches. A failed pipeline init is loud (`failed to read Vulkan shader` /
@@ -37,7 +37,7 @@ instance's files untouched and stay on the single-projection path.
 
 ## Measurement
 
-Kernel attribution (same binary, `Q36_VK_PROF_KERNEL/PREFILL/SHAPE=1`, ctx 512,
+Kernel attribution (same binary, `P36_VK_PROF_KERNEL/PREFILL/SHAPE=1`, ctx 512,
 chunk 256, gen 0), pair off vs on:
 
 | | pair off | pair on |
@@ -61,7 +61,7 @@ outright): mmq -14.2%, prefill +10.6%. The pair recovers part of that
 for it twice.
 
 **7-rep interleaved `tests/bench_ab.sh`, ctx 1024, gen 16, chunk 256**
-(wrappers that differ only in `Q36_VK_DENSE_IQ3_PAIR`; one binary):
+(wrappers that differ only in `P36_VK_DENSE_IQ3_PAIR`; one binary):
 
 - Arm A (pair off): prefill **169.25 tok/s** (MAD 0.140), decode **18.12 tok/s** (MAD 0.100)
 - Arm B (pair on): prefill **173.01 tok/s** (MAD 0.440), decode **18.22 tok/s** (MAD 0.080)

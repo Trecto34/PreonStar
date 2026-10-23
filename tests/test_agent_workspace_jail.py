@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""q36-agent --server against a scripted fake server: the workspace jail and the implementation ceiling.
+"""p36-agent --server against a scripted fake server: the workspace jail and the implementation ceiling.
 
 Replays the real pathology: the agent works in a project directory, runs `find / -name index.html`,
 finds an unrelated project and starts editing it.  Checks (remote mode, no model):
@@ -7,7 +7,7 @@ finds an unrelated project and starts editing it.  Checks (remote mode, no model
   - work on the real target continues, and the root survives compaction in the task state;
   - --yolo opts out explicitly (with a warning); --unsafe-filesystem only opens the file tools;
   - mutation thrashing ends at --max-implementation-steps with an INCOMPLETE report, never VERIFY.
-Usage: tests/test_agent_workspace_jail.py [path/to/q36-agent]"""
+Usage: tests/test_agent_workspace_jail.py [path/to/p36-agent]"""
 import json
 import os
 import subprocess
@@ -16,7 +16,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-AGENT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./q36-agent")
+AGENT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./p36-agent")
 LIMIT = "IMPLEMENTATION_STEP_LIMIT_REACHED"
 
 
@@ -77,8 +77,8 @@ def tool_results(reqs):
 
 
 def fixture():
-    ws = os.path.realpath(tempfile.mkdtemp(prefix="q36html-"))
-    other = os.path.realpath(tempfile.mkdtemp(prefix="q36other-"))
+    ws = os.path.realpath(tempfile.mkdtemp(prefix="p36html-"))
+    other = os.path.realpath(tempfile.mkdtemp(prefix="p36other-"))
     with open(os.path.join(other, "index.html"), "w") as f:
         f.write("UNRELATED-PROJECT\n")
     return ws, other
@@ -130,7 +130,7 @@ check("unsafe-fs: file tools reach outside, the shell does not",
 
 # 4. --workspace PATH names the root and the launch directory is irrelevant
 ws, other = fixture()
-here = os.path.realpath(tempfile.mkdtemp(prefix="q36launch-"))
+here = os.path.realpath(tempfile.mkdtemp(prefix="p36launch-"))
 p, reqs = run(pathology(ws, other), ws, extra=("--workspace", ws), launch=here)
 check("workspace flag: the root is PATH, not the launch directory",
       "WORKSPACE_ESCAPE_BLOCKED" in tool_results(reqs)[1] and "workspace_root: " + ws in tool_results(reqs)[1] and

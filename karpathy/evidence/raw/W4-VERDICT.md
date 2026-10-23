@@ -17,7 +17,7 @@ Raw artifacts: `karpathy/evidence/raw/ab-w4-wave32-iq2m.csv` and `ab-w4-wave32-i
 - **Arm A (Stock baseline, native wave64)**:
   - Prefill median: **242.43 tok/s** (MAD 0.500)
   - Decode median: **46.62 tok/s** (MAD 0.410)
-- **Arm B (Wave32 clean scan, `Q36_VK_WAVE32_CLEAN=1`)**:
+- **Arm B (Wave32 clean scan, `P36_VK_WAVE32_CLEAN=1`)**:
   - Prefill median: **240.00 tok/s** (MAD 1.270)
   - Decode median: **46.62 tok/s** (MAD 0.170)
 - **Delta (B vs A)**:

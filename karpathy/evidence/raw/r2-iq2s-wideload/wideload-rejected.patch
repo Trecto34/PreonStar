@@ -14,10 +14,10 @@ index 718c245..f70cdf8 100644
 +    return (sb[ih][off >> 1u] >> (8u * (off & 1u))) & 255u;
 +}
  #endif
- #ifdef Q36_MOE_IQ3S
+ #ifdef P36_MOE_IQ3S
  /* IQ3_S superblock: [d f16][64 qs][8 qh][32 signs][4 scales] = 110 bytes.
 @@ -98,32 +105,53 @@ void main(void) {
- #ifdef Q36_MOE_IQ2S
+ #ifdef P36_MOE_IQ2S
          /* Same element slotting as the Q2_K path: this thread owns the two
           * elements at y_off + 16*p for p = 0..7 and each 16-element group
 -         * carries one IQ2_S scale, one grid index and one sign byte. */
@@ -93,5 +93,5 @@ index 718c245..f70cdf8 100644
 +             * other half is still reading, and the next expert reuses sb. */
 +            barrier();
          }
- #elif defined(Q36_MOE_IQ3S)
+ #elif defined(P36_MOE_IQ3S)
          /* Same element slotting: this thread owns the elements y_off + 16*p

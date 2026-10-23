@@ -2,7 +2,7 @@
 #extension GL_ARB_gpu_shader_int64 : require
 
 /* Routing-weighted accumulation of per-expert down outputs, port of the
- * "out[j] += down[j] * top_w[i]" loop in q36_forward_ffn().  Token batch
+ * "out[j] += down[j] * top_w[i]" loop in p36_forward_ffn().  Token batch
  * rides invocation y: token tok reduces expert rows tok*n_used.. into
  * output row tok. */
 

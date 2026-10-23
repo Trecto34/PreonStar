@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-/* P9a: what fraction of q36_sample_full_vocab's host cost can a GPU min-p
+/* P9a: what fraction of p36_sample_full_vocab's host cost can a GPU min-p
  * prefilter actually remove?  The filter may only *find* survivors; expf, the
  * sum and the draw must stay on the CPU to stay bit-identical, so the removal
  * is the full-vocab scan (pass 1 max, pass 2 scaled/store/branch, pass 3 draw)
@@ -39,7 +39,7 @@ static void run(const char *tag, float temperature, float min_p, int reps) {
         if (lg[i] > mx) { mx = lg[i]; best = (int)i; }
     }
 
-    /* the reference: q36_sample_full_vocab's two remaining loops over n_vocab */
+    /* the reference: p36_sample_full_vocab's two remaining loops over n_vocab */
     float reject_scaled = logf(min_p);
     for (int i = 0; i < 8 && isfinite(reject_scaled); i++) {
         reject_scaled = nextafterf(reject_scaled, -3.4e38f);

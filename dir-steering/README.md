@@ -1,7 +1,7 @@
 # Directional Steering
 
 > This directory preserves a DS4 experiment as design reference. Its 43-layer,
-> 4096-wide vectors target a different model and are not Q36 tests or tools.
+> 4096-wide vectors target a different model and are not P36 tests or tools.
 
 Directional steering is a runtime activation edit for DS4. A steering file is a
 flat `f32` matrix with one normalized 4096-wide direction per layer. During

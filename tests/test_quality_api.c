@@ -4,7 +4,7 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_quality_api");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_quality_api");
     if (cli_rc) return cli_rc;
     const char *invalid[] = {
         "{}",

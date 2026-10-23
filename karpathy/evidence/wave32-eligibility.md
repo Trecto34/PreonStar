@@ -1,4 +1,4 @@
-# Wave32 eligibility audit — q36 compute shaders
+# Wave32 eligibility audit — p36 compute shaders
 
 Correctness/safety audit of forcing `requiredSubgroupSize = 32` on the compute pipelines built
 from `vulkan/*.comp`. Read-only analysis; no build, no benchmark, no model load, no engine run.
@@ -7,9 +7,9 @@ from `vulkan/*.comp`. Read-only analysis; no build, no benchmark, no model load,
 
 | item | value |
 |---|---|
-| corpus | `/home/server/q36-opt-27b/vulkan/*.comp` — **92 files** |
+| corpus | `/home/server/p36-opt-27b/vulkan/*.comp` — **92 files** |
 | scanned for | `subgroup*(` calls, `gl_Subgroup*` reads, `barrier()`, `local_size_x/y/z`, `GL_KHR_shader_subgroup_*` declares |
-| force list source | `q36_vulkan.c:1556-1582` |
+| force list source | `p36_vulkan.c:1556-1582` |
 | bucket rule | `CROSS-LANE-HEAVY` = any reduction-class call; `NEEDS-REVIEW` = non-reduction call or `gl_Subgroup*` read; `SAFE-WAVE32` = neither |
 | hot flag | substring match on the profile list in the request, with `_r4` added (covers `dense_iq3_xxs_decode_r4`, `dense_iq3_s_mmq_r4`, ...) |
 
@@ -20,7 +20,7 @@ a `file:line`. No performance claim is made anywhere in this document.
 
 ## 1. The eligibility rule as written in the engine
 
-`q36_vulkan.c:1561-1568` (comment), quoted verbatim:
+`p36_vulkan.c:1561-1568` (comment), quoted verbatim:
 
 ```c
 /* Shaders that declare local_size_x = 32 and use no cross-lane operation
@@ -33,10 +33,10 @@ a `file:line`. No performance claim is made anywhere in this document.
  * interchangeable. */
 ```
 
-`q36_vulkan.c:1569-1574` — the list itself, quoted verbatim:
+`p36_vulkan.c:1569-1574` — the list itself, quoted verbatim:
 
 ```c
-    static const char *const q36_vk_force_wave32[] = {
+    static const char *const p36_vk_force_wave32[] = {
         "delta_net_cols.spv",
         "rope_qwen.spv",
         "rope_qwen_mrope.spv",
@@ -44,20 +44,20 @@ a `file:line`. No performance claim is made anywhere in this document.
     };
 ```
 
-The list is not the whole force set. `q36_vulkan.c:1575-1578` adds a substring rule that covers a
+The list is not the whole force set. `p36_vulkan.c:1575-1578` adds a substring rule that covers a
 whole family without being listed:
 
 ```c
     bool force_wave32 = strstr(k->path, "dense_") && strstr(k->path, "_mmq.spv");
-    for (size_t i = 0; !force_wave32 && i < sizeof(q36_vk_force_wave32) / sizeof(*q36_vk_force_wave32); i++) {
-        force_wave32 = strstr(k->path, q36_vk_force_wave32[i]) != NULL;
+    for (size_t i = 0; !force_wave32 && i < sizeof(p36_vk_force_wave32) / sizeof(*p36_vk_force_wave32); i++) {
+        force_wave32 = strstr(k->path, p36_vk_force_wave32[i]) != NULL;
     }
 ```
 
-and `q36_vulkan.c:1579-1582` applies it, with full-subgroup requirement:
+and `p36_vulkan.c:1579-1582` applies it, with full-subgroup requirement:
 
 ```c
-    if (q36_vk.subgroup_size_control && force_wave32) {
+    if (p36_vk.subgroup_size_control && force_wave32) {
         stage.pNext = &subgroup_size;
         stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
@@ -133,14 +133,14 @@ unused `GL_KHR_shader_subgroup_*` extensions. `H` marks a shader on the profile'
 | `matmul_q8_0.comp` | 64 | subgroupClusteredAdd@111<br>*(uniform)* barrier@87,107<br>declares: subgroup_basic,subgroup_arithmetic,subgroup_clustered | CROSS-LANE-HEAVY |
 | `matmul_q8_0_decode.comp` **H** | 128 | *(uniform)* barrier@94 | SAFE-WAVE32 |
 | `matmul_q8_0_decode_b64.comp` **H** | 128 | *(uniform)* barrier@98 | SAFE-WAVE32 |
-| `matmul_q8_0_decode_q36.comp` **H** | 128 | *(uniform)* barrier@77 | SAFE-WAVE32 |
+| `matmul_q8_0_decode_p36.comp` **H** | 128 | *(uniform)* barrier@77 | SAFE-WAVE32 |
 | `matmul_q8_0_f32b.comp` | 128 | subgroupAdd@66 subgroupElect@68<br>ids: gl_NumSubgroups@67 gl_SubgroupID@68 gl_NumSubgroups@72<br>*(uniform)* barrier@69<br>declares: subgroup_basic,subgroup_arithmetic | CROSS-LANE-HEAVY |
 | `matmul_q8_0_f32b_nx.comp` | 64 | subgroupAdd@70 subgroupElect@72<br>ids: gl_NumSubgroups@71 gl_SubgroupID@73 gl_NumSubgroups@79<br>*(uniform)* barrier@75<br>declares: subgroup_basic,subgroup_arithmetic | CROSS-LANE-HEAVY |
 | `matmul_q8_0_f32b_pair.comp` | 128 | subgroupAdd@63 subgroupAdd@64 subgroupElect@66<br>ids: gl_NumSubgroups@65 gl_SubgroupID@67 gl_SubgroupID@68 gl_NumSubgroups@74<br>*(uniform)* barrier@70<br>declares: subgroup_basic,subgroup_arithmetic | CROSS-LANE-HEAVY |
 | `matmul_q8_0_mm.comp` | 256 | *(uniform)* barrier@88,116 | SAFE-WAVE32 |
 | `matmul_q8_0_mm_f16.comp` | 256 | *(uniform)* barrier@136,163 | SAFE-WAVE32 |
 | `matmul_q8_0_mm_f16_out32.comp` | 256 | *(uniform)* barrier@85,99 | SAFE-WAVE32 |
-| `matmul_q8_0_q36.comp` | 64 | *(uniform)* barrier@77,97,103 | SAFE-WAVE32 |
+| `matmul_q8_0_p36.comp` | 64 | *(uniform)* barrier@77,97,103 | SAFE-WAVE32 |
 | `moe_down_gemm.comp` | 256 | *(uniform)* barrier@85,128,148 | SAFE-WAVE32 |
 | `moe_down_q2k_f32b.comp` | 32 | subgroupAdd@141 subgroupElect@143<br>ids: gl_NumSubgroups@142 gl_SubgroupID@144 gl_NumSubgroups@148<br>*(uniform)* barrier@146<br>declares: subgroup_basic,subgroup_arithmetic | CROSS-LANE-HEAVY |
 | `moe_down_q2k_sum_decode.comp` | 32 | subgroupAdd@121<br>declares: subgroup_basic,subgroup_arithmetic | CROSS-LANE-HEAVY |
@@ -193,7 +193,7 @@ matches the comment's *letter* (`local_size_x = 32`).
 * `kv_store_quant.comp` — 256*1*1 (`kv_store_quant.comp:7`), no `subgroup*` call and no `gl_Subgroup*` read; bits cannot move, but the comment says "declare local_size_x = 32", so adding it is a rule-text change, not just an entry.
 * `matmul_q8_0_decode.comp` — 128*1*1 (`matmul_q8_0_decode.comp:6`), no `subgroup*` call and no `gl_Subgroup*` read; bits cannot move, but the comment says "declare local_size_x = 32", so adding it is a rule-text change, not just an entry.
 * `matmul_q8_0_decode_b64.comp` — 128*1*1 (`matmul_q8_0_decode_b64.comp:8`), no `subgroup*` call and no `gl_Subgroup*` read; bits cannot move, but the comment says "declare local_size_x = 32", so adding it is a rule-text change, not just an entry.
-* `matmul_q8_0_decode_q36.comp` — 128*1*1 (`matmul_q8_0_decode_q36.comp:3`), no `subgroup*` call and no `gl_Subgroup*` read; bits cannot move, but the comment says "declare local_size_x = 32", so adding it is a rule-text change, not just an entry.
+* `matmul_q8_0_decode_p36.comp` — 128*1*1 (`matmul_q8_0_decode_p36.comp:3`), no `subgroup*` call and no `gl_Subgroup*` read; bits cannot move, but the comment says "declare local_size_x = 32", so adding it is a rule-text change, not just an entry.
 * `moe_matvec.comp` — 64*1*1 (`moe_matvec.comp:36`), no `subgroup*` call and no `gl_Subgroup*` read; bits cannot move, but the comment says "declare local_size_x = 32", so adding it is a rule-text change, not just an entry.
 * `moe_matvec_fast.comp` — 64*1*1 (`moe_matvec_fast.comp:12`), no `subgroup*` call and no `gl_Subgroup*` read; bits cannot move, but the comment says "declare local_size_x = 32", so adding it is a rule-text change, not just an entry.
 * `rms_norm.comp` — 256*1*1 (`rms_norm.comp:2`), no `subgroup*` call and no `gl_Subgroup*` read; bits cannot move, but the comment says "declare local_size_x = 32", so adding it is a rule-text change, not just an entry.
@@ -251,30 +251,30 @@ not "no cross-lane operation". The comment should be amended to say so, or the e
 
 ## 5. Makefile: one `.comp`, several `.spv` (`-D` variants)
 
-A wave32 decision is per **`.spv`** (`strstr` on `k->path`, `q36_vulkan.c:1575-1578`), while the code
+A wave32 decision is per **`.spv`** (`strstr` on `k->path`, `p36_vulkan.c:1575-1578`), while the code
 audited here is per **`.comp`**. The Makefile builds multiple `.spv` from one `.comp`, differing only
 by `-D` flags, so sibling variants of the same source can end up on opposite sides of the force rule.
 
 | `.comp` | `.spv` variants built from it | `-D` flags (from the recipe) | forced? |
 |---|---|---|---|
 | `dense_iq3_xxs_decode.comp` | `dense_iq3_xxs_decode.spv` | *(none)* | no |
-| ↳ `dense_iq3_xxs_decode.comp` | `dense_iq3_xxs_decode_r4.spv` | `-DQ36_ROWS=4 -DQ36_BOUNDS=0` | no |
+| ↳ `dense_iq3_xxs_decode.comp` | `dense_iq3_xxs_decode_r4.spv` | `-DP36_ROWS=4 -DP36_BOUNDS=0` | no |
 | `dense_iq3_s_decode.comp` | `dense_iq3_s_decode.spv` | *(none)* | no |
-| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_full.spv` | `-DQ36_BOUNDS=0` | no |
-| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_r4.spv` | `-DQ36_ROWS=4 -DQ36_BOUNDS=0` | no |
-| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_r1.spv` | `-DQ36_ROWS=1 -DQ36_BOUNDS=0` | no |
+| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_full.spv` | `-DP36_BOUNDS=0` | no |
+| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_r4.spv` | `-DP36_ROWS=4 -DP36_BOUNDS=0` | no |
+| ↳ `dense_iq3_s_decode.comp` | `dense_iq3_s_decode_r1.spv` | `-DP36_ROWS=1 -DP36_BOUNDS=0` | no |
 | `dense_iq3_s_mmq.comp` | `dense_iq3_s_mmq.spv` | *(none)* | **yes** |
-| ↳ `dense_iq3_s_mmq.comp` | `dense_iq3_s_bm64_mmq.spv` | `-DQ36_BM=64` | **yes** |
-| ↳ `dense_iq3_s_mmq.comp` | `dense_iq3_s_mmq_r4.spv` | `-DQ36_BM=4 -DQ36_BK=64` | no |
+| ↳ `dense_iq3_s_mmq.comp` | `dense_iq3_s_bm64_mmq.spv` | `-DP36_BM=64` | **yes** |
+| ↳ `dense_iq3_s_mmq.comp` | `dense_iq3_s_mmq_r4.spv` | `-DP36_BM=4 -DP36_BK=64` | no |
 | `dense_kquant_decode.comp` | `dense_kquant_decode.spv` | *(none)* | no |
-| ↳ `dense_kquant_decode.comp` | `dense_q4k_decode.spv` | `-DQ36_Q4K_ONLY=1 -DQ36_BOUNDS=0` | no |
-| ↳ `dense_kquant_decode.comp` | `dense_q5k_decode.spv` | `-DQ36_Q5K_ONLY=1 -DQ36_BOUNDS=0` | no |
+| ↳ `dense_kquant_decode.comp` | `dense_q4k_decode.spv` | `-DP36_Q4K_ONLY=1 -DP36_BOUNDS=0` | no |
+| ↳ `dense_kquant_decode.comp` | `dense_q5k_decode.spv` | `-DP36_Q5K_ONLY=1 -DP36_BOUNDS=0` | no |
 | `delta_net_cols.comp` | `delta_net_cols.spv` | *(none)* | **yes** |
-| ↳ `delta_net_cols.comp` | `delta_net_cols_f16.spv` | `-DQ36_STATE_F16=1` | no |
-| `delta_net_decode_reg.comp` | `delta_net_decode_reg.spv` | `-DQ36_COLS=32` | no |
-| ↳ `delta_net_decode_reg.comp` | `delta_net_decode_reg_f16.spv` | `-DQ36_STATE_F16=1 -DQ36_COLS=32` | no |
+| ↳ `delta_net_cols.comp` | `delta_net_cols_f16.spv` | `-DP36_STATE_F16=1` | no |
+| `delta_net_decode_reg.comp` | `delta_net_decode_reg.spv` | `-DP36_COLS=32` | no |
+| ↳ `delta_net_decode_reg.comp` | `delta_net_decode_reg_f16.spv` | `-DP36_STATE_F16=1 -DP36_COLS=32` | no |
 | `matmul_f32_fast.comp` | `matmul_f32_fast.spv` | *(none)* | no |
-| ↳ `matmul_f32_fast.comp` | `matmul_f32_fast_w256.spv` | `-DQ36_MFF_LOCAL=256` | no |
+| ↳ `matmul_f32_fast.comp` | `matmul_f32_fast_w256.spv` | `-DP36_MFF_LOCAL=256` | no |
 
 **Mixed-state variants (same `.comp`, different force decision):**
 
@@ -286,7 +286,7 @@ paths, yet takes a different subgroup width at pipeline creation. Where the sour
 depends on the subgroup width (see §6), that is a correctness bug regardless of which variant is
 wrong; where it does not depend on it, the pair is merely inconsistent with no numeric effect.
 
-## 6. The substring rule at `q36_vulkan.c:1575` — what it already forces, and the gap
+## 6. The substring rule at `p36_vulkan.c:1575` — what it already forces, and the gap
 
 `strstr(k->path, "dense_") && strstr(k->path, "_mmq.spv")` forces every `dense_*_mmq.spv`. The
 outputs that match, from the `Makefile`:
@@ -333,7 +333,7 @@ file rather than assumed.
 | `.comp` | `local_size_x` | `BN` / tile line | `gl_Subgroup*` reads | token-index lines | bucket |
 |---|---|---|---|---|---|
 | `dense_extra_mmq.comp` | 128 | `28`: `const uint BM = 32u;`; `29`: `const uint BN = 128u;` | `gl_SubgroupID`@153, `gl_SubgroupInvocationID`@154 | `286`: `bv[st * 2u + t] = buf_b[(wave * 32u + st * 16u +`; `301`: `uint tok = tok0 + wave * 32u + (t >> 1u) * 16u +` | NEEDS-REVIEW |
-| `dense_iq3_s_mmq.comp` | 128 | `31`: `const uint BM = Q36_BM;`; `32`: `const uint BN = 128u;` | `gl_SubgroupID`@78, `gl_SubgroupInvocationID`@79 | `175`: `bv[st * 2u + t] = buf_b[(warp_tok * 32u + st * 16u +`; `190`: `uint tok = tok0 + warp_tok * 32u + (tt >> 1u) * 16u +` | NEEDS-REVIEW |
+| `dense_iq3_s_mmq.comp` | 128 | `31`: `const uint BM = P36_BM;`; `32`: `const uint BN = 128u;` | `gl_SubgroupID`@78, `gl_SubgroupInvocationID`@79 | `175`: `bv[st * 2u + t] = buf_b[(warp_tok * 32u + st * 16u +`; `190`: `uint tok = tok0 + warp_tok * 32u + (tt >> 1u) * 16u +` | NEEDS-REVIEW |
 | `dense_iq3_xxs_mmq.comp` | 128 | `23`: `const uint BM = 32u;`; `24`: `const uint BN = 128u;` | `gl_SubgroupID`@71, `gl_SubgroupInvocationID`@72 | `151`: `bv[st * 2u + t] = buf_b[(warp_tok * 32u + st * 16u +`; `166`: `uint tok = tok0 + warp_tok * 32u + (tt >> 1u) * 16u +` | NEEDS-REVIEW |
 | `dense_iq4_xs_mmq.comp` | 128 | `21`: `const uint BM = 32u;`; `22`: `const uint BN = 128u;` | `gl_SubgroupID`@69, `gl_SubgroupInvocationID`@70 | `156`: `bv[st * 2u + t] = buf_b[(warp_tok * 32u + st * 16u +`; `171`: `uint tok = tok0 + warp_tok * 32u + (tt >> 1u) * 16u +` | NEEDS-REVIEW |
 | `dense_kquant_mmq.comp` | 128 | `29`: `const uint BM = 32u;`; `30`: `const uint BN = 128u;` | `gl_SubgroupID`@205, `gl_SubgroupInvocationID`@206 | `210`: `uint out_tok0 = tok0 + wave * 32u + lane_tok * 8u;`; `284`: `bv[t] = buf_b[(wave * 32u + lane_tok * 8u + t) * STRIDE + k]` | NEEDS-REVIEW |
@@ -346,11 +346,11 @@ file rather than assumed.
 ### 6.3 Gap: `dense_iq3_s_mmq_r4.spv` escapes the substring rule
 
 `dense_iq3_s_mmq_r4.spv` does not contain `_mmq.spv` (it ends `_mmq_r4.spv`), so neither the
-substring rule (`q36_vulkan.c:1575`) nor the list (`1569-1574`) covers it — while `dense_iq3_s_mmq.spv`
+substring rule (`p36_vulkan.c:1575`) nor the list (`1569-1574`) covers it — while `dense_iq3_s_mmq.spv`
 and `dense_iq3_s_bm64_mmq.spv`, built from the *same* `dense_iq3_s_mmq.comp`, are forced. The
 subgroup-counted token formula at `dense_iq3_s_mmq.comp:190-191` is not guarded by any `-D` in the
 `_r4` recipe, so the variant inherits the same 4-subgroup requirement. It is selected at runtime
-(`q36_vulkan.c:8165`, `dense_iq3_s_mmq_r4` for `out_dim == 48 && n_tok <= 128`).
+(`p36_vulkan.c:8165`, `dense_iq3_s_mmq_r4` for `out_dim == 48 && n_tok <= 128`).
 
 ## 7. `barrier()` users (uniform control flow — noted separately)
 
@@ -391,14 +391,14 @@ using it, with line numbers:
 * `matmul_q8_0.comp` — barrier@87, 107
 * `matmul_q8_0_decode.comp` — barrier@94
 * `matmul_q8_0_decode_b64.comp` — barrier@98
-* `matmul_q8_0_decode_q36.comp` — barrier@77
+* `matmul_q8_0_decode_p36.comp` — barrier@77
 * `matmul_q8_0_f32b.comp` — barrier@69
 * `matmul_q8_0_f32b_nx.comp` — barrier@75
 * `matmul_q8_0_f32b_pair.comp` — barrier@70
 * `matmul_q8_0_mm.comp` — barrier@88, 116
 * `matmul_q8_0_mm_f16.comp` — barrier@136, 163
 * `matmul_q8_0_mm_f16_out32.comp` — barrier@85, 99
-* `matmul_q8_0_q36.comp` — barrier@77, 97, 103
+* `matmul_q8_0_p36.comp` — barrier@77, 97, 103
 * `moe_down_gemm.comp` — barrier@85, 128, 148
 * `moe_down_q2k_f32b.comp` — barrier@146
 * `moe_gate_up.comp` — barrier@116, 169, 176
@@ -465,11 +465,11 @@ matmul_q5k_mmq.comp                      local_size_x=64
 matmul_q6k_mmq.comp                      local_size_x=64       
 matmul_q8_0_decode.comp                  local_size_x=128      HOT
 matmul_q8_0_decode_b64.comp              local_size_x=128      HOT
-matmul_q8_0_decode_q36.comp              local_size_x=128      HOT
+matmul_q8_0_decode_p36.comp              local_size_x=128      HOT
 matmul_q8_0_mm.comp                      local_size_x=256      
 matmul_q8_0_mm_f16.comp                  local_size_x=256      
 matmul_q8_0_mm_f16_out32.comp            local_size_x=256      
-matmul_q8_0_q36.comp                     local_size_x=64       
+matmul_q8_0_p36.comp                     local_size_x=64       
 moe_down_gemm.comp                       local_size_x=256      
 moe_gate_up.comp                         local_size_x=64       
 moe_gate_up_gemm.comp                    local_size_x=256      
@@ -498,4 +498,4 @@ vision_attention.comp                    local_size_x=128
 vision_matmul_f16.comp                   local_size_x=16x16x1 
 ```
 
-Generated 2026-09-17 by read-only scan of `/home/server/q36-opt-27b/vulkan` and `/home/server/q36-opt-27b/Makefile`.
+Generated 2026-09-17 by read-only scan of `/home/server/p36-opt-27b/vulkan` and `/home/server/p36-opt-27b/Makefile`.

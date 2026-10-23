@@ -10,7 +10,7 @@ Verdict: APPROVED
 - Original scalar implementation accumulated 128 products per row in a 32‑bit int; final fma uses float conversion.
 - New implementation packs two weights per i16vec2 component, performing component‑wise multiplication and accumulation in i16vec2.
 - Each component sees at most 64 products (half of 128). Max product magnitude = 1 * 127 = 127, sum ≤ 64 * 127 = 8128 < 32767 (int16_t limit). No overflow, safe conversion to float via `int(sum[r][t].x) + int(sum[r][t].y)`.
-- Final accumulation `acc_f32 = fma(wd * yd, float(s), acc_f32)` matches reference `q36_contract_mmq_ptq1_dot` computation.
+- Final accumulation `acc_f32 = fma(wd * yd, float(s), acc_f32)` matches reference `p36_contract_mmq_ptq1_dot` computation.
 
 2. LDS layout, alignment & bank‑conflict analysis
 ------------------------------------------------

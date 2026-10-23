@@ -1,9 +1,9 @@
-// Q36 Metal matvec kernels used by generation.
+// P36 Metal matvec kernels used by generation.
 
 constant short FC_mul_mv_nsg   [[function_constant(FC_MUL_MV + 0)]];
 constant short FC_mul_mv_nxpsg [[function_constant(FC_MUL_MV + 1)]];
 
-struct q36_metal_args_mul_mv {
+struct p36_metal_args_mul_mv {
     int ne00;
     int ne01;
     int ne02;
@@ -25,14 +25,14 @@ struct q36_metal_args_mul_mv {
     short r3;
 };
 
-struct q36_metal_args_compressor_pair_store {
+struct p36_metal_args_compressor_pair_store {
     uint32_t width;
     uint32_t ratio;
     uint32_t pos;
     uint32_t ape_type;
 };
 
-struct q36_metal_args_mul_mm {
+struct p36_metal_args_mul_mm {
     int32_t ne00;
     int32_t ne02;
     uint64_t nb01;
@@ -49,7 +49,7 @@ struct q36_metal_args_mul_mm {
     int16_t r3;
 };
 
-struct q36_metal_args_mul_mv_ext {
+struct p36_metal_args_mul_mv_ext {
     int32_t ne00;
     int32_t ne01;
     int32_t ne02;
@@ -66,7 +66,7 @@ struct q36_metal_args_mul_mv_ext {
     uint64_t nb13;
     int32_t ne0;
     int32_t ne1;
-    // Keep this layout byte-for-byte aligned with host q36_q8_mv_args.
+    // Keep this layout byte-for-byte aligned with host p36_q8_mv_args.
     int32_t nr0;
     int16_t r2;
     int16_t r3;
@@ -185,11 +185,11 @@ void kernel_mul_mv_q8_0_f32_impl(
         dst_f32, sumf, r0, args.ne01, tiisg, sgitg, shmem);
 }
 
-// Decode-time Q8_0 matrix-vector multiply. Q36 uses this for Q8_0 dense
+// Decode-time Q8_0 matrix-vector multiply. P36 uses this for Q8_0 dense
 // projections such as shared experts and output-side small matvecs.
 [[host_name("kernel_mul_mv_q8_0_f32")]]
 kernel void kernel_mul_mv_q8_0_f32(
-        constant q36_metal_args_mul_mv & args,
+        constant p36_metal_args_mul_mv & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -197,13 +197,13 @@ kernel void kernel_mul_mv_q8_0_f32(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_mul_mv_q8_0_f32_impl<N_R0_Q8_0, constant q36_metal_args_mul_mv &>(
+    kernel_mul_mv_q8_0_f32_impl<N_R0_Q8_0, constant p36_metal_args_mul_mv &>(
         args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 }
 
 [[host_name("kernel_mul_mv_q8_0_f32_r4")]]
 kernel void kernel_mul_mv_q8_0_f32_r4(
-        constant q36_metal_args_mul_mv & args,
+        constant p36_metal_args_mul_mv & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -211,14 +211,14 @@ kernel void kernel_mul_mv_q8_0_f32_r4(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_mul_mv_q8_0_f32_impl<4, constant q36_metal_args_mul_mv &>(
+    kernel_mul_mv_q8_0_f32_impl<4, constant p36_metal_args_mul_mv &>(
         args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 }
 
 // Output projection alias used by the optimized host dispatch.
 [[host_name("kernel_mul_mv_q8_0_f32_nr4")]]
 kernel void kernel_mul_mv_q8_0_f32_nr4(
-        constant q36_metal_args_mul_mv & args,
+        constant p36_metal_args_mul_mv & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -226,7 +226,7 @@ kernel void kernel_mul_mv_q8_0_f32_nr4(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_mul_mv_q8_0_f32_impl<4, constant q36_metal_args_mul_mv &>(
+    kernel_mul_mv_q8_0_f32_impl<4, constant p36_metal_args_mul_mv &>(
         args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 }
 
@@ -236,8 +236,8 @@ kernel void kernel_mul_mv_q8_0_f32_nr4(
 // the activation load and threadgroup scheduling are shared.
 [[host_name("kernel_mul_mv_q8_0_f32_pair")]]
 kernel void kernel_mul_mv_q8_0_f32_pair(
-        constant q36_metal_args_mul_mv & args0,
-        constant q36_metal_args_mul_mv & args1,
+        constant p36_metal_args_mul_mv & args0,
+        constant p36_metal_args_mul_mv & args1,
         device const char * src0_a,
         device const char * src0_b,
         device const char * src1,
@@ -354,15 +354,15 @@ kernel void kernel_mul_mv_q8_0_f32_pair(
 //
 //     mid = silu(min(gate, limit)) * clamp(up, -limit, limit)
 //
-// Q36's shared expert uses two Q8_0 matrices with the same input row.  This
+// P36's shared expert uses two Q8_0 matrices with the same input row.  This
 // kernel preserves the exact Q8_0 dot-product reduction shape for both
 // projections, still writes gate/up for diagnostics, and derives `mid` in the
 // same lane that owns the reduced output row.  The point is not to fuse two
 // independent weight streams into one matmul; it is to remove the separate
 // activation pass and its reread of the two 2048-wide rows.
 template<short NR0, bool STORE_GATE_UP>
-void kernel_q36_shared_gate_up_swiglu_q8_0_impl(
-        constant q36_metal_args_mul_mv & args,
+void kernel_p36_shared_gate_up_swiglu_q8_0_impl(
+        constant p36_metal_args_mul_mv & args,
         device const char * src0_gate,
         device const char * src0_up,
         device const char * src1,
@@ -483,9 +483,9 @@ void kernel_q36_shared_gate_up_swiglu_q8_0_impl(
     }
 }
 
-[[host_name("kernel_q36_shared_gate_up_swiglu_q8_0")]]
-kernel void kernel_q36_shared_gate_up_swiglu_q8_0(
-        constant q36_metal_args_mul_mv & args,
+[[host_name("kernel_p36_shared_gate_up_swiglu_q8_0")]]
+kernel void kernel_p36_shared_gate_up_swiglu_q8_0(
+        constant p36_metal_args_mul_mv & args,
         device const char * src0_gate,
         device const char * src0_up,
         device const char * src1,
@@ -497,14 +497,14 @@ kernel void kernel_q36_shared_gate_up_swiglu_q8_0(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_q36_shared_gate_up_swiglu_q8_0_impl<N_R0_Q8_0, true>(
+    kernel_p36_shared_gate_up_swiglu_q8_0_impl<N_R0_Q8_0, true>(
             args, src0_gate, src0_up, src1, dst_gate, dst_up, dst_mid,
             clamp_value, shmem, tgpig, tiisg, sgitg);
 }
 
-[[host_name("kernel_q36_shared_gate_up_swiglu_q8_0_r4")]]
-kernel void kernel_q36_shared_gate_up_swiglu_q8_0_r4(
-        constant q36_metal_args_mul_mv & args,
+[[host_name("kernel_p36_shared_gate_up_swiglu_q8_0_r4")]]
+kernel void kernel_p36_shared_gate_up_swiglu_q8_0_r4(
+        constant p36_metal_args_mul_mv & args,
         device const char * src0_gate,
         device const char * src0_up,
         device const char * src1,
@@ -516,14 +516,14 @@ kernel void kernel_q36_shared_gate_up_swiglu_q8_0_r4(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_q36_shared_gate_up_swiglu_q8_0_impl<4, true>(
+    kernel_p36_shared_gate_up_swiglu_q8_0_impl<4, true>(
             args, src0_gate, src0_up, src1, dst_gate, dst_up, dst_mid,
             clamp_value, shmem, tgpig, tiisg, sgitg);
 }
 
-[[host_name("kernel_q36_shared_mid_swiglu_q8_0")]]
-kernel void kernel_q36_shared_mid_swiglu_q8_0(
-        constant q36_metal_args_mul_mv & args,
+[[host_name("kernel_p36_shared_mid_swiglu_q8_0")]]
+kernel void kernel_p36_shared_mid_swiglu_q8_0(
+        constant p36_metal_args_mul_mv & args,
         device const char * src0_gate,
         device const char * src0_up,
         device const char * src1,
@@ -535,14 +535,14 @@ kernel void kernel_q36_shared_mid_swiglu_q8_0(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_q36_shared_gate_up_swiglu_q8_0_impl<N_R0_Q8_0, false>(
+    kernel_p36_shared_gate_up_swiglu_q8_0_impl<N_R0_Q8_0, false>(
             args, src0_gate, src0_up, src1, dst_gate, dst_up, dst_mid,
             clamp_value, shmem, tgpig, tiisg, sgitg);
 }
 
-[[host_name("kernel_q36_shared_mid_swiglu_q8_0_r4")]]
-kernel void kernel_q36_shared_mid_swiglu_q8_0_r4(
-        constant q36_metal_args_mul_mv & args,
+[[host_name("kernel_p36_shared_mid_swiglu_q8_0_r4")]]
+kernel void kernel_p36_shared_mid_swiglu_q8_0_r4(
+        constant p36_metal_args_mul_mv & args,
         device const char * src0_gate,
         device const char * src0_up,
         device const char * src1,
@@ -554,28 +554,28 @@ kernel void kernel_q36_shared_mid_swiglu_q8_0_r4(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_q36_shared_gate_up_swiglu_q8_0_impl<4, false>(
+    kernel_p36_shared_gate_up_swiglu_q8_0_impl<4, false>(
             args, src0_gate, src0_up, src1, dst_gate, dst_up, dst_mid,
             clamp_value, shmem, tgpig, tiisg, sgitg);
 }
 
-struct q36_shared_gate_up_decode_args {
+struct p36_shared_gate_up_decode_args {
     uint mid_dim;
     uint blocks;
     float gate_scale;
     float up_scale;
 };
 
-// Direct translation of Q36 Vulkan's decode-only shared expert. Each
+// Direct translation of P36 Vulkan's decode-only shared expert. Each
 // threadgroup owns one output row; four adjacent lanes consume one Q8_0 block
 // and the two simdgroups are reduced once. Only the activated mid row is
 // materialized.
-kernel void q36_shared_gate_up_decode(
+kernel void p36_shared_gate_up_decode(
         device const block_q8_0 *gate_w [[buffer(0)]],
         device const block_q8_0 *up_w [[buffer(1)]],
         device const float *x [[buffer(2)]],
         device float *mid [[buffer(3)]],
-        constant q36_shared_gate_up_decode_args &args [[buffer(4)]],
+        constant p36_shared_gate_up_decode_args &args [[buffer(4)]],
         uint tid [[thread_index_in_threadgroup]],
         uint lane [[thread_index_in_simdgroup]],
         uint sg [[simdgroup_index_in_threadgroup]],
@@ -613,18 +613,18 @@ kernel void q36_shared_gate_up_decode(
     }
 }
 
-struct q36_shared_down_tail_decode_args {
+struct p36_shared_down_tail_decode_args {
     uint out_dim;
     uint blocks;
     float scale;
 };
 
-kernel void q36_shared_down_tail_decode(
+kernel void p36_shared_down_tail_decode(
         device const block_q8_0 *weights [[buffer(0)]],
         device const float *x [[buffer(1)]],
         device const float *scalar [[buffer(2)]],
         device float *out [[buffer(3)]],
-        constant q36_shared_down_tail_decode_args &args [[buffer(4)]],
+        constant p36_shared_down_tail_decode_args &args [[buffer(4)]],
         uint tid [[thread_index_in_threadgroup]],
         uint lane [[thread_index_in_simdgroup]],
         uint sg [[simdgroup_index_in_threadgroup]],
@@ -747,10 +747,10 @@ void kernel_mul_mv_t_t_disp(
 }
 
 // Decode-time dense F32/F16 matrix-vector multiply. The instantiated kernels
-// handle unquantized Q36 weights and activations that are already float rows.
+// handle unquantized P36 weights and activations that are already float rows.
 template<typename T0, typename T1>
 kernel void kernel_mul_mv_t_t(
-        constant q36_metal_args_mul_mv & args,
+        constant p36_metal_args_mul_mv & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -758,7 +758,7 @@ kernel void kernel_mul_mv_t_t(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_mul_mv_t_t_disp<T0, T1, constant q36_metal_args_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+    kernel_mul_mv_t_t_disp<T0, T1, constant p36_metal_args_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 }
 
 typedef decltype(kernel_mul_mv_t_t<half, half>) mul_mv_t_t;
@@ -865,11 +865,11 @@ void kernel_mul_mv_t_t_4_disp(
     };
 }
 
-// Vectorized dense matvec using float4/half4 loads. Q36 uses this where the
+// Vectorized dense matvec using float4/half4 loads. P36 uses this where the
 // inner dimension and alignment make vector loads cheaper than scalar lanes.
 template<typename T0, typename T04, typename T1, typename T14>
 kernel void kernel_mul_mv_t_t_4(
-        constant q36_metal_args_mul_mv & args,
+        constant p36_metal_args_mul_mv & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -877,7 +877,7 @@ kernel void kernel_mul_mv_t_t_4(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_mul_mv_t_t_4_disp<T0, T04, T1, T14, constant q36_metal_args_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+    kernel_mul_mv_t_t_4_disp<T0, T04, T1, T14, constant p36_metal_args_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 }
 
 typedef decltype(kernel_mul_mv_t_t_4<half, half4, half, half4>) mul_mv_t_t_4;
@@ -886,7 +886,7 @@ typedef decltype(kernel_mul_mv_t_t_4<half, half4, half, half4>) mul_mv_t_t_4;
 template [[host_name("kernel_mul_mv_f32_f32_4")]] kernel mul_mv_t_t_4 kernel_mul_mv_t_t_4<float, float4, float, float4>;
 template [[host_name("kernel_mul_mv_f16_f32_4")]] kernel mul_mv_t_t_4 kernel_mul_mv_t_t_4<half,  half4,  float, float4>;
 
-// Q36 compressor projections always compute two same-shaped F16 matvecs from
+// P36 compressor projections always compute two same-shaped F16 matvecs from
 // the same normalized activation: one for projected KV and one for pooling
 // scores.  This paired variant keeps the exact dense F16 row-reduction shape
 // for each matrix, but shares one dispatch and one activation stream.
@@ -1009,7 +1009,7 @@ void kernel_mul_mv_f16_f32_pair_4_disp(
 }
 
 kernel void kernel_mul_mv_f16_f32_pair_4(
-        constant q36_metal_args_mul_mv & args,
+        constant p36_metal_args_mul_mv & args,
         device const char * src0_a,
         device const char * src0_b,
         device const char * src1,
@@ -1019,7 +1019,7 @@ kernel void kernel_mul_mv_f16_f32_pair_4(
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    kernel_mul_mv_f16_f32_pair_4_disp<constant q36_metal_args_mul_mv &>(
+    kernel_mul_mv_f16_f32_pair_4_disp<constant p36_metal_args_mul_mv &>(
             args, src0_a, src0_b, src1, dst_a, dst_b, shmem, tgpig, tiisg, sgitg);
 }
 
@@ -1027,10 +1027,10 @@ kernel void kernel_mul_mv_f16_f32_pair_4(
 // matvec remains unchanged and still materializes both F32 outputs. After a
 // device-memory barrier, the first NR0 threads reload those exact stored bits
 // and perform the same state write and score+APE addition as
-// kernel_q36_compressor_store_one.
+// kernel_p36_compressor_store_one.
 kernel void kernel_mul_mv_f16_f32_pair_compressor_store_4(
-        constant q36_metal_args_mul_mv & args,
-        constant q36_metal_args_compressor_pair_store & store,
+        constant p36_metal_args_mul_mv & args,
+        constant p36_metal_args_compressor_pair_store & store,
         device const char * src0_a,
         device const char * src0_b,
         device const char * src1,
@@ -1044,7 +1044,7 @@ kernel void kernel_mul_mv_f16_f32_pair_compressor_store_4(
         ushort tiitg [[thread_index_in_threadgroup]],
         ushort tiisg [[thread_index_in_simdgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    kernel_mul_mv_f16_f32_pair_4_disp<constant q36_metal_args_mul_mv &>(
+    kernel_mul_mv_f16_f32_pair_4_disp<constant p36_metal_args_mul_mv &>(
             args, src0_a, src0_b, src1, dst_a, dst_b,
             shmem, tgpig, tiisg, sgitg);
 
@@ -1115,16 +1115,16 @@ void kernel_mul_mv_t_t_short_impl(
 }
 
 // Scalar fallback for short rows. It trades parallelism for lower dispatch and
-// reduction overhead when Q36 asks for tiny dense matvecs.
+// reduction overhead when P36 asks for tiny dense matvecs.
 template<typename T0, typename T1>
 kernel void kernel_mul_mv_t_t_short(
-        constant q36_metal_args_mul_mv & args,
+        constant p36_metal_args_mul_mv & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiisg[[thread_index_in_simdgroup]]) {
-    kernel_mul_mv_t_t_short_impl<T0, T1, constant q36_metal_args_mul_mv &>(
+    kernel_mul_mv_t_t_short_impl<T0, T1, constant p36_metal_args_mul_mv &>(
         args,
         src0,
         src1,
@@ -1163,33 +1163,33 @@ void dequantize_q8_0(device const block_q8_0 *xb, short il, thread type4x4 & reg
     reg = (type4x4) reg_f;
 }
 
-struct q36_dense_block_q4_0 {
+struct p36_dense_block_q4_0 {
     half d;
     uchar qs[16];
 };
 
-struct q36_dense_block_q4_K {
+struct p36_dense_block_q4_K {
     half d;
     half dmin;
     uchar scales[12];
     uchar qs[128];
 };
 
-struct q36_dense_block_q2_K {
+struct p36_dense_block_q2_K {
     uchar scales[16];
     uchar qs[64];
     half d;
     half dmin;
 };
 
-struct q36_dense_block_q3_K {
+struct p36_dense_block_q3_K {
     uchar hmask[32];
     uchar qs[64];
     uchar scales[12];
     half d;
 };
 
-struct q36_dense_block_q5_K {
+struct p36_dense_block_q5_K {
     half d;
     half dmin;
     uchar scales[12];
@@ -1199,29 +1199,29 @@ struct q36_dense_block_q5_K {
 
 // Decode-only Q5_K cache layout. The original 5-bit codes are expanded once
 // at model setup, while block scale/min metadata remains lossless.
-struct q36_dense_block_q5_K_expanded {
+struct p36_dense_block_q5_K_expanded {
     half d;
     half dmin;
     uchar scales[8];
     uchar mins[8];
     uchar qs[256];
 };
-static_assert(sizeof(q36_dense_block_q5_K_expanded) == 276,
+static_assert(sizeof(p36_dense_block_q5_K_expanded) == 276,
               "expanded Q5_K block ABI");
 
-struct q36_dense_block_q6_K {
+struct p36_dense_block_q6_K {
     uchar ql[128];
     uchar qh[64];
     char scales[16];
     half d;
 };
 
-struct q36_dense_block_iq3_xxs {
+struct p36_dense_block_iq3_xxs {
     half d;
     uchar qs[96];
 };
 
-struct q36_dense_block_iq3_s {
+struct p36_dense_block_iq3_s {
     half d;
     uchar qs[64];
     uchar qh[8];
@@ -1229,57 +1229,57 @@ struct q36_dense_block_iq3_s {
     uchar scales[4];
 };
 
-struct q36_dense_block_iq2_xxs {
+struct p36_dense_block_iq2_xxs {
     half d;
     ushort qs[32];
 };
 
-struct q36_dense_block_iq2_xs {
+struct p36_dense_block_iq2_xs {
     half d;
     ushort qs[32];
     uchar scales[8];
 };
 
-struct q36_dense_block_iq2_s {
+struct p36_dense_block_iq2_s {
     half d;
     uchar qs[64];
     uchar qh[8];
     uchar scales[8];
 };
 
-struct q36_dense_block_iq1_s {
+struct p36_dense_block_iq1_s {
     half d;
     uchar qs[32];
     ushort qh[8];
 };
 
-struct q36_dense_block_iq4_nl_32 {
+struct p36_dense_block_iq4_nl_32 {
     half d;
     uchar qs[16];
 };
 
-struct q36_dense_block_iq4_nl {
-    q36_dense_block_iq4_nl_32 sub[8];
+struct p36_dense_block_iq4_nl {
+    p36_dense_block_iq4_nl_32 sub[8];
 };
 
-struct q36_dense_block_iq4_xs {
+struct p36_dense_block_iq4_xs {
     half d;
     ushort scales_h;
     uchar scales_l[4];
     uchar qs[128];
 };
 
-static constant char q36_dense_iq4_values[16] = {
+static constant char p36_dense_iq4_values[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10,
        1,   13,  25,  38,  53,  69,  89, 113,
 };
 
-static inline uint q36_dense_load_u32(device const uchar *p) {
+static inline uint p36_dense_load_u32(device const uchar *p) {
     return uint(p[0]) | (uint(p[1]) << 8) | (uint(p[2]) << 16) |
            (uint(p[3]) << 24);
 }
 
-static inline float4 q36_dense_signed_grid4(constant const uchar *grid,
+static inline float4 p36_dense_signed_grid4(constant const uchar *grid,
                                              uchar signs, bool high) {
     const uchar4 values = *((constant const uchar4 *)(grid + (high ? 4 : 0)));
     const uchar4 masks = high ? uchar4(16, 32, 64, 128)
@@ -1289,7 +1289,7 @@ static inline float4 q36_dense_signed_grid4(constant const uchar *grid,
                          (uchar4(signs) & masks) != uchar4(0)));
 }
 
-static inline uchar2 q36_dense_k_scale_min(device const uchar *scales,
+static inline uchar2 p36_dense_k_scale_min(device const uchar *scales,
                                             uint group) {
     if (group < 4)
         return uchar2(scales[group] & 63, scales[4 + group] & 63);
@@ -1299,8 +1299,8 @@ static inline uchar2 q36_dense_k_scale_min(device const uchar *scales,
                       ((scales[group] >> 6) << 4));
 }
 
-static inline int q36_dense_q3_scale(
-        device const q36_dense_block_q3_K *xb, uint group) {
+static inline int p36_dense_q3_scale(
+        device const p36_dense_block_q3_K *xb, uint group) {
     uint lo = xb->scales[group & 7];
     lo = group < 8 ? lo & 15 : lo >> 4;
     uint hi = (xb->scales[8 + (group & 3)] >>
@@ -1309,7 +1309,7 @@ static inline int q36_dense_q3_scale(
 }
 
 void dequantize_dense_q2_K_t4(
-        device const q36_dense_block_q2_K *xb, short il,
+        device const p36_dense_block_q2_K *xb, short il,
         thread float4 &reg) {
     const uint idx = 4u * uint(il);
     const uint group = idx >> 4;
@@ -1324,7 +1324,7 @@ void dequantize_dense_q2_K_t4(
 }
 
 void dequantize_dense_q3_K_t4(
-        device const q36_dense_block_q3_K *xb, short il,
+        device const p36_dense_block_q3_K *xb, short il,
         thread float4 &reg) {
     const uint idx = 4u * uint(il);
     const uint half_id = idx >> 7;
@@ -1332,7 +1332,7 @@ void dequantize_dense_q3_K_t4(
     const uint shift = 2 * (group >> 1);
     const uchar mask = uchar(1u << (half_id * 4 + (group >> 1)));
     const float dl = float(xb->d) *
-                     float(q36_dense_q3_scale(xb, idx >> 4));
+                     float(p36_dense_q3_scale(xb, idx >> 4));
     for (uint i = 0; i < 4; ++i) {
         const uint pos = (idx & 31) + i;
         const int q = int((xb->qs[half_id * 32 + pos] >> shift) & 3) -
@@ -1342,12 +1342,12 @@ void dequantize_dense_q3_K_t4(
 }
 
 void dequantize_dense_q5_K_t4(
-        device const q36_dense_block_q5_K *xb, short il,
+        device const p36_dense_block_q5_K *xb, short il,
         thread float4 &reg) {
     const uint idx = 4u * uint(il);
     const uint group = idx >> 5;
     const uint pos = idx & 31;
-    const uchar2 sm = q36_dense_k_scale_min(xb->scales, group);
+    const uchar2 sm = p36_dense_k_scale_min(xb->scales, group);
     const float dl = float(xb->d) * float(sm[0]);
     const float ml = float(xb->dmin) * float(sm[1]);
     for (uint i = 0; i < 4; ++i) {
@@ -1358,18 +1358,18 @@ void dequantize_dense_q5_K_t4(
     }
 }
 
-kernel void q36_repack_q5_K_expanded(
-        device const q36_dense_block_q5_K *src [[buffer(0)]],
-        device q36_dense_block_q5_K_expanded *dst [[buffer(1)]],
+kernel void p36_repack_q5_K_expanded(
+        device const p36_dense_block_q5_K *src [[buffer(0)]],
+        device p36_dense_block_q5_K_expanded *dst [[buffer(1)]],
         constant uint &n_blocks [[buffer(2)]],
         uint ib [[thread_position_in_grid]]) {
     if (ib >= n_blocks) return;
-    device const q36_dense_block_q5_K *s = src + ib;
-    device q36_dense_block_q5_K_expanded *d = dst + ib;
+    device const p36_dense_block_q5_K *s = src + ib;
+    device p36_dense_block_q5_K_expanded *d = dst + ib;
     d->d = s->d;
     d->dmin = s->dmin;
     for (uint group = 0; group < 8; ++group) {
-        const uchar2 sm = q36_dense_k_scale_min(s->scales, group);
+        const uchar2 sm = p36_dense_k_scale_min(s->scales, group);
         d->scales[group] = sm[0];
         d->mins[group] = sm[1];
         for (uint pos = 0; pos < 32; ++pos) {
@@ -1382,23 +1382,23 @@ kernel void q36_repack_q5_K_expanded(
 }
 
 void dequantize_dense_iq2_xxs_t4(
-        device const q36_dense_block_iq2_xxs *xb, short il,
+        device const p36_dense_block_iq2_xxs *xb, short il,
         thread float4 &reg) {
     const uint idx = 4u * uint(il);
     const uint group = idx >> 5;
     const uint l = (idx & 31) >> 3;
     const bool high = ((idx >> 2) & 1) != 0;
     device const uchar *q = (device const uchar *)xb->qs + 8 * group;
-    const uint packed = q36_dense_load_u32(q + 4);
+    const uint packed = p36_dense_load_u32(q + 4);
     const uchar entry = q[l];
-    const uchar signs = q36_dense_ksigns_iq3[(packed >> (7 * l)) & 127];
+    const uchar signs = p36_dense_ksigns_iq3[(packed >> (7 * l)) & 127];
     const float dl = float(xb->d) * (0.5f + float(packed >> 28)) * 0.25f;
-    reg = dl * q36_dense_signed_grid4(
-        q36_dense_iq2xxs_grid + 8u * uint(entry), signs, high);
+    reg = dl * p36_dense_signed_grid4(
+        p36_dense_iq2xxs_grid + 8u * uint(entry), signs, high);
 }
 
 void dequantize_dense_iq2_xs_t4(
-        device const q36_dense_block_iq2_xs *xb, short il,
+        device const p36_dense_block_iq2_xs *xb, short il,
         thread float4 &reg) {
     const uint idx = 4u * uint(il);
     const uint group = idx >> 5;
@@ -1408,14 +1408,14 @@ void dequantize_dense_iq2_xs_t4(
     const uchar sc = xb->scales[group];
     const uint nibble = l < 2 ? sc & 15 : sc >> 4;
     const float dl = float(xb->d) * (0.5f + float(nibble)) * 0.25f;
-    const uchar signs = q36_dense_ksigns_iq3[qs >> 9];
+    const uchar signs = p36_dense_ksigns_iq3[qs >> 9];
     constant const uchar *grid =
-        (constant const uchar *)(q36_dense_iq2xs_grid + (qs & 511));
-    reg = dl * q36_dense_signed_grid4(grid, signs, high);
+        (constant const uchar *)(p36_dense_iq2xs_grid + (qs & 511));
+    reg = dl * p36_dense_signed_grid4(grid, signs, high);
 }
 
 void dequantize_dense_iq2_s_t4(
-        device const q36_dense_block_iq2_s *xb, short il,
+        device const p36_dense_block_iq2_s *xb, short il,
         thread float4 &reg) {
     const uint idx = 4u * uint(il);
     const uint group = idx >> 5;
@@ -1428,12 +1428,12 @@ void dequantize_dense_iq2_s_t4(
     const uint nibble = l < 2 ? sc & 15 : sc >> 4;
     const float dl = float(xb->d) * (0.5f + float(nibble)) * 0.25f;
     constant const uchar *grid =
-        (constant const uchar *)(q36_dense_iq2s_grid + entry);
-    reg = dl * q36_dense_signed_grid4(grid, signs, high);
+        (constant const uchar *)(p36_dense_iq2s_grid + entry);
+    reg = dl * p36_dense_signed_grid4(grid, signs, high);
 }
 
 void dequantize_dense_iq1_s_t4(
-        device const q36_dense_block_iq1_s *xb, short il,
+        device const p36_dense_block_iq1_s *xb, short il,
         thread float4 &reg) {
     const uint idx = 4u * uint(il);
     const uint group = idx >> 5;
@@ -1446,28 +1446,28 @@ void dequantize_dense_iq1_s_t4(
                      float(2 * ((uint(qh) >> 12) & 7) + 1);
     const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
     constant const char *grid =
-        (constant const char *)(q36_dense_iq1s_grid + entry) +
+        (constant const char *)(p36_dense_iq1s_grid + entry) +
         (high ? 4 : 0);
     reg = dl * (float4(*((constant const char4 *)grid)) + delta);
 }
 
 void dequantize_dense_iq4_nl_t4(
-        device const q36_dense_block_iq4_nl *xb, short il,
+        device const p36_dense_block_iq4_nl *xb, short il,
         thread float4 &reg) {
-    device const q36_dense_block_iq4_nl_32 *sub = &xb->sub[uint(il) / 8];
+    device const p36_dense_block_iq4_nl_32 *sub = &xb->sub[uint(il) / 8];
     const uint chunk = uint(il) & 7;
     const bool high = chunk >= 4;
     const uint pos = 4 * (chunk & 3);
     const float d = float(sub->d);
     for (uint i = 0; i < 4; ++i) {
         const uchar packed = sub->qs[pos + i];
-        reg[i] = d * float(q36_dense_iq4_values[
+        reg[i] = d * float(p36_dense_iq4_values[
             high ? packed >> 4 : packed & 15]);
     }
 }
 
 void dequantize_dense_iq4_xs_t4(
-        device const q36_dense_block_iq4_xs *xb, short il,
+        device const p36_dense_block_iq4_xs *xb, short il,
         thread float4 &reg) {
     const uint idx = 4u * uint(il);
     const uint group = idx >> 5;
@@ -1478,12 +1478,12 @@ void dequantize_dense_iq4_xs_t4(
     const float dl = float(xb->d) * float(ls - 32);
     for (uint i = 0; i < 4; ++i) {
         const uchar packed = xb->qs[16 * group + pos + i];
-        reg[i] = dl * float(q36_dense_iq4_values[
+        reg[i] = dl * float(p36_dense_iq4_values[
             high ? packed >> 4 : packed & 15]);
     }
 }
 
-#define Q36_DENSE_DEQ16(name, block_t, deq_t4) \
+#define P36_DENSE_DEQ16(name, block_t, deq_t4) \
 template <typename type4x4> \
 void name(device const block_t *xb, short il, thread type4x4 &reg) { \
     float4x4 tmp; \
@@ -1492,35 +1492,35 @@ void name(device const block_t *xb, short il, thread type4x4 &reg) { \
     reg = (type4x4)tmp; \
 }
 
-Q36_DENSE_DEQ16(dequantize_dense_q2_K, q36_dense_block_q2_K,
+P36_DENSE_DEQ16(dequantize_dense_q2_K, p36_dense_block_q2_K,
                 dequantize_dense_q2_K_t4)
-Q36_DENSE_DEQ16(dequantize_dense_q3_K, q36_dense_block_q3_K,
+P36_DENSE_DEQ16(dequantize_dense_q3_K, p36_dense_block_q3_K,
                 dequantize_dense_q3_K_t4)
-Q36_DENSE_DEQ16(dequantize_dense_q5_K, q36_dense_block_q5_K,
+P36_DENSE_DEQ16(dequantize_dense_q5_K, p36_dense_block_q5_K,
                 dequantize_dense_q5_K_t4)
-Q36_DENSE_DEQ16(dequantize_dense_iq2_xxs, q36_dense_block_iq2_xxs,
+P36_DENSE_DEQ16(dequantize_dense_iq2_xxs, p36_dense_block_iq2_xxs,
                 dequantize_dense_iq2_xxs_t4)
-Q36_DENSE_DEQ16(dequantize_dense_iq2_xs, q36_dense_block_iq2_xs,
+P36_DENSE_DEQ16(dequantize_dense_iq2_xs, p36_dense_block_iq2_xs,
                 dequantize_dense_iq2_xs_t4)
-Q36_DENSE_DEQ16(dequantize_dense_iq2_s, q36_dense_block_iq2_s,
+P36_DENSE_DEQ16(dequantize_dense_iq2_s, p36_dense_block_iq2_s,
                 dequantize_dense_iq2_s_t4)
-Q36_DENSE_DEQ16(dequantize_dense_iq1_s, q36_dense_block_iq1_s,
+P36_DENSE_DEQ16(dequantize_dense_iq1_s, p36_dense_block_iq1_s,
                 dequantize_dense_iq1_s_t4)
-Q36_DENSE_DEQ16(dequantize_dense_iq4_nl, q36_dense_block_iq4_nl,
+P36_DENSE_DEQ16(dequantize_dense_iq4_nl, p36_dense_block_iq4_nl,
                 dequantize_dense_iq4_nl_t4)
-Q36_DENSE_DEQ16(dequantize_dense_iq4_xs, q36_dense_block_iq4_xs,
+P36_DENSE_DEQ16(dequantize_dense_iq4_xs, p36_dense_block_iq4_xs,
                 dequantize_dense_iq4_xs_t4)
 
-#undef Q36_DENSE_DEQ16
+#undef P36_DENSE_DEQ16
 
-static inline uchar2 q36_dense_q4_K_scale_min(int j, int k, device const uchar *q) {
+static inline uchar2 p36_dense_q4_K_scale_min(int j, int k, device const uchar *q) {
     return j < 4 ? uchar2{uchar(q[j + 0 + k] & 63), uchar(q[j + 4 + k] & 63)}
                  : uchar2{uchar((q[j + 4 + k] & 0x0f) | ((q[j - 4 + k] & 0xc0) >> 2)),
                           uchar((q[j + 4 + k] >> 4) | ((q[j - 0 + k] & 0xc0) >> 2))};
 }
 
 template <typename type4x4>
-void dequantize_dense_q4_0(device const q36_dense_block_q4_0 *xb, short il, thread type4x4 &reg) {
+void dequantize_dense_q4_0(device const p36_dense_block_q4_0 *xb, short il, thread type4x4 &reg) {
     float4x4 reg_f;
     const float d = (float)xb->d;
     const int base = 16 * (int)il;
@@ -1535,12 +1535,12 @@ void dequantize_dense_q4_0(device const q36_dense_block_q4_0 *xb, short il, thre
 }
 
 template <typename type4x4>
-void dequantize_dense_q4_K(device const q36_dense_block_q4_K *xb, short il, thread type4x4 &reg) {
+void dequantize_dense_q4_K(device const p36_dense_block_q4_K *xb, short il, thread type4x4 &reg) {
     device const uchar *q = xb->qs;
     short is = (il / 4) * 2;
     q = q + (il / 4) * 32 + 16 * (il & 1);
     il = il & 3;
-    const uchar2 sc = q36_dense_q4_K_scale_min(is, il / 2, xb->scales);
+    const uchar2 sc = p36_dense_q4_K_scale_min(is, il / 2, xb->scales);
     const float d = il < 2 ? (float)xb->d : (float)xb->d * (1.0f / 16.0f);
     const float min = (float)xb->dmin;
     const float dl = d * sc[0];
@@ -1555,7 +1555,7 @@ void dequantize_dense_q4_K(device const q36_dense_block_q4_K *xb, short il, thre
 }
 
 template <typename type4x4>
-void dequantize_dense_q6_K(device const q36_dense_block_q6_K *xb, short il,
+void dequantize_dense_q6_K(device const p36_dense_block_q6_K *xb, short il,
                            thread type4x4 &reg) {
     const float d_all = (float)xb->d;
     device const ushort *ql = (device const ushort *)xb->ql;
@@ -1591,7 +1591,7 @@ void dequantize_dense_q6_K(device const q36_dense_block_q6_K *xb, short il,
     reg = (type4x4)out;
 }
 
-static inline float4 q36_dense_iq3_grid4(constant const uchar *grid,
+static inline float4 p36_dense_iq3_grid4(constant const uchar *grid,
                                           uchar signs, bool high) {
     const uchar4 values = *((constant const uchar4 *)grid);
     const uchar4 masks = high ? uchar4(16, 32, 64, 128)
@@ -1602,7 +1602,7 @@ static inline float4 q36_dense_iq3_grid4(constant const uchar *grid,
 }
 
 template <typename type4x4>
-void dequantize_dense_iq3_xxs(device const q36_dense_block_iq3_xxs *xb,
+void dequantize_dense_iq3_xxs(device const p36_dense_block_iq3_xxs *xb,
                               short il, thread type4x4 &reg) {
     const int ib32 = il / 2;
     il &= 1;
@@ -1613,22 +1613,22 @@ void dequantize_dense_iq3_xxs(device const q36_dense_block_iq3_xxs *xb,
     const float dl = (float)xb->d * (0.5f + float(aux >> 28)) * 0.5f;
     float4x4 out;
     constant const uchar *g1 =
-        (constant const uchar *)(q36_dense_iq3xxs_grid + q3[4*il + 0]);
+        (constant const uchar *)(p36_dense_iq3xxs_grid + q3[4*il + 0]);
     constant const uchar *g2 =
-        (constant const uchar *)(q36_dense_iq3xxs_grid + q3[4*il + 1]);
-    uchar signs = q36_dense_ksigns_iq3[(aux >> (14*il)) & 127u];
-    out[0] = dl * q36_dense_iq3_grid4(g1, signs, false);
-    out[1] = dl * q36_dense_iq3_grid4(g2, signs, true);
-    g1 = (constant const uchar *)(q36_dense_iq3xxs_grid + q3[4*il + 2]);
-    g2 = (constant const uchar *)(q36_dense_iq3xxs_grid + q3[4*il + 3]);
-    signs = q36_dense_ksigns_iq3[(aux >> (14*il + 7)) & 127u];
-    out[2] = dl * q36_dense_iq3_grid4(g1, signs, false);
-    out[3] = dl * q36_dense_iq3_grid4(g2, signs, true);
+        (constant const uchar *)(p36_dense_iq3xxs_grid + q3[4*il + 1]);
+    uchar signs = p36_dense_ksigns_iq3[(aux >> (14*il)) & 127u];
+    out[0] = dl * p36_dense_iq3_grid4(g1, signs, false);
+    out[1] = dl * p36_dense_iq3_grid4(g2, signs, true);
+    g1 = (constant const uchar *)(p36_dense_iq3xxs_grid + q3[4*il + 2]);
+    g2 = (constant const uchar *)(p36_dense_iq3xxs_grid + q3[4*il + 3]);
+    signs = p36_dense_ksigns_iq3[(aux >> (14*il + 7)) & 127u];
+    out[2] = dl * p36_dense_iq3_grid4(g1, signs, false);
+    out[3] = dl * p36_dense_iq3_grid4(g2, signs, true);
     reg = (type4x4)out;
 }
 
 template <typename type4x4>
-void dequantize_dense_iq3_s(device const q36_dense_block_iq3_s *xb,
+void dequantize_dense_iq3_s(device const p36_dense_block_iq3_s *xb,
                             short il, thread type4x4 &reg) {
     const int ib32 = il / 2;
     il &= 1;
@@ -1638,18 +1638,18 @@ void dequantize_dense_iq3_s(device const q36_dense_block_iq3_s *xb,
     const float dl = (float)xb->d *
         float(1 + 2*((xb->scales[ib32/2] >> (4*(ib32%2))) & 0xf));
     float4x4 out;
-    constant const uchar *g1 = (constant const uchar *)(q36_dense_iq3s_grid +
+    constant const uchar *g1 = (constant const uchar *)(p36_dense_iq3s_grid +
         (qs[4*il + 0] | ((uint(qh) << 8) & 256u)));
-    constant const uchar *g2 = (constant const uchar *)(q36_dense_iq3s_grid +
+    constant const uchar *g2 = (constant const uchar *)(p36_dense_iq3s_grid +
         (qs[4*il + 1] | ((uint(qh) << 7) & 256u)));
-    out[0] = dl * q36_dense_iq3_grid4(g1, signs[0], false);
-    out[1] = dl * q36_dense_iq3_grid4(g2, signs[0], true);
-    g1 = (constant const uchar *)(q36_dense_iq3s_grid +
+    out[0] = dl * p36_dense_iq3_grid4(g1, signs[0], false);
+    out[1] = dl * p36_dense_iq3_grid4(g2, signs[0], true);
+    g1 = (constant const uchar *)(p36_dense_iq3s_grid +
         (qs[4*il + 2] | ((uint(qh) << 6) & 256u)));
-    g2 = (constant const uchar *)(q36_dense_iq3s_grid +
+    g2 = (constant const uchar *)(p36_dense_iq3s_grid +
         (qs[4*il + 3] | ((uint(qh) << 5) & 256u)));
-    out[2] = dl * q36_dense_iq3_grid4(g1, signs[1], false);
-    out[3] = dl * q36_dense_iq3_grid4(g2, signs[1], true);
+    out[2] = dl * p36_dense_iq3_grid4(g1, signs[1], false);
+    out[3] = dl * p36_dense_iq3_grid4(g2, signs[1], true);
     reg = (type4x4)out;
 }
 
@@ -1685,7 +1685,7 @@ void dequantize_q8_0_t4(device const block_q8_0 *xb, short il, thread type4 & re
 }
 
 template <typename type4>
-void dequantize_dense_q4_0_t4(device const q36_dense_block_q4_0 *xb, short il, thread type4 &reg) {
+void dequantize_dense_q4_0_t4(device const p36_dense_block_q4_0 *xb, short il, thread type4 &reg) {
     const float d = (float)xb->d;
     const int base = 4 * (int)il;
     for (int i = 0; i < 4; i++) {
@@ -1698,7 +1698,7 @@ void dequantize_dense_q4_0_t4(device const q36_dense_block_q4_0 *xb, short il, t
 }
 
 template <typename type4>
-void dequantize_dense_q4_K_t4(device const q36_dense_block_q4_K *xb, short il, thread type4 &reg) {
+void dequantize_dense_q4_K_t4(device const p36_dense_block_q4_K *xb, short il, thread type4 &reg) {
     const short group = il / 4;
     const short row = il & 3;
     const short is = (group / 4) * 2;
@@ -1706,7 +1706,7 @@ void dequantize_dense_q4_K_t4(device const q36_dense_block_q4_K *xb, short il, t
     device const uchar *q = xb->qs + (group / 4) * 32 +
                             16 * (group & 1) + 4 * row;
     const uchar2 sc =
-        q36_dense_q4_K_scale_min(is, sub / 2, xb->scales);
+        p36_dense_q4_K_scale_min(is, sub / 2, xb->scales);
     const float d = sub < 2 ? (float)xb->d
                             : (float)xb->d * (1.0f / 16.0f);
     const float dl = d * sc[0];
@@ -1725,7 +1725,7 @@ void dequantize_dense_256_t4(device const block_t *xb, short il,
 }
 
 void dequantize_dense_iq3_xxs_t4(
-        device const q36_dense_block_iq3_xxs *xb, short il,
+        device const p36_dense_block_iq3_xxs *xb, short il,
         thread float4 &reg) {
     const int ib32 = il / 8;
     const int half32 = (il / 4) & 1;
@@ -1736,14 +1736,14 @@ void dequantize_dense_iq3_xxs_t4(
     const uint aux = gas[0] | (uint(gas[1]) << 16);
     const float dl = (float)xb->d * (0.5f + float(aux >> 28)) * 0.5f;
     constant const uchar *grid = (constant const uchar *)(
-        q36_dense_iq3xxs_grid + q3[4*half32 + row]);
+        p36_dense_iq3xxs_grid + q3[4*half32 + row]);
     const uint sign_shift = 14*half32 + 7*(row/2);
-    const uchar signs = q36_dense_ksigns_iq3[(aux >> sign_shift) & 127u];
-    reg = dl * q36_dense_iq3_grid4(grid, signs, bool(row & 1));
+    const uchar signs = p36_dense_ksigns_iq3[(aux >> sign_shift) & 127u];
+    reg = dl * p36_dense_iq3_grid4(grid, signs, bool(row & 1));
 }
 
 void dequantize_dense_iq3_s_t4(
-        device const q36_dense_block_iq3_s *xb, short il,
+        device const p36_dense_block_iq3_s *xb, short il,
         thread float4 &reg) {
     const int ib32 = il / 8;
     const int half32 = (il / 4) & 1;
@@ -1754,17 +1754,17 @@ void dequantize_dense_iq3_s_t4(
     const uint grid_index = qs[4*half32 + row] |
         ((uint(qh) << (8 - row)) & 256u);
     constant const uchar *grid =
-        (constant const uchar *)(q36_dense_iq3s_grid + grid_index);
+        (constant const uchar *)(p36_dense_iq3s_grid + grid_index);
     const float dl = (float)xb->d *
         float(1 + 2*((xb->scales[ib32/2] >> (4*(ib32%2))) & 0xf));
     const uchar sign_bits = signs[row/2];
-    reg = dl * q36_dense_iq3_grid4(grid, sign_bits, bool(row & 1));
+    reg = dl * p36_dense_iq3_grid4(grid, sign_bits, bool(row & 1));
 }
 
-// Q36 small-batch mat-vec kernel used for 2..8 prompt tokens.
+// P36 small-batch mat-vec kernel used for 2..8 prompt tokens.
 template<short r1ptg, typename q_t, short chpb, void (*deq_t4)(device const q_t *, short, thread float4 &) >
 void kernel_mul_mv_ext_q4_f32_impl(
-        constant q36_metal_args_mul_mv_ext & args,
+        constant p36_metal_args_mul_mv_ext & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -1862,10 +1862,10 @@ void kernel_mul_mv_ext_q4_f32_impl(
 }
 
 // Small-batch prompt matvec for 2..5 tokens. It bridges decode-style matvec and
-// full matmul when Q36 prefill chunks are too small to amortize matrix tiles.
+// full matmul when P36 prefill chunks are too small to amortize matrix tiles.
 template<short r1ptg, typename q_t, short epb, void (*deq_t4)(device const q_t *, short, thread float4 &)>
 kernel void kernel_mul_mv_ext_q4_f32_disp(
-        constant q36_metal_args_mul_mv_ext & args,
+        constant p36_metal_args_mul_mv_ext & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -1883,7 +1883,7 @@ kernel void kernel_mul_mv_ext_q4_f32_disp(
 template<short rows_per_sg, typename q_t, short epb,
          void (*deq_t4)(device const q_t *, short, thread float4 &)>
 kernel void kernel_mul_mv_rows_q4_f32_disp(
-        constant q36_metal_args_mul_mv_ext & args,
+        constant p36_metal_args_mul_mv_ext & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -1921,7 +1921,7 @@ kernel void kernel_mul_mv_rows_q4_f32_disp(
     }
 }
 
-static inline float4 q36_dense_iq3_grid4_tg(
+static inline float4 p36_dense_iq3_grid4_tg(
         threadgroup const uint *grid, uint index, uchar signs, bool high) {
     const uchar4 values = as_type<uchar4>(grid[index]);
     const uchar4 masks = high ? uchar4(16, 32, 64, 128)
@@ -1932,7 +1932,7 @@ static inline float4 q36_dense_iq3_grid4_tg(
 }
 
 kernel void kernel_mul_mv_rows_iq3_xxs_tg_f32(
-        constant q36_metal_args_mul_mv_ext & args,
+        constant p36_metal_args_mul_mv_ext & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -1945,9 +1945,9 @@ kernel void kernel_mul_mv_rows_iq3_xxs_tg_f32(
     threadgroup uint *grid = (threadgroup uint *)shmem;
     threadgroup uchar *sign_lut = (threadgroup uchar *)(grid + 256);
     for (ushort i = lid; i < 256; i += 32 * NSG)
-        grid[i] = q36_dense_iq3xxs_grid[i];
+        grid[i] = p36_dense_iq3xxs_grid[i];
     for (ushort i = lid; i < 128; i += 32 * NSG)
-        sign_lut[i] = q36_dense_ksigns_iq3[i];
+        sign_lut[i] = p36_dense_ksigns_iq3[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const int first_row = (tgpig.x * NSG + sgitg) * 4;
@@ -1961,8 +1961,8 @@ kernel void kernel_mul_mv_rows_iq3_xxs_tg_f32(
 #pragma unroll(4)
         for (short row_out = 0; row_out < 4; ++row_out) {
             if (first_row + row_out >= args.ne01) continue;
-            device const q36_dense_block_iq3_xxs *xb =
-                (device const q36_dense_block_iq3_xxs *)(
+            device const p36_dense_block_iq3_xxs *xb =
+                (device const p36_dense_block_iq3_xxs *)(
                     src0 + (uint64_t)(first_row + row_out) * args.nb01) + block;
 #pragma unroll(2)
             for (short part = 0; part < 2; ++part) {
@@ -1978,7 +1978,7 @@ kernel void kernel_mul_mv_rows_iq3_xxs_tg_f32(
                     (0.5f + float(aux >> 28)) * 0.5f;
                 const uint sign_shift = 14*half32 + 7*(row/2);
                 const uchar signs = sign_lut[(aux >> sign_shift) & 127u];
-                const float4 vx = q36_dense_iq3_grid4_tg(
+                const float4 vx = p36_dense_iq3_grid4_tg(
                     grid, q3[4*half32 + row], signs, bool(row & 1));
                 sum[row_out] += dl * dot(vx, vy[part]);
             }
@@ -1993,7 +1993,7 @@ kernel void kernel_mul_mv_rows_iq3_xxs_tg_f32(
 }
 
 kernel void kernel_mul_mv_rows_iq3_s_tg_f32(
-        constant q36_metal_args_mul_mv_ext & args,
+        constant p36_metal_args_mul_mv_ext & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -2005,7 +2005,7 @@ kernel void kernel_mul_mv_rows_iq3_s_tg_f32(
     const ushort lid = 32 * sgitg + tiisg;
     threadgroup uint *grid = (threadgroup uint *)shmem;
     for (ushort i = lid; i < 512; i += 32 * NSG)
-        grid[i] = q36_dense_iq3s_grid[i];
+        grid[i] = p36_dense_iq3s_grid[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const int first_row = (tgpig.x * NSG + sgitg) * 4;
@@ -2019,8 +2019,8 @@ kernel void kernel_mul_mv_rows_iq3_s_tg_f32(
 #pragma unroll(4)
         for (short row_out = 0; row_out < 4; ++row_out) {
             if (first_row + row_out >= args.ne01) continue;
-            device const q36_dense_block_iq3_s *xb =
-                (device const q36_dense_block_iq3_s *)(
+            device const p36_dense_block_iq3_s *xb =
+                (device const p36_dense_block_iq3_s *)(
                     src0 + (uint64_t)(first_row + row_out) * args.nb01) + block;
 #pragma unroll(2)
             for (short part = 0; part < 2; ++part) {
@@ -2035,7 +2035,7 @@ kernel void kernel_mul_mv_rows_iq3_s_tg_f32(
                     ((uint(qh) << (8 - row)) & 256u);
                 const float dl = (float)xb->d * float(1 + 2*((
                     xb->scales[ib32/2] >> (4*(ib32%2))) & 0xf));
-                const float4 vx = q36_dense_iq3_grid4_tg(
+                const float4 vx = p36_dense_iq3_grid4_tg(
                     grid, grid_index, signs[row/2], bool(row & 1));
                 sum[row_out] += dl * dot(vx, vy[part]);
             }
@@ -2050,7 +2050,7 @@ kernel void kernel_mul_mv_rows_iq3_s_tg_f32(
 }
 
 kernel void kernel_mul_mv_rows_iq3_s_pair_tg_f32(
-        constant q36_metal_args_mul_mv_ext &args,
+        constant p36_metal_args_mul_mv_ext &args,
         device const char *src0_a,
         device const char *src0_b,
         device const char *src1,
@@ -2064,7 +2064,7 @@ kernel void kernel_mul_mv_rows_iq3_s_pair_tg_f32(
     const ushort lid = 32 * sgitg + tiisg;
     threadgroup uint *grid = (threadgroup uint *)shmem;
     for (ushort i = lid; i < 512; i += 32 * NSG)
-        grid[i] = q36_dense_iq3s_grid[i];
+        grid[i] = p36_dense_iq3s_grid[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const int first_row = (tgpig.x * NSG + sgitg) * 4;
@@ -2079,11 +2079,11 @@ kernel void kernel_mul_mv_rows_iq3_s_pair_tg_f32(
 #pragma unroll(4)
         for (short row_out = 0; row_out < 4; ++row_out) {
             if (first_row + row_out >= args.ne01) continue;
-            device const q36_dense_block_iq3_s *xa =
-                (device const q36_dense_block_iq3_s *)(
+            device const p36_dense_block_iq3_s *xa =
+                (device const p36_dense_block_iq3_s *)(
                     src0_a + (uint64_t)(first_row + row_out) * args.nb01) + block;
-            device const q36_dense_block_iq3_s *xb =
-                (device const q36_dense_block_iq3_s *)(
+            device const p36_dense_block_iq3_s *xb =
+                (device const p36_dense_block_iq3_s *)(
                     src0_b + (uint64_t)(first_row + row_out) * args.nb01) + block;
 #pragma unroll(2)
             for (short part = 0; part < 2; ++part) {
@@ -2099,7 +2099,7 @@ kernel void kernel_mul_mv_rows_iq3_s_pair_tg_f32(
                     ((uint(qha) << (8 - row)) & 256u);
                 const float dla = (float)xa->d * float(1 + 2*((
                     xa->scales[ib32/2] >> (4*(ib32%2))) & 0xf));
-                const float4 va = q36_dense_iq3_grid4_tg(
+                const float4 va = p36_dense_iq3_grid4_tg(
                     grid, grid_a, signsa[row/2], bool(row & 1));
 
                 device const uchar *qsb = xb->qs + 8*ib32;
@@ -2109,7 +2109,7 @@ kernel void kernel_mul_mv_rows_iq3_s_pair_tg_f32(
                     ((uint(qhb) << (8 - row)) & 256u);
                 const float dlb = (float)xb->d * float(1 + 2*((
                     xb->scales[ib32/2] >> (4*(ib32%2))) & 0xf));
-                const float4 vb = q36_dense_iq3_grid4_tg(
+                const float4 vb = p36_dense_iq3_grid4_tg(
                     grid, grid_b, signsb[row/2], bool(row & 1));
 
                 sum_a[row_out] += dla * dot(va, vy[part]);
@@ -2129,7 +2129,7 @@ kernel void kernel_mul_mv_rows_iq3_s_pair_tg_f32(
 }
 
 kernel void kernel_mul_mv_rows_iq3_xxs_pair_tg_f32(
-        constant q36_metal_args_mul_mv_ext &args,
+        constant p36_metal_args_mul_mv_ext &args,
         device const char *src0_a,
         device const char *src0_b,
         device const char *src1,
@@ -2144,9 +2144,9 @@ kernel void kernel_mul_mv_rows_iq3_xxs_pair_tg_f32(
     threadgroup uint *grid = (threadgroup uint *)shmem;
     threadgroup uchar *sign_lut = (threadgroup uchar *)(grid + 256);
     for (ushort i = lid; i < 256; i += 32 * NSG)
-        grid[i] = q36_dense_iq3xxs_grid[i];
+        grid[i] = p36_dense_iq3xxs_grid[i];
     for (ushort i = lid; i < 128; i += 32 * NSG)
-        sign_lut[i] = q36_dense_ksigns_iq3[i];
+        sign_lut[i] = p36_dense_ksigns_iq3[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const int first_row = (tgpig.x * NSG + sgitg) * 4;
@@ -2161,11 +2161,11 @@ kernel void kernel_mul_mv_rows_iq3_xxs_pair_tg_f32(
 #pragma unroll(4)
         for (short row_out = 0; row_out < 4; ++row_out) {
             if (first_row + row_out >= args.ne01) continue;
-            device const q36_dense_block_iq3_xxs *xa =
-                (device const q36_dense_block_iq3_xxs *)(
+            device const p36_dense_block_iq3_xxs *xa =
+                (device const p36_dense_block_iq3_xxs *)(
                     src0_a + (uint64_t)(first_row + row_out) * args.nb01) + block;
-            device const q36_dense_block_iq3_xxs *xb =
-                (device const q36_dense_block_iq3_xxs *)(
+            device const p36_dense_block_iq3_xxs *xb =
+                (device const p36_dense_block_iq3_xxs *)(
                     src0_b + (uint64_t)(first_row + row_out) * args.nb01) + block;
 #pragma unroll(2)
             for (short part = 0; part < 2; ++part) {
@@ -2182,7 +2182,7 @@ kernel void kernel_mul_mv_rows_iq3_xxs_pair_tg_f32(
                     (0.5f + float(auxa >> 28)) * 0.5f;
                 const uint shifta = 14*half32 + 7*(row/2);
                 const uchar signsa = sign_lut[(auxa >> shifta) & 127u];
-                const float4 va = q36_dense_iq3_grid4_tg(
+                const float4 va = p36_dense_iq3_grid4_tg(
                     grid, q3a[4*half32 + row], signsa, bool(row & 1));
 
                 device const uchar *q3b = xb->qs + 8*ib32;
@@ -2193,7 +2193,7 @@ kernel void kernel_mul_mv_rows_iq3_xxs_pair_tg_f32(
                     (0.5f + float(auxb >> 28)) * 0.5f;
                 const uint shiftb = 14*half32 + 7*(row/2);
                 const uchar signsb = sign_lut[(auxb >> shiftb) & 127u];
-                const float4 vb = q36_dense_iq3_grid4_tg(
+                const float4 vb = p36_dense_iq3_grid4_tg(
                     grid, q3b[4*half32 + row], signsb, bool(row & 1));
 
                 sum_a[row_out] += dla * dot(va, vy[part]);
@@ -2213,14 +2213,14 @@ kernel void kernel_mul_mv_rows_iq3_xxs_pair_tg_f32(
 }
 
 typedef decltype(kernel_mul_mv_ext_q4_f32_disp<2, block_q8_0, 32, dequantize_q8_0_t4>) mul_mv_ext_q4_f32_t;
-typedef decltype(kernel_mul_mv_rows_q4_f32_disp<2, q36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>) mul_mv_rows_q_f32_t;
+typedef decltype(kernel_mul_mv_rows_q4_f32_disp<2, p36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>) mul_mv_rows_q_f32_t;
 
 // Host-visible small-batch variants for r1=2..5 during tiny prompt/support
 // paths.
 
 template<short r1ptg>
 void kernel_mul_mv_ext_q8_0_pair_swiglu_f32_impl(
-        constant q36_metal_args_mul_mv_ext & args,
+        constant p36_metal_args_mul_mv_ext & args,
         device const char * src0_gate,
         device const char * src0_up,
         device const char * src1,
@@ -2352,7 +2352,7 @@ void kernel_mul_mv_ext_q8_0_pair_swiglu_f32_impl(
 
 template<short r1ptg>
 kernel void kernel_mul_mv_ext_q8_0_pair_swiglu_f32_disp(
-        constant q36_metal_args_mul_mv_ext & args,
+        constant p36_metal_args_mul_mv_ext & args,
         device const char * src0_gate,
         device const char * src0_up,
         device const char * src1,
@@ -2370,7 +2370,7 @@ kernel void kernel_mul_mv_ext_q8_0_pair_swiglu_f32_disp(
 
 typedef decltype(kernel_mul_mv_ext_q8_0_pair_swiglu_f32_disp<2>) mul_mv_ext_q8_0_pair_swiglu_f32_t;
 
-// Host-visible small-batch variants. Q36 currently needs F16 and Q8_0 weights
+// Host-visible small-batch variants. P36 currently needs F16 and Q8_0 weights
 // for r1=2..5 during the prompt path.
 
 template [[host_name("kernel_mul_mv_ext_q8_0_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, block_q8_0, 32, dequantize_q8_0_t4>;
@@ -2378,27 +2378,27 @@ template [[host_name("kernel_mul_mv_ext_q8_0_f32_r1_3")]] kernel mul_mv_ext_q4_f
 template [[host_name("kernel_mul_mv_ext_q8_0_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, block_q8_0, 32, dequantize_q8_0_t4>;
 template [[host_name("kernel_mul_mv_ext_q8_0_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, block_q8_0, 32, dequantize_q8_0_t4>;
 
-template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, q36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
-template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, q36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
-template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, q36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
-template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, q36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
-template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, q36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, p36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, p36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, p36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, p36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_0_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, p36_dense_block_q4_0, 32,  dequantize_dense_q4_0_t4>;
 
-template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, q36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
-template [[host_name("kernel_mul_mv_rows_q4_K_f32")]] kernel mul_mv_rows_q_f32_t kernel_mul_mv_rows_q4_f32_disp<2, q36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
-template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, q36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
-template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, q36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
-template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, q36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
-template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, q36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, p36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
+template [[host_name("kernel_mul_mv_rows_q4_K_f32")]] kernel mul_mv_rows_q_f32_t kernel_mul_mv_rows_q4_f32_disp<2, p36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, p36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, p36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, p36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
+template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, p36_dense_block_q4_K, 256, dequantize_dense_q4_K_t4>;
 
-template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, q36_dense_block_q6_K, 256, dequantize_dense_256_t4<q36_dense_block_q6_K, dequantize_dense_q6_K>>;
-template [[host_name("kernel_mul_mv_rows_q6_K_f32")]] kernel mul_mv_rows_q_f32_t kernel_mul_mv_rows_q4_f32_disp<2, q36_dense_block_q6_K, 256, dequantize_dense_256_t4<q36_dense_block_q6_K, dequantize_dense_q6_K>>;
-template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, q36_dense_block_q6_K, 256, dequantize_dense_256_t4<q36_dense_block_q6_K, dequantize_dense_q6_K>>;
-template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, q36_dense_block_q6_K, 256, dequantize_dense_256_t4<q36_dense_block_q6_K, dequantize_dense_q6_K>>;
-template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, q36_dense_block_q6_K, 256, dequantize_dense_256_t4<q36_dense_block_q6_K, dequantize_dense_q6_K>>;
-template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, q36_dense_block_q6_K, 256, dequantize_dense_256_t4<q36_dense_block_q6_K, dequantize_dense_q6_K>>;
+template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, p36_dense_block_q6_K, 256, dequantize_dense_256_t4<p36_dense_block_q6_K, dequantize_dense_q6_K>>;
+template [[host_name("kernel_mul_mv_rows_q6_K_f32")]] kernel mul_mv_rows_q_f32_t kernel_mul_mv_rows_q4_f32_disp<2, p36_dense_block_q6_K, 256, dequantize_dense_256_t4<p36_dense_block_q6_K, dequantize_dense_q6_K>>;
+template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, p36_dense_block_q6_K, 256, dequantize_dense_256_t4<p36_dense_block_q6_K, dequantize_dense_q6_K>>;
+template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, p36_dense_block_q6_K, 256, dequantize_dense_256_t4<p36_dense_block_q6_K, dequantize_dense_q6_K>>;
+template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, p36_dense_block_q6_K, 256, dequantize_dense_256_t4<p36_dense_block_q6_K, dequantize_dense_q6_K>>;
+template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, p36_dense_block_q6_K, 256, dequantize_dense_256_t4<p36_dense_block_q6_K, dequantize_dense_q6_K>>;
 
-#define Q36_DENSE_MV_VARIANTS(stem, block_t, deq, rows) \
+#define P36_DENSE_MV_VARIANTS(stem, block_t, deq, rows) \
 template [[host_name("kernel_mul_mv_ext_" #stem "_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, block_t, 256, deq>; \
 template [[host_name("kernel_mul_mv_ext_" #stem "_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, block_t, 256, deq>; \
 template [[host_name("kernel_mul_mv_ext_" #stem "_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, block_t, 256, deq>; \
@@ -2406,29 +2406,29 @@ template [[host_name("kernel_mul_mv_ext_" #stem "_f32_r1_4")]] kernel mul_mv_ext
 template [[host_name("kernel_mul_mv_ext_" #stem "_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, block_t, 256, deq>; \
 template [[host_name("kernel_mul_mv_rows_" #stem "_f32")]] kernel mul_mv_rows_q_f32_t kernel_mul_mv_rows_q4_f32_disp<rows, block_t, 256, deq>;
 
-Q36_DENSE_MV_VARIANTS(q2_K, q36_dense_block_q2_K,
+P36_DENSE_MV_VARIANTS(q2_K, p36_dense_block_q2_K,
                       dequantize_dense_q2_K_t4, 4)
-Q36_DENSE_MV_VARIANTS(q3_K, q36_dense_block_q3_K,
+P36_DENSE_MV_VARIANTS(q3_K, p36_dense_block_q3_K,
                       dequantize_dense_q3_K_t4, 4)
-Q36_DENSE_MV_VARIANTS(q5_K, q36_dense_block_q5_K,
+P36_DENSE_MV_VARIANTS(q5_K, p36_dense_block_q5_K,
                       dequantize_dense_q5_K_t4, 4)
-Q36_DENSE_MV_VARIANTS(iq2_xxs, q36_dense_block_iq2_xxs,
+P36_DENSE_MV_VARIANTS(iq2_xxs, p36_dense_block_iq2_xxs,
                       dequantize_dense_iq2_xxs_t4, 4)
-Q36_DENSE_MV_VARIANTS(iq2_xs, q36_dense_block_iq2_xs,
+P36_DENSE_MV_VARIANTS(iq2_xs, p36_dense_block_iq2_xs,
                       dequantize_dense_iq2_xs_t4, 4)
-Q36_DENSE_MV_VARIANTS(iq2_s, q36_dense_block_iq2_s,
+P36_DENSE_MV_VARIANTS(iq2_s, p36_dense_block_iq2_s,
                       dequantize_dense_iq2_s_t4, 4)
-Q36_DENSE_MV_VARIANTS(iq1_s, q36_dense_block_iq1_s,
+P36_DENSE_MV_VARIANTS(iq1_s, p36_dense_block_iq1_s,
                       dequantize_dense_iq1_s_t4, 4)
-Q36_DENSE_MV_VARIANTS(iq4_nl, q36_dense_block_iq4_nl,
+P36_DENSE_MV_VARIANTS(iq4_nl, p36_dense_block_iq4_nl,
                       dequantize_dense_iq4_nl_t4, 4)
-Q36_DENSE_MV_VARIANTS(iq4_xs, q36_dense_block_iq4_xs,
+P36_DENSE_MV_VARIANTS(iq4_xs, p36_dense_block_iq4_xs,
                       dequantize_dense_iq4_xs_t4, 4)
 
-#undef Q36_DENSE_MV_VARIANTS
+#undef P36_DENSE_MV_VARIANTS
 
 kernel void kernel_mul_mv_rows_q5_K_expanded_f32(
-        constant q36_metal_args_mul_mv_ext &args,
+        constant p36_metal_args_mul_mv_ext &args,
         device const uchar *src0,
         device const float *src1,
         device float *dst,
@@ -2442,8 +2442,8 @@ kernel void kernel_mul_mv_rows_q5_K_expanded_f32(
     for (int block = 0; block < blocks_per_row; ++block) {
         const uint64_t block_index =
             (uint64_t)row * (uint64_t)blocks_per_row + (uint64_t)block;
-        device const q36_dense_block_q5_K_expanded *xb =
-            (device const q36_dense_block_q5_K_expanded *)(
+        device const p36_dense_block_q5_K_expanded *xb =
+            (device const p36_dense_block_q5_K_expanded *)(
                 src0 + block_index * 276u);
         device const uchar *raw = (device const uchar *)xb;
         for (uint half_id = 0; half_id < 2u; ++half_id) {
@@ -2463,17 +2463,17 @@ kernel void kernel_mul_mv_rows_q5_K_expanded_f32(
     if (tiisg == 0) dst[row] = total;
 }
 
-template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, q36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
-template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, q36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
-template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, q36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
-template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, q36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
-template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, q36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, p36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, p36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, p36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, p36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_xxs_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, p36_dense_block_iq3_xxs, 256, dequantize_dense_iq3_xxs_t4>;
 
-template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, q36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
-template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, q36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
-template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, q36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
-template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, q36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
-template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, q36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_1")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<1, p36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, p36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, p36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, p36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
+template [[host_name("kernel_mul_mv_ext_iq3_s_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, p36_dense_block_iq3_s, 256, dequantize_dense_iq3_s_t4>;
 
 template [[host_name("kernel_mul_mv_ext_q8_0_pair_swiglu_f32_r1_2")]] kernel mul_mv_ext_q8_0_pair_swiglu_f32_t kernel_mul_mv_ext_q8_0_pair_swiglu_f32_disp<2>;
 template [[host_name("kernel_mul_mv_ext_q8_0_pair_swiglu_f32_r1_3")]] kernel mul_mv_ext_q8_0_pair_swiglu_f32_t kernel_mul_mv_ext_q8_0_pair_swiglu_f32_disp<3>;
@@ -2483,14 +2483,14 @@ template [[host_name("kernel_mul_mv_ext_q8_0_pair_swiglu_f32_r1_5")]] kernel mul
 constant bool FC_mul_mm_bc_inp [[function_constant(FC_MUL_MM + 0)]];
 constant bool FC_mul_mm_bc_out [[function_constant(FC_MUL_MM + 1)]];
 
-#ifdef Q36_METAL_HAS_TENSOR
+#ifdef P36_METAL_HAS_TENSOR
 template<
     short NR0, short NR1,
     typename SA, typename SA_4x4, typename block_q, short nl,
     void (*dequantize_func)(device const block_q *, short, thread SA_4x4 &),
     typename T0, typename T0_4x4, typename T1>
 kernel void kernel_mul_mm_mpp(
-        constant q36_metal_args_mul_mm & args,
+        constant p36_metal_args_mul_mm & args,
         device const char * srcA,
         device const char * srcB,
         device       char * dst,
@@ -2606,7 +2606,7 @@ template [[host_name("kernel_mul_mm_f16_f32_mpp")]]  kernel mul_mm_mpp_t kernel_
 // Retained Metal4/TensorOps dense prefill kernel.  The legacy MPP prototype
 // staged both operands in threadgroup memory; this version stages only the
 // model weight tile and lets MPP read the dense RHS activation matrix directly
-// from device memory.  That direct-RHS shape was the clear win for Q36's large
+// from device memory.  That direct-RHS shape was the clear win for P36's large
 // aligned F16/Q8_0 prompt matmuls.  The host selects the widest token tile that
 // evenly divides the batch, with 128-token tiles retained after the 64-token
 // retest was neutral or slower.
@@ -2621,7 +2621,7 @@ template<
     void (*dequantize_func)(device const block_q *, short, thread SA_4x4 &),
     typename T0, typename T0_4x4, typename T1>
 kernel void kernel_mul_mm_mpp_direct_rhs(
-        constant q36_metal_args_mul_mm & args,
+        constant p36_metal_args_mul_mm & args,
         device const char * srcA,
         device const char * srcB,
         device       char * dst,
@@ -2725,24 +2725,24 @@ typedef decltype(kernel_mul_mm_mpp_direct_rhs<32, half, half4x4, float4x4, 1, de
 template [[host_name("kernel_mul_mm_f16_f32_mpp_direct_rhs")]]  kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<32, half, half4x4, half4x4, 1, dequantize_f16,  half,  half4x4,  float>;
 template [[host_name("kernel_mul_mm_f16_f32_mpp_direct_rhs_n64")]]  kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<64, half, half4x4, half4x4, 1, dequantize_f16,  half,  half4x4,  float>;
 template [[host_name("kernel_mul_mm_f16_f32_mpp_direct_rhs_n128")]]  kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<128, half, half4x4, half4x4, 1, dequantize_f16,  half,  half4x4,  float>;
-template [[host_name("kernel_mul_mm_q4_0_f32_nax_direct_rhs")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<32, half, half4x4, q36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, float>;
-template [[host_name("kernel_mul_mm_q4_0_f32_nax_direct_rhs_n64")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<64, half, half4x4, q36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, float>;
-template [[host_name("kernel_mul_mm_q4_0_f32_nax_direct_rhs_n128")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<128, half, half4x4, q36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, float>;
-template [[host_name("kernel_mul_mm_q4_K_f32_nax_direct_rhs")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<32, half, half4x4, q36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, float>;
-template [[host_name("kernel_mul_mm_q4_K_f32_nax_direct_rhs_n64")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<64, half, half4x4, q36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, float>;
-template [[host_name("kernel_mul_mm_q4_K_f32_nax_direct_rhs_n128")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<128, half, half4x4, q36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, float>;
+template [[host_name("kernel_mul_mm_q4_0_f32_nax_direct_rhs")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<32, half, half4x4, p36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, float>;
+template [[host_name("kernel_mul_mm_q4_0_f32_nax_direct_rhs_n64")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<64, half, half4x4, p36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, float>;
+template [[host_name("kernel_mul_mm_q4_0_f32_nax_direct_rhs_n128")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<128, half, half4x4, p36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, float>;
+template [[host_name("kernel_mul_mm_q4_K_f32_nax_direct_rhs")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<32, half, half4x4, p36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, float>;
+template [[host_name("kernel_mul_mm_q4_K_f32_nax_direct_rhs_n64")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<64, half, half4x4, p36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, float>;
+template [[host_name("kernel_mul_mm_q4_K_f32_nax_direct_rhs_n128")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<128, half, half4x4, p36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, float>;
 template [[host_name("kernel_mul_mm_q8_0_f32_nax_direct_rhs")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<32, half, half4x4, block_q8_0, 2, dequantize_q8_0_pairs, float, float4x4, float>;
 template [[host_name("kernel_mul_mm_q8_0_f32_nax_direct_rhs_n64")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<64, half, half4x4, block_q8_0, 2, dequantize_q8_0_pairs, float, float4x4, float>;
 template [[host_name("kernel_mul_mm_q8_0_f32_nax_direct_rhs_n128")]] kernel mul_mm_mpp_direct_rhs_t kernel_mul_mm_mpp_direct_rhs<128, half, half4x4, block_q8_0, 2, dequantize_q8_0_pairs, float, float4x4, float>;
 
 #endif
 
-// Tiled matrix-matrix kernel used for prompt batches larger than 8. Q36 uses
+// Tiled matrix-matrix kernel used for prompt batches larger than 8. P36 uses
 // this to turn prefill into large simdgroup matrix operations; each block_q
 // contains 16*nl weights.
 template<typename S0, typename S0_4x4, typename S0_8x8, typename S1, typename S1_2x4, typename S1_8x8, typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread S0_4x4 &), typename T0, typename T0_4x4, typename T1, typename T1_2x4>
 kernel void kernel_mul_mm(
-        constant q36_metal_args_mul_mm & args,
+        constant p36_metal_args_mul_mm & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -2941,7 +2941,7 @@ kernel void kernel_mul_mm(
 // only arithmetic change versus materializing RMSNorm first is where x*scale is
 // rounded from F32 to F16.
 kernel void kernel_mul_mm_f16_f32_scaled(
-        constant q36_metal_args_mul_mm & args,
+        constant p36_metal_args_mul_mm & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -3147,7 +3147,7 @@ kernel void kernel_mul_mm_f16_f32_scaled(
 }
 
 kernel void kernel_mul_mm_f16_f32_pair(
-        constant q36_metal_args_mul_mm & args,
+        constant p36_metal_args_mul_mm & args,
         device const char * src0_a,
         device const char * src0_b,
         device const char * src1,
@@ -3390,34 +3390,34 @@ typedef decltype(kernel_mul_mm<float, float4x4, simdgroup_float8x8, float, float
 template [[host_name("kernel_mul_mm_f32_ff32")]] kernel mul_mm_ff32_t kernel_mul_mm<float, float4x4, simdgroup_float8x8, float, float2x4, simdgroup_float8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>;
 template [[host_name("kernel_mul_mm_f16_f32")]]  kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, half4x4, 1, dequantize_f16,  half,  half4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_q8_0_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, block_q8_0, 2, dequantize_q8_0, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_q4_0_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_q2_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q2_K, 16, dequantize_dense_q2_K, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_q3_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q3_K, 16, dequantize_dense_q3_K, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_q4_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_q5_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q5_K, 16, dequantize_dense_q5_K, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_q6_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q6_K, 16, dequantize_dense_q6_K, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_iq2_xxs_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq2_xxs, 16, dequantize_dense_iq2_xxs, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_iq2_xs_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq2_xs, 16, dequantize_dense_iq2_xs, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_iq2_s_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq2_s, 16, dequantize_dense_iq2_s, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_iq1_s_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq1_s, 16, dequantize_dense_iq1_s, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_iq3_xxs_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq3_xxs, 16, dequantize_dense_iq3_xxs, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_iq3_s_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq3_s, 16, dequantize_dense_iq3_s, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_iq4_nl_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq4_nl, 16, dequantize_dense_iq4_nl, float, float4x4, float, float2x4>;
-template [[host_name("kernel_mul_mm_iq4_xs_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq4_xs, 16, dequantize_dense_iq4_xs, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_q4_0_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_q2_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q2_K, 16, dequantize_dense_q2_K, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_q3_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q3_K, 16, dequantize_dense_q3_K, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_q4_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_q5_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q5_K, 16, dequantize_dense_q5_K, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_q6_K_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q6_K, 16, dequantize_dense_q6_K, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_iq2_xxs_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq2_xxs, 16, dequantize_dense_iq2_xxs, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_iq2_xs_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq2_xs, 16, dequantize_dense_iq2_xs, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_iq2_s_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq2_s, 16, dequantize_dense_iq2_s, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_iq1_s_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq1_s, 16, dequantize_dense_iq1_s, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_iq3_xxs_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq3_xxs, 16, dequantize_dense_iq3_xxs, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_iq3_s_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq3_s, 16, dequantize_dense_iq3_s, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_iq4_nl_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq4_nl, 16, dequantize_dense_iq4_nl, float, float4x4, float, float2x4>;
+template [[host_name("kernel_mul_mm_iq4_xs_f32")]] kernel mul_mm_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq4_xs, 16, dequantize_dense_iq4_xs, float, float4x4, float, float2x4>;
 
 // Dense prefill converts one RHS activation panel to F16 and shares it across
 // all output tiles and paired projections, mirroring Vulkan's shared panel.
-template [[host_name("kernel_mul_mm_q4_0_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_q2_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q2_K, 16, dequantize_dense_q2_K, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_q3_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q3_K, 16, dequantize_dense_q3_K, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_q4_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_q5_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q5_K, 16, dequantize_dense_q5_K, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_q6_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_q6_K, 16, dequantize_dense_q6_K, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_iq2_xxs_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq2_xxs, 16, dequantize_dense_iq2_xxs, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_iq2_xs_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq2_xs, 16, dequantize_dense_iq2_xs, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_iq2_s_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq2_s, 16, dequantize_dense_iq2_s, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_iq1_s_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq1_s, 16, dequantize_dense_iq1_s, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_iq3_xxs_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq3_xxs, 16, dequantize_dense_iq3_xxs, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_iq3_s_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq3_s, 16, dequantize_dense_iq3_s, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_iq4_nl_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq4_nl, 16, dequantize_dense_iq4_nl, float, float4x4, half, half2x4>;
-template [[host_name("kernel_mul_mm_iq4_xs_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, q36_dense_block_iq4_xs, 16, dequantize_dense_iq4_xs, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_q4_0_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q4_0, 2, dequantize_dense_q4_0, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_q2_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q2_K, 16, dequantize_dense_q2_K, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_q3_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q3_K, 16, dequantize_dense_q3_K, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_q4_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q4_K, 16, dequantize_dense_q4_K, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_q5_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q5_K, 16, dequantize_dense_q5_K, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_q6_K_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_q6_K, 16, dequantize_dense_q6_K, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_iq2_xxs_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq2_xxs, 16, dequantize_dense_iq2_xxs, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_iq2_xs_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq2_xs, 16, dequantize_dense_iq2_xs, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_iq2_s_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq2_s, 16, dequantize_dense_iq2_s, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_iq1_s_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq1_s, 16, dequantize_dense_iq1_s, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_iq3_xxs_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq3_xxs, 16, dequantize_dense_iq3_xxs, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_iq3_s_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq3_s, 16, dequantize_dense_iq3_s, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_iq4_nl_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq4_nl, 16, dequantize_dense_iq4_nl, float, float4x4, half, half2x4>;
+template [[host_name("kernel_mul_mm_iq4_xs_f16")]] kernel mul_mm_f16rhs_t kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, p36_dense_block_iq4_xs, 16, dequantize_dense_iq4_xs, float, float4x4, half, half2x4>;

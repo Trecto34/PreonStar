@@ -2,7 +2,7 @@
  * For each shape and n_tok, the batched call must reproduce, bit for bit, n_tok
  * separate one-token calls (dense_extra_decode_pq2_0) on the same q8_K rows.
  * Random PQ2_0 weights; activations quantized on the GPU.  Batches above
- * Q36_VK_Q2_SMALL_MAX (default 16) still take the f16-accumulating mmq tile and
+ * P36_VK_Q2_SMALL_MAX (default 16) still take the f16-accumulating mmq tile and
  * are timed only.  Exit status is nonzero on any checked mismatch. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -13,9 +13,9 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include "../q36.h"
-#include "../q36_gpu.h"
-#include "../q36_cli_args.h"
+#include "../p36.h"
+#include "../p36_gpu.h"
+#include "../p36_cli_args.h"
 
 #define PQ2_0_TYPE 142u
 #define PQ2_BLK 34u
@@ -31,7 +31,7 @@ static double now_ms(void) {
     return ts.tv_sec * 1e3 + ts.tv_nsec * 1e-6;
 }
 
-/* Batches the small kernel serves (<= Q36_VK_Q2_SMALL_MAX, default 16).  Larger
+/* Batches the small kernel serves (<= P36_VK_Q2_SMALL_MAX, default 16).  Larger
  * ones go to the f16-accumulating mmq tile and are only timed, not checked. */
 static uint32_t small_max = 16;
 
@@ -52,31 +52,31 @@ static int run_case(uint32_t in_dim, uint32_t out_dim, uint32_t n_tok, int iters
     float *x = malloc((size_t)n_tok * in_dim * sizeof(float));
     for (uint64_t i = 0; i < (uint64_t)n_tok * in_dim; i++) x[i] = frand();
 
-    q36_gpu_tensor *xt = q36_gpu_tensor_alloc((uint64_t)n_tok * in_dim * sizeof(float));
-    q36_gpu_tensor *q8 = q36_gpu_tensor_alloc((uint64_t)n_tok * q8_tok_bytes);
-    q36_gpu_tensor *yb = q36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * sizeof(float));
-    q36_gpu_tensor *x1 = q36_gpu_tensor_alloc((uint64_t)in_dim * sizeof(float));
-    q36_gpu_tensor *q81 = q36_gpu_tensor_alloc(q8_tok_bytes);
-    q36_gpu_tensor *y1 = q36_gpu_tensor_alloc((uint64_t)out_dim * sizeof(float));
+    p36_gpu_tensor *xt = p36_gpu_tensor_alloc((uint64_t)n_tok * in_dim * sizeof(float));
+    p36_gpu_tensor *q8 = p36_gpu_tensor_alloc((uint64_t)n_tok * q8_tok_bytes);
+    p36_gpu_tensor *yb = p36_gpu_tensor_alloc((uint64_t)n_tok * out_dim * sizeof(float));
+    p36_gpu_tensor *x1 = p36_gpu_tensor_alloc((uint64_t)in_dim * sizeof(float));
+    p36_gpu_tensor *q81 = p36_gpu_tensor_alloc(q8_tok_bytes);
+    p36_gpu_tensor *y1 = p36_gpu_tensor_alloc((uint64_t)out_dim * sizeof(float));
     float *ob = malloc((size_t)n_tok * out_dim * sizeof(float));
     float *o1 = malloc((size_t)n_tok * out_dim * sizeof(float));
     int bad = 0;
     if (!xt || !q8 || !yb || !x1 || !q81 || !y1) { fprintf(stderr, "alloc failed\n"); return 1; }
 
-    q36_gpu_tensor_write(xt, 0, x, (uint64_t)n_tok * in_dim * sizeof(float));
-    bad |= !q36_gpu_quantize_q8_k_tensor(q8, xt, in_dim, n_tok);
-    bad |= !q36_gpu_matmul_iq_quant_q8_scaled_tensor(yb, w, wbytes, 0, PQ2_0_TYPE, in_dim, out_dim,
+    p36_gpu_tensor_write(xt, 0, x, (uint64_t)n_tok * in_dim * sizeof(float));
+    bad |= !p36_gpu_quantize_q8_k_tensor(q8, xt, in_dim, n_tok);
+    bad |= !p36_gpu_matmul_iq_quant_q8_scaled_tensor(yb, w, wbytes, 0, PQ2_0_TYPE, in_dim, out_dim,
                                                      q8, n_tok, 1.0f);
-    bad |= !q36_gpu_synchronize();
-    q36_gpu_tensor_read(yb, 0, ob, (uint64_t)n_tok * out_dim * sizeof(float));
+    bad |= !p36_gpu_synchronize();
+    p36_gpu_tensor_read(yb, 0, ob, (uint64_t)n_tok * out_dim * sizeof(float));
 
     for (uint32_t t = 0; t < n_tok; t++) {
-        q36_gpu_tensor_write(x1, 0, x + (uint64_t)t * in_dim, (uint64_t)in_dim * sizeof(float));
-        bad |= !q36_gpu_quantize_q8_k_tensor(q81, x1, in_dim, 1);
-        bad |= !q36_gpu_matmul_iq_quant_q8_scaled_tensor(y1, w, wbytes, 0, PQ2_0_TYPE, in_dim, out_dim,
+        p36_gpu_tensor_write(x1, 0, x + (uint64_t)t * in_dim, (uint64_t)in_dim * sizeof(float));
+        bad |= !p36_gpu_quantize_q8_k_tensor(q81, x1, in_dim, 1);
+        bad |= !p36_gpu_matmul_iq_quant_q8_scaled_tensor(y1, w, wbytes, 0, PQ2_0_TYPE, in_dim, out_dim,
                                                          q81, 1, 1.0f);
-        bad |= !q36_gpu_synchronize();
-        q36_gpu_tensor_read(y1, 0, o1 + (uint64_t)t * out_dim, (uint64_t)out_dim * sizeof(float));
+        bad |= !p36_gpu_synchronize();
+        p36_gpu_tensor_read(y1, 0, o1 + (uint64_t)t * out_dim, (uint64_t)out_dim * sizeof(float));
     }
     if (bad) { fprintf(stderr, "gpu call failed\n"); return 1; }
 
@@ -91,13 +91,13 @@ static int run_case(uint32_t in_dim, uint32_t out_dim, uint32_t n_tok, int iters
 
     double t0 = now_ms();
     for (int it = 0; it < iters; it++)
-        q36_gpu_matmul_iq_quant_q8_scaled_tensor(yb, w, wbytes, 0, PQ2_0_TYPE, in_dim, out_dim, q8, n_tok, 1.0f);
-    q36_gpu_synchronize();
+        p36_gpu_matmul_iq_quant_q8_scaled_tensor(yb, w, wbytes, 0, PQ2_0_TYPE, in_dim, out_dim, q8, n_tok, 1.0f);
+    p36_gpu_synchronize();
     double batched = (now_ms() - t0) / iters;
     t0 = now_ms();
     for (int it = 0; it < iters; it++)
-        q36_gpu_matmul_iq_quant_q8_scaled_tensor(y1, w, wbytes, 0, PQ2_0_TYPE, in_dim, out_dim, q81, 1, 1.0f);
-    q36_gpu_synchronize();
+        p36_gpu_matmul_iq_quant_q8_scaled_tensor(y1, w, wbytes, 0, PQ2_0_TYPE, in_dim, out_dim, q81, 1, 1.0f);
+    p36_gpu_synchronize();
     double single = (now_ms() - t0) / iters;
 
     bool checked = n_tok <= small_max;
@@ -105,20 +105,20 @@ static int run_case(uint32_t in_dim, uint32_t out_dim, uint32_t n_tok, int iters
            !checked ? "mmq" : mism ? "FAIL" : "PASS", in_dim, out_dim, n_tok, (unsigned long long)mism, max_abs,
            batched, single, batched / single);
 
-    q36_gpu_tensor_free(xt); q36_gpu_tensor_free(q8); q36_gpu_tensor_free(yb);
-    q36_gpu_tensor_free(x1); q36_gpu_tensor_free(q81); q36_gpu_tensor_free(y1);
+    p36_gpu_tensor_free(xt); p36_gpu_tensor_free(q8); p36_gpu_tensor_free(yb);
+    p36_gpu_tensor_free(x1); p36_gpu_tensor_free(q81); p36_gpu_tensor_free(y1);
     free(x); free(ob); free(o1);
     /* w stays allocated: the weight cache is keyed by host pointer. */
     return checked && mism != 0;
 }
 
 int main(int argc, char **argv) {
-    int cli_rc = q36_cli_require_no_arguments(argc, argv, "test_pq2_small");
+    int cli_rc = p36_cli_require_no_arguments(argc, argv, "test_pq2_small");
     if (cli_rc) return cli_rc;
-    const char *env = getenv("Q36_VK_Q2_SMALL_MAX");
+    const char *env = getenv("P36_VK_Q2_SMALL_MAX");
     if (env && env[0]) small_max = (uint32_t)strtoul(env, NULL, 10);
-    if (!q36_gpu_init()) { fprintf(stderr, "q36_gpu_init failed\n"); return 1; }
-    q36_gpu_set_quality(false);
+    if (!p36_gpu_init()) { fprintf(stderr, "p36_gpu_init failed\n"); return 1; }
+    p36_gpu_set_quality(false);
     int bad = 0;
     const uint32_t toks[] = { 1, 2, 3, 4, 7, 8, 9, 13, 16, 24, 32, 48, 64 };
     const uint32_t shapes[][2] = { { 5120, 17408 }, { 17408, 5120 }, { 5120, 1001 } };

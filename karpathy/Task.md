@@ -3,7 +3,7 @@
 Optimize this checkout's Vulkan runtime and shaders for:
 
 - **Primary:** `ukisai/Swift-Qwen3.8-27B-GGUF`, IQ3_XXS, on AMD BC-250/RADV.
-- **Compatibility:** `/home/server/q36/gguf/Huihui-Qwen3.6-35B-A3B-Abliterated-Q36-IQ2XXS.gguf`,
+- **Compatibility:** `/home/server/p36/gguf/Huihui-Qwen3.6-35B-A3B-Abliterated-P36-IQ2XXS.gguf`,
   the local Qwen3.5/Qwen3.6 MoE (`qwen35moe`) reference.
 
 The primary model is the practical Swift tier on this machine. IQ4_XS was

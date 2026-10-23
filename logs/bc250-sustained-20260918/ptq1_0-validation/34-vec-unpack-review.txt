@@ -70,7 +70,7 @@ Verdict: APPROVED
   which correctly covers the 64 tokens (BN=64).
 - Under wave64, gl_NumSubgroups = 1 (wave = 0 only), leaving tokens 32..63
   unprocessed in the compute phase.
-- Portability is maintained via the host-side enforcement in q36_vulkan.c:
+- Portability is maintained via the host-side enforcement in p36_vulkan.c:
   force_wave32 flags dense_*_mmq kernels to require VK_SUBGROUP_SIZE_CONTROL
   with wave32. This is an intentional and verified architectural invariant.
 

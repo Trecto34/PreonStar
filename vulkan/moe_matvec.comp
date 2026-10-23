@@ -9,7 +9,7 @@
  * eight pair ids, so each expert row block is loaded once and applied to
  * independent q8_K accumulation chains before advancing.  The optional scales
  * buffer is the per-expert .scale tensor applied to the matvec output,
- * mirroring q36_scale_inplace(); in fallback staging mode it is packed one
+ * mirroring p36_scale_inplace(); in fallback staging mode it is packed one
  * entry per tile instead.
  *
  * AVX2 keeps 8 float accumulator lanes: lane k carries, per 256-block, the

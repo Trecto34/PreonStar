@@ -21,8 +21,8 @@ disassembly is unavailable.
 
 | method | result |
 |---|---|
-| `RADV_DEBUG=shaderstats ./q36 …` | No per-shader statistics emitted on this RADV build; only application output. Trial: `logs/profiles/` (`shaderstats` run in `logs/agent/`). |
-| `RADV_DEBUG=shaders ./q36 …` (to file) | Dumps every pipeline. Two attempts wedged the interactive session before a file was written. **Not re-attempted.** |
+| `RADV_DEBUG=shaderstats ./p36 …` | No per-shader statistics emitted on this RADV build; only application output. Trial: `logs/profiles/` (`shaderstats` run in `logs/agent/`). |
+| `RADV_DEBUG=shaders ./p36 …` (to file) | Dumps every pipeline. Two attempts wedged the interactive session before a file was written. **Not re-attempted.** |
 | `RADV_DEBUG=info` | Device info only; no ACO register stats. |
 | `ACO_DEBUG=stats` | Not exposed for prebuilt ACO in this Mesa build. |
 | `amdgpu_pm_info` / throttle flags | `/sys/kernel/debug` is root-only and there is **no passwordless sudo**; `amdgpu_pm_info` is absent. |
