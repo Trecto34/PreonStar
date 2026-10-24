@@ -114,7 +114,7 @@ static int p36_vk_run_unlocked(
             else if (((kernel->write_mask >> i) & 1u) &&
                      p36_vk_hazard_in(p36_vk_hazard_read, p36_vk_hazard_read_n, roots[i])) need_barrier = true;
         }
-        if (need_barrier) {
+        if (need_barrier && !p36_vk_skip_barriers()) {
             p36_vk_hazard_barrier_count++;
             VkMemoryBarrier compute_barrier = {
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,

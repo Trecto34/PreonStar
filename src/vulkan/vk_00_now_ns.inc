@@ -620,6 +620,15 @@ static uint64_t p36_vk_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* Diagnostic probe: dropping the dependency barriers measures what the token
+ * would cost if the GPU could overlap independent work.  Numerics are wrong by
+ * design; never enable this outside a timing experiment. */
+static bool p36_vk_skip_barriers(void) {
+    static int cached = -1;
+    if (cached < 0) cached = getenv("P36_VK_SKIP_BARRIERS") != NULL;
+    return cached == 1;
+}
+
 static void p36_vk_prof_report(void);
 static void p36_vk_stream_profile_report(void);
 

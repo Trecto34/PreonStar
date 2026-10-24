@@ -2641,3 +2641,38 @@ so it is reverted (stash `C: lagged decode loop`). What the run showed:
 - **Plumbing that works.** `p36_gpu_embed_row_tensor(..., ids, row)` already
   takes a device id; a `-1` sentinel through `p36_forward_tokens_vulkan_into()`
   selects it. EOS costs one wasted token of compute.
+
+
+## Dense 27B: profile, and the barrier ceiling (2026-10-23)
+
+`Swift-1.5-Qwen3.8-27B-Uncensored-VAL-APEX-I-NanoPlus-V3.gguf` (12.18 GB),
+production server flags. Decode **21.9 t/s**, prefill **160-166 t/s** at 651
+tokens. Interleaved against pre-session `643e1cf`: 22.04/22.06 vs 21.92/21.97,
+i.e. **identical** — today's MoE wins (device embed, expert pair schedule, fused
+q8_K norm) do not touch the dense path. Good control, no carry-over.
+
+Generation-only numbers come from diffing `-n 1` and `-n 17` profiles, which
+subtracts the shared 23-token prefill instead of guessing at it:
+
+| model | dispatches/token | barriers/token | kernel ms/token | wall ms/token |
+|---|---|---|---|---|
+| dense 27B | 501 | 420 | 24.2 | 45.6 |
+| Occamy MoE | 571 | 395 | 7.1 | 18.6 |
+
+Half of every dense token, and 62% of every MoE token, is not kernel time.
+
+**Barrier probe** (`P36_VK_SKIP_BARRIERS=1`, wrong numerics on purpose, timing
+only, 64 tokens, 2 reps):
+
+- dense 27B: 22.6/22.9 -> 25.7/25.8 t/s (**+12%**)
+- Occamy MoE: 53.3/52.9 -> 108.5/105.0 t/s (**+100%**)
+
+So the hazard barriers are *not* the dense limiter — that hypothesis is dead.
+On MoE they cost ~9 ms of the 18.6 ms token, which means the "tapped out at
+51.7 t/s" conclusion from earlier today was wrong about the cause: the GPU is
+waiting on its own dependency chain, not on bandwidth. The 105 t/s figure is a
+ceiling, not a target, because those dispatches really do depend on each other;
+the recoverable part is whatever fusion removes from the chain (a
+gate/up/silu/down expert chain collapsing 3 dispatches into 1 is the obvious
+first candidate).
+
