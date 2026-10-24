@@ -125,19 +125,32 @@ sum in another, no q8_K staging) by default; `P36_VK_MOE_PAIR_DECODE=0` restores
 the bit-exact q8 route, which is what to use when you need token-for-token
 reproducibility against older builds:
 
-| Model | Context | Prefill t/s | Decode t/s | Route |
-|---|---:|---:|---:|---|
-| Occamy 35B-A3B MoE | 7.6k live | ~600 (peak 814) | 46-51 | fused pair (default), server |
-| Occamy 35B-A3B MoE | 512 | 355 | 74-76 | fused pair (default), CLI |
-| Occamy 35B-A3B MoE | 512 | 355 | 52-54 | q8 route (`P36_VK_MOE_PAIR_DECODE=0`) |
-| Swift 27B dense | 512-2k | 160-166 | 21-22 | default |
+Decode holds up with context — the fused pair keeps **68+ t/s at 10.8k tokens**
+and loses only 11% going from 1k to 10.8k (n=192, temp 0, `--prefill-chunk 512`):
 
-The fused pair is worth **+30-40% decode** end to end, and it survived a 31k-token
-agentic run (tool calls, JSON schemas, stop tokens) without a regression. It can
-move a token on some prompts vs the q8 route — the fibonacci probe diverges
-around token 30 — so keep `=0` for parity-sensitive evaluation. Dense 27B gains
-nothing from it: at 21.9 t/s it reads 12.18 GB per token, 267 GB/s effective,
-which is the GDDR6 bus, not the scheduler.
+| Context | Occamy 35B-A3B prefill | Occamy decode | MiniCPM-V 35B-A3B prefill | MiniCPM-V decode |
+|---:|---:|---:|---:|---:|
+| 1k | 565 t/s | **76.9 t/s** | 518 t/s | **80.0 t/s** |
+| 2k | 746 t/s | 76.2 t/s | 788 t/s | 79.0 t/s |
+| 4k | 782 t/s | 73.5 t/s | 830 t/s | 77.1 t/s |
+| 8k | 698 t/s | 69.7 t/s | 778 t/s | 72.6 t/s |
+| 10.8k | 695 t/s | **68.3 t/s** | 736 t/s | **70.7 t/s** |
+| 12.1k | 690 t/s | 66.4 t/s | 730 t/s | 66.6 t/s |
+
+The server matches the CLI within noise at the same depth (68.1-68.7 t/s at
+10.8k; SSE, sampling and the request loop cost ~0.02 ms/token). The q8 route is
+the slow one at depth: **49.2 t/s at 10.8k** with `P36_VK_MOE_PAIR_DECODE=0`,
+which is the +40% the fused pair buys.
+
+Rotation is what governs, not context: dense Swift 27B does 21-22 t/s with 160-166
+t/s prefill because it reads 12.18 GB per token (267 GB/s effective, the GDDR6
+bus, not the scheduler), and it gains nothing from the pair route.
+
+The fused pair can move a token on some prompts vs the q8 route — the fibonacci
+probe diverges around token 30 — so keep `=0` for parity-sensitive evaluation.
+It held JSON/schema adherence and stop-token precision across a 31k-token agentic
+suite (15.5k prefill + 15.5k decode) with sequential `write`, tool and browser
+calls.
 
 ### 16 GB UMA: what actually fits
 
@@ -146,6 +159,12 @@ which is the GDDR6 bus, not the scheduler.
 - Chunk 512 was validated to **22,361 live context tokens** under an agentic
   workload; a 31k-token agentic session (15.5k prefill + 15.5k decode) ran
   without a decode stall.
+- **`--kv-disk-dir` is free and worth it.** Decode is unchanged (68.08 vs 68.68
+  t/s at 10.8k), and a repeated 10.8k prompt drops **ttft from 15.88 s to 1.98 s**.
+  KV at 10.8k is only ~0.15 GiB thanks to hybrid attention — the ceiling is the
+  weights, not the cache.
+- Rebuild **every** binary after a route change (`make -j16`, not just `make
+  p36`): a stale `p36-server` silently keeps the old route and reads ~30% slow.
 
 These are reference points from one board, not a promise. **How to measure your
 own machine, the exact harness invocation, the A/B protocol used to accept a
