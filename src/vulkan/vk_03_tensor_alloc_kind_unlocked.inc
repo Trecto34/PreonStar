@@ -248,6 +248,14 @@ enum { P36_VK_CB_RING = 4 };
 /* Counted so the kernel profile can charge the GPU's non-kernel time to the
  * hazard barriers rather than leaving it unexplained. */
 static uint64_t p36_vk_hazard_barrier_count;
+/* Fence-wait accounting: did the fence already signal while we spun (GPU
+ * finished before the host got here), or did the host have to block (GPU
+ * still running)?  These are the only two explanations for time spent in
+ * vk_wait_fence that no kernel timer covers. */
+static uint64_t p36_vk_wait_ready;
+static uint64_t p36_vk_wait_blocked;
+static uint64_t p36_vk_wait_spin_ns;
+static uint64_t p36_vk_wait_block_ns;
 typedef struct {
     VkCommandBuffer cb;
     VkFence fence;
@@ -310,7 +318,17 @@ static int p36_vk_slot_wait_unlocked(p36_vk_cb_slot *s) {
         rc = vkGetFenceStatus(p36_vk.device, s->fence);
         if (rc != VK_NOT_READY) break;
     }
-    if (rc == VK_NOT_READY) rc = vkWaitForFences(p36_vk.device, 1, &s->fence, VK_TRUE, UINT64_MAX);
+    if (p36_vk.prof_kernel && rc != VK_NOT_READY) {
+        p36_vk_wait_ready++;
+        p36_vk_wait_spin_ns += p36_vk_now_ns() - w0;
+    } else if (rc == VK_NOT_READY) {
+        uint64_t b0 = p36_vk.prof_kernel ? p36_vk_now_ns() : 0;
+        rc = vkWaitForFences(p36_vk.device, 1, &s->fence, VK_TRUE, UINT64_MAX);
+        if (p36_vk.prof_kernel) {
+            p36_vk_wait_blocked++;
+            p36_vk_wait_block_ns += p36_vk_now_ns() - b0;
+        }
+    }
     if (rc != VK_SUCCESS) {
         /* A lost device never signals this fence; drop the slot so callers
          * unwind instead of waiting on it again. */

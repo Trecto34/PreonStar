@@ -2526,6 +2526,27 @@ Baseline `a565aff`, BC-250, ctx 128 / 128 gen: 22.2 tok/s (ctx 4096: 20.35).  Sw
   55f55566... unchanged. Host phases per token now forward=15.3 read=2.3
   caller=0.52 ms.
 
+### fence wait is the GPU, not host latency — decode is tapped out (2026-10-23)
+
+Split `vk_wait_fence` into "fence already signalled" versus "host had to
+block", because only the second can be IRQ/wakeup latency worth chasing:
+
+```
+kernel GPU time  302.8 ms      8029 barriers
+fence_ready        361 waits   spin_ms 319.2     (~0.88 ms each)
+fence_blocked        5 waits   block_ms  2.9     (0.15 ms/token, all of it)
+```
+
+The 19.8 ms/token attributed to `vk_wait_fence` is **not** host wait-state:
+the host arrives before the fence signals, polls, and sees it signal ~0.88 ms
+later, 361 times out of 366. Only 5 waits ever block, for 2.9 ms across the
+whole span. So that time is the GPU finishing its own work, observed through
+a spin loop — a hybrid spin/block would reclaim CPU cycles, not t/s.
+
+Which closes the 4 ms: 15.3 ms of kernels + ~3.9 ms of GPU-side barrier and
+launch cost, with the host provably not the limiter (it is ahead of the GPU
+in 361 of 366 waits). Decode on MiniPlus stands at 51.7 t/s.
+
 ### fused add + RMS norm + q8_K — ACCEPTED, ~0.6% (structural, 2026-10-23)
 
 `add_rms_norm_q8_k.spv` and its host wrapper already existed but were parked
