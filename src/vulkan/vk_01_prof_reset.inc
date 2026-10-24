@@ -164,6 +164,14 @@ static void p36_vk_prof_op_add(const char *name,
     r->wall_ns += wall_ns;
 }
 
+/* Barrier ownership: the barrier belongs to the dispatch that needs it, so the
+ * op rows show which chain is serializing the token. */
+static void p36_vk_prof_op_barrier(const char *name) {
+    if (!p36_vk.prof_ops) return;
+    p36_vk_prof_op_row *r = p36_vk_prof_op_get(name);
+    if (r) r->barriers++;
+}
+
 static void p36_vk_prof_scope_begin(p36_vk_prof_scope *s, const char *name) {
     if (!s) return;
     s->active = p36_vk.prof_ops;

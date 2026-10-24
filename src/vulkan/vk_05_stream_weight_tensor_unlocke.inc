@@ -116,6 +116,7 @@ static int p36_vk_run_unlocked(
         }
         if (need_barrier && !p36_vk_skip_barriers()) {
             p36_vk_hazard_barrier_count++;
+            p36_vk_prof_op_barrier(prof_op);
             VkMemoryBarrier compute_barrier = {
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,

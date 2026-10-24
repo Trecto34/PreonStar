@@ -551,6 +551,7 @@ typedef struct {
     const char *name;
     uint64_t dispatches;
     uint64_t flushes;
+    uint64_t barriers;
     uint64_t groups;
     uint64_t record_ns;
     uint64_t submit_ns;

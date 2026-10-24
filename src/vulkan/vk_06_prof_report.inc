@@ -19,11 +19,12 @@ static void p36_vk_prof_report(void) {
         for (uint32_t i = 0; i < p36_vk_prof_op_n; i++) {
             const p36_vk_prof_op_row *r = &p36_vk_prof_op_rows[i];
             fprintf(stderr,
-                    "p36:   op %-28s dispatches=%" PRIu64 " flushes=%" PRIu64 " groups=%" PRIu64
-                    " record_ms=%.3f submit_wait_ms=%.3f gpu_ms=%.3f wall_ms=%.3f\n",
+                    "p36:   op %-28s dispatches=%" PRIu64 " flushes=%" PRIu64 " barriers=%" PRIu64
+                    " groups=%" PRIu64 " record_ms=%.3f submit_wait_ms=%.3f gpu_ms=%.3f wall_ms=%.3f\n",
                     r->name,
                     r->dispatches,
                     r->flushes,
+                    r->barriers,
                     r->groups,
                     (double)r->record_ns / 1e6,
                     (double)r->submit_ns / 1e6,
