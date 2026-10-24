@@ -2777,3 +2777,30 @@ above. `P36_VK_MOE_PAIR_DECODE=0` disables it and restores the q8 route; the
 md5 gate reads 55f55566 either way on the capital-of-France prompt, while the
 fibonacci probe still diverges between the two routes.
 
+
+## The missing 30% was a stale `p36-server` binary (2026-10-24)
+
+Chasing the gap between the server (46-51 t/s at 11k context) and the CLI
+(68.3 t/s at 10,806 tokens), same board, same model, `--prefill-chunk 512`:
+
+| path | route | decode at 10.8k |
+|---|---|---:|
+| CLI | fused pair | 68.3 t/s |
+| server | fused pair (current build) | 68.1-68.7 t/s |
+| server | q8 (`P36_VK_MOE_PAIR_DECODE=0`) | **49.2 t/s** |
+
+The 49.2 reproduces the agentic telemetry exactly. Cause: `make p36` relinks
+only the CLI, so `p36-server` was still the 21:38 build from before the pair
+route existed — the env var was a no-op there, and the whole agentic suite ran
+the q8 route. Rebuilt with `make -j16`, the server lands on the CLI number.
+
+So there is no server-side harness tax at depth: SSE, sampling and the request
+loop cost ~0.02 ms/token of caller gap. Attention decay at 10.8k is real but
+small (-11% vs 1k, ~-0.9 t/s per 1k).
+
+Disk KV: decode identical (68.08 vs 68.68 t/s), and \_ttft drops 15.88 s -> 1.98 s\_
+on a repeated 10.8k prompt. It costs nothing; it only saves prefill.
+
+Lesson: rebuild **all** binaries before benchmarking the server, and check
+`ls -l p36-server` against the commit date when a route change is suspected.
+
