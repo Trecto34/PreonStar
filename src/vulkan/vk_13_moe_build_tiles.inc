@@ -1227,8 +1227,9 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
     /* The IQ3_XXS expert pair is the identity-decode schedule, not a prefill
      * GEMM: gate+up go out in one dispatch, the down sum in another, and the
      * q8_K staging stage disappears.  Behind the prefill threshold it never
-     * ran at n_tok 1, which cost Occamy 54 -> 76 t/s.  Opt-in because it
-     * moves tokens against the q8 route on some prompts (1 of 5 gated). */
+     * ran at n_tok 1, which cost Occamy 54 -> 76 t/s.  On by default; it
+     * moves tokens against the q8 route on some prompts, so
+     * P36_VK_MOE_PAIR_DECODE=0 restores the bit-exact q8 path. */
     bool apex_iq3xxs = (apex_prefill || (n_tok == 1u && p36_vk_moe_pair_decode())) &&
                        gu_iq3xxs && down_iq3xxs &&
                        p36_vk_env_default_on("P36_VK_MOE_APEX_IQ3XXS");

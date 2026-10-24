@@ -120,20 +120,24 @@ backend they affect, not in the general flag list.
 ## Performance
 
 On the BC-250 reference board (16 GB UMA, RADV), greedy decoding, Q8_0 K / Q4_0 V
-cache. Two expert routes exist; the q8 route is the bit-exact default, the fused
-expert pair is opt-in with `P36_VK_MOE_PAIR_DECODE=1` (it moves tokens against
-the q8 route on some prompts — see [benchmarks.md](docs/benchmarks.md)):
+cache. MoE decode uses the **fused expert pair** (gate+up in one dispatch, down
+sum in another, no q8_K staging) by default; `P36_VK_MOE_PAIR_DECODE=0` restores
+the bit-exact q8 route, which is what to use when you need token-for-token
+reproducibility against older builds:
 
 | Model | Context | Prefill t/s | Decode t/s | Route |
 |---|---:|---:|---:|---|
-| Occamy 35B-A3B MoE | 7.6k live | ~600 (peak 814) | 46-51 | fused pair, server |
-| Occamy 35B-A3B MoE | 512 | 355 | 74-76 | fused pair, CLI |
-| Occamy 35B-A3B MoE | 512 | 355 | 52-54 | default q8, CLI |
+| Occamy 35B-A3B MoE | 7.6k live | ~600 (peak 814) | 46-51 | fused pair (default), server |
+| Occamy 35B-A3B MoE | 512 | 355 | 74-76 | fused pair (default), CLI |
+| Occamy 35B-A3B MoE | 512 | 355 | 52-54 | q8 route (`P36_VK_MOE_PAIR_DECODE=0`) |
 | Swift 27B dense | 512-2k | 160-166 | 21-22 | default |
 
-The fused pair is worth **+30-40% decode** end to end. Dense 27B gains nothing
-from it: at 21.9 t/s it reads 12.18 GB per token, 267 GB/s effective, which is
-the GDDR6 bus, not the scheduler.
+The fused pair is worth **+30-40% decode** end to end, and it survived a 31k-token
+agentic run (tool calls, JSON schemas, stop tokens) without a regression. It can
+move a token on some prompts vs the q8 route — the fibonacci probe diverges
+around token 30 — so keep `=0` for parity-sensitive evaluation. Dense 27B gains
+nothing from it: at 21.9 t/s it reads 12.18 GB per token, 267 GB/s effective,
+which is the GDDR6 bus, not the scheduler.
 
 ### 16 GB UMA: what actually fits
 

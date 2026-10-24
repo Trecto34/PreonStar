@@ -2771,3 +2771,9 @@ the flag so the q8 route remains the bit-exact default. The token-shift seen in
 the fibonacci probe did not surface as a tool-call or schema failure in this
 workload.
 
+
+**Addendum (2026-10-24):** flipped to default-on after the agentic validation
+above. `P36_VK_MOE_PAIR_DECODE=0` disables it and restores the q8 route; the
+md5 gate reads 55f55566 either way on the capital-of-France prompt, while the
+fibonacci probe still diverges between the two routes.
+

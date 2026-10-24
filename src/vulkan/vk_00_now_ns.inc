@@ -630,13 +630,16 @@ static bool p36_vk_skip_barriers(void) {
     return cached == 1;
 }
 
-/* Opt-in: the fused expert pair at n_tok 1 skips the q8_K staging and merges
- * gate+up plus the down sum (~1.4x decode on Occamy), at the cost of moving
- * tokens against the q8 route on some prompts.  Off by default; the q8 route
- * stays the bit-exact one. */
+/* The fused expert pair at n_tok 1 skips the q8_K staging and merges gate+up
+ * plus the down sum: +30-40% decode on the BC-250, validated under agentic
+ * tool-calling load.  Default on.  It moves tokens against the q8 route on
+ * some prompts, so P36_VK_MOE_PAIR_DECODE=0 restores the bit-exact q8 path. */
 static bool p36_vk_moe_pair_decode(void) {
     static int cached = -1;
-    if (cached < 0) cached = getenv("P36_VK_MOE_PAIR_DECODE") != NULL;
+    if (cached < 0) {
+        const char *env = getenv("P36_VK_MOE_PAIR_DECODE");
+        cached = !(env && (env[0] == '0' || !strcmp(env, "false") || !strcmp(env, "off")));
+    }
     return cached == 1;
 }
 

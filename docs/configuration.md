@@ -178,3 +178,13 @@ The agent cache directory follows the same rename: `Q36_AGENT_CACHE_DIR` is now
 `P36_AGENT_CACHE_DIR`. Saved sessions, the disk KV cache and both command
 histories resolve again once the directories are in place; nothing needs to be
 re-prefilled.
+
+## Environment switches
+
+Runtime knobs that are not CLI flags. Set them in the shell that starts `p36`
+or `p36-server`; they are read once at first use.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `P36_VK_MOE_PAIR_DECODE` | on | `=0` disables the fused expert pair at decode and restores the bit-exact q8 route (decode 74-76 -> 52-54 t/s on the BC-250). Use `=0` when you need token-for-token reproducibility against builds from before the pair route. |
+
