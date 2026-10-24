@@ -2676,3 +2676,37 @@ the recoverable part is whatever fusion removes from the chain (a
 gate/up/silu/down expert chain collapsing 3 dispatches into 1 is the obvious
 first candidate).
 
+
+## MoE mid-buffer q8 fusion: measured neutral, reverted (2026-10-23)
+
+Folded `q8_k_quant` into the MoE swiglu (the mid buffer is only ever consumed
+through it) and A/B'd at `-n 128 --ctx 512`, 5 interleaved pairs against
+`287ff53`:
+
+| pair | prev | fused |
+|---|---|---|
+| 1 | 52.96 | 52.79 |
+| 2 | 53.10 | 52.57 |
+| 3 | 52.88 | 53.11 |
+| 4 | 53.10 | 52.42 |
+| 5 | 53.23 | 53.05 |
+| median | **53.10** | **52.79** |
+
+Structure did change as intended — `q8_k_quant` 61 -> 41 dispatches and
+46 -> 26 barriers per token, `swiglu` 40 -> 20 with a new `swiglu_q8_k` at 20
+and no barriers — so the fusion removes 20 dispatches and 20 barriers per
+token. md5 stayed 55f55566... throughout.
+
+It bought nothing. Two reasons, both worth remembering:
+
+- The mid quantize was only 20 of the 61 `q8_k_quant` calls; the other 41 are
+  shared-expert and attention inputs at sites that have no producer to fold
+  into. The barrier saving is 20/395 = 5% of the serialization, ~0.4 ms.
+- The fused workgroup does the amax reduction and b8 packing on top of the
+  existent swiglu math, which costs back roughly what the removed dispatch
+  saved.
+
+Verdict: **rejected**, reverted. The 22%-of-barriers-for-0.42-ms observation is
+real but the fix has to come from the *other* 41 calls or from removing whole
+dependency steps, not from moving this one.
+
