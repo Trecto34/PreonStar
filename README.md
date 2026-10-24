@@ -119,14 +119,29 @@ backend they affect, not in the general flag list.
 
 ## Performance
 
-Prefill and decode at 2048-32768 tokens of context, on the BC-250 reference board
-with the default q2 model, greedy decoding, Q8_0 K / Q4_0 V cache:
+On the BC-250 reference board (16 GB UMA, RADV), greedy decoding, Q8_0 K / Q4_0 V
+cache. Two expert routes exist; the q8 route is the bit-exact default, the fused
+expert pair is opt-in with `P36_VK_MOE_PAIR_DECODE=1` (it moves tokens against
+the q8 route on some prompts — see [benchmarks.md](docs/benchmarks.md)):
 
-| Context | Prefill t/s | Decode t/s |
-|---:|---:|---:|
-| 2048 | 640 | 82 |
-| 8192 | 502 | 75 |
-| 32768 | 244 | 51 |
+| Model | Context | Prefill t/s | Decode t/s | Route |
+|---|---:|---:|---:|---|
+| Occamy 35B-A3B MoE | 7.6k live | ~600 (peak 814) | 46-51 | fused pair, server |
+| Occamy 35B-A3B MoE | 512 | 355 | 74-76 | fused pair, CLI |
+| Occamy 35B-A3B MoE | 512 | 355 | 52-54 | default q8, CLI |
+| Swift 27B dense | 512-2k | 160-166 | 21-22 | default |
+
+The fused pair is worth **+30-40% decode** end to end. Dense 27B gains nothing
+from it: at 21.9 t/s it reads 12.18 GB per token, 267 GB/s effective, which is
+the GDDR6 bus, not the scheduler.
+
+### 16 GB UMA: what actually fits
+
+- `--prefill-chunk 512` with `--kv-disk-dir DIR` is the working envelope.
+  Chunk 1024 trips a RADV 64 MB scratch-buffer allocation failure.
+- Chunk 512 was validated to **22,361 live context tokens** under an agentic
+  workload; a 31k-token agentic session (15.5k prefill + 15.5k decode) ran
+  without a decode stall.
 
 These are reference points from one board, not a promise. **How to measure your
 own machine, the exact harness invocation, the A/B protocol used to accept a

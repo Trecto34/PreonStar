@@ -2746,3 +2746,28 @@ Landed **opt-in**: `P36_VK_MOE_PAIR_DECODE=1`. The q8 route stays the
 bit-exact default and the md5 gate still reads 55f55566 with the flag unset.
 Whether to flip the default is a numerics decision, not a performance one.
 
+
+
+## Server telemetry: fused expert pair under agentic load (2026-10-24)
+
+Validation run for `P36_VK_MOE_PAIR_DECODE=1` on the BC-250 with
+`--prefill-chunk 512 --kv-disk-dir`, five agentic loops (Three.js generation
+plus tool execution):
+
+- **31,075 tokens** total: 15.5k prefill, 15.5k decode.
+- Decode **46.0-50.8 t/s sustained** through one continuous 11,000-token
+  generation. Short-context CLI decode on the same route is 74-76 t/s, so live
+  11k context costs roughly a third of the rate.
+- Prefill **~600 t/s average at 7.6k context**, peaking at **814 t/s** on
+  512-token chunks.
+- `--prefill-chunk 1024` still trips the RADV 64 MB scratch allocation
+  failure; 512 scaled to **22,361 live context tokens** without a stall.
+- Structured output held: JSON/schema adherence and stop-token precision across
+  sequential `write`, `BrowserNavigate` and `ShellStart` calls, including a
+  procedural voxel pagoda that rendered first try.
+
+Verdict: the pair route is production-ready for the server, and stays behind
+the flag so the q8 route remains the bit-exact default. The token-shift seen in
+the fibonacci probe did not surface as a tool-call or schema failure in this
+workload.
+
