@@ -2710,3 +2710,39 @@ Verdict: **rejected**, reverted. The 22%-of-barriers-for-0.42-ms observation is
 real but the fix has to come from the *other* 41 calls or from removing whole
 dependency steps, not from moving this one.
 
+
+
+## (b) collapsed into a real win: the fused expert pair at decode (2026-10-23)
+
+**The plan was wrong about the shape.** `moe_matvec` is not 60 expert
+dispatches — it is 3 legs (gate, up, down) x 20 MoE layers, and each leg is
+already one grid-over-experts launch. Merging gate+up (60 -> 40) removes zero
+barriers, because the up leg never takes one: gate's barrier on `qx` already
+covered it. The rejected swiglu fusion (20 dispatches + 20 barriers, net zero)
+is the empirical ceiling for that class of change.
+
+**What was actually there.** Occamy decode was on the q8 route while prefill
+used the APEX f32 expert pair, purely because `apex_prefill = n_tok >=
+P36_VK_MOE_GEMM_MIN` (default 128). The pair is the *identity-decode* schedule,
+not a prefill GEMM: `moe_iq3xxs_gate_up_decode` plus `moe_iq3xxs_down_sum_decode`,
+no q8_K staging at all. Forcing it on at n_tok 1:
+
+| run | default (q8 route) | pair decode |
+|---|---|---|
+| -n 256, 3 pairs | 53.45 / 53.09 / 52.68 | 73.97 / 72.33 / 75.03 |
+| flag on, 2 reps | 52.48 / 52.84 | 73.92 / 75.99 |
+
+**+41% decode**, and dispatch count per token drops by two thirds of the MoE
+front half. Prefill is unchanged (it already used the pair above 128 tokens).
+
+**Parity is the catch.** md5 55f55566 holds on four of five gated prompts
+(capital 64/256, haiku 128, sky 128), but `def fibonacci(n):` at 96 tokens
+diverges at about token 30: same paragraph, then a heading and blank line
+differ. Forcing the pair for prefill too gives a *third* hash (a51119c2...),
+so this is inherent to f32 activations vs the q8 staging, not a
+route-mixing artifact.
+
+Landed **opt-in**: `P36_VK_MOE_PAIR_DECODE=1`. The q8 route stays the
+bit-exact default and the md5 gate still reads 55f55566 with the flag unset.
+Whether to flip the default is a numerics decision, not a performance one.
+
