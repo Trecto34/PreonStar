@@ -91,6 +91,10 @@ Enable it with:
 ./p36-server --kv-disk-dir /tmp/p36-kv --kv-disk-space-mb 8192
 ```
 
+**Measured cost:** decode is unchanged with it on (68.08 vs 68.68 t/s at 10.8k
+context), and a repeated 10.8k prompt drops **ttft from 15.88 s to 1.98 s**. It
+buys prefix reuse and costs nothing per generated token.
+
 The cache key is the SHA1 of the rendered byte prefix, and files are named
 `<sha1>.kv`. The P36 payload still stores the exact token IDs and graph
 state for that prefix. This matters for continued chats: the model may have

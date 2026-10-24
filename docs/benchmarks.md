@@ -111,6 +111,53 @@ about 3B active), Q2 imatrix quant.
 Hardware: 16 GB GDDR6 unified memory, 256-bit bus (vendor spec, about 448 GB/s),
 8-core Zen 2, Linux + RADV.
 
+### Reference results -- fused expert pair (APEX-I, 2026-10)
+
+MoE decode defaults to the fused expert pair (gate+up in one dispatch, down sum
+in another, no q8_K staging). Two APEX-I 35B-A3B builds on the same board,
+greedy (`temperature 0`), 192 generated tokens, `--prefill-chunk 512`, Q8_0 K /
+Q4_0 V, one process at a time. Prompt depth is the token count reported by
+`processing N input tokens`, not the word count of the file:
+
+| Context | Occamy 35B-A3B prefill | Occamy decode | MiniCPM-V 35B-A3B prefill | MiniCPM-V decode |
+|---:|---:|---:|---:|---:|
+| 1k | 565 t/s | 76.9 t/s | 518 t/s | 80.0 t/s |
+| 2k | 746 t/s | 76.2 t/s | 788 t/s | 79.0 t/s |
+| 4k | 782 t/s | 73.5 t/s | 830 t/s | 77.1 t/s |
+| 8k | 698 t/s | 69.7 t/s | 778 t/s | 72.6 t/s |
+| 10.8k | 695 t/s | **68.3 t/s** | 736 t/s | **70.7 t/s** |
+| 12.1k | 690 t/s | 66.4 t/s | 730 t/s | 66.6 t/s |
+
+- Prefill at 1k is lower because the 512-token chunk pipeline has not found its
+  stride yet; it saturates from 2k up.
+- Decay past 4k is close to linear, about **-0.9 t/s per 1k tokens**. Attention
+  is 7% of kernel time at 1k and 10-11% at 4k. There is no cliff: the weight
+  stream still dominates at 12k.
+- KV at 10.8k is only ~0.15 GiB (hybrid attention), so the ceiling is the
+  weights, not the cache.
+- `p36-server` matches the CLI at the same depth within noise (68.1-68.7 t/s at
+  10.8k). SSE, sampling and the request loop cost ~0.02 ms/token of caller gap.
+- The q8 route (`P36_VK_MOE_PAIR_DECODE=0`) measures **49.2 t/s at 10.8k** on the
+  same prompt: the fused pair is worth +40% at depth.
+- The kernel profiler (`P36_VK_PROF_KERNEL=1`) itself costs 15-17% of decode rate.
+  Use it for ratios, never for absolute t/s.
+
+### Rebuild before you measure
+
+`make` links six binaries from shared objects, so a route change compiled into
+the common objects still leaves stale executables behind. Always rebuild the
+whole set and check the clock:
+
+```sh
+make -j"$(nproc)"
+ls -l p36 p36-server p36-agent
+```
+
+A stale `p36-server` does not error. It keeps the old route and reads about 30%
+slow, which is indistinguishable from a real regression: a server binary from
+before the fused pair reported 49 t/s at 10.8k context against the current 68.
+
+
 **These are reference points, not guarantees.** They were taken on one board in
 one thermal environment, and the board is the variable that moves most: a stock
 24-CU part, a different governor, or a warm case will not reproduce them. Refresh
