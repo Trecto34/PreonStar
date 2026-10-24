@@ -100,6 +100,24 @@ Verify the build without a model or a GPU:
 make check
 ```
 
+### Rebuild before you benchmark
+
+`make` builds six binaries from shared objects. Almost every runtime change is
+compiled into the common objects, so **rebuild all of them, not one** — then
+confirm the clock on each is fresh:
+
+```sh
+make -j"$(nproc)"          # p36, p36-server, p36-agent, p36-bench, p36-eval, p36_test
+ls -l p36 p36-server p36-agent
+```
+
+A stale binary does not error, it just keeps running the old route. That cost a
+whole session once: `p36-server` from before the fused expert pair stayed on the
+q8 route and read **49 t/s where the current build does 68 t/s** — a phantom "30%
+server overhead" that was entirely a missing relink. If a number looks worse than
+the table in [Performance](#performance), check the binary timestamp before you
+profile anything.
+
 ## Configuration
 
 A few flags cover most use; the rest are in [configuration.md](docs/configuration.md).
