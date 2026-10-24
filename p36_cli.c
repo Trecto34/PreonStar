@@ -99,8 +99,12 @@ static void usage(FILE *fp) {
         "      Qwen3-VL mmproj sidecar. It remains disk-backed.\n"
         "  --mtp-draft N\n"
         "      Maximum autoregressive MTP draft tokens per speculative step. Default: 1\n"
-        "  --mtp-margin F\n"
-        "      Minimum recursive-draft confidence for the fast N=2 verifier. Default: 3\n"
+"  --mtp-margin F\n"
+"      Minimum recursive-draft confidence for the fast N=2 verifier. Default: 3\n"
+"  --lookup-order N\n"
+"      Prompt-lookup match length in tokens. Default: 3\n"
+"  --lookup-k N\n"
+"      Prompt-lookup draft tokens per step; 0 disables the route. Default: 0\n"
         "  -c, --ctx N\n"
         "      Context size allocated for the session. Default: 32768\n"
         "  -ctk, --cache-type-k TYPE\n"
@@ -644,7 +648,7 @@ static int run_sampled_generation(p36_engine *engine, const cli_config *cfg, con
 
         int toks[17];
         int ntok = 0;
-        if (cfg->gen.temperature <= 0.0f && p36_engine_mtp_draft_tokens(engine) > 1 &&
+        if (cfg->gen.temperature <= 0.0f && p36_engine_spec_enabled(engine) &&
             getenv("P36_MTP_SPEC_DISABLE") == NULL) {
             ntok = p36_session_eval_speculative_argmax(session,
                                                        token,
@@ -893,7 +897,7 @@ static int run_generation(p36_engine *engine, const cli_config *cfg) {
             fprintf(stderr, "p36: diagnostic run completed on the %s path.\n",
                     p36_backend_name(cfg->engine.backend));
         }
-    } else if (cfg->gen.temperature > 0.0f || p36_engine_mtp_draft_tokens(engine) > 1) {
+    } else if (cfg->gen.temperature > 0.0f || p36_engine_spec_enabled(engine)) {
         rc = run_sampled_generation(engine, cfg, &prompt);
     } else {
         token_printer printer = {
@@ -1256,7 +1260,7 @@ static int run_chat_turn(p36_engine *engine, cli_config *cfg, repl_chat *chat,
 
         int toks[17];
         int ntok = 0;
-        if (cfg->gen.temperature <= 0.0f && p36_engine_mtp_draft_tokens(engine) > 1 &&
+        if (cfg->gen.temperature <= 0.0f && p36_engine_spec_enabled(engine) &&
             getenv("P36_MTP_SPEC_DISABLE") == NULL) {
             ntok = p36_session_eval_speculative_argmax(chat->session,
                                                        token,
@@ -1577,6 +1581,8 @@ static cli_config parse_options(int argc, char **argv) {
             .backend = default_backend(),
             .mtp_draft_tokens = 1,
             .mtp_margin = 3.0f,
+            .lookup_order = 3,
+            .lookup_k = 0,
         },
         .gen = {
             .prompt = NULL,
@@ -1638,6 +1644,10 @@ static cli_config parse_options(int argc, char **argv) {
             c.engine.mtp_draft_tokens = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--mtp-margin")) {
             c.engine.mtp_margin = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.0f, 1000.0f);
+        } else if (!strcmp(arg, "--lookup-order")) {
+            c.engine.lookup_order = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--lookup-k")) {
+            c.engine.lookup_k = parse_nonnegative_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) {
             c.gen.n_predict = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) {

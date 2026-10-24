@@ -49,6 +49,7 @@
 #define P36_Q8_0_BYTES 34u
 #define P36_QK4_0 32u
 #define P36_Q4_0_BYTES 18u
+#define P36_Q4_1_BYTES 20u
 #define P36_QK2_0 64u
 #define P36_Q2_0_BYTES 18u
 /* PQ2_0 (Prism type 142) is the same 2-bit codec as Q2_0 with one f16
@@ -296,6 +297,7 @@ enum {
     P36_TENSOR_F32 = 0,
     P36_TENSOR_F16 = 1,
     P36_TENSOR_Q4_0 = 2,
+    P36_TENSOR_Q4_1 = 3,
     P36_TENSOR_Q8_0 = 8,
     P36_TENSOR_Q2_K = 10,
     P36_TENSOR_Q3_K = 11,
@@ -337,6 +339,7 @@ typedef struct {
     bool hadamard_inverse;
     bool hadamard_grouped;   /* GDN ssm_out: activation needs a tiled->grouped permute */
     bool from_q4_0;          /* file stores Q4_0; loader re-encodes it as Q8_0 in the arena */
+    bool from_q4_1;          /* appended MTP block only: lossy Q4_1 -> Q8_0 for the draft head */
 } p36_tensor;
 
 typedef struct {
@@ -613,6 +616,9 @@ struct p36_engine {
     int power_percent;
     int mtp_draft_tokens;
     float mtp_margin;
+    /* Prompt-lookup speculation: k == 0 disables it. */
+    int lookup_order;
+    int lookup_k;
     float mtp_expert_weights_scale;
     p36_kv_cache_type cache_type_k;
     p36_kv_cache_type cache_type_v;
@@ -839,6 +845,9 @@ typedef struct {
     p36_vulkan_full_attn_cache mtp_full;
     p36_vulkan_recurrent_cache spec_recurrent[P36_MAX_LAYER];
     p36_gpu_tensor *spec_logits;
+    /* Top-2 of every speculative logits row, so verification reads n_draft
+     * ints instead of n_draft full vocab rows. */
+    p36_gpu_tensor *spec_tops;
     p36_gpu_tensor *mtp_tok_embd;
     p36_gpu_tensor *mtp_e_norm;
     p36_gpu_tensor *mtp_h_norm;

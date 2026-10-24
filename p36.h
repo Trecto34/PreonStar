@@ -93,6 +93,8 @@ typedef struct {
     uint32_t prefill_chunk;
     int mtp_draft_tokens;
     float mtp_margin;
+    int lookup_order;
+    int lookup_k;
     const char *directional_steering_file;
     float directional_steering_attn;
     float directional_steering_ffn;
@@ -375,6 +377,8 @@ int p36_session_ctx(p36_session *s);
 int p36_engine_routed_quant_bits(p36_engine *e);
 bool p36_engine_has_mtp(p36_engine *e);
 int p36_engine_mtp_draft_tokens(p36_engine *e);
+int p36_engine_lookup_k(p36_engine *e);
+bool p36_engine_spec_enabled(p36_engine *e);
 const p36_tokens *p36_session_tokens(p36_session *s);
 int p36_engine_debug_tensor_row(p36_engine *e, const char *tensor_name, uint64_t row, float *dst, uint32_t n);
 int p36_engine_debug_first_tensor_of_type(p36_engine *e, uint32_t type, char *name, size_t name_cap, uint32_t *n);

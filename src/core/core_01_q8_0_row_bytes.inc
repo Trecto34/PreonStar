@@ -40,12 +40,16 @@ const char *p36_kv_cache_type_name(p36_kv_cache_type type) {
 }
 
 p36_kv_cache_type p36_default_kv_cache_type_k(p36_backend backend, bool ssd_streaming) {
+    if (getenv("P36_VK_STRICT_PARITY") && !getenv("P36_VK_STRICT_Q8_KV"))
+        return P36_KV_CACHE_F16;
     return (backend == P36_BACKEND_VULKAN || backend == P36_BACKEND_METAL) &&
            !ssd_streaming ?
            P36_KV_CACHE_Q8_0 : P36_KV_CACHE_F16;
 }
 
 p36_kv_cache_type p36_default_kv_cache_type_v(p36_backend backend, bool ssd_streaming) {
+    if (getenv("P36_VK_STRICT_PARITY") && !getenv("P36_VK_STRICT_Q8_KV"))
+        return P36_KV_CACHE_F16;
     return (backend == P36_BACKEND_VULKAN || backend == P36_BACKEND_METAL) &&
            !ssd_streaming ?
            P36_KV_CACHE_Q4_0 : P36_KV_CACHE_F16;

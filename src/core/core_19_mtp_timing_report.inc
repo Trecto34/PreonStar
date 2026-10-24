@@ -15,6 +15,132 @@ static void p36_mtp_timing_report(uint32_t pos, const char *exit_reason,
             p36_gpu_read_flushes() - f0);
 }
 
+/* Shared speculative commit: verify[] has just been forwarded as one batch
+ * from start_pos, with row_tops[i] the argmax predicted after verify[i].
+ * Accepts the longest prefix the target agrees with, leaves the KV frontier
+ * and s->logits consistent with that prefix, and pushes it into the
+ * checkpoint.  Both draft sources (MTP head, prompt lookup) end here so the
+ * accept/rollback numerics exist once.  Returns 1 + commit_n, or -1. */
+static int p36_spec_commit_tokens(p36_session *s, const int *verify, int verify_n,
+                                  uint32_t start_pos, const int *row_tops,
+                                  int eos_token, int *accepted,
+                                  char *err, size_t errlen) {
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int commit_n = 1;
+    if (!rt) return -1;
+
+    for (int i = 1; i < verify_n; i++) {
+        if (row_tops[i - 1] != verify[i]) break;
+        commit_n++;
+    }
+    for (int i = 0; i < commit_n; i++) {
+        if (verify[i] == eos_token) {
+            commit_n = i + 1;
+            break;
+        }
+    }
+
+    if (commit_n == verify_n) {
+        /* Full accept: the verify pass already ran every committed token's
+         * forward and left the last row's logits in s->logits; adopting its
+         * KV/recurrent frontier makes the replay free. */
+        if (!p36_vulkan_update_last_h(rt, (uint32_t)verify_n - 1u)) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec frontier adopt failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+    } else {
+        if (!p36_vulkan_spec_frontier_restore(rt)) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec rollback failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+        /* Replay the accepted prefix as one batch; refreshes s->logits
+         * and last_h from the last accepted row. */
+        bool replay;
+        p36_gpu_set_micro_batch(true);
+        replay = p36_forward_tokens_vulkan(s, verify, (uint32_t)commit_n, start_pos, true);
+        p36_gpu_set_micro_batch(false);
+        if (!replay) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec accepted-prefix replay failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+    }
+
+    for (int i = 0; i < commit_n; i++) {
+        accepted[1 + i] = verify[i];
+        p36_tokens_push(&s->checkpoint, verify[i]);
+    }
+    s->checkpoint_valid = true;
+    p36_mtp_stats_add(verify_n, commit_n, commit_n == verify_n);
+    return 1 + commit_n;
+}
+
+/* Prompt lookup: the newest earlier copy of the last `order` tokens predicts
+ * the continuation.  Pure host work over the live token history -- no model,
+ * no GPU -- so a repeat-heavy turn (code blocks, file rewrites, echoed tool
+ * output) gets drafts for free.  Returns the number of proposed tokens. */
+static int p36_lookup_propose(const p36_session *s, int order, int k, int *out) {
+    const int *v;
+    uint32_t len, suffix, i, avail;
+    if (!s || !out || order <= 0 || k <= 0) return 0;
+    v = s->checkpoint.v;
+    len = s->checkpoint.len;
+    if (!v || len <= (uint32_t)order) return 0;
+    suffix = len - (uint32_t)order;
+    for (i = suffix; i-- > 0u; ) {
+        if (memcmp(v + i, v + suffix, (size_t)order * sizeof(*v)) != 0) continue;
+        avail = len - (i + (uint32_t)order);
+        if (avail == 0u) continue;
+        if (avail > (uint32_t)k) avail = (uint32_t)k;
+        memcpy(out, v + i + (uint32_t)order, (size_t)avail * sizeof(*out));
+        return (int)avail;
+    }
+    return 0;
+}
+
+/* One prompt-lookup speculative step: evaluate the pending token, draft from
+ * the token history, then reuse the MTP verifier and commit path so the
+ * accept/rollback numerics never fork by draft source. */
+static int p36_session_eval_lookup(p36_session *s, int first_token, int max_tokens,
+                                   int eos_token, int *accepted, int accepted_cap,
+                                   char *err, size_t errlen) {
+    p36_engine *e = s->engine;
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int verify[P36_MTP_MAX_DRAFT];
+    int row_tops[P36_MTP_MAX_DRAFT];
+    int k, verify_n, rc;
+    uint32_t start_pos;
+    if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+    accepted[0] = first_token;
+    if (!rt || !rt->last_h || !rt->logits) return 1;
+    k = e->lookup_k;
+    if (k > P36_MTP_MAX_DRAFT) k = P36_MTP_MAX_DRAFT;
+    if (k > accepted_cap - 1) k = accepted_cap - 1;
+    if (k > max_tokens - 1) k = max_tokens - 1;
+    if (k > s->ctx_size - s->checkpoint.len) k = s->ctx_size - s->checkpoint.len;
+    if (first_token == eos_token || k <= 1) return 1;
+    verify_n = p36_lookup_propose(s, e->lookup_order, k, verify);
+    if (verify_n <= 1) return 1;
+    /* The greedy token at this position is already known from the logits of
+     * the token just committed.  A proposal that disagrees cannot be right,
+     * so skip the verify batch rather than pay for it. */
+    if (verify[0] != p36_session_argmax(s)) return 1;
+    start_pos = (uint32_t)s->checkpoint.len;
+    if (!p36_vulkan_spec_frontier_snapshot(rt)) return 1;
+    if (!p36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
+        if (!p36_vulkan_spec_frontier_restore(rt)) p36_session_invalidate(s);
+        if (err && errlen) snprintf(err, errlen, "lookup verifier failed at pos %u", start_pos);
+        return -1;
+    }
+    rc = p36_spec_commit_tokens(s, verify, verify_n, start_pos, row_tops,
+                                eos_token, accepted, err, errlen);
+    return rc < 0 ? -1 : rc;
+}
 int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
                                         int max_tokens, int eos_token,
                                         int *accepted, int accepted_cap,
@@ -24,6 +150,10 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
     e = s->engine;
     if (!e || !p36_engine_has_mtp(e) || e->mtp_draft_tokens <= 1 ||
         !p36_engine_uses_vulkan_runtime(e)) {
+        /* No MTP head available: prompt lookup is the only draft source. */
+        if (e && e->lookup_k > 1 && p36_engine_uses_vulkan_runtime(e))
+            return p36_session_eval_lookup(s, first_token, max_tokens, eos_token,
+                                           accepted, accepted_cap, err, errlen);
         if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
         accepted[0] = first_token;
         return 1;
@@ -124,56 +254,26 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
 
         if (!p36_vulkan_spec_frontier_snapshot(rt)) return 1;
         if (mtp_timing) tc_snap = p36_now_sec();
+        const bool prof_verify = getenv("P36_VK_PROF_VERIFY") != NULL;
+        static uint32_t prof_verify_n;
+        if (prof_verify) p36_gpu_prof_reset();
         if (!p36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
             if (!p36_vulkan_spec_frontier_restore(rt)) p36_session_invalidate(s);
             if (err && errlen) snprintf(err, errlen, "MTP target verifier failed at pos %u", start_pos);
             return -1;
         }
+        if (prof_verify) {
+            char plabel[32];
+            snprintf(plabel, sizeof(plabel), "verify%u_n%d", prof_verify_n++, verify_n);
+            p36_gpu_prof_report(plabel);
+        }
         if (mtp_timing) tc_verify = p36_now_sec();
 
-        commit_n = 1;
-        for (int i = 1; i < verify_n; i++) {
-            if (row_tops[i - 1] != verify[i]) break;
-            commit_n++;
-        }
-        for (int i = 0; i < commit_n; i++) {
-            if (verify[i] == eos_token) {
-                commit_n = i + 1;
-                break;
-            }
-        }
-
-        if (commit_n == verify_n) {
-            /* Full accept: the verify pass already ran every committed
-             * token's forward and left the last row's logits in s->logits;
-             * adopting its KV/recurrent frontier makes the replay free. */
-            if (!p36_vulkan_update_last_h(rt, (uint32_t)verify_n - 1u)) {
-                if (err && errlen) snprintf(err, errlen, "MTP frontier adopt failed at pos %u", start_pos);
-                p36_session_invalidate(s);
-                return -1;
-            }
-        } else {
-            if (!p36_vulkan_spec_frontier_restore(rt)) {
-                if (err && errlen) snprintf(err, errlen, "MTP verifier rollback failed at pos %u", start_pos);
-                p36_session_invalidate(s);
-                return -1;
-            }
-            /* Replay the accepted prefix as one batch; refreshes s->logits
-             * and last_h from the last accepted row. */
-            bool replay;
-            p36_gpu_set_micro_batch(true);
-            replay = p36_forward_tokens_vulkan(s, verify, (uint32_t)commit_n, start_pos, true);
-            p36_gpu_set_micro_batch(false);
-            if (!replay) {
-                if (err && errlen) snprintf(err, errlen, "MTP accepted-prefix replay failed at pos %u", start_pos);
-                p36_session_invalidate(s);
-                return -1;
-            }
-        }
-
-        for (int i = 0; i < commit_n; i++) {
-            accepted[1 + i] = verify[i];
-            p36_tokens_push(&s->checkpoint, verify[i]);
+        {
+            int rc = p36_spec_commit_tokens(s, verify, verify_n, start_pos, row_tops,
+                                            eos_token, accepted, err, errlen);
+            if (rc < 0) return -1;
+            commit_n = rc - 1;
         }
         if (mtp_timing) {
             p36_mtp_timing_report(start_pos,
@@ -181,10 +281,8 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
                                   verify_n, commit_n, n_draft, tc0, tc_fwd, tc_draft,
                                   tc_snap, tc_verify, p36_now_sec(), tr0, tf0);
         }
-        s->checkpoint_valid = true;
         s->mtp_draft_valid = false;
         s->mtp_draft_token = -1;
-        p36_mtp_stats_add(verify_n, commit_n, commit_n == verify_n);
         return 1 + commit_n;
     }
 #else
@@ -269,6 +367,16 @@ bool p36_engine_has_mtp(p36_engine *e) {
 
 int p36_engine_mtp_draft_tokens(p36_engine *e) {
     return p36_engine_has_mtp(e) ? e->mtp_draft_tokens : 1;
+}
+
+/* Drafts per prompt-lookup step; 0 disables the lookup route. */
+int p36_engine_lookup_k(p36_engine *e) {
+    return e && p36_engine_uses_vulkan_runtime(e) ? e->lookup_k : 0;
+}
+
+/* Greedy decode can speculate when any draft source is armed. */
+bool p36_engine_spec_enabled(p36_engine *e) {
+    return p36_engine_mtp_draft_tokens(e) > 1 || p36_engine_lookup_k(e) > 1;
 }
 
 const p36_tokens *p36_session_tokens(p36_session *s) {

@@ -603,7 +603,7 @@ int main(int argc, char **argv) {
     fflush(out);
 
     const int eos = p36_token_eos(engine);
-    const bool spec = p36_engine_mtp_draft_tokens(engine) > 1 &&
+    const bool spec = p36_engine_spec_enabled(engine) &&
                       getenv("P36_MTP_SPEC_DISABLE") == NULL;
     p36_session_snapshot snap = {0};
     char err[256];

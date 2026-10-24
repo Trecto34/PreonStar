@@ -382,10 +382,13 @@ bool extra_type = weight_type == P36_VK_TENSOR_IQ2_XXS ||
         ok = weights != NULL;
         if (ok) {
             const p36_gpu_tensor *bindings[4] = { weights, q8, out, tables };
-            const char *op = p36_vk_prof_iq3_shape(
-                weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
-                (uint32_t)out_dim, n_tok == 1u ?
-                    "dense_extra_decode" : "dense_extra_mmq");
+            const char *op = n_tok != 1u ? "dense_extra_mmq" :
+                weight_type == P36_VK_TENSOR_IQ2_XXS ? "dense_iq2_xxs_decode" :
+                weight_type == P36_VK_TENSOR_IQ2_XS ? "dense_iq2_xs_decode" :
+                weight_type == P36_VK_TENSOR_IQ2_S ? "dense_iq2_s_decode" :
+                weight_type == P36_VK_TENSOR_IQ1_S ? "dense_iq1_s_decode" :
+                weight_type == P36_VK_TENSOR_IQ4_NL ? "dense_iq4_nl_decode" :
+                "dense_extra_decode";
             if (n_tok == 1u) {
                 struct {
                     uint32_t out_dim;
@@ -424,6 +427,10 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                 }
                 bool iq2s_fast = weight_type == P36_VK_TENSOR_IQ2_S &&
                                  p36_vk_env_default_on("P36_VK_IQ2S_EXTRA");
+                bool iq2xxs_fast = weight_type == P36_VK_TENSOR_IQ2_XXS &&
+                                   p36_vk_env_default_on("P36_VK_IQ2_EXTRA");
+                bool iq2xs_fast = weight_type == P36_VK_TENSOR_IQ2_XS &&
+                                  p36_vk_env_default_on("P36_VK_IQ2_EXTRA");
                 p36_vk_kernel *decode_kernel =
                     q2_family &&
                     p36_vk.have_int_dot && p36_vk.subgroup_size == 64u &&
@@ -435,6 +442,8 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                     p36_vk.subgroup_arithmetic ?
                         &p36_vk.dense_extra_decode_ptq1_0 :
                     iq2s_fast ? &p36_vk.dense_extra_decode_iq2s :
+                    iq2xxs_fast ? &p36_vk.dense_extra_decode_iq2xxs :
+                    iq2xs_fast ? &p36_vk.dense_extra_decode_iq2xs :
                         &p36_vk.dense_extra_decode;
                 ok = p36_vk_run_unlocked(
                     op, decode_kernel,
@@ -549,6 +558,22 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                     op, &p36_vk.dense_iq4_xs_decode,
                     bindings, &push, sizeof(push),
                     ((uint32_t)out_dim + 3u) / 4u, 1, 1);
+            } else if (n_tok >= 2u && n_tok <= 4u && out_dim % 4u == 0u &&
+                       p36_vk_env_default_on("P36_VK_DENSE_IQ4_ROWS")) {
+                struct {
+                    uint32_t out_dim;
+                    uint32_t n_tok;
+                    uint32_t blocks;
+                    uint32_t row_bytes;
+                    float scale;
+                } push = {
+                    (uint32_t)out_dim, (uint32_t)n_tok,
+                    (uint32_t)blocks, (uint32_t)row_bytes, scale,
+                };
+                ok = p36_vk_run_unlocked(
+                    "dense_iq4_xs_rows", &p36_vk.dense_iq4_xs_rows,
+                    bindings, &push, sizeof(push),
+                    ((uint32_t)out_dim + 3u) / 4u, 1, 1);
             } else {
                 struct {
                     uint32_t out_dim;
@@ -661,10 +686,10 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                 /* Small-batch activation rows share one weight unpack.
                  * dense_iq3_xxs_decode_r4 is ALU-bound (P4: 5.4 VALU/weight), and
                  * the 128-row MMQ tile costs a full tile for 2..8 rows
-                 * (dense_iq3_xxs_mmq + predequant_b16).  Only 2 rows is
-                 * reachable today (P7: the verify is 2 rows, never 3); 3..8 is
-                 * P6's recorded reconsider_if condition, bit-exact at 3/4/8 in
-                 * tests/test_dense_iq3xxs_nx.c, and 8 is the audit's scope. */
+                 * (dense_iq3_xxs_mmq + predequant_b16).  The 4-row lookup
+                 * verifier lands here; each token pair costs one more weight
+                 * pass, but the pair-sized qv array stays below the VGPR
+                 * spill threshold (4-token variants measured slower). */
                 struct {
                     uint32_t out_dim;
                     uint32_t n_tok;
@@ -677,14 +702,16 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                 };
                 const char *op = p36_vk_prof_iq3_shape(
                     weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
-                    (uint32_t)out_dim, "dense_iq3_xxs_decode_nx");
+                    (uint32_t)out_dim,
+                    "dense_iq3_xxs_decode_nx");
                 if (getenv("P36_VK_DBG_IQ3N"))
                     fprintf(stderr, "IQ3F n_tok=%u in=%u out=%u nx\n",
                             (uint32_t)n_tok, (uint32_t)in_dim, (uint32_t)out_dim);
                 ok = p36_vk_run_unlocked(
                     op, &p36_vk.dense_iq3_xxs_decode_nx,
                     bindings, &push, sizeof(push),
-                    ((uint32_t)out_dim + 3u) / 4u, 1, 1);
+                    ((uint32_t)out_dim + 3u) / 4u,
+                    1, 1);
             } else {
                 struct {
                     uint32_t out_dim;
@@ -1237,6 +1264,41 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                     gu_q3k && down_q3k &&
                     p36_vk_env_default_on("P36_VK_MOE_APEX_Q3K");
     bool apex = apex_iq3xxs_q3k || apex_iq2s_iq3xxs || apex_iq2s_iq2xxs_iq3xxs || apex_q3k || apex_iq3xxs;
+    /* A 2..4-row verifier is too small for the q8 pair tile to amortize the
+     * expert weights.  The identity pair kernels already beat it per row, so
+     * run them once per row.  Default on: the logit dump showed the only
+     * divergence is a sub-0.01 reduction-order tie; set =0 for strict
+     * tie-matching against serial decode. */
+    bool rows_on = p36_vk_env_default_on("P36_VK_MOE_F32_ROWS");
+    bool row_pair = selected && weights && p36_vk_moe_pair_decode() &&
+        ((gu_q3k && down_q3k) || (gu_iq3xxs && down_iq3xxs) ||
+         (gu_iq3xxs && down_q3k) || (gu_iq2s && down_iq3xxs) ||
+         (gu_iq2s_iq2xxs && down_iq3xxs));
+    if (row_pair && rows_on && p36_vk_micro_batch && n_tok > 1u && n_tok <= 4u) {
+        p36_gpu_tensor *vx[4] = {0}, *vs[4] = {0}, *vw[4] = {0}, *vo[4] = {0};
+        uint64_t x_row = (uint64_t)in_dim * sizeof(float);
+        uint64_t o_row = (uint64_t)out_dim * sizeof(float);
+        uint64_t s_row = (uint64_t)n_used * sizeof(uint32_t);
+        int ok = 1;
+        for (uint32_t t = 0; t < n_tok && ok; t++) {
+            vx[t] = p36_gpu_tensor_view(x, t * x_row, x_row);
+            vs[t] = p36_gpu_tensor_view(selected, t * s_row, s_row);
+            vw[t] = p36_gpu_tensor_view(weights, t * s_row, s_row);
+            vo[t] = p36_gpu_tensor_view(out, t * o_row, o_row);
+            ok = vx[t] && vs[t] && vw[t] && vo[t] &&
+                 p36_gpu_moe_ffn_f32_tensor(vo[t], model_map, model_size,
+                                            gate, up, down, vs[t], vw[t],
+                                            layer, n_used, vx[t], 1u,
+                                            in_dim, mid_dim, out_dim, n_expert);
+        }
+        for (uint32_t t = 0; t < n_tok; t++) {
+            p36_gpu_tensor_free(vx[t]);
+            p36_gpu_tensor_free(vs[t]);
+            p36_gpu_tensor_free(vw[t]);
+            p36_gpu_tensor_free(vo[t]);
+        }
+        if (ok) return 1;
+    }
     uint32_t gate_block_bytes = q4k ? 144u : gate->type == P36_VK_TENSOR_IQ2_S ? 82u :
                                 gate->type == P36_VK_TENSOR_IQ3_XXS ? 98u :
                                 gate->type == P36_VK_TENSOR_Q3_K ? 110u : 66u;

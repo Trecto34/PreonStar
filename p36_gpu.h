@@ -769,6 +769,17 @@ int p36_gpu_top2_tensor(
         const p36_gpu_tensor *logits,
         uint32_t              count);
 
+/* Top-2 of every row of a `rows x count` logits block, plus a device copy of
+ * the last row into `last_logits`.  Speculative verification then needs one
+ * small int readback instead of `rows` full-vocabulary host reads, each of
+ * which drains the queue.  Unsupported backends return zero so callers keep
+ * their per-row readback path. */
+int p36_gpu_spec_verify_tops(
+        p36_gpu_tensor       *last_logits,
+        p36_gpu_tensor       *out_ids,
+        const p36_gpu_tensor *spec_logits,
+        uint32_t              rows,
+        uint32_t              count);
 /* Exact top-8 F32 entries on the GPU, descending by value (ties broken by
  * lower index, matching the CPU top-k sampler). `out` is one 64-byte buffer:
  * int32 ids[8] at offset 0, then float32 vals[8] at offset 32. Unsupported

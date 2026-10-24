@@ -362,6 +362,7 @@ static void p36_vulkan_runtime_free(p36_vulkan_runtime *rt) {
     p36_gpu_tensor_free(rt->mtp_full.k);
     p36_gpu_tensor_free(rt->mtp_full.v);
     p36_gpu_tensor_free(rt->spec_logits);
+    p36_gpu_tensor_free(rt->spec_tops);
     p36_gpu_tensor_free(rt->mtp_tok_embd);
     p36_gpu_tensor_free(rt->mtp_e_norm);
     p36_gpu_tensor_free(rt->mtp_h_norm);
@@ -376,6 +377,7 @@ static void p36_vulkan_runtime_free(p36_vulkan_runtime *rt) {
 static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
                                                      uint32_t prefill_cap,
                                                      bool enable_mtp,
+                                                     bool enable_spec,
                                                      bool quality,
                                                      bool ssd_streaming,
                                                      p36_kv_cache_type cache_type_k,
@@ -393,6 +395,8 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
     if (prefill_cap < 1) prefill_cap = 1;
     rt->prefill_cap = prefill_cap;
     rt->mtp_enabled = enable_mtp;
+    /* Verify scratch is shared: prompt lookup speculates without an MTP head. */
+    const bool spec_scratch = enable_mtp || enable_spec;
     {
         const char *env = getenv("P36_VK_RECURRENT_CONV_DECODE");
         rt->recur_conv_fused = !quality && !ssd_streaming &&
@@ -402,6 +406,7 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
     {
         const char *env = getenv("P36_VK_RECURRENT_STATE_F16");
         rt->recur_state_f16 = !quality && !ssd_streaming &&
+                              !getenv("P36_VK_STRICT_PARITY") &&
                               (!env || !env[0] || env[0] != '0');
     }
 #endif
@@ -696,8 +701,6 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
         rt->mtp_full.k = p36_gpu_tensor_alloc_uninitialized((uint64_t)kv_cap * k_row_bytes);
         rt->mtp_full.v = p36_gpu_tensor_alloc_uninitialized((uint64_t)kv_cap * v_row_bytes);
         if (!rt->mtp_full.k || !rt->mtp_full.v) goto fail;
-        rt->spec_logits = p36_gpu_tensor_alloc((uint64_t)P36_MTP_MAX_DRAFT * P36_N_VOCAB * sizeof(float));
-        if (!rt->spec_logits) goto fail;
         P36_GPU_ALLOC_MTP_F32(mtp_tok_embd, P36_N_EMBD);
         P36_GPU_ALLOC_MTP_F32(mtp_e_norm, P36_N_EMBD);
         P36_GPU_ALLOC_MTP_F32(mtp_h_norm, P36_N_EMBD);
@@ -706,6 +709,11 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
         P36_GPU_ALLOC_MTP_F32(mtp_next, P36_N_EMBD);
         P36_GPU_ALLOC_MTP_F32(mtp_head, P36_N_EMBD);
         P36_GPU_ALLOC_MTP_F32(mtp_logits, P36_N_VOCAB);
+    }
+    if (spec_scratch) {
+        rt->spec_logits = p36_gpu_tensor_alloc((uint64_t)P36_MTP_MAX_DRAFT * P36_N_VOCAB * sizeof(float));
+        rt->spec_tops = p36_gpu_tensor_alloc((uint64_t)P36_MTP_MAX_DRAFT * 2u * sizeof(int32_t));
+        if (!rt->spec_logits || !rt->spec_tops) goto fail;
     }
     for (uint32_t il = 0; il < P36_N_LAYER; il++) {
         if (p36_layer_is_full_attention(il)) {
@@ -722,7 +730,7 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
             rt->recurrent[il].state = p36_gpu_tensor_alloc(
                 state_dim * (rt->recur_state_f16 ? sizeof(uint16_t) : sizeof(float)));
             if (!rt->recurrent[il].conv || !rt->recurrent[il].state) goto fail;
-            if (enable_mtp) {
+            if (spec_scratch) {
                 rt->spec_recurrent[il].conv = p36_gpu_tensor_alloc(hist_rows * P36_N_SSM_CONV_DIM * sizeof(float));
                 rt->spec_recurrent[il].state = p36_gpu_tensor_alloc(
                     state_dim * (rt->recur_state_f16 ? sizeof(uint16_t) : sizeof(float)));

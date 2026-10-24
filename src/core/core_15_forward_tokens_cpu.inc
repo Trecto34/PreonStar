@@ -191,6 +191,99 @@ static bool p36_hadamard_prepare(p36_vulkan_runtime *rt,
                                            g_p36_hadamard.inv_sqrt_block, 0);
 }
 
+/* Diagnostic: does the fused norm's Q8 output agree with a fresh quantization
+ * of the same norm rows? A row-1 mismatch means the epilogue wrote the wrong
+ * row; a match means the consumer selected the wrong row. */
+static void p36_vk_layer0_q8_probe(p36_vulkan_runtime *rt, uint32_t n_tok) {
+    const uint64_t row = (P36_N_EMBD / P36_QK_K) * P36_VK_Q8_K_BYTES;
+    const uint64_t bytes = (uint64_t)n_tok * row;
+    p36_gpu_tensor *tmp = p36_gpu_tensor_alloc(bytes);
+    p36_gpu_tensor *ha = p36_gpu_tensor_alloc(bytes);
+    p36_gpu_tensor *hb = p36_gpu_tensor_alloc(bytes);
+    unsigned char *a = malloc((size_t)bytes);
+    unsigned char *b = malloc((size_t)bytes);
+    if (!tmp || !ha || !hb || !a || !b) {
+        fprintf(stderr, "p36: q8 probe alloc failed rows=%u\n", n_tok);
+        goto done;
+    }
+    if (!p36_gpu_quantize_q8_k_tensor(tmp, rt->norm, P36_N_EMBD, n_tok)) {
+        fprintf(stderr, "p36: q8 probe quantize failed rows=%u\n", n_tok);
+        goto done;
+    }
+    if (!p36_gpu_tensor_copy(ha, 0, tmp, 0, bytes) ||
+        !p36_gpu_tensor_copy(hb, 0, rt->inp_q8, 0, bytes) ||
+        !p36_gpu_tensor_read(ha, 0, a, bytes) ||
+        !p36_gpu_tensor_read(hb, 0, b, bytes)) {
+        fprintf(stderr, "p36: q8 probe read failed rows=%u\n", n_tok);
+        goto done;
+    }
+    for (uint32_t t = 0; t < n_tok; t++) {
+        const uint8_t *ra = a + (uint64_t)t * row;
+        const uint8_t *rb = b + (uint64_t)t * row;
+        uint64_t i = 0;
+        while (i < row && ra[i] == rb[i]) i++;
+        fprintf(stderr, "p36: q8 probe row=%u %s at byte=%llu/%llu\n",
+                t, i == row ? "match" : "MISMATCH",
+                (unsigned long long)i, (unsigned long long)row);
+    }
+done:
+    free(a); free(b);
+    p36_gpu_tensor_free(tmp); p36_gpu_tensor_free(ha); p36_gpu_tensor_free(hb);
+}
+
+/* Diagnostic: pull one Vulkan tensor to disk so a batched forward and a
+ * row-serialized forward can be diffed without guessing which kernel drifted.
+ * Gated by P36_VK_DUMP_LAYER (or legacy P36_VK_DUMP_LAYER0); one file per
+ * tensor under P36_VK_DUMP_DIR. P36_VK_DUMP_POS pins the token position. */
+static bool p36_vk_dump_layer_hit(uint32_t il, uint32_t n_tok, uint32_t pos0) {
+    const char *dl = getenv("P36_VK_DUMP_LAYER");
+    const char *dp = getenv("P36_VK_DUMP_POS");
+    uint32_t want;
+    if (!(dl || getenv("P36_VK_DUMP_LAYER0"))) return false;
+    if (n_tok < 2u || n_tok > 4u) return false;
+    want = (dl && dl[0]) ? (uint32_t)strtoul(dl, NULL, 10) : 0u;
+    if (il != want) return false;
+    if (dp && dp[0] && pos0 != (uint32_t)strtoul(dp, NULL, 10)) return false;
+    return true;
+}
+
+static void p36_vk_layer0_dump(const char *tag, const p36_gpu_tensor *t,
+                               uint64_t bytes) {
+    const char *dir = getenv("P36_VK_DUMP_DIR");
+    char path[512];
+    void *buf;
+    FILE *f;
+    if (!dir || !dir[0] || !t || bytes == 0) {
+        fprintf(stderr, "p36: dump %s unavailable (bytes=%llu)\n", tag,
+                (unsigned long long)bytes);
+        return;
+    }
+    buf = malloc((size_t)bytes);
+    if (!buf) return;
+    {
+        /* Scratch tensors (norm, qkv, conv) are device-local; bounce through
+         * a host-visible allocation before reading. */
+        p36_gpu_tensor *tmp = p36_gpu_tensor_alloc(bytes);
+        int ok = tmp && p36_gpu_tensor_copy(tmp, 0, t, 0, bytes) &&
+                 p36_gpu_tensor_read(tmp, 0, buf, bytes);
+        p36_gpu_tensor_free(tmp);
+        if (!ok) {
+            fprintf(stderr, "p36: dump %s read failed (bytes=%llu tensor=%llu)\n", tag,
+                    (unsigned long long)bytes,
+                    (unsigned long long)p36_gpu_tensor_bytes(t));
+            free(buf);
+            return;
+        }
+    }
+    snprintf(path, sizeof(path), "%s/%s.f32", dir, tag);
+    f = fopen(path, "wb");
+    if (f) {
+        fwrite(buf, 1, (size_t)bytes, f);
+        fclose(f);
+    }
+    free(buf);
+}
+
 /* Same, for a folded weight whose rotation axis kept the training V order
  * (prism.hadamard.gdn_v_grouped): the runtime activation is tiled, so permute
  * tiled -> grouped inside the fused kernel before the signs and the transform. */
@@ -266,12 +359,13 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
 #endif
 #ifndef P36_METAL
         /* Vulkan prefill pair: one dispatch decodes the gate and up tiles
-         * against a single staged activation tile.  n_tok == 1 keeps the
-         * per-row decode kernels, and any refusal falls through to the two
-         * single-projection dispatches below. */
+         * against a single staged activation tile.  Small 2..4-row batches
+         * (MTP verify) skip the 128-row tile and fall through to the
+         * single-projection nx kernels, which stream each weight once for
+         * the whole batch. */
         {
             const char *iq3_pair = getenv("P36_VK_DENSE_IQ3_PAIR");
-            if (!pair_projected && n_tok > 1u &&
+            if (!pair_projected && n_tok > 4u &&
                 (!iq3_pair || iq3_pair[0] != '0') &&
                 l->ffn_gate_shexp->type == P36_TENSOR_IQ3_XXS &&
                 l->ffn_up_shexp->type == P36_TENSOR_IQ3_XXS) {
@@ -715,6 +809,9 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
     e = s->engine;
     rt = (p36_vulkan_runtime *)s->runtime;
     cache = &rt->recurrent[il];
+    const char *q8_pair_env = getenv("P36_VK_Q8_PAIR");
+    bool q8_pair = !getenv("P36_VK_STRICT_PARITY") &&
+                   (!q8_pair_env || q8_pair_env[0] != '0');
     if ((l->attn_qkv->type != P36_TENSOR_Q8_0 || l->attn_gate->type != P36_TENSOR_Q8_0) &&
         !rt->inp_q8_valid &&
         !p36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, P36_N_EMBD, n_tok)) {
@@ -728,7 +825,7 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
         if (!p36_hadamard_prepare(rt, inp, P36_N_EMBD, n_tok)) return false;
         qkv_q8 = rt->had_q8;
     }
-    bool pair_projected = n_tok == 1u &&
+    bool pair_projected = q8_pair && n_tok == 1u &&
                           l->attn_qkv->type == P36_TENSOR_Q8_0 &&
                           l->attn_gate->type == P36_TENSOR_Q8_0 &&
                           p36_gpu_matmul_q8_0_pair_scaled_tensor(
@@ -739,20 +836,63 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
                               p36_tensor_scalar_or(&e->model, l->attn_qkv_scale, 1.0f),
                               p36_tensor_scalar_or(&e->model, l->attn_gate_scale, 1.0f));
     if (!pair_projected) {
-        if (!p36_gpu_tensor_matmul_q8_or_float_scaled(&e->model, l->attn_qkv, qkv_in, qkv_q8, rt->recur_qkv,
-                                                      P36_N_EMBD, P36_N_SSM_CONV_DIM, n_tok,
-                                                      p36_tensor_scalar_or(&e->model, l->attn_qkv_scale, 1.0f))) {
-            fprintf(stderr, "p36: recurrent attn_qkv failed at layer=%u\n", il);
-            return false;
+        bool serial_qkv = n_tok > 1u && n_tok <= 4u &&
+                          getenv("P36_VK_SERIAL_QKV") != NULL;
+        if (serial_qkv) {
+            /* Diagnostic parity probe: project one row at a time into that
+             * row's slot, so the batch dump compares equal-width rows. */
+            for (uint32_t t = 0; t < n_tok; t++) {
+                p36_gpu_tensor *in = p36_gpu_tensor_view(
+                    qkv_in, (uint64_t)t * P36_N_EMBD * sizeof(float),
+                    P36_N_EMBD * sizeof(float));
+                p36_gpu_tensor *q = p36_gpu_tensor_view(
+                    rt->recur_qkv, (uint64_t)t * P36_N_SSM_CONV_DIM * sizeof(float),
+                    P36_N_SSM_CONV_DIM * sizeof(float));
+                p36_gpu_tensor *z = p36_gpu_tensor_view(
+                    rt->recur_z, (uint64_t)t * P36_N_SSM_INNER * sizeof(float),
+                    P36_N_SSM_INNER * sizeof(float));
+                bool ok = in && q && z &&
+                    p36_gpu_tensor_matmul_q8_or_float_scaled(
+                        &e->model, l->attn_qkv, in, qkv_q8, q,
+                        P36_N_EMBD, P36_N_SSM_CONV_DIM, 1,
+                        p36_tensor_scalar_or(&e->model, l->attn_qkv_scale, 1.0f)) &&
+                    p36_gpu_tensor_matmul_q8_or_float_scaled(
+                        &e->model, l->attn_gate, in, qkv_q8, z,
+                        P36_N_EMBD, P36_N_SSM_INNER, 1,
+                        p36_tensor_scalar_or(&e->model, l->attn_gate_scale, 1.0f));
+                p36_gpu_tensor_free(in);
+                p36_gpu_tensor_free(q);
+                p36_gpu_tensor_free(z);
+                if (!ok) {
+                    fprintf(stderr, "p36: recurrent serial qkv failed at layer=%u row=%u\n",
+                            il, t);
+                    return false;
+                }
+            }
+        } else {
+            if (!p36_gpu_tensor_matmul_q8_or_float_scaled(&e->model, l->attn_qkv, qkv_in, qkv_q8, rt->recur_qkv,
+                                                          P36_N_EMBD, P36_N_SSM_CONV_DIM, n_tok,
+                                                          p36_tensor_scalar_or(&e->model, l->attn_qkv_scale, 1.0f))) {
+                fprintf(stderr, "p36: recurrent attn_qkv failed at layer=%u\n", il);
+                return false;
+            }
+            /* The z gate dispatch records before the host conv step so the flush
+             * the conv's qkv read triggers completes both projections. */
+            if (!p36_gpu_tensor_matmul_q8_or_float_scaled(&e->model, l->attn_gate, qkv_in, qkv_q8, rt->recur_z,
+                                                          P36_N_EMBD, P36_N_SSM_INNER, n_tok,
+                                                          p36_tensor_scalar_or(&e->model, l->attn_gate_scale, 1.0f))) {
+                fprintf(stderr, "p36: recurrent attn_gate failed at layer=%u\n", il);
+                return false;
+            }
         }
-        /* The z gate dispatch records before the host conv step so the flush
-         * the conv's qkv read triggers completes both projections. */
-        if (!p36_gpu_tensor_matmul_q8_or_float_scaled(&e->model, l->attn_gate, qkv_in, qkv_q8, rt->recur_z,
-                                                      P36_N_EMBD, P36_N_SSM_INNER, n_tok,
-                                                      p36_tensor_scalar_or(&e->model, l->attn_gate_scale, 1.0f))) {
-            fprintf(stderr, "p36: recurrent attn_gate failed at layer=%u\n", il);
-            return false;
-        }
+    }
+    if (il == 0u && getenv("P36_VK_DUMP_QKV")) {
+        static uint32_t qkv_call;
+        char tag[48];
+        p36_gpu_synchronize();
+        snprintf(tag, sizeof(tag), "qkv_pre_%u", qkv_call++);
+        p36_vk_layer0_dump(tag, rt->recur_qkv,
+            (uint64_t)n_tok * P36_N_SSM_CONV_DIM * sizeof(float));
     }
     bool front=false;
 #ifndef P36_METAL
@@ -792,7 +932,7 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
         fprintf(stderr, "p36: recurrent conv non-finite at layer=%u\n", il);
         return false;
     }
-    pair_projected = n_tok == 1u &&
+    pair_projected = q8_pair && n_tok == 1u &&
                      l->ssm_beta->type == P36_TENSOR_Q8_0 &&
                      l->ssm_alpha->type == P36_TENSOR_Q8_0 &&
                      p36_gpu_matmul_q8_0_pair_scaled_tensor(
@@ -986,15 +1126,106 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
     for (uint32_t il = 0; il < P36_N_LAYER; il++) {
         const p36_layer_weights *l = &e->weights.layer[il];
         if (l->kind == P36_LAYER_FULL_ATTN) {
-            if (!p36_forward_full_attn_vulkan(s, l, il, pos0, positions,
-                                               n_tok, rt->norm, rt->next_hidden)) {
+            bool serial_attn = n_tok > 1u && n_tok <= 4u &&
+                               getenv("P36_VK_SERIAL_ATTN") != NULL;
+            if (serial_attn) {
+                for (uint32_t t = 0; t < n_tok; t++) {
+                    uint64_t off = (uint64_t)t * P36_N_EMBD * sizeof(float);
+                    p36_gpu_tensor *in = p36_gpu_tensor_view(rt->norm, off,
+                                                             P36_N_EMBD * sizeof(float));
+                    p36_gpu_tensor *out = p36_gpu_tensor_view(rt->next_hidden, off,
+                                                              P36_N_EMBD * sizeof(float));
+                    bool row_ok = in && out && p36_forward_full_attn_vulkan(
+                        s, l, il, pos0 + t, positions ? positions + t : NULL,
+                        1, in, out);
+                    p36_gpu_tensor_free(in);
+                    p36_gpu_tensor_free(out);
+                    if (!row_ok) {
+                        fprintf(stderr, "p36: attention serial row failed at layer=%u row=%u\n",
+                                il, t);
+                        return false;
+                    }
+                    if (p36_vk_dump_layer_hit(il, n_tok, pos0)) {
+                        char tag[48];
+                        p36_gpu_synchronize();
+                        snprintf(tag, sizeof(tag), "attn_qg_row%u", t);
+                        p36_vk_layer0_dump(tag, rt->attn_qg,
+                            (uint64_t)P36_N_HEAD * P36_N_HEAD_DIM * 2u * sizeof(float));
+                        snprintf(tag, sizeof(tag), "attn_q_row%u", t);
+                        p36_vk_layer0_dump(tag, rt->attn_q,
+                            (uint64_t)P36_N_HEAD * P36_N_HEAD_DIM * sizeof(float));
+                        snprintf(tag, sizeof(tag), "attn_out_row%u", t);
+                        p36_vk_layer0_dump(tag, rt->attn_out,
+                            (uint64_t)P36_N_SSM_INNER * sizeof(float));
+                    }
+                }
+            } else if (!p36_forward_full_attn_vulkan(s, l, il, pos0, positions,
+                                                      n_tok, rt->norm, rt->next_hidden)) {
                 fprintf(stderr, "p36: full attention block failed at pos=%u layer=%u\n", pos0, il);
                 return false;
             }
+            /* attn_qg aliases FFN scratch for dense layers, so snapshot the
+             * attention intermediates before the FFN overwrites them. */
+            if (!serial_attn && p36_vk_dump_layer_hit(il, n_tok, pos0)) {
+                p36_gpu_synchronize();
+                p36_vk_layer0_dump("attn_qg", rt->attn_qg,
+                                   (uint64_t)n_tok * P36_N_HEAD *
+                                   P36_N_HEAD_DIM * 2u * sizeof(float));
+                p36_vk_layer0_dump("attn_q", rt->attn_q,
+                                   (uint64_t)n_tok * P36_N_HEAD *
+                                   P36_N_HEAD_DIM * sizeof(float));
+                p36_vk_layer0_dump("attn_out", rt->attn_out,
+                                   (uint64_t)n_tok * P36_N_SSM_INNER * sizeof(float));
+            }
         } else {
-            if (!p36_forward_recurrent_vulkan(s, l, il, n_tok, rt->norm, rt->next_hidden)) {
+            bool serial_recur = n_tok > 1u && n_tok <= 4u &&
+                                getenv("P36_VK_SERIAL_RECURRENT") != NULL;
+            if (serial_recur) {
+                /* Diagnostic parity probe: feed the recurrent block one row
+                 * at a time so conv/scan state follows the exact serial
+                 * order. Attention and FFN stay batched. */
+                for (uint32_t t = 0; t < n_tok; t++) {
+                    uint64_t off = (uint64_t)t * P36_N_EMBD * sizeof(float);
+                    p36_gpu_tensor *in = p36_gpu_tensor_view(rt->norm, off,
+                                                             P36_N_EMBD * sizeof(float));
+                    p36_gpu_tensor *out = p36_gpu_tensor_view(rt->next_hidden, off,
+                                                              P36_N_EMBD * sizeof(float));
+                    bool row_ok = in && out &&
+                        p36_forward_recurrent_vulkan(s, l, il, 1, in, out);
+                    p36_gpu_tensor_free(in);
+                    p36_gpu_tensor_free(out);
+                    if (!row_ok) {
+                        fprintf(stderr, "p36: recurrent serial row failed at layer=%u row=%u\n",
+                                il, t);
+                        return false;
+                    }
+                    if (p36_vk_dump_layer_hit(il, n_tok, pos0)) {
+                        char tag[48];
+                        p36_gpu_synchronize();
+                        snprintf(tag, sizeof(tag), "recur_qkv_row%u", t);
+                        p36_vk_layer0_dump(tag, rt->recur_qkv,
+                            (uint64_t)P36_N_SSM_CONV_DIM * sizeof(float));
+                        snprintf(tag, sizeof(tag), "recur_conv_row%u", t);
+                        p36_vk_layer0_dump(tag, rt->recur_conv,
+                            (uint64_t)P36_N_SSM_CONV_DIM * sizeof(float));
+                        snprintf(tag, sizeof(tag), "recur_z_row%u", t);
+                        p36_vk_layer0_dump(tag, rt->recur_z,
+                            (uint64_t)P36_N_SSM_INNER * sizeof(float));
+                    }
+                }
+            } else if (!p36_forward_recurrent_vulkan(s, l, il, n_tok,
+                                                     rt->norm, rt->next_hidden)) {
                 fprintf(stderr, "p36: recurrent block failed at pos=%u layer=%u\n", pos0, il);
                 return false;
+            }
+            if (!serial_recur && rt->recur_qkv && p36_vk_dump_layer_hit(il, n_tok, pos0)) {
+                p36_gpu_synchronize();
+                p36_vk_layer0_dump("recur_qkv_batch", rt->recur_qkv,
+                    (uint64_t)n_tok * P36_N_SSM_CONV_DIM * sizeof(float));
+                p36_vk_layer0_dump("recur_conv_batch", rt->recur_conv,
+                    (uint64_t)n_tok * P36_N_SSM_CONV_DIM * sizeof(float));
+                p36_vk_layer0_dump("recur_z_batch", rt->recur_z,
+                    (uint64_t)n_tok * P36_N_SSM_INNER * sizeof(float));
             }
         }
         if (e->directional_steering_attn_scale != 0.0f &&
@@ -1060,6 +1291,56 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
         if (e->quality && !p36_gpu_tensor_all_finite(rt->hidden, n_tok * P36_N_EMBD)) {
             fprintf(stderr, "p36: non-finite hidden state at pos=%u layer=%u\n", pos0, il);
             return false;
+        }
+        if (il == 0u && n_tok > 1u && getenv("P36_VK_Q8_CHECK")) {
+            static bool q8_probed;
+            if (!q8_probed) {
+                q8_probed = true;
+                fprintf(stderr, "p36: q8 probe at layer0 rows=%u kind=%u qkv=%u gate=%u\n",
+                        n_tok, (unsigned)l->kind,
+                        (unsigned)l->attn_qkv->type, (unsigned)l->attn_gate->type);
+                p36_vk_layer0_q8_probe(rt, n_tok);
+            }
+        }
+        {
+            static bool dumped;
+            if (p36_vk_dump_layer_hit(il, n_tok, pos0) && !dumped) {
+                const uint64_t act = (uint64_t)n_tok * P36_N_EMBD * sizeof(float);
+                const uint64_t ssm = (uint64_t)n_tok * P36_N_SSM_CONV_DIM * sizeof(float);
+                const uint64_t q8 = p36_gpu_tensor_bytes(rt->inp_q8);
+                dumped = true;
+                p36_gpu_synchronize();
+                p36_vk_layer0_dump("norm", rt->norm, act);
+                p36_vk_layer0_dump("hidden", rt->hidden, act);
+                p36_vk_layer0_dump("next_hidden", rt->next_hidden, act);
+                p36_vk_layer0_dump("inp_q8", rt->inp_q8, q8);
+                p36_vk_layer0_dump("recur_qkv", rt->recur_qkv, ssm);
+                p36_vk_layer0_dump("recur_conv", rt->recur_conv, ssm);
+                if (!p36_layer_is_full_attention(il)) {
+                    p36_vk_layer0_dump("cache_conv", rt->recurrent[il].conv,
+                                       p36_gpu_tensor_bytes(rt->recurrent[il].conv));
+                    p36_vk_layer0_dump("cache_state", rt->recurrent[il].state,
+                                       p36_gpu_tensor_bytes(rt->recurrent[il].state));
+                } else {
+                    p36_vk_layer0_dump("cache_k", rt->full[il].k,
+                                       p36_gpu_tensor_bytes(rt->full[il].k));
+                    p36_vk_layer0_dump("cache_v", rt->full[il].v,
+                                       p36_gpu_tensor_bytes(rt->full[il].v));
+                }
+            }
+        }
+        if (getenv("P36_VK_SWEEP_LAYERS")) {
+            const char *sp = getenv("P36_VK_SWEEP_POS");
+            uint32_t want_pos = (sp && sp[0]) ? (uint32_t)strtoul(sp, NULL, 10) : 0u;
+            if (pos0 == want_pos) {
+                const uint64_t act = (uint64_t)n_tok * P36_N_EMBD * sizeof(float);
+                char tag[32];
+                p36_gpu_synchronize();
+                snprintf(tag, sizeof(tag), "L%02u_hidden", il);
+                p36_vk_layer0_dump(tag, rt->hidden, act);
+                snprintf(tag, sizeof(tag), "L%02u_ffn", il);
+                p36_vk_layer0_dump(tag, rt->next_hidden, act);
+            }
         }
     }
     if (e->quality && !p36_gpu_tensor_all_finite(rt->norm, n_tok * P36_N_EMBD)) {
@@ -1584,26 +1865,46 @@ static bool p36_vulkan_verify_suffix_tops(p36_session *s,
                                           uint32_t n_tok,
                                           uint32_t pos0,
                                           int *row_tops) {
-    p36_engine *e;
     p36_vulkan_runtime *rt;
     if (!s || !tokens || n_tok == 0 || n_tok > P36_MTP_MAX_DRAFT) return false;
-    e = s->engine;
     rt = (p36_vulkan_runtime *)s->runtime;
-    if (!rt || !rt->spec_logits) return false;
+    if (!rt || !rt->spec_logits || !rt->spec_tops) return false;
+    const bool timed = getenv("P36_LOOKUP_TIME") != NULL;
+    struct timespec t_start;
+    if (timed) clock_gettime(CLOCK_MONOTONIC, &t_start);
     p36_gpu_set_micro_batch(true);
     {
+        /* Project every row through the graph's own output path: it applies
+         * the Hadamard rotation of the output weight when the loader pre-
+         * rotated it, which a plain matmul on rt->norm would miss. */
         bool fwd = p36_forward_tokens_vulkan_into(s, tokens, NULL, NULL,
-                                                  n_tok, pos0, NULL, false) &&
-                   p36_gpu_tensor_matmul_scaled(&e->model,
-                                                e->weights.output,
-                                                rt->norm,
-                                                rt->spec_logits,
-                                                P36_N_EMBD,
-                                                P36_N_VOCAB,
-                                                n_tok,
-                                                p36_tensor_scalar_or(&e->model, e->weights.output_scale, 1.0f));
+                                                  n_tok, pos0, rt->spec_logits, true);
         p36_gpu_set_micro_batch(false);
         if (!fwd) return false;
+    }
+    /* Top-2 of every row on the device, then one small read: pulling each
+     * vocabulary row back on the host drains the queue once per draft and
+     * costs more than the drafts can save.  The helper also leaves rt->logits
+     * equal to the last row so later lazy host reads stay correct.
+     * P36_VK_ARGMAX=0 keeps the plain per-row readback below. */
+    if (p36_gpu_spec_verify_tops(rt->logits, rt->spec_tops, rt->spec_logits,
+                                 n_tok, P36_N_VOCAB)) {
+        int32_t tops[2 * P36_MTP_MAX_DRAFT];
+        if (!p36_gpu_tensor_read(rt->spec_tops, 0, tops,
+                                 (uint64_t)n_tok * 2u * sizeof(int32_t))) return false;
+        if (timed) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            fprintf(stderr, "verify n=%u ms=%.3f\n", n_tok,
+                    (now.tv_sec - t_start.tv_sec) * 1e3 +
+                    (now.tv_nsec - t_start.tv_nsec) / 1e6);
+        }
+        for (uint32_t i = 0; i + 1u < n_tok; i++) row_tops[i] = tops[2u * i];
+        s->gpu_top2[0] = tops[2u * (n_tok - 1u)];
+        s->gpu_top2[1] = tops[2u * (n_tok - 1u) + 1u];
+        s->gpu_top2_valid = s->gpu_top2[0] >= 0 && s->gpu_top2[1] >= 0;
+        s->logits_host_valid = false;
+        return true;
     }
     for (uint32_t i = 0; i + 1u < n_tok; i++) {
         if (!p36_gpu_tensor_read(rt->spec_logits,

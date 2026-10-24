@@ -223,6 +223,7 @@ typedef struct {
     p36_vk_kernel kv_store_quant;
     p36_vk_kernel rms_norm_rope_kv_quant;
     p36_vk_kernel top2;
+    p36_vk_kernel argmax_rows;
     p36_vk_kernel topk8;
     p36_vk_kernel logits_minp;
     p36_vk_kernel moe_gate_up_f32b;
@@ -267,6 +268,7 @@ typedef struct {
     p36_vk_kernel dense_iq3_s_mmq_r4;
     p36_vk_kernel dense_iq4_xs;
     p36_vk_kernel dense_iq4_xs_decode;
+    p36_vk_kernel dense_iq4_xs_rows;
     p36_vk_kernel dense_iq4_xs_mmq;
     p36_vk_kernel dense_iq1_m;
     p36_vk_kernel dense_extra_decode;
@@ -277,6 +279,8 @@ typedef struct {
     p36_vk_kernel dense_extra_decode_ptq1_0;
     p36_vk_kernel dense_extra_decode_iq2s_pair;
     p36_vk_kernel dense_extra_decode_iq2s;
+    p36_vk_kernel dense_extra_decode_iq2xxs;
+    p36_vk_kernel dense_extra_decode_iq2xs;
     p36_vk_kernel dense_extra_mmq;
     p36_vk_kernel dense_extra_mmq_q2_0;
     p36_vk_kernel dense_extra_mmq_pq2_0;
@@ -288,6 +292,11 @@ typedef struct {
     p36_vk_kernel dense_q4k_decode;
     p36_vk_kernel dense_q5k_decode;
     p36_vk_kernel dense_q3k_decode;
+    p36_vk_kernel dense_q2k_decode;
+    p36_vk_kernel dense_q3k_rows;
+    p36_vk_kernel dense_q4k_rows;
+    p36_vk_kernel dense_q5k_rows;
+    p36_vk_kernel dense_q6k_rows;
     p36_vk_kernel moe_reduce;
     p36_vk_kernel ffn_tail;
     p36_vk_kernel fwht;
@@ -306,6 +315,8 @@ typedef struct {
     uint64_t attn_part_bytes;
     p36_gpu_tensor *top2_part;
     uint64_t top2_part_bytes;
+    p36_gpu_tensor *argmax_rows_part;
+    uint64_t argmax_rows_part_bytes;
     p36_gpu_tensor *topk8_part;
     uint64_t topk8_part_bytes;
 } p36_vulkan_runtime;

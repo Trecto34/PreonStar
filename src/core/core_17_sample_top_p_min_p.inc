@@ -238,6 +238,9 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
     e->mtp_draft_tokens = opt->mtp_draft_tokens > 0 ? opt->mtp_draft_tokens : 1;
     if (e->mtp_draft_tokens > P36_MTP_MAX_DRAFT) e->mtp_draft_tokens = P36_MTP_MAX_DRAFT;
     e->mtp_margin = opt->mtp_margin >= 0.0f ? opt->mtp_margin : 0.0f;
+    e->lookup_order = opt->lookup_order > 0 ? opt->lookup_order : 3;
+    e->lookup_k = opt->lookup_k > 0 ? opt->lookup_k : 0;
+    if (e->lookup_k > P36_MTP_MAX_DRAFT) e->lookup_k = P36_MTP_MAX_DRAFT;
     if (opt->directional_steering_file && opt->directional_steering_file[0]) {
         e->directional_steering_file = p36_strdup(opt->directional_steering_file);
     }
@@ -434,7 +437,8 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
                 opt->mtp_path,
                 e->mtp_draft_tokens);
 #endif
-    } else if (P36_MODEL_DENSE && p36_backend_uses_graph(opt->backend) &&
+    } else if (P36_MODEL_DENSE && e->mtp_draft_tokens > 1 &&
+               p36_backend_uses_graph(opt->backend) &&
                tensor_by_namef(&e->model, "blk.%u.nextn.eh_proj.weight", P36_N_LAYER) &&
                tensor_by_namef(&e->model, "blk.%u.nextn.eh_proj.weight", P36_N_LAYER)->bytes != 0) {
 #ifndef P36_NO_GPU
@@ -774,6 +778,8 @@ int p36_engine_generate_argmax(p36_engine *e, const p36_tokens *prompt,
     if (p36_session_sync(s, prompt, err, sizeof(err)) != 0) goto done;
     t_prefill1 = p36_now_sec();
     eos = p36_token_eos(e);
+    const bool prof_decode = getenv("P36_VK_PROF_DECODE") != NULL;
+    if (prof_decode) p36_gpu_prof_reset();
     t_decode0 = p36_now_sec();
     int room = p36_session_ctx(s) - p36_session_pos(s);
     int max_tokens = room <= 1 ? 0 : n_predict;
@@ -788,6 +794,7 @@ int p36_engine_generate_argmax(p36_engine *e, const p36_tokens *prompt,
         generated++;
     }
     t_decode1 = p36_now_sec();
+    if (prof_decode) p36_gpu_prof_report("decode");
     if (done) done(emit_ud);
     p36_log(stderr,
             P36_LOG_TIMING,
@@ -931,6 +938,7 @@ int p36_session_create(p36_session **out, p36_engine *e, int ctx_size) {
         s->runtime = p36_vulkan_runtime_create(ctx_size,
                                                p36_engine_gpu_prefill_cap(e),
                                                e->mtp_ready,
+                                               e->lookup_k > 1,
                                                e->quality,
                                                e->ssd_streaming,
                                                e->cache_type_k,

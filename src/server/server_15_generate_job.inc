@@ -324,7 +324,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         if (!multimodal && !s->batched_mode && temperature <= 0.0f &&
             presence_penalty == 0.0f && frequency_penalty == 0.0f &&
             repeat_penalty == 1.0f &&
-            p36_engine_mtp_draft_tokens(s->engine) > 1 &&
+            p36_engine_spec_enabled(s->engine) &&
             getenv("P36_MTP_SPEC_DISABLE") == NULL)
         {
             ntok = p36_session_eval_speculative_argmax(slot->session,

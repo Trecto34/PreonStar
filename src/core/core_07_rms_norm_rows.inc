@@ -429,9 +429,10 @@ static void model_convert_q4_0(p36_model *m) {
         }
         for (uint64_t i = 0; i < m->n_tensors; i++) {
             p36_tensor *t = &m->tensors[i];
-            if (!t->from_q4_0) continue;
+            if (!t->from_q4_0 && !t->from_q4_1) continue;
             uint64_t src = m->tensor_data_pos + t->rel_offset;
-            uint64_t q4_bytes = t->elements / P36_QK8_0 * P36_Q4_0_BYTES;
+            uint64_t q4_bytes = t->elements / P36_QK8_0 *
+                (t->from_q4_1 ? P36_Q4_1_BYTES : P36_Q4_0_BYTES);
             if (src > m->file_size || q4_bytes > m->file_size - src)
                 p36_die("tensor points outside GGUF file");
             uint64_t dst = align_up(used, 32);
@@ -439,11 +440,38 @@ static void model_convert_q4_0(p36_model *m) {
             if (pass == 0) continue;
             const uint8_t *q4 = m->map + src;
             p36_block_q8_0 *q8 = (p36_block_q8_0 *)(void *)((uint8_t *)m->map + arena_off + dst);
-            for (uint64_t b = 0; b < t->elements / P36_QK8_0; b++, q4 += P36_Q4_0_BYTES) {
-                memcpy(&q8[b].d, q4, sizeof(q8[b].d));
-                for (uint32_t j = 0; j < 16; j++) {
-                    q8[b].qs[j] = (int8_t)((q4[2 + j] & 15u) - 8);
-                    q8[b].qs[j + 16] = (int8_t)((q4[2 + j] >> 4) - 8);
+            uint32_t stride = t->from_q4_1 ? P36_Q4_1_BYTES : P36_Q4_0_BYTES;
+            for (uint64_t b = 0; b < t->elements / P36_QK8_0; b++, q4 += stride) {
+                if (t->from_q4_0) {
+                    memcpy(&q8[b].d, q4, sizeof(q8[b].d));
+                    for (uint32_t j = 0; j < 16; j++) {
+                        q8[b].qs[j] = (int8_t)((q4[2 + j] & 15u) - 8);
+                        q8[b].qs[j + 16] = (int8_t)((q4[2 + j] >> 4) - 8);
+                    }
+                } else {
+                    uint16_t db, mb;
+                    float d, mn, maxabs = 0.0f, vals[32];
+                    memcpy(&db, q4, sizeof(db));
+                    memcpy(&mb, q4 + 2, sizeof(mb));
+                    d = p36_f16_to_f32(db);
+                    mn = p36_f16_to_f32(mb);
+                    for (uint32_t j = 0; j < 16; j++) {
+                        vals[j] = d * (float)(q4[4 + j] & 15u) + mn;
+                        vals[j + 16] = d * (float)(q4[4 + j] >> 4) + mn;
+                    }
+                    for (uint32_t j = 0; j < 32; j++) {
+                        float a = fabsf(vals[j]);
+                        if (a > maxabs) maxabs = a;
+                    }
+                    float d8 = maxabs > 0.0f ? maxabs / 127.0f : 1.0f;
+                    q8[b].d = p36_f32_to_f16(d8);
+                    for (uint32_t j = 0; j < 32; j++) {
+                        float q = vals[j] / d8;
+                        int v = (int)lrintf(q);
+                        if (v < -128) v = -128;
+                        if (v > 127) v = 127;
+                        q8[b].qs[j] = (int8_t)v;
+                    }
                 }
             }
             t->abs_offset = arena_off + dst;
@@ -473,12 +501,23 @@ static void parse_tensors(p36_model *m, p36_cursor *c) {
         }
         if (!cursor_u32(c, &t->type)) p36_die(c->error);
         if (!cursor_u64(c, &t->rel_offset)) p36_die(c->error);
-        if (t->type == P36_TENSOR_Q4_0 && !tensor_in_appended_nextn_block(m, t->name)) {
+        if (t->type == P36_TENSOR_Q4_0) {
             /* Q4_0 -> Q8_0 is exact (q-8 fits int8, same f16 scale), so the
              * whole Q8_0 kernel set serves these tensors; see
-             * model_convert_q4_0. */
+             * model_convert_q4_0.  This includes the appended MTP block. */
             if ((t->elements % P36_QK8_0) != 0) p36_die("q4_0 tensor row is not a multiple of 32");
             t->from_q4_0 = true;
+            t->type = P36_TENSOR_Q8_0;
+            t->bytes = t->elements / P36_QK8_0 * sizeof(p36_block_q8_0);
+            continue;
+        }
+        if (t->type == P36_TENSOR_Q4_1 && tensor_in_appended_nextn_block(m, t->name)) {
+            /* The draft head's ffn_down is Q4_1 (scale + min).  The verifier
+             * never sees these weights, so a lossy Q8_0 requant is enough to
+             * give the MTP draft a q8 matvec; committed tokens still come
+             * from the exact dense weights. */
+            if ((t->elements % P36_QK8_0) != 0) p36_die("q4_1 tensor row is not a multiple of 32");
+            t->from_q4_1 = true;
             t->type = P36_TENSOR_Q8_0;
             t->bytes = t->elements / P36_QK8_0 * sizeof(p36_block_q8_0);
             continue;

@@ -90,6 +90,9 @@ void p36_gpu_cleanup(void) {
     p36_vk_tensor_free_unlocked(p36_vk.top2_part);
     p36_vk.top2_part = NULL;
     p36_vk.top2_part_bytes = 0;
+    p36_vk_tensor_free_unlocked(p36_vk.argmax_rows_part);
+    p36_vk.argmax_rows_part = NULL;
+    p36_vk.argmax_rows_part_bytes = 0;
     p36_vk_tensor_free_unlocked(p36_vk.topk8_part);
     p36_vk.topk8_part = NULL;
     p36_vk.topk8_part_bytes = 0;
@@ -115,7 +118,10 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode);
     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_iq2s_pair);
     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_iq2s);
+    p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_iq2xxs);
+    p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_iq2xs);
     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_mmq);
+    p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_rows);
     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_decode);
     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs);
     p36_vk_kernel_destroy(&p36_vk.dense_kquant_mmq);
@@ -124,6 +130,11 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.dense_q4k_decode);
     p36_vk_kernel_destroy(&p36_vk.dense_q5k_decode);
     p36_vk_kernel_destroy(&p36_vk.dense_q3k_decode);
+    p36_vk_kernel_destroy(&p36_vk.dense_q2k_decode);
+    p36_vk_kernel_destroy(&p36_vk.dense_q3k_rows);
+    p36_vk_kernel_destroy(&p36_vk.dense_q4k_rows);
+    p36_vk_kernel_destroy(&p36_vk.dense_q5k_rows);
+    p36_vk_kernel_destroy(&p36_vk.dense_q6k_rows);
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_s_decode_r4);
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_s_decode_r1);
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_s_decode_full);
@@ -607,6 +618,8 @@ static void p36_vk_prepare_dense_kernels(void) {
         &p36_vk.dense_q4k_decode,
         &p36_vk.dense_kquant_decode,
         &p36_vk.dense_extra_decode_iq2s,
+        &p36_vk.dense_extra_decode_iq2xxs,
+        &p36_vk.dense_extra_decode_iq2xs,
         &p36_vk.dense_extra_mmq_iq2s,
         &p36_vk.dense_extra_decode_iq2s_pair,
         &p36_vk.dense_extra_mmq,

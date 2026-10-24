@@ -338,13 +338,29 @@ int p36_gpu_matmul_q8_0_scaled_tensor(p36_gpu_tensor *out,
     const unsigned char *w = p36_gpu_weight_bytes(model_map, model_size, weight_offset, weight_bytes);
     if (!w) return 0;
 
+    if (n_tok == 1 && (getenv("P36_VK_Q8_NX_DECODE") || getenv("P36_VK_STRICT_PARITY")) &&
+        out_dim <= UINT32_MAX && blocks <= UINT32_MAX && row_bytes <= UINT32_MAX &&
+        p36_vk_matmul_q8_0_f32b_nx(out, w, weight_bytes, x, row_bytes, out_dim, n_tok, blocks, scale)) {
+        return 1;
+    }
+    if (n_tok == 1 && getenv("P36_VK_Q8_MM_DECODE") &&
+        out_dim <= UINT32_MAX && blocks <= UINT32_MAX && row_bytes <= UINT32_MAX &&
+        p36_vk_matmul_q8_0_mm(out, w, weight_bytes, x, row_bytes, out_dim, n_tok, blocks, scale)) {
+        return 1;
+    }
     if (!p36_gpu_quality && n_tok == 1 && p36_vk_use_q8_0_f32b() && p36_vk_use_q8_0_gpu() &&
         out_dim <= UINT32_MAX && blocks <= UINT32_MAX && row_bytes <= UINT32_MAX &&
         p36_vk_matmul_q8_0_f32b(out, w, weight_bytes, x, row_bytes, out_dim, blocks, scale)) {
         return 1;
     }
 
-    if (!p36_gpu_quality && p36_vk_micro_batch && n_tok >= 2 && n_tok <= 8 &&
+    if (getenv("P36_VK_Q8_CHECK") && n_tok > 1u && out_dim == 6144u) {
+        fprintf(stderr, "p36: q8_0 matmul out=%llu tok=%llu micro=%d f32b=%d\n",
+                (unsigned long long)out_dim, (unsigned long long)n_tok,
+                (int)p36_vk_micro_batch, (int)p36_vk_use_q8_0_f32b());
+    }
+    if (!p36_gpu_quality && (p36_vk_micro_batch || getenv("P36_VK_Q8_NX") || getenv("P36_VK_STRICT_PARITY")) &&
+        n_tok >= 2 && n_tok <= 8 &&
         p36_vk_use_q8_0_f32b() && p36_vk_use_q8_0_gpu() &&
         out_dim <= UINT32_MAX && blocks <= UINT32_MAX && row_bytes <= UINT32_MAX &&
         p36_vk_matmul_q8_0_f32b_nx(out, w, weight_bytes, x, row_bytes, out_dim, n_tok, blocks, scale)) {

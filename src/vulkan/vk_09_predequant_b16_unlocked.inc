@@ -147,13 +147,65 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
             bool q3_full = weight_type == P36_VK_TENSOR_Q3_K &&
                            out_dim % 4u == 0u &&
                            p36_vk_env_default_on("P36_VK_DENSE_Q3K_DECODE");
+            bool q2_full = weight_type == P36_VK_TENSOR_Q2_K &&
+                           out_dim % 4u == 0u &&
+                           p36_vk_env_default_on("P36_VK_DENSE_Q2K_DECODE");
             p36_vk_kernel *kernel = q4_full ? &p36_vk.dense_q4k_decode :
                                    q5_full ? &p36_vk.dense_q5k_decode :
                                    q3_full ? &p36_vk.dense_q3k_decode :
+                                   q2_full ? &p36_vk.dense_q2k_decode :
                                              &p36_vk.dense_kquant_decode;
             ok = p36_vk_run_unlocked(op, kernel,
                                      bindings, &push, sizeof(push),
                                      ((uint32_t)out_dim + 3u) / 4u, 1, 1);
+        }
+        pthread_mutex_unlock(&p36_vk_mu);
+        return ok;
+    }
+
+    /* Small multi-row verify on the K-quant trunk: stream each weight block
+     * once and broadcast it over up to four activation rows, instead of paying
+     * the 128-row MMQ tile for a 2..4 token verifier. */
+#ifndef P36_VK_KQUANT_ROWS
+#define P36_VK_KQUANT_ROWS 4u
+#endif
+    bool kquant_rows = weight_type == P36_VK_TENSOR_Q3_K ||
+                       weight_type == P36_VK_TENSOR_Q4_K ||
+                       weight_type == P36_VK_TENSOR_Q5_K ||
+                       weight_type == P36_VK_TENSOR_Q6_K;
+    if (!p36_gpu_quality && kquant_rows && n_tok > 1u && n_tok <= 4u &&
+        out_dim % P36_VK_KQUANT_ROWS == 0u &&
+        p36_vk_env_default_on("P36_VK_DENSE_KQUANT_ROWS")) {
+        pthread_mutex_lock(&p36_vk_mu);
+        p36_gpu_tensor *weights = p36_vk_weight_get_unlocked(source, weight_bytes);
+        int ok = weights != NULL;
+        if (ok) {
+            struct {
+                uint32_t in_dim;
+                uint32_t out_dim;
+                uint32_t n_tok;
+                uint32_t blocks;
+                uint32_t row_bytes;
+                uint32_t type;
+                float scale;
+            } push = {
+                (uint32_t)in_dim, (uint32_t)out_dim, (uint32_t)n_tok,
+                (uint32_t)blocks, (uint32_t)row_bytes, weight_type, scale,
+            };
+            const p36_gpu_tensor *bindings[3] = { weights, q8, out };
+            const char *op =
+                weight_type == P36_VK_TENSOR_Q3_K ? "dense_q3k_rows" :
+                weight_type == P36_VK_TENSOR_Q4_K ? "dense_q4k_rows" :
+                weight_type == P36_VK_TENSOR_Q5_K ? "dense_q5k_rows" :
+                                                    "dense_q6k_rows";
+            p36_vk_kernel *kernel =
+                weight_type == P36_VK_TENSOR_Q3_K ? &p36_vk.dense_q3k_rows :
+                weight_type == P36_VK_TENSOR_Q4_K ? &p36_vk.dense_q4k_rows :
+                weight_type == P36_VK_TENSOR_Q5_K ? &p36_vk.dense_q5k_rows :
+                                                    &p36_vk.dense_q6k_rows;
+            ok = p36_vk_run_unlocked(op, kernel, bindings, &push, sizeof(push),
+                                     ((uint32_t)out_dim + P36_VK_KQUANT_ROWS - 1u) /
+                                         P36_VK_KQUANT_ROWS, 1, 1);
         }
         pthread_mutex_unlock(&p36_vk_mu);
         return ok;

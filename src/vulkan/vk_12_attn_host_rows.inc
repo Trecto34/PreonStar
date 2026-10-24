@@ -598,6 +598,57 @@ int p36_gpu_top2_tensor(p36_gpu_tensor *out_ids,
     return ok;
 }
 
+
+int p36_gpu_spec_verify_tops(p36_gpu_tensor *last_logits, p36_gpu_tensor *out_ids,
+                             const p36_gpu_tensor *spec_logits,
+                             uint32_t rows, uint32_t count) {
+    const uint64_t row_bytes = (uint64_t)count * sizeof(float);
+    if (rows == 0u || count == 0u) return 0;
+    if (!p36_gpu_tensor_range_ok(spec_logits, 0, (uint64_t)rows * row_bytes) ||
+        !p36_gpu_tensor_range_ok(last_logits, 0, row_bytes) ||
+        !p36_gpu_tensor_range_ok(out_ids, 0, (uint64_t)rows * 2u * sizeof(int32_t))) return 0;
+    /* One pair of dispatches for the whole batch: the row-wise reduction
+     * writes every row's ids in place, so the host reads the 128-byte result
+     * once instead of launching (and waiting on) a top2 per row. */
+    if (!p36_vk_env_default_on("P36_VK_ARGMAX")) return 0;
+    const uint32_t groups = count < 32768u ? (count + 255u) / 256u : 128u;
+    const uint64_t part_bytes = (uint64_t)groups * rows * 16u;
+    if (groups == 0u || groups > 256u) return 0;
+    pthread_mutex_lock(&p36_vk_mu);
+    if (!p36_vk.argmax_rows_part || p36_vk.argmax_rows_part_bytes < part_bytes) {
+        p36_vk_tensor_release_unlocked(p36_vk.argmax_rows_part);
+        p36_vk.argmax_rows_part = p36_vk_tensor_alloc_scratch_unlocked(part_bytes);
+        p36_vk.argmax_rows_part_bytes = p36_vk.argmax_rows_part ? part_bytes : 0;
+    }
+    int ok = 0;
+    if (p36_vk.argmax_rows_part) {
+        const p36_gpu_tensor *bindings[3] = {
+            spec_logits, p36_vk.argmax_rows_part, out_ids,
+        };
+        struct {
+            uint32_t count;
+            uint32_t groups;
+            uint32_t pass;
+        } push = { count, groups, 0u };
+        ok = p36_vk_run_unlocked("argmax_rows_part", &p36_vk.argmax_rows,
+                                 bindings, &push, sizeof(push), groups, rows, 1);
+        if (ok) {
+            push.pass = 1u;
+            ok = p36_vk_run_unlocked("argmax_rows_top", &p36_vk.argmax_rows,
+                                     bindings, &push, sizeof(push), 1, rows, 1);
+        }
+    }
+    pthread_mutex_unlock(&p36_vk_mu);
+    if (!ok) return 0;
+    {
+        p36_gpu_tensor last = *spec_logits;
+        last.offset += (uint64_t)(rows - 1u) * row_bytes;
+        last.bytes -= (uint64_t)(rows - 1u) * row_bytes;
+        if (!p36_gpu_tensor_copy(last_logits, 0, &last, 0, row_bytes)) return 0;
+    }
+    return 1;
+}
+
 int p36_gpu_logits_minp_pack(p36_gpu_tensor *out, const p36_gpu_tensor *logits,
                              uint32_t count, float temperature,
                              float reject_scaled) {
