@@ -2893,3 +2893,34 @@ Do not tune draft count or margin further. The pending forward must fold into
 verify row 0 (one forward per accepted group) before MTP can pay; that
 restructure is the only remaining lever here. Evidence:
 `evidence/raw/w-mtp-moe/`.
+
+## One-forward MTP (draft before verify): exact, still slower (2026-10-26)
+
+Restructured the speculative cycle so the head drafts from the last committed
+hidden before the target forward, putting the pending token at row 0 of the
+verify batch: one forward per accepted group instead of a forward plus a
+verify.  Greedy parity held, drafts improved (full-accept 27/37 = 73% vs
+27/42 = 64% with the old same-position pairing), and a full-accept cycle
+costs 1.9 ms head + 18.5 ms two-row verify = 20.4 ms for 2 tokens
+(98 t/s).  But a rejected first draft pays the verify forward *and* a 11.8 ms
+replay, 32 ms for 1 token.
+
+3 reps, ctx 512, 96 tokens, draft 2, margin 0:
+
+| scheme | decode median |
+|---|---:|
+| plain | 85.5 t/s |
+| old two-forward MTP | 78.6 t/s |
+| one-forward MTP | 71.8 t/s |
+
+Reverted: exact but slower.  The limiting cost is the second verify row:
+one row 11.7 ms, two rows 18.5 ms, three 22.5, four 26.3.  Trying the 128-row
+MMQ tile for the 2-row case instead of the nx kernels made it 71 ms - the nx
+path stays.  Those extra rows do not amortize because the IQ3_XXS/Q2_K decode
+kernels are ALU (unpack) bound on this GPU, not weight-bandwidth bound.
+
+So 150 t/s via MTP needs 2-4 row forwards at ~1.05x the cost of one row; at
+the current 1.37x the best possible is 2/1.37 = 1.46x *and only with 100%
+acceptance*.  The kernel that would have to change first is the routed
+gate/up and down matvec (moe_matvec_fast / moe_down_q2k_sum_decode_iq3xxs):
+share the unpacked weight word across rows instead of re-unpacking per row.
