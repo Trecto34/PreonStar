@@ -2860,3 +2860,36 @@ not add a second barrier form without a profile that shows pure WAR first.
 Cross-check on `Cyber-Tiel-Coder-35B-A3B.APEX-I-NanoPlus` (same 3-pair
 interleave, same prompt): 84.33 -> 85.69 t/s median, +1.61%, all pairs in the
 same direction (`evidence/raw/w-router-subgroup/ab-cybertiel.csv`).
+
+## MoE MTP with a real head: 0.92x, structural (2026-10-26)
+
+First run of MoE MTP in p36 with an actual support GGUF
+(`Qwen3.6-35B-A3B-MTP-Q4K-Q8_0-F32.gguf`, 1.59 GiB) against
+`Cyber-Tiel-Coder-35B-A3B.APEX-I-NanoPlus` (12.55 GiB, same 248320 vocab).
+Qwen3.6 APEX itself (13.03 GiB) cannot host the head on this 14 GiB board:
+radv buffer allocation fails, then the process is OOM-killed.
+
+Three fixes were needed before it ran at all: bind the token table and output
+projection from the target model instead of the support file (its Q8_0 copies
+are 1 GiB of dead weight), skip those tensors in the MTP prewarm, and let the
+MoE MTP validator accept the matrix types the main model already validated.
+Greedy output stays byte-identical to plain decode, so the speculate/verify
+path is exact.
+
+3 interleaved pairs, ctx 512, 96-token cap, `--temp 0`:
+
+| arm | decode median |
+|---|---:|
+| plain | 85.51 t/s |
+| MTP draft 2, margin 0 | 78.60 t/s |
+
+Cycle accounting: an accepted cycle is `fwd 13.65 + draft 0.21 + verify
+11.72 = 25.67 ms` for 2 tokens (77.8 t/s); a gate-rejected cycle is 13.50 ms
+for 1 token (74 t/s). Verify alone costs 0.86 of a forward, so speculation
+cannot beat the 85.5 t/s plain rate at draft 2. Sweep: d2/m0 77.98, d3/m3
+76.63, d4/m3 75.64, d3/m0 70.90 - all lose.
+
+Do not tune draft count or margin further. The pending forward must fold into
+verify row 0 (one forward per accepted group) before MTP can pay; that
+restructure is the only remaining lever here. Evidence:
+`evidence/raw/w-mtp-moe/`.

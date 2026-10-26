@@ -1949,7 +1949,7 @@ static bool p36_mtp_eval_vulkan(p36_session *s,
     mw = &e->mtp_weights;
     l = &mw->block;
 
-    if (!p36_gpu_embed_tokens(&e->mtp_model, mw->token_embd, &token, 1, rt->mtp_tok_embd)) return false;
+    if (!p36_gpu_embed_tokens(&e->model, mw->token_embd, &token, 1, rt->mtp_tok_embd)) return false;
     if (!p36_gpu_rms_norm_weight_rows_tensor(rt->mtp_e_norm,
                                              rt->mtp_tok_embd,
                                              e->mtp_model.map,

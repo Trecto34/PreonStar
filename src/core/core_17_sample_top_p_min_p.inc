@@ -430,7 +430,7 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
         return 1;
 #else
         model_open(&e->mtp_model, opt->mtp_path, true);
-        mtp_weights_bind(&e->mtp_weights, &e->mtp_model);
+        mtp_weights_bind(&e->mtp_weights, &e->mtp_model, &e->model);
         model_get_f32_compat(&e->mtp_model, "qwen35moe.expert_weights_scale", &e->mtp_expert_weights_scale);
         e->mtp_ready = true;
         fprintf(stderr, "p36: MTP support model loaded: %s (draft=%d)\n",

@@ -71,23 +71,26 @@ static void mtp_weights_validate_layout(const p36_mtp_weights *w) {
     const p36_layer_weights *l;
     if (!w) p36_die("internal error: missing MTP weights while validating layout");
     l = &w->block;
-    tensor_expect_layout(w->token_embd, P36_TENSOR_Q8_0, 2, P36_N_EMBD, P36_N_VOCAB, 0);
+    /* The shared token table and projection are the target model's own
+     * tensors, already validated with the target: any dense matrix type the
+     * main model runs is valid here too. */
+    tensor_expect_cpu_matrix(w->token_embd, P36_N_EMBD, P36_N_VOCAB);
     tensor_expect_layout(w->output_norm, P36_TENSOR_F32, 1, P36_N_EMBD, 0, 0);
-    tensor_expect_layout(w->output, P36_TENSOR_Q8_0, 2, P36_N_EMBD, P36_N_VOCAB, 0);
+    tensor_expect_cpu_matrix(w->output, P36_N_EMBD, P36_N_VOCAB);
     tensor_expect_optional_plain(w->output_scale, 1, 1, 0, 0);
-    tensor_expect_layout(w->eh_proj, P36_TENSOR_Q8_0, 2, P36_N_EMBD * 2u, P36_N_EMBD, 0);
+    tensor_expect_cpu_matrix(w->eh_proj, P36_N_EMBD * 2u, P36_N_EMBD);
     tensor_expect_layout(w->enorm, P36_TENSOR_F32, 1, P36_N_EMBD, 0, 0);
     tensor_expect_layout(w->hnorm, P36_TENSOR_F32, 1, P36_N_EMBD, 0, 0);
     tensor_expect_layout(w->shared_head_norm, P36_TENSOR_F32, 1, P36_N_EMBD, 0, 0);
 
     tensor_expect_layout(l->attn_norm, P36_TENSOR_F32, 1, P36_N_EMBD, 0, 0);
     tensor_expect_layout(l->post_attention_norm, P36_TENSOR_F32, 1, P36_N_EMBD, 0, 0);
-    tensor_expect_layout(l->attn_q, P36_TENSOR_Q8_0, 2, P36_N_EMBD, P36_N_SSM_INNER * 2u, 0);
+    tensor_expect_cpu_matrix(l->attn_q, P36_N_EMBD, P36_N_SSM_INNER * 2u);
     tensor_expect_layout(l->attn_q_norm, P36_TENSOR_F32, 1, P36_N_HEAD_DIM, 0, 0);
-    tensor_expect_layout(l->attn_k, P36_TENSOR_Q8_0, 2, P36_N_EMBD, (uint64_t)P36_N_HEAD_KV * P36_N_HEAD_DIM, 0);
+    tensor_expect_cpu_matrix(l->attn_k, P36_N_EMBD, (uint64_t)P36_N_HEAD_KV * P36_N_HEAD_DIM);
     tensor_expect_layout(l->attn_k_norm, P36_TENSOR_F32, 1, P36_N_HEAD_DIM, 0, 0);
-    tensor_expect_layout(l->attn_v, P36_TENSOR_Q8_0, 2, P36_N_EMBD, (uint64_t)P36_N_HEAD_KV * P36_N_VALUE_DIM, 0);
-    tensor_expect_layout(l->attn_output, P36_TENSOR_Q8_0, 2, P36_N_SSM_INNER, P36_N_EMBD, 0);
+    tensor_expect_cpu_matrix(l->attn_v, P36_N_EMBD, (uint64_t)P36_N_HEAD_KV * P36_N_VALUE_DIM);
+    tensor_expect_cpu_matrix(l->attn_output, P36_N_SSM_INNER, P36_N_EMBD);
     tensor_expect_optional_plain(l->attn_sinks, 1, P36_N_HEAD, 0, 0);
     tensor_expect_optional_plain(l->attn_q_scale, 1, 1, 0, 0);
     tensor_expect_optional_plain(l->attn_k_scale, 1, 1, 0, 0);
@@ -110,14 +113,19 @@ static void mtp_weights_validate_layout(const p36_mtp_weights *w) {
     tensor_expect_optional_plain(l->ffn_down_shexp_scale, 1, 1, 0, 0);
 }
 
-static void mtp_weights_bind(p36_mtp_weights *w, const p36_model *m) {
+/* `head` carries the shared token table and output projection: the draft
+ * head embeds and projects with the target model's own tensors, and a
+ * support GGUF's copies are dead weight (1 GiB of Q8_0 on a 16 GiB board).
+ * Only the nextn block and its norms come from the support file. */
+static void mtp_weights_bind(p36_mtp_weights *w, const p36_model *m,
+                             const p36_model *head) {
     const uint32_t il = P36_N_LAYER;
     p36_layer_weights *l;
     memset(w, 0, sizeof(*w));
-    w->token_embd = required_tensor(m, "token_embd.weight");
-    w->output_norm = required_tensor(m, "output_norm.weight");
-    w->output = required_tensor(m, "output.weight");
-    w->output_scale = model_find_tensor(m, "output.scale");
+    w->token_embd = required_tensor(head, "token_embd.weight");
+    w->output_norm = required_tensor(head, "output_norm.weight");
+    w->output = required_tensor(head, "output.weight");
+    w->output_scale = model_find_tensor(head, "output.scale");
     w->eh_proj = required_tensorf(m, "blk.%u.nextn.eh_proj.weight", il);
     w->enorm = required_tensorf(m, "blk.%u.nextn.enorm.weight", il);
     w->hnorm = required_tensorf(m, "blk.%u.nextn.hnorm.weight", il);
@@ -987,11 +995,17 @@ static void p36_vulkan_prewarm_weights(const p36_engine *e) {
 #endif
     /* The MTP support model is fetched through the same whole-tensor cache
      * keys at draft time; without a prewarm the first drafts pay its whole
-     * upload (~1.2s spread over the first replies). */
+     * upload (~1.2s spread over the first replies). The head only reads the
+     * nextn block plus the token table: the output projection and its norm
+     * come from the main model, so caching this file's copies would pin an
+     * unused ~0.5 GiB on 16 GiB boards. */
     if (e->mtp_ready) {
         for (uint64_t i = 0; i < e->mtp_model.n_tensors; i++) {
             const p36_tensor *t = &e->mtp_model.tensors[i];
-            if (t == e->mtp_weights.token_embd || t->bytes == 0) continue;
+            if (t == e->mtp_weights.token_embd || t == e->mtp_weights.output ||
+                t == e->mtp_weights.output_norm || t == e->mtp_weights.output_scale ||
+                t->bytes == 0)
+                continue;
             (void)p36_gpu_cache_model_range(e->mtp_model.map, e->mtp_model.size, t->abs_offset, t->bytes, NULL);
         }
     }
