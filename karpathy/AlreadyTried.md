@@ -2856,3 +2856,7 @@ barriers=32962  raw=31443  waw=5439  war=1470  pure_war=0
 Every WAR co-occurs with a RAW or WAW on the same dispatch, so an
 execution-only barrier would change nothing on this workload. Stop here; do
 not add a second barrier form without a profile that shows pure WAR first.
+
+Cross-check on `Cyber-Tiel-Coder-35B-A3B.APEX-I-NanoPlus` (same 3-pair
+interleave, same prompt): 84.33 -> 85.69 t/s median, +1.61%, all pairs in the
+same direction (`evidence/raw/w-router-subgroup/ab-cybertiel.csv`).
