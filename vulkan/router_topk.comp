@@ -1,11 +1,18 @@
 #version 460
 
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
 /* Expert router top-k for decode/small batches. Selection runs on raw
  * logits (softmax is monotone, so the order matches the host's prob-based
  * scan), then weights renormalize the selected logits only: the full
  * softmax denominator cancels, mirroring p36_vk_router_fast_rows. Ties
- * pick the lower expert index like the host insertion scan. One serial
- * lane is memory-latency bound here, so 256 lanes reduce each round. */
+ * pick the lower expert index like the host insertion scan.
+ *
+ * Each round is one subgroup max plus one subgroup min for the tie-break
+ * lane, so a subgroup leader publishes (value, index) and the workgroup
+ * reduces only that handful of candidates. Two barriers per round instead
+ * of the eleven the full 256-lane tree needs. */
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -28,9 +35,8 @@ layout(push_constant) uniform Push {
     float route_scale;
 } pc;
 
-shared float sv[256];
-shared float rv[256];
-shared uint ri[256];
+shared float subv[8];
+shared uint subi[8];
 shared uint win[8];
 shared float winv[8];
 
@@ -39,31 +45,34 @@ void main(void) {
     uint lid = gl_LocalInvocationID.x;
     if (tok >= pc.n_tok) return;
 
-    sv[lid] = lid < pc.n_expert ? logits[tok * pc.n_expert + lid] : -1.0 / 0.0;
-    barrier();
+    float v = lid < pc.n_expert ? logits[tok * pc.n_expert + lid] : -1.0 / 0.0;
+    uint nsub = gl_NumSubgroups;
 
     for (uint k = 0u; k < pc.n_used; k++) {
-        rv[lid] = sv[lid];
-        ri[lid] = lid;
+        float m = subgroupMax(v);
+        uint cand = (v == m) ? gl_SubgroupInvocationID : 0xffffffffu;
+        uint li = subgroupMin(cand);
+        if (gl_SubgroupInvocationID == 0u) {
+            subv[gl_SubgroupID] = m;
+            subi[gl_SubgroupID] = gl_SubgroupID * gl_SubgroupSize + li;
+        }
         barrier();
-        for (uint s = 128u; s > 0u; s >>= 1u) {
-            if (lid < s) {
-                float a = rv[lid], b = rv[lid + s];
-                uint ai = ri[lid], bi = ri[lid + s];
-                if (b > a || (b == a && bi < ai)) {
-                    rv[lid] = b;
-                    ri[lid] = bi;
+        if (lid == 0u) {
+            float bv = subv[0];
+            uint bi = subi[0];
+            for (uint s = 1u; s < nsub; s++) {
+                float sv = subv[s];
+                uint si = subi[s];
+                if (sv > bv || (sv == bv && si < bi)) {
+                    bv = sv;
+                    bi = si;
                 }
             }
-            barrier();
-        }
-        if (lid == 0u) {
-            win[k] = ri[0];
-            winv[k] = rv[0];
+            win[k] = bi;
+            winv[k] = bv;
         }
         barrier();
-        if (lid == win[k]) sv[lid] = -1.0 / 0.0;
-        barrier();
+        if (lid == win[k]) v = -1.0 / 0.0;
     }
 
     if (lid == 0u) {

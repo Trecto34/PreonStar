@@ -2804,3 +2804,37 @@ on a repeated 10.8k prompt. It costs nothing; it only saves prefill.
 Lesson: rebuild **all** binaries before benchmarking the server, and check
 `ls -l p36-server` against the commit date when a route change is suspected.
 
+
+## Expert router top-k: subgroup selection — ACCEPTED, +1.24% decode (2026-10-26)
+
+The decode router kernel spent 42.8 ms of 1434 ms profiled GPU time (3.0%,
+`evidence/raw/p1-sumdecode/iq2m-decode-base.txt`) and did it with a
+256-lane shared-memory reduction: one tree pass of eight barriers plus three
+barrier-separated publishes per selected expert, `1 + 11k` barriers for k
+experts (`vulkan/router_topk.comp`, pre-change copy in
+`evidence/raw/w-router-subgroup/original.comp`).
+
+Replaced the tree with subgroup max plus a subgroup min over the tie-break
+candidate lane, then a four-candidate workgroup reduce: `1 + 2k` barriers,
+same selection order, same lowest-index tie-break, same FP64 normalization.
+Selection arithmetic is untouched; only the reduction shape changed.
+
+5 interleaved pairs on MiniCPM-V-4.7-35B-A3B APEX-I, ctx 512, 48 greedy
+tokens, shader binary swapped between runs:
+
+| arm | decode median | MAD |
+|---|---:|---:|
+| 256-lane tree | 84.60 t/s | 0.30 |
+| subgroup selection | **85.65 t/s** | 0.07 |
+
+All five pairs in the same direction; prefill unchanged within its own noise
+(that path mostly uses the host-row router above 64 rows). Parity: six
+prompts byte-identical to the old shader (4x64 and 2x48 greedy tokens).
+
+Evidence: `evidence/raw/w-router-subgroup/` (`ab.csv`, `note.md`). The 3.0%
+profile share bounds this at roughly +2%, and the measured +1.24% sits under
+it; the barrier count was the cost, as the audit suspected.
+
+Do not re-open router *projection* precision from this result: the FP32 gate
+matmul and its reduction order are unchanged and were rejected separately
+(`docs/backends.md`).

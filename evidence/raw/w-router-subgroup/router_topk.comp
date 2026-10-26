@@ -1,0 +1,92 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Expert router top-k for decode/small batches. Selection runs on raw
+ * logits (softmax is monotone, so the order matches the host's prob-based
+ * scan), then weights renormalize the selected logits only: the full
+ * softmax denominator cancels, mirroring p36_vk_router_fast_rows. Ties
+ * pick the lower expert index like the host insertion scan.
+ *
+ * Each round is one subgroup max plus one subgroup min for the tie-break
+ * lane, so a subgroup leader publishes (value, index) and the workgroup
+ * reduces only that handful of candidates. Two barriers per round instead
+ * of the eleven the full 256-lane tree needs. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Logits {
+    float logits[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer Selected {
+    uint selected[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Weights {
+    float wout[];
+};
+
+layout(push_constant) uniform Push {
+    uint n_expert;
+    uint n_used;
+    uint n_tok;
+    float route_scale;
+} pc;
+
+shared float subv[8];
+shared uint subi[8];
+shared uint win[8];
+shared float winv[8];
+
+void main(void) {
+    uint tok = gl_WorkGroupID.x;
+    uint lid = gl_LocalInvocationID.x;
+    if (tok >= pc.n_tok) return;
+
+    float v = lid < pc.n_expert ? logits[tok * pc.n_expert + lid] : -1.0 / 0.0;
+    uint nsub = gl_NumSubgroups;
+
+    for (uint k = 0u; k < pc.n_used; k++) {
+        float m = subgroupMax(v);
+        uint cand = (v == m) ? gl_SubgroupInvocationID : 0xffffffffu;
+        uint li = subgroupMin(cand);
+        if (gl_SubgroupInvocationID == 0u) {
+            subv[gl_SubgroupID] = m;
+            subi[gl_SubgroupID] = gl_SubgroupID * gl_SubgroupSize + li;
+        }
+        barrier();
+        if (lid == 0u) {
+            float bv = subv[0];
+            uint bi = subi[0];
+            for (uint s = 1u; s < nsub; s++) {
+                float sv = subv[s];
+                uint si = subi[s];
+                if (sv > bv || (sv == bv && si < bi)) {
+                    bv = sv;
+                    bi = si;
+                }
+            }
+            win[k] = bi;
+            winv[k] = bv;
+        }
+        barrier();
+        if (lid == win[k]) v = -1.0 / 0.0;
+    }
+
+    if (lid == 0u) {
+        float maxv = winv[0];
+        double sum = 0.0;
+        float top_exp[8];
+        for (uint i = 0u; i < pc.n_used; i++) {
+            top_exp[i] = exp(winv[i] - maxv);
+            sum += double(top_exp[i]);
+        }
+        if (sum < 6.103515625e-5) sum = 6.103515625e-5;
+        for (uint i = 0u; i < pc.n_used; i++) {
+            selected[tok * pc.n_used + i] = win[i];
+            wout[tok * pc.n_used + i] = float(double(top_exp[i]) / sum) * pc.route_scale;
+        }
+    }
+}
