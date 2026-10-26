@@ -42,6 +42,13 @@ static void p36_vk_prof_report(void) {
                 (double)total_ns / 1e6, p36_vk_hazard_barrier_count,
                 p36_vk_wait_ready, p36_vk_wait_blocked,
                 (double)p36_vk_wait_spin_ns / 1e6, (double)p36_vk_wait_block_ns / 1e6);
+        if (getenv("P36_VK_HAZARD_STATS")) {
+            fprintf(stderr,
+                    "p36: hazard classes raw=%" PRIu64 " waw=%" PRIu64
+                    " war=%" PRIu64 " pure_war=%" PRIu64 "\n",
+                    p36_vk_hazard_raw_count, p36_vk_hazard_waw_count,
+                    p36_vk_hazard_war_count, p36_vk_hazard_pure_war_count);
+        }
         for (uint32_t i = 0; i < p36_vk_prof_kernel_n; i++) {
             const p36_vk_prof_kernel_row *r = &p36_vk_prof_kernel_rows[i];
             const double pct = total_ns ? 100.0 * (double)r->gpu_ns / (double)total_ns : 0.0;

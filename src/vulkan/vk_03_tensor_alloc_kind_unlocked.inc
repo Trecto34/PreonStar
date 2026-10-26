@@ -248,6 +248,11 @@ enum { P36_VK_CB_RING = 4 };
 /* Counted so the kernel profile can charge the GPU's non-kernel time to the
  * hazard barriers rather than leaving it unexplained. */
 static uint64_t p36_vk_hazard_barrier_count;
+/* Hazard-class census for choosing the cheapest barrier form. */
+static uint64_t p36_vk_hazard_raw_count;
+static uint64_t p36_vk_hazard_waw_count;
+static uint64_t p36_vk_hazard_war_count;
+static uint64_t p36_vk_hazard_pure_war_count;
 /* Fence-wait accounting: did the fence already signal while we spun (GPU
  * finished before the host got here), or did the host have to block (GPU
  * still running)?  These are the only two explanations for time spent in

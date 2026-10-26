@@ -2838,3 +2838,21 @@ it; the barrier count was the cost, as the audit suspected.
 Do not re-open router *projection* precision from this result: the FP32 gate
 matmul and its reduction order are unchanged and were rejected separately
 (`docs/backends.md`).
+
+## War-only hazard barriers: census says there are none — CLOSED (2026-10-26)
+
+The audit proposed narrowing pure write-after-read hazards to an
+execution-only barrier (no memory masks). Classification needs every binding,
+because the existing loop early-exits on the first hazard and cannot tell WAR
+from RAW/WAW. Counters added in the dispatch path, printed with
+`P36_VK_HAZARD_STATS=1`; inert otherwise.
+
+48 greedy tokens, MiniCPM-V-4.7-35B-A3B APEX-I, ctx 512:
+
+```
+barriers=32962  raw=31443  waw=5439  war=1470  pure_war=0
+```
+
+Every WAR co-occurs with a RAW or WAW on the same dispatch, so an
+execution-only barrier would change nothing on this workload. Stop here; do
+not add a second barrier form without a profile that shows pure WAR first.

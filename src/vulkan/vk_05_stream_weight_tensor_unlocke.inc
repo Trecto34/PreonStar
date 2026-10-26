@@ -107,12 +107,24 @@ static int p36_vk_run_unlocked(
          * last barrier - including work in earlier eager-submitted buffers,
          * which executes in submission order and is still covered by a
          * barrier recorded here. Independent dispatches overlap. */
-        bool need_barrier = p36_vk_hazard_all;
-        for (uint32_t i = 0; !need_barrier && i < kernel->bindings; i++) {
+        bool has_raw = p36_vk_hazard_all;
+        bool has_waw = p36_vk_hazard_all;
+        bool has_war = p36_vk_hazard_all;
+        for (uint32_t i = 0; i < kernel->bindings; i++) {
             if (roots[i]->weight_only) continue;
-            if (p36_vk_hazard_in(p36_vk_hazard_written, p36_vk_hazard_written_n, roots[i])) need_barrier = true;
-            else if (((kernel->write_mask >> i) & 1u) &&
-                     p36_vk_hazard_in(p36_vk_hazard_read, p36_vk_hazard_read_n, roots[i])) need_barrier = true;
+            bool written_before = p36_vk_hazard_in(p36_vk_hazard_written, p36_vk_hazard_written_n, roots[i]);
+            bool read_before = p36_vk_hazard_in(p36_vk_hazard_read, p36_vk_hazard_read_n, roots[i]);
+            bool writes_here = ((kernel->write_mask >> i) & 1u) != 0;
+            if (written_before && writes_here) has_waw = true;
+            else if (written_before) has_raw = true;
+            else if (writes_here && read_before) has_war = true;
+        }
+        bool need_barrier = has_raw || has_waw || has_war;
+        if (need_barrier) {
+            if (has_raw) p36_vk_hazard_raw_count++;
+            if (has_waw) p36_vk_hazard_waw_count++;
+            if (has_war) p36_vk_hazard_war_count++;
+            if (has_war && !has_raw && !has_waw) p36_vk_hazard_pure_war_count++;
         }
         if (need_barrier && !p36_vk_skip_barriers()) {
             p36_vk_hazard_barrier_count++;
