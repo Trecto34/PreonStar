@@ -3318,3 +3318,12 @@ output. 3 interleaved pairs vs `13eb0aa`, ctx 1024 gen 128: prefill
 528.7 -> 612.4 t/s median (+15.8%, disjoint), decode 81.24 -> 81.06 (noise).
 Scope: a process's first prefill (bench, one-shot CLI, first server request);
 a warm server already had the table. `evidence/raw/w-decode-reorder/ab-embed-async.csv`.
+
+## K-quant shared-expert fusion (D3) — ceiling probe says NOT WORTH BUILDING (2026-10-27)
+
+Probe: skip the whole shared-expert block at n_tok 1 (wrong output, timing
+only). CyberTiel ctx 1024 gen 128, 2 interleaved pairs: 81.21/80.76 ->
+84.98/84.65 t/s, i.e. **+4.5% is the ceiling for removing it entirely**,
+after `13eb0aa` already overlaps it with the routed pass. A fused 2-dispatch
+path still has to read the ~70 MB of Q4_K shared weights, so the reachable
+part is ~1-2%. Not built.
