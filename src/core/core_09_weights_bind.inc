@@ -67,6 +67,20 @@ static void weights_bind(p36_weights *w, const p36_model *m) {
 }
 
 #ifndef P36_NO_GPU
+/* The nextn block reuses the target layer's dense shared-expert kernels, so it
+ * may carry any quant those kernels dispatch (a Q4_K head block is normal). */
+static void tensor_expect_dense_quant(const p36_tensor *t, uint32_t ndim,
+                                      uint64_t d0, uint64_t d1) {
+    if (!t) p36_die("internal error: missing tensor while validating MTP layout");
+    if (t->type != P36_TENSOR_Q4_K && t->type != P36_TENSOR_Q5_K &&
+        t->type != P36_TENSOR_Q6_K && t->type != P36_TENSOR_Q8_0) {
+        fprintf(stderr, "p36: tensor %.*s has type %s, expected a dense quant type\n",
+                (int)t->name.len, t->name.ptr, tensor_type_name(t->type));
+        exit(1);
+    }
+    tensor_expect_layout(t, t->type, ndim, d0, d1, 0);
+}
+
 static void mtp_weights_validate_layout(const p36_mtp_weights *w) {
     const p36_layer_weights *l;
     if (!w) p36_die("internal error: missing MTP weights while validating layout");
@@ -100,11 +114,11 @@ static void mtp_weights_validate_layout(const p36_mtp_weights *w) {
     tensor_expect_layout_or_q8_0(l->ffn_gate_inp, P36_TENSOR_F32, 2, P36_N_EMBD, P36_N_EXPERT, 0);
     tensor_expect_layout(l->ffn_gate_inp_shexp, P36_TENSOR_F32, 1, P36_N_EMBD, 0, 0);
     tensor_expect_routed_gate_up(l->ffn_gate_exps, 3, P36_N_EMBD, P36_N_FF_EXP, P36_N_EXPERT);
-    tensor_expect_layout_or_q8_0(l->ffn_gate_shexp, P36_TENSOR_Q5_K, 2, P36_N_EMBD, P36_N_FF_SHARED, 0);
+    tensor_expect_dense_quant(l->ffn_gate_shexp, 2, P36_N_EMBD, P36_N_FF_SHARED);
     tensor_expect_routed_gate_up(l->ffn_up_exps, 3, P36_N_EMBD, P36_N_FF_EXP, P36_N_EXPERT);
-    tensor_expect_layout_or_q8_0(l->ffn_up_shexp, P36_TENSOR_Q5_K, 2, P36_N_EMBD, P36_N_FF_SHARED, 0);
+    tensor_expect_dense_quant(l->ffn_up_shexp, 2, P36_N_EMBD, P36_N_FF_SHARED);
     tensor_expect_routed_down(l->ffn_down_exps, 3, P36_N_FF_EXP, P36_N_EMBD, P36_N_EXPERT);
-    tensor_expect_layout_or_q8_0(l->ffn_down_shexp, P36_TENSOR_Q6_K, 2, P36_N_FF_SHARED, P36_N_EMBD, 0);
+    tensor_expect_dense_quant(l->ffn_down_shexp, 2, P36_N_FF_SHARED, P36_N_EMBD);
     tensor_expect_optional_plain(l->ffn_gate_exps_scale, 1, P36_N_EXPERT, 0, 0);
     tensor_expect_optional_plain(l->ffn_gate_shexp_scale, 1, 1, 0, 0);
     tensor_expect_optional_plain(l->ffn_up_exps_scale, 1, P36_N_EXPERT, 0, 0);

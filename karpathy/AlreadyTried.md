@@ -2924,3 +2924,21 @@ the current 1.37x the best possible is 2/1.37 = 1.46x *and only with 100%
 acceptance*.  The kernel that would have to change first is the routed
 gate/up and down matvec (moe_matvec_fast / moe_down_q2k_sum_decode_iq3xxs):
 share the unpacked weight word across rows instead of re-unpacking per row.
+
+## 2026-10-26 MTP on the APEX / Q4_0-expert files (works, still slower)
+
+* `gguf-tools/mtp-head-extract` extracts the nextn block into a support GGUF and
+  requantizes Q4_0 experts to Q4_K, so `--mtp` runs on our own models at all:
+  APEX-I head 466 MB, IQ2XXS head 328 MB.
+* Removed the `mtp_draft_token == argmax` pre-gate; it rejected nearly every
+  cycle and made draft depth pointless.
+* Draft head logits were NaN with an extracted file: the writer aligned tensor
+  data by pointer instead of by byte offset (`calloc` is 16-byte aligned).
+* Measured: APEX plain 85.5 vs MTP 44.2 (accept 50.8%); IQ2XXS plain 96.4 vs
+  MTP 84.4 (accept 89.2%). Still a loss.
+* Root cause of the loss is the cycle, not the head: p36 pays a separate target
+  forward for the pending token plus a verify forward, and on partial accept a
+  third full replay. Upstream does one target forward per cycle and replays only
+  recurrent layers from captured inputs.
+* `reconsider_if`: the cycle is rewritten to draft before the target forward and
+  to replay recurrent layers only.

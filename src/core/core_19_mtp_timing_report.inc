@@ -218,8 +218,10 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
             }
             return 1;
         }
-        if ((e->mtp_margin > 0.0f && s->mtp_draft_margin < e->mtp_margin) ||
-            s->mtp_draft_token != p36_session_argmax(s)) {
+        /* Only the head's own confidence gates the draft: requiring the draft
+         * to equal the target's argmax up front rejects nearly every cycle and
+         * makes depth pointless (the verify pass is what checks agreement). */
+        if (e->mtp_margin > 0.0f && s->mtp_draft_margin < e->mtp_margin) {
             s->mtp_backoff_len = s->mtp_backoff_len ? (s->mtp_backoff_len < 4 ? s->mtp_backoff_len * 2 : 4) : 1;
             s->mtp_backoff = s->mtp_backoff_len;
             p36_mtp_stats_add(0, 0, false);
@@ -244,8 +246,6 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
                 return -1;
             }
             s->mtp_draft_token = sample_argmax_margin(s->mtp_logits, P36_N_VOCAB, &margin);
-            if (s->mtp_draft_token < 0) break;
-            if (e->mtp_margin > 0.0f && margin < e->mtp_margin) break;
             verify[verify_n++] = s->mtp_draft_token;
             prev_token = s->mtp_draft_token;
             n_draft++;
