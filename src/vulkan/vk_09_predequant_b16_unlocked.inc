@@ -198,11 +198,15 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
                 weight_type == P36_VK_TENSOR_Q4_K ? "dense_q4k_rows" :
                 weight_type == P36_VK_TENSOR_Q5_K ? "dense_q5k_rows" :
                                                     "dense_q6k_rows";
+            /* The 4-row build computes all four token slots whatever n_tok
+             * is, so a 2-row verify (the usual MTP draft-1 cycle) paid for
+             * four; the 2-row build does only the live rows, same math. */
+            bool two = n_tok == 2u;
             p36_vk_kernel *kernel =
-                weight_type == P36_VK_TENSOR_Q3_K ? &p36_vk.dense_q3k_rows :
-                weight_type == P36_VK_TENSOR_Q4_K ? &p36_vk.dense_q4k_rows :
-                weight_type == P36_VK_TENSOR_Q5_K ? &p36_vk.dense_q5k_rows :
-                                                    &p36_vk.dense_q6k_rows;
+                weight_type == P36_VK_TENSOR_Q3_K ? (two ? &p36_vk.dense_q3k_rows2 : &p36_vk.dense_q3k_rows) :
+                weight_type == P36_VK_TENSOR_Q4_K ? (two ? &p36_vk.dense_q4k_rows2 : &p36_vk.dense_q4k_rows) :
+                weight_type == P36_VK_TENSOR_Q5_K ? (two ? &p36_vk.dense_q5k_rows2 : &p36_vk.dense_q5k_rows) :
+                                                    (two ? &p36_vk.dense_q6k_rows2 : &p36_vk.dense_q6k_rows);
             ok = p36_vk_run_unlocked(op, kernel, bindings, &push, sizeof(push),
                                      ((uint32_t)out_dim + P36_VK_KQUANT_ROWS - 1u) /
                                          P36_VK_KQUANT_ROWS, 1, 1);

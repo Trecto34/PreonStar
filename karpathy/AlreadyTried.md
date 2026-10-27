@@ -3327,3 +3327,18 @@ only). CyberTiel ctx 1024 gen 128, 2 interleaved pairs: 81.21/80.76 ->
 after `13eb0aa` already overlaps it with the routed pass. A fused 2-dispatch
 path still has to read the ~70 MB of Q4_K shared weights, so the reachable
 part is ~1-2%. Not built.
+
+## MTP verify: 2-row build of the K-quant rows kernel — ACCEPTED, +8.4% MTP generation (2026-10-27)
+
+Profile of `--mtp-draft 3 --mtp-margin 2` on CyberTiel + APEX MTP head: almost
+every cycle verifies 2 rows, and a 2-row verify cost 19.2 ms vs 11.8 ms for a
+1-row forward. `dense_q4k_rows` alone was ~5.1 ms per verify vs ~3.0 ms for the
+1-row decode kernel: `dense_q*k_rows.spv` is built with `P36_ROWS_TOK=4` and
+computes all four token slots for any n_tok 2..4 (inactive slots alias the
+last row). Added `dense_q{3,4,5,6}k_rows2.spv` (`P36_ROWS_TOK=2`), selected
+when n_tok == 2. Per-row arithmetic is unchanged. Greedy MTP text (200 tok,
+code prompt) byte-identical in all 6 runs; 3 interleaved pairs vs `8409f3a`:
+generation 89.01/89.02/89.47 -> 87.66/97.06/96.53 t/s (median +8.4%; B's
+first run includes the new pipelines' first build). `evidence/raw/w-mtp-rows2/`.
+n_tok 3 still runs the 4-slot build; a 3-row variant is the obvious follow-up
+if deeper drafts become the default.

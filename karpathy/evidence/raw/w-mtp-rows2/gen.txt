@@ -1,0 +1,6 @@
+mtp-A-1 generation: 89.01
+mtp-A-2 generation: 89.02
+mtp-A-3 generation: 89.47
+mtp-B-1 generation: 87.66
+mtp-B-2 generation: 97.06
+mtp-B-3 generation: 96.53
