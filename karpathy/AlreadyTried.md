@@ -3342,3 +3342,19 @@ generation 89.01/89.02/89.47 -> 87.66/97.06/96.53 t/s (median +8.4%; B's
 first run includes the new pipelines' first build). `evidence/raw/w-mtp-rows2/`.
 n_tok 3 still runs the 4-slot build; a 3-row variant is the obvious follow-up
 if deeper drafts become the default.
+
+## MTP draft head over the vocab prefix (FR-Spec style) — REJECTED, content-dependent (2026-10-27)
+
+Draft head output projection + top-2 over only the first V vocab rows (Qwen
+BPE ids are roughly frequency-ordered; K-quant output rows are contiguous).
+Pitfall found: a row-prefix matmul that imports `row_bytes * V` as its own
+weight buffer *slows* the head (V=65536: 1.70 -> 3.21 ms) because it competes
+with the full-vocab buffer; binding the whole tensor and dispatching V rows
+fixes it (1.72 -> 1.29 ms at 65536, 1.08 at 32768, 0.54 at 16384).
+Not lossless here: batched verify is not bit-identical to serial decode, so
+different drafts flip different near-ties and the greedy text changes (it
+already differs from plain greedy at byte 256 with the full-vocab head).
+CyberTiel + APEX head, draft 3 margin 2, V=32768 vs full: code prompt
+98.26/86.98/104.29 vs 96.75/97.51/97.93 (median +0.8%, high spread), prose
+82.96 vs 87.36 (-5%). Rejected. `reconsider_if`: verify becomes bit-exact
+with serial decode, or a longer A/B shows a consistent gain across prompts.
