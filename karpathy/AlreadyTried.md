@@ -3434,3 +3434,17 @@ slots exit. Bit-identical (MTP text md5 equal in all runs). MTP generation
 plain decode -0.76% (80.71/80.41/80.40 -> 80.54/79.77/79.80). The saved reads
 are spent on the owner workgroup doing the shared rows serially; reverted.
 The batched identity pass (`d696e02`) is the part of this lever that pays.
+
+## MoE down sum: one workgroup per (row, slot) + ordered route reduce — ACCEPTED, +2.94% decode (2026-10-27)
+
+Re-measurement of the 2026-10-27 split (+3.1%, reverted for the 5% bar) and of
+this session's "decode halved" rebuild, which was the shader-dir pitfall above.
+`moe_down_q2k_sum_decode` (all five builds; Q4_K keeps its own shader) now runs
+grid (out_dim, n_slot), one routed slot per workgroup, writing `acc*scale` to
+a per-slot partial row; `moe_down_route_reduce` replays `fma32(part, route,
+sum)` per token in expert order. Replaces the fused path (no flag). Covers the
+batched MTP verify too (n_slot = rows x 8). Bit-identical: decode-path and
+prefill frontier logits plus greedy text on CyberTiel and Occamy, MTP text on
+CyberTiel. 3 interleaved pairs vs `d696e02` (harness pinned to each arm's
+shaders): decode 80.67/80.70/81.02 -> 83.43/83.07/83.00 (+2.94%, disjoint),
+prefill +1.49% (noise). `evidence/raw/w-down-split/`.

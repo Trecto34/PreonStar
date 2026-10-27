@@ -1510,8 +1510,12 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
         tile_count = p36_vk_moe_tile_bound((uint32_t)n_slot, n_expert, pair_tile);
     }
     mid8 = p36_gpu_tensor_alloc_scratch(n_slot * mid_dim * sizeof(float));
-    if (!down_sum_decode) down8 = p36_gpu_tensor_alloc_scratch(n_slot * out_dim * sizeof(float));
-    if (!mid8 || (!down_sum_decode && !down8)) goto done;
+    /* The down sum (every type but Q4_K) writes one partial row per routed
+     * slot into down8 and reduces it per token afterwards. */
+    bool down_split = down_sum_decode && !q4k;
+    if (!down_sum_decode || down_split)
+        down8 = p36_gpu_tensor_alloc_scratch(n_slot * out_dim * sizeof(float));
+    if (!mid8 || ((!down_sum_decode || down_split) && !down8)) goto done;
 
     uint32_t wave = 0;
     ok = 1;
@@ -1632,7 +1636,7 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                 const p36_gpu_tensor *db[7] = {
                     down_bank, mid8, schedule,
                     down_scales ? down_scales : down_bank,
-                    weights, out, tables,
+                    weights, down_split ? down8 : out, tables,
                 };
                 const char *dname = q4k ? "moe_q4k_down_sum_decode" :
                                     down_q3k ? "moe_q3k_down_sum_decode" :
@@ -1647,7 +1651,17 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                                        &p36_vk.moe_down_q2k_sum_decode;
                 ok = p36_vk_run_unlocked(dname, dkernel,
                                          db, &dpush, sizeof(dpush),
-                                         out_dim, identity ? (uint32_t)n_tok : 1u, 1);
+                                         out_dim, down_split ? (uint32_t)n_slot : 1u, 1);
+                if (ok && down_split) {
+                    struct {
+                        uint32_t out_dim;
+                        uint32_t n_used;
+                    } rpush = { out_dim, n_used };
+                    const p36_gpu_tensor *rb[3] = { down8, weights, out };
+                    ok = p36_vk_run_unlocked("moe_down_route_reduce", &p36_vk.moe_down_route_reduce,
+                                             rb, &rpush, sizeof(rpush),
+                                             (out_dim + 255u) / 256u, (uint32_t)n_tok, 1);
+                }
             } else {
                 const p36_gpu_tensor *db[6] = {
                     down_bank, mid8, schedule,

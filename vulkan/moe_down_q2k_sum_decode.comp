@@ -4,7 +4,6 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#extension GL_ARB_gpu_shader_int64 : require
 
 /* Decode-only Q2_K down projection and routing-weighted sum. One
  * workgroup owns one output row and visits the eight experts in order. */
@@ -15,7 +14,7 @@ layout(set = 0, binding = 0) readonly buffer Weights { uint16_t wb[]; };
 layout(set = 0, binding = 1) readonly buffer Mid { vec2 mid[]; };
 layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
 layout(set = 0, binding = 3) readonly buffer Scales { float scales[]; };
-layout(set = 0, binding = 4) readonly buffer RouteWeights { float route[]; };
+layout(set = 0, binding = 4) readonly buffer RouteWeights { float route[]; };  /* used by the reduce */
 layout(set = 0, binding = 5) writeonly buffer Output { float y[]; };
 #if defined(P36_MOE_IQ2S) || defined(P36_MOE_IQ3S) || defined(P36_MOE_IQ3XXS)
 layout(set = 0, binding = 6) readonly buffer Tables { uint tables[]; };
@@ -64,21 +63,6 @@ const uint IQ3S_BYTES = 110u;
 const uint TAB_IQ3S_GRID = 2592u;
 #endif
 
-float fma32(float a, float b, float c) {
-    double p = double(a) * double(b);
-    double s = p + double(c);
-    double bv = s - p;
-    double e = (p - (s - bv)) + (double(c) - bv);
-    if (e != 0.0LF) {
-        uint64_t bits = doubleBitsToUint64(s);
-        if ((bits & 1UL) == 0UL) {
-            if (s > 0.0LF) bits += (e > 0.0LF) ? 1UL : -1UL;
-            else if (s < 0.0LF) bits += (e < 0.0LF) ? 1UL : -1UL;
-            s = uint64BitsToDouble(bits);
-        }
-    }
-    return float(s);
-}
 
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
@@ -101,14 +85,13 @@ void main(void) {
 #else
     uint row_u16 = pc.blocks * Q2K_U16;
 #endif
-    /* Identity batches (MTP verify rows) put the token on grid.y; each
-     * token's sum keeps the single-token order.  Decode dispatches y = 1. */
+    /* One workgroup per (output row, routed slot): grid.y runs over every
+     * slot of every identity token (8 at decode, 8 x rows for an MTP
+     * verify).  The serial 8-expert chain this replaces held the kernel at
+     * ~58 GB/s; moe_down_route_reduce applies route[] afterwards in expert
+     * order with the same fma32, so the sum is bit-identical. */
     {
-    uint t = gl_WorkGroupID.y;
-    float sum = 0.0;
-
-    for (uint u = 0u; u < pc.n_used; u++) {
-        uint slot = t * pc.n_used + u;
+        uint slot = gl_WorkGroupID.y;
         uint expert = selected[slot];
 #if defined(P36_MOE_IQ2S) || defined(P36_MOE_IQ3S) || defined(P36_MOE_IQ3XXS) || defined(P36_MOE_Q3K)
         uint base_bytes = (expert * pc.out_dim + row) * row_bytes;
@@ -293,9 +276,7 @@ void main(void) {
         acc = subgroupAdd(acc);
         if (tid == 0u) {
             float sc = pc.has_scales != 0u ? scales[expert] : 1.0;
-            sum = fma32(acc * sc, route[slot], sum);
+            y[slot * pc.out_dim + row] = acc * sc;
         }
-    }
-    if (tid == 0u) y[t * pc.out_dim + row] = sum;
     }
 }

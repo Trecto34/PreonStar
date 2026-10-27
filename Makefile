@@ -207,6 +207,7 @@ VULKAN_SHADERS := \
 	vulkan/dense_q5k_rows2.spv \
 	vulkan/dense_q6k_rows2.spv \
 	vulkan/moe_reduce.spv \
+	vulkan/moe_down_route_reduce.spv \
 	vulkan/ffn_tail.spv
 
 vulkan/moe_matvec_fast.spv: vulkan/moe_matvec_fast.comp
@@ -1089,3 +1090,6 @@ test-quality: tests/test_prompt_prefix tests/test_quality_api
 
 p36_eval_cases.o: p36_eval_cases.c p36_eval_cases.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ p36_eval_cases.c
+
+vulkan/moe_down_route_reduce.spv: vulkan/moe_down_route_reduce.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
