@@ -326,6 +326,7 @@ static void p36_vulkan_runtime_free(p36_vulkan_runtime *rt) {
     p36_gpu_tensor_free(rt->embed_stage[1]);
     p36_gpu_tensor_free(rt->norm);
     p36_gpu_tensor_free(rt->last_h);
+    p36_gpu_tensor_free(rt->last_h_raw);
     p36_gpu_tensor_free(rt->inp_q8);
     p36_gpu_tensor_free(rt->had_q8);
     p36_gpu_tensor_free(rt->had_signs);
@@ -439,6 +440,8 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
     P36_GPU_ALLOC_SCRATCH_F32(norm, P36_N_EMBD);
     rt->last_h = p36_gpu_tensor_alloc((uint64_t)P36_N_EMBD * sizeof(float));
     if (!rt->last_h) goto fail;
+    rt->last_h_raw = p36_gpu_tensor_alloc((uint64_t)P36_N_EMBD * sizeof(float));
+    if (!rt->last_h_raw) goto fail;
 #ifdef P36_METAL
     P36_GPU_ALLOC_F32(recur_v, P36_N_SSM_INNER);
     {

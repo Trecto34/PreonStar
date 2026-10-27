@@ -152,11 +152,19 @@ static void put_str(uint8_t **p, const char *s, uint64_t n) {
 
 int main(int argc, char **argv) {
     const char *in_path = NULL, *out_path = NULL;
+    p36q_type expert_type = P36Q_TYPE_Q4_K;
+    uint32_t expert_ggml = GGML_Q4_K;
     long layer = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--in") && i + 1 < argc) in_path = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out_path = argv[++i];
         else if (!strcmp(argv[i], "--layer") && i + 1 < argc) layer = strtol(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--expert-quant") && i + 1 < argc) {
+            const char *q = argv[++i];
+            if (!strcmp(q, "q4_k")) { expert_type = P36Q_TYPE_Q4_K; expert_ggml = GGML_Q4_K; }
+            else if (!strcmp(q, "q8_0")) { expert_type = P36Q_TYPE_Q8_0; expert_ggml = 8; }
+            else die("--expert-quant must be q4_k or q8_0");
+        }
         else die("usage: mtp-head-extract --in MODEL.gguf --out HEAD.gguf [--layer N]");
     }
     if (!in_path || !out_path) die("usage: mtp-head-extract --in MODEL.gguf --out HEAD.gguf [--layer N]");
@@ -230,8 +238,9 @@ int main(int argc, char **argv) {
         if (t->type == 30 || t->type == 1) { /* bf16/f16 -> f32: small head vectors */
             items[i].out_type = 0;
         } else if (expert && t->type == GGML_Q4_0) {
-            if (t->dim[0] % 256 != 0) die("Q4_0 expert row is not a multiple of 256");
-            items[i].out_type = GGML_Q4_K;
+                    if (t->dim[0] % p36q_block_size(expert_type) != 0)
+                die("expert row is not a multiple of the target quant block");
+            items[i].out_type = expert_ggml;
         }
         size_t row = type_row_size(items[i].out_type, t->dim[0]);
         if (row == 0) die("unsupported tensor type in head block");
@@ -276,7 +285,7 @@ int main(int argc, char **argv) {
         off = (off + GGUF_ALIGNMENT - 1) / GGUF_ALIGNMENT * GGUF_ALIGNMENT;
     }
 
-    p36q_quantize_init(P36Q_TYPE_Q4_K);
+    p36q_quantize_init(expert_type);
     size_t woff = 0;
     for (size_t i = 0; i < n_sel; i++) {
         const tensor_info *t = items[i].t;
@@ -305,11 +314,11 @@ int main(int argc, char **argv) {
             float *f = malloc((size_t)t->elements * sizeof(float));
             if (!f) die("out of memory");
             dequant_q4_0(src, f, t->elements);
-            p36q_quantize_chunk(P36Q_TYPE_Q4_K, f, dst, 0, (int64_t)rows,
+            p36q_quantize_chunk(expert_type, f, dst, 0, (int64_t)rows,
                                 (int64_t)t->dim[0], NULL);
             free(f);
-            fprintf(stderr, "mtp-head-extract: %s q4_0 -> q4_k (%zu bytes)\n",
-                    t->name, items[i].out_bytes);
+            fprintf(stderr, "mtp-head-extract: %s q4_0 -> %s (%zu bytes)\n",
+                    t->name, p36q_type_name(expert_type), items[i].out_bytes);
         } else {
             memcpy(dst, src, items[i].out_bytes);
         }

@@ -2942,3 +2942,17 @@ share the unpacked weight word across rows instead of re-unpacking per row.
   recurrent layers from captured inputs.
 * `reconsider_if`: the cycle is rewritten to draft before the target forward and
   to replay recurrent layers only.
+
+## 2026-10-26 MTP cycle rewrite (one target forward per cycle) - LANDS
+
+* Draft before the target forward from the raw residual hidden (`last_h_raw`);
+  verify `[pending, drafts...]` in one forward; commit via `row_tops`.
+* IQ2XXS-Q2K model: plain 95.52 -> MTP 97.52 t/s (draft 3, margin 1), parity
+  exact, 96.8% acceptance. First configuration in this campaign where MTP beats
+  plain decode.
+* Draft 4+ still loses: a 7-row verify costs 34.8 ms and a partial accept adds a
+  16-26 ms full replay. `reconsider_if`: recurrent-only replay + row-amortised
+  small-batch kernels (extend `dense_*_rows` past 4 rows).
+* APEX-I head: only ~50% acceptance after Q4_0 -> Q4_K requant; the same
+  treatment of the IQ2_XXS head keeps 96.8%, so the APEX head itself is suspect.
+

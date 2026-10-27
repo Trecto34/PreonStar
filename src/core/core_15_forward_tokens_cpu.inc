@@ -1386,11 +1386,18 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
 
 static bool p36_vulkan_update_last_h(p36_vulkan_runtime *rt, uint32_t row) {
     if (!rt || !rt->last_h) return false;
-    return p36_gpu_tensor_copy(rt->last_h,
-                               0,
-                               rt->norm,
-                               (uint64_t)row * P36_N_EMBD * sizeof(float),
-                               (uint64_t)P36_N_EMBD * sizeof(float)) != 0;
+    if (p36_gpu_tensor_copy(rt->last_h,
+                            0,
+                            rt->norm,
+                            (uint64_t)row * P36_N_EMBD * sizeof(float),
+                            (uint64_t)P36_N_EMBD * sizeof(float)) == 0) return false;
+    if (rt->last_h_raw &&
+        p36_gpu_tensor_copy(rt->last_h_raw,
+                            0,
+                            rt->next_hidden,
+                            (uint64_t)row * P36_N_EMBD * sizeof(float),
+                            (uint64_t)P36_N_EMBD * sizeof(float)) == 0) return false;
+    return true;
 }
 
 static p36_gpu_tensor *p36_vulkan_row(p36_gpu_tensor *t, uint32_t row,

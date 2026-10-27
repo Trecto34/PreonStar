@@ -721,54 +721,6 @@ static int p36_session_eval_internal(p36_session *s, int token, bool update_mtp,
 }
 
 #ifndef P36_NO_GPU
-/* Decode one token with the MTP draft merged into the same submission:
- * the pipeline drains once (at the draft logits read) instead of once
- * per model, which is what makes the confidence gate affordable. */
-static int p36_session_eval_with_draft(p36_session *s, int token, char *err, size_t errlen) {
-    p36_vulkan_runtime *rt;
-    uint32_t pos;
-    if (s->checkpoint.len >= s->ctx_size) {
-        if (err && errlen) snprintf(err, errlen, "context exhausted");
-        return 1;
-    }
-    if (!p36_session_reserve_kv(s, (uint32_t)s->checkpoint.len + 1u,
-                                (uint32_t)s->checkpoint.len)) {
-        if (err && errlen) snprintf(err, errlen, "failed to grow KV cache");
-        return 1;
-    }
-    rt = (p36_vulkan_runtime *)s->runtime;
-    s->mtp_draft_valid = false;
-    pos = (uint32_t)s->checkpoint.len;
-    {
-        const bool timing = getenv("P36_MTP_TIMING") != NULL;
-        double t0 = timing ? p36_now_sec() : 0.0, t1 = t0, t2 = t0, t3 = t0, t4 = t0;
-        bool ok = p36_forward_tokens_vulkan_into(s, &token, NULL, NULL,
-                                                 1, pos, rt->logits, false) &&
-                  p36_vulkan_update_last_h(rt, 0);
-        if (timing) t1 = p36_now_sec();
-        ok = ok && p36_mtp_eval_vulkan(s, token, pos, rt->norm);
-        if (timing) t2 = p36_now_sec();
-        ok = ok && p36_gpu_tensor_read(rt->logits, 0, s->logits, (uint64_t)P36_N_VOCAB * sizeof(*s->logits));
-        if (timing) t3 = p36_now_sec();
-        if (!ok) {
-            if (err && errlen) snprintf(err, errlen, "Vulkan decode+draft failed at pos %u", pos);
-            s->checkpoint_valid = false;
-            return 1;
-        }
-        s->logits_host_valid = true;
-        s->gpu_top2_valid = false;
-        s->mtp_draft_token = sample_argmax_margin(s->mtp_logits, P36_N_VOCAB, &s->mtp_draft_margin);
-        if (timing) {
-            t4 = p36_now_sec();
-            fprintf(stderr, "p36: mtp timing eval fwd=%.2f mtp=%.2f read=%.2f argmax=%.2f ms\n",
-                    (t1 - t0) * 1000.0, (t2 - t1) * 1000.0, (t3 - t2) * 1000.0, (t4 - t3) * 1000.0);
-        }
-    }
-    s->mtp_draft_valid = s->mtp_draft_token >= 0;
-    p36_tokens_push(&s->checkpoint, token);
-    s->checkpoint_valid = true;
-    return 0;
-}
 #endif
 
 int p36_session_eval(p36_session *s, int token, char *err, size_t errlen) {

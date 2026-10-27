@@ -677,8 +677,6 @@ struct p36_session {
     int mtp_draft_token;
     bool mtp_draft_valid;
     float mtp_draft_margin;
-    int mtp_backoff;
-    int mtp_backoff_len;
 };
 
 typedef struct {
@@ -806,6 +804,9 @@ typedef struct {
     uint32_t embed_flip;
     p36_gpu_tensor *norm;
     p36_gpu_tensor *last_h;
+    /* Raw residual stream of the last decoded row (before the final output
+     * norm): the MTP head is trained on this, not on the normalised hidden. */
+    p36_gpu_tensor *last_h_raw;
     p36_gpu_tensor *inp_q8;
     bool inp_q8_valid;
     p36_gpu_tensor *had_q8;     /* q8_K of the transformed activation */

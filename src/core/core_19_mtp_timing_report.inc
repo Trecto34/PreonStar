@@ -80,6 +80,62 @@ static int p36_spec_commit_tokens(p36_session *s, const int *verify, int verify_
     return 1 + commit_n;
 }
 
+/* Commit for the one-forward cycle: verify[0] is the pending token, so the
+ * accepted count is also the number of tokens handed back.  row_tops[i] is the
+ * target's argmax after verify[i], which is what validates verify[i + 1]. */
+static int p36_spec_commit_pending(p36_session *s, const int *verify, int verify_n,
+                                   uint32_t start_pos, const int *row_tops,
+                                   int eos_token, int *accepted,
+                                   char *err, size_t errlen) {
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int commit_n = 1;
+    if (!rt) return -1;
+    for (int i = 1; i < verify_n; i++) {
+        if (row_tops[i - 1] != verify[i]) break;
+        commit_n++;
+    }
+    for (int i = 0; i < commit_n; i++) {
+        if (verify[i] == eos_token) {
+            commit_n = i + 1;
+            break;
+        }
+    }
+    if (commit_n == verify_n) {
+        /* Every row was committed: the verify pass already ran each token's
+         * forward, so adopting its frontier and logits is free. */
+        if (!p36_vulkan_update_last_h(rt, (uint32_t)verify_n - 1u)) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec frontier adopt failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+    } else {
+        if (!p36_vulkan_spec_frontier_restore(rt)) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec rollback failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+        bool replay;
+        p36_gpu_set_micro_batch(true);
+        replay = p36_forward_tokens_vulkan(s, verify, (uint32_t)commit_n, start_pos, true);
+        p36_gpu_set_micro_batch(false);
+        if (!replay) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec accepted-prefix replay failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+    }
+    for (int i = 0; i < commit_n; i++) {
+        accepted[i] = verify[i];
+        p36_tokens_push(&s->checkpoint, verify[i]);
+    }
+    s->checkpoint_valid = true;
+    p36_mtp_stats_add(verify_n, commit_n, commit_n == verify_n);
+    return commit_n;
+}
+
 /* Prompt lookup: the newest earlier copy of the last `order` tokens predicts
  * the continuation.  Pure host work over the live token history -- no model,
  * no GPU -- so a repeat-heavy turn (code blocks, file rewrites, echoed tool
@@ -184,97 +240,75 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
             tf0 = p36_gpu_read_flushes();
         }
 
-        /* Draft backoff: after unconfident drafts, decode plainly for a
-         * few tokens so hard content does not pay the draft head on every
-         * token. Confident content resets to drafting every token. */
-        if (s->mtp_backoff > 0) {
-            s->mtp_backoff--;
+        if (draft_cap > P36_MTP_MAX_DRAFT) draft_cap = P36_MTP_MAX_DRAFT;
+        if (draft_cap > accepted_cap) draft_cap = accepted_cap;
+        if (draft_cap > max_tokens) draft_cap = max_tokens;
+        if (draft_cap > s->ctx_size - s->checkpoint.len) draft_cap = s->ctx_size - s->checkpoint.len;
+        if (rt->prefill_cap > 0 && draft_cap > (int)rt->prefill_cap) draft_cap = (int)rt->prefill_cap;
+        if (first_token == eos_token || draft_cap <= 1) {
             if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
             accepted[0] = first_token;
             return 1;
         }
-
-        /* Commit the target token with its MTP draft piggybacked on the
-         * same submission; the confidence gate and the first-draft check
-         * against the fresh target logits are then free. */
-        if (p36_session_eval_with_draft(s, first_token, err, errlen) != 0) return -1;
-        accepted[0] = first_token;
+        start_pos = (uint32_t)s->checkpoint.len;
+        if (!p36_session_reserve_kv(s, start_pos + (uint32_t)draft_cap, start_pos)) {
+            if (err && errlen) snprintf(err, errlen, "failed to grow MTP KV cache");
+            return -1;
+        }
+        /* Draft from the hidden the previous cycle left in last_h, before the
+         * target runs: the verify pass below covers the pending token and every
+         * draft in one target forward, so a cycle costs one forward no matter
+         * how deep the draft goes. */
+        verify[0] = first_token;
+        verify_n = 1;
+        prev_token = first_token;
+        while (verify_n < draft_cap && prev_token != eos_token) {
+            float margin = 0.0f;
+            const p36_gpu_tensor *h = verify_n == 1
+                ? (rt->last_h_raw ? rt->last_h_raw : rt->last_h)
+                : rt->mtp_cur;
+            if (!p36_mtp_eval_vulkan(s, prev_token, start_pos + (uint32_t)verify_n - 1u, h)) {
+                if (err && errlen)
+                    snprintf(err, errlen, "MTP draft failed at pos %u",
+                             start_pos + (uint32_t)verify_n - 1u);
+                p36_session_invalidate(s);
+                return -1;
+            }
+            int tok = sample_argmax_margin(s->mtp_logits, P36_N_VOCAB, &margin);
+            if (tok < 0) break;
+            if (e->mtp_margin > 0.0f && margin < e->mtp_margin) break;
+            verify[verify_n++] = tok;
+            prev_token = tok;
+            n_draft++;
+        }
         if (mtp_timing) {
             tc_fwd = p36_now_sec();
             tc_draft = tc_fwd;
-            tc_snap = tc_fwd;
-            tc_verify = tc_fwd;
         }
-
-        if (draft_cap > P36_MTP_MAX_DRAFT) draft_cap = P36_MTP_MAX_DRAFT;
-        if (draft_cap > accepted_cap - 1) draft_cap = accepted_cap - 1;
-        if (draft_cap > max_tokens - 1) draft_cap = max_tokens - 1;
-        if (draft_cap > s->ctx_size - s->checkpoint.len) draft_cap = s->ctx_size - s->checkpoint.len;
-        if (rt->prefill_cap > 0 && draft_cap > (int)rt->prefill_cap) draft_cap = (int)rt->prefill_cap;
-        if (first_token == eos_token || draft_cap <= 0 || !s->mtp_draft_valid) {
+        if (verify_n <= 1) {
+            /* The gate took every draft: decode the pending token plainly. */
+            if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+            accepted[0] = first_token;
             if (mtp_timing) {
-                p36_mtp_timing_report((uint32_t)s->checkpoint.len, "no-draft", 0, 1, 0,
-                                      tc0, tc_fwd, tc_draft, tc_snap, tc_verify, tc_fwd, tr0, tf0);
+                p36_mtp_timing_report(start_pos, "no-draft", 0, 1, 0, tc0, tc_draft,
+                                      tc_draft, tc_draft, tc_draft, p36_now_sec(), tr0, tf0);
             }
             return 1;
         }
-        /* Only the head's own confidence gates the draft: requiring the draft
-         * to equal the target's argmax up front rejects nearly every cycle and
-         * makes depth pointless (the verify pass is what checks agreement). */
-        if (e->mtp_margin > 0.0f && s->mtp_draft_margin < e->mtp_margin) {
-            s->mtp_backoff_len = s->mtp_backoff_len ? (s->mtp_backoff_len < 4 ? s->mtp_backoff_len * 2 : 4) : 1;
-            s->mtp_backoff = s->mtp_backoff_len;
-            p36_mtp_stats_add(0, 0, false);
-            if (mtp_timing) {
-                p36_mtp_timing_report((uint32_t)s->checkpoint.len, "gate-reject", 0, 1, 0,
-                                      tc0, tc_fwd, tc_draft, tc_snap, tc_verify, tc_fwd, tr0, tf0);
-            }
-            return 1;
+        if (!p36_vulkan_spec_frontier_snapshot(rt)) {
+            if (err && errlen) snprintf(err, errlen, "MTP state snapshot failed");
+            return -1;
         }
-        s->mtp_backoff_len = 0;
-
-        start_pos = (uint32_t)s->checkpoint.len;
-        verify[0] = s->mtp_draft_token;
-        verify_n = 1;
-        prev_token = verify[0];
-        while (verify_n < draft_cap && prev_token != eos_token) {
-            float margin = 0.0f;
-            if (!p36_mtp_eval_vulkan(s, prev_token, start_pos + (uint32_t)verify_n - 1u, rt->mtp_cur)) {
-                if (err && errlen) snprintf(err, errlen, "MTP recursive draft failed at pos %u",
-                                            start_pos + (uint32_t)verify_n - 1u);
-                s->checkpoint_valid = false;
-                return -1;
-            }
-            s->mtp_draft_token = sample_argmax_margin(s->mtp_logits, P36_N_VOCAB, &margin);
-            verify[verify_n++] = s->mtp_draft_token;
-            prev_token = s->mtp_draft_token;
-            n_draft++;
-        }
-        if (mtp_timing) tc_draft = p36_now_sec();
-
-        if (!p36_vulkan_spec_frontier_snapshot(rt)) return 1;
         if (mtp_timing) tc_snap = p36_now_sec();
-        const bool prof_verify = getenv("P36_VK_PROF_VERIFY") != NULL;
-        static uint32_t prof_verify_n;
-        if (prof_verify) p36_gpu_prof_reset();
         if (!p36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
             if (!p36_vulkan_spec_frontier_restore(rt)) p36_session_invalidate(s);
             if (err && errlen) snprintf(err, errlen, "MTP target verifier failed at pos %u", start_pos);
             return -1;
         }
-        if (prof_verify) {
-            char plabel[32];
-            snprintf(plabel, sizeof(plabel), "verify%u_n%d", prof_verify_n++, verify_n);
-            p36_gpu_prof_report(plabel);
-        }
         if (mtp_timing) tc_verify = p36_now_sec();
-
-        {
-            int rc = p36_spec_commit_tokens(s, verify, verify_n, start_pos, row_tops,
-                                            eos_token, accepted, err, errlen);
-            if (rc < 0) return -1;
-            commit_n = rc - 1;
-        }
+        commit_n = p36_spec_commit_pending(s, verify, verify_n, start_pos, row_tops,
+                                           eos_token, accepted, err, errlen);
+        if (commit_n < 0) return -1;
         if (mtp_timing) {
             p36_mtp_timing_report(start_pos,
                                   commit_n == verify_n ? "full-accept" : "partial",
@@ -283,7 +317,7 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
         }
         s->mtp_draft_valid = false;
         s->mtp_draft_token = -1;
-        return 1 + commit_n;
+        return commit_n;
     }
 #else
     (void)eos_token;
