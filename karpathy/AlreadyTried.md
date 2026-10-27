@@ -3448,3 +3448,12 @@ prefill frontier logits plus greedy text on CyberTiel and Occamy, MTP text on
 CyberTiel. 3 interleaved pairs vs `d696e02` (harness pinned to each arm's
 shaders): decode 80.67/80.70/81.02 -> 83.43/83.07/83.00 (+2.94%, disjoint),
 prefill +1.49% (noise). `evidence/raw/w-down-split/`.
+
+## K-quant mmq dead-wave skip — re-measured: ACCEPTED, +5.9% chunk-64 prefill (2026-10-27)
+
+Supersedes the "-1.8%, rejected" entry above, which ran the main checkout's
+shader (shader-dir pitfall). With each binary on its own shaders,
+`dense_kquant_mmq_q4k` at ctx 512 chunk 64 went 385.5 -> 313.4 ms (-18.7%).
+Bit-identical frontier logits at chunk 64 and 256. 3 pairs vs `d696e02`,
+ctx 512 chunk 64: prefill 293.97/288.06/288.08 -> 298.73/310.88/305.13
+(+5.92%). `evidence/raw/w-down-split/ab-mmq-deadwave.csv`.
