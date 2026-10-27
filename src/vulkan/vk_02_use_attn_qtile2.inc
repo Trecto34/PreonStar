@@ -501,6 +501,15 @@ static int p36_vk_kernel_init(p36_vk_kernel *k) {
             force_wave32 = strstr(k->path, p36_vk_clean_scan_wave32[i]) != NULL;
         }
     }
+    /* moe_down_q2k_sum_decode declares local_size_x = 32 and reduces with one
+     * subgroupAdd per expert.  At wave64 half of every wave is inactive, which
+     * is exactly the shape this kernel shows in the profile: 2048 workgroups,
+     * 32 threads each, 56 GB/s against 132 GB/s for its 64-thread sibling
+     * moe_gate_up_decode on the same access pattern.  Env-gated until the
+     * measurement and the logits md5 both clear. */
+    if (!force_wave32 && getenv("P36_VK_WAVE32_MOE_DOWN") &&
+        strstr(k->path, "moe_down_q2k_sum_decode"))
+        force_wave32 = true;
     /* dense_extra_decode_ptq1_0 is the mirror-image trap: it partitions all
      * 128 weights of a PTQ1_0 block across every lane of the 64-wide
      * workgroup (b_start = lid>>3) and recovers the true dot product with

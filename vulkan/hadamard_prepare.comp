@@ -1,4 +1,5 @@
 #version 460
+#extension GL_KHR_shader_subgroup_shuffle : require
 
 /* Fused Hadamard activation preparation:
  *   1. Optional tiled -> grouped V permute (for GDN ssm_out, width 6144)
@@ -68,7 +69,8 @@ void main(void) {
 
     if (row >= pc.n_rows) return;
 
-    /* 1. Load 4 floats/thread with optional permute, multiply signs & scale into LDS */
+    /* 1. Load 4 floats/thread with optional permute, signs & scale into registers */
+    float x[4];
     for (uint k = 0u; k < 4u; ++k) {
         const uint i = tid * 4u + k;
         const uint col = block_1024 * BLOCK + i;
@@ -80,14 +82,38 @@ void main(void) {
             const uint nk_idx  = col / 384u;
             src_col = hd_idx + 128u * (nk_idx + 16u * rep_idx);
         }
-        const float val = src[row * pc.width + src_col];
-        const float s   = signs[pc.sign_offset + col];
-        sh[i] = val * s * pc.scale;
+        x[k] = src[row * pc.width + src_col] * signs[pc.sign_offset + col] * pc.scale;
     }
-    barrier();
 
-    /* 2. In-LDS Fast Walsh-Hadamard Transform butterfly (1024 elements) */
-    for (uint h = 1u; h < BLOCK; h <<= 1) {
+    /* 2a. FWHT stages h=1,2: both elements of every pair live in this thread */
+    for (uint h = 1u; h < 4u; h <<= 1u) {
+        for (uint k = 0u; k < 4u; ++k) {
+            if ((k & h) == 0u) {
+                const float a = x[k];
+                const float b = x[k + h];
+                x[k]     = a + b;
+                x[k + h] = a - b;
+            }
+        }
+    }
+
+    /* 2b. FWHT stages h=4..32: element i pairs with i^h, i.e. this lane pairs
+     *     with lane^(h/4) of the same subgroup.  A shuffle replaces what used
+     *     to be an LDS write + barrier + LDS read.  Same pairs, same order,
+     *     same add/sub as the barrier version, so the result is bit-identical. */
+    for (uint h = 4u; h < 64u; h <<= 1u) {
+        const uint m = h / 4u;
+        float o[4];
+        for (uint k = 0u; k < 4u; ++k) o[k] = subgroupShuffleXor(x[k], m);
+        for (uint k = 0u; k < 4u; ++k) {
+            x[k] = ((tid & m) == 0u) ? (x[k] + o[k]) : (o[k] - x[k]);
+        }
+    }
+
+    /* 2c. FWHT stages h=64..512 cross subgroup boundaries: LDS + barrier. */
+    for (uint k = 0u; k < 4u; ++k) sh[tid * 4u + k] = x[k];
+    barrier();
+    for (uint h = 64u; h < BLOCK; h <<= 1u) {
         for (uint k = 0u; k < 4u; ++k) {
             const uint i = tid * 4u + k;
             if ((i & h) == 0u) {

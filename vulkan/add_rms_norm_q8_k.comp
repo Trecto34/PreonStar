@@ -13,6 +13,12 @@
  *   1024 threads handle 16 blocks (4096 elements) concurrently (64 threads per block).
  *   Loops over rounds of 16 blocks if row width > 4096.
  *   Produces bit-identical Q8_K output to quantize_q8_k.comp.
+ *
+ * Phase 3 (pc.rot != 0):
+ *   Per 1024-element chunk: x * signs * inv_sqrt(1024), 10-stage FWHT in LDS,
+ *   then the same 64-thread Q8_K quantizer into had_q8.  Output is
+ *   bit-identical to hadamard_prepare.comp, so the caller can skip that
+ *   dispatch and the re-read of the norm rows it used to do.
  */
 
 layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
@@ -41,10 +47,21 @@ layout(set = 0, binding = 5) writeonly buffer Q8K {
     uint q8[];
 };
 
+layout(set = 0, binding = 6) readonly buffer Signs {
+    float signs[];
+};
+
+layout(set = 0, binding = 7) writeonly buffer HadQ8K {
+    uint had_q8[];
+};
+
 layout(push_constant) uniform Push {
     uint n;
     float eps;
     uint blocks;
+    uint rot;              /* 1 => also emit the rotated quantisation */
+    uint sign_offset;      /* element offset into signs[] */
+    float inv_sqrt_block;  /* 1 / sqrt(1024) */
 } pc;
 
 const uint QK_K = 256u;
@@ -184,5 +201,114 @@ void main(void) {
             q8[out_base + 66u + lid] = (uint(s0) & 0xffffu) | ((uint(s1) & 0xffffu) << 16u);
         }
         barrier();
+    }
+
+    /* Phase 3: optional rotated quantisation.  sh_abs doubles as the FWHT
+     * scratch: phase 2 is finished, and a barrier separates the last read of
+     * the transformed chunk from the max-abs pass that reuses the array. */
+    if (pc.rot != 0u) {
+        float qregs[4];
+        for (uint c = 0u; c < pc.n; c += 1024u) {
+            uint col = c + tid;
+            float x = 0.0f;
+            if (col < pc.n) {
+                /* Same value phase 2 wrote to y[col], times signs and the
+                 * 1/sqrt(1024) the rotation is normalised by. */
+                x = ((s[base + col] * scale) * w[col]) * signs[pc.sign_offset + col] *
+                    pc.inv_sqrt_block;
+            }
+            sh_abs[tid] = x;
+            barrier();
+            for (uint h = 1u; h < 1024u; h <<= 1u) {
+                if ((tid & h) == 0u) {
+                    float lo = sh_abs[tid];
+                    float hi = sh_abs[tid + h];
+                    sh_abs[tid] = lo + hi;
+                    sh_abs[tid + h] = lo - hi;
+                }
+                barrier();
+            }
+
+            uint rsub = tid >> 6u;      /* Q8_K block inside the chunk, 0..3 */
+            uint rlid = tid & 63u;
+            uint relem = rlid * 4u;
+            uint rb = (c >> 8u) + rsub;
+            bool ractive = (rb < pc.blocks);
+
+            float rmax_abs = 0.0f;
+            float rmax_val = 0.0f;
+            uint rmax_idx = relem;
+            for (uint j = 0u; j < 4u; ++j) {
+                qregs[j] = 0.0f;
+                if (ractive) {
+                    float xv = sh_abs[rsub * 256u + relem + j];
+                    qregs[j] = xv;
+                    float ax = abs(xv);
+                    if (ax > rmax_abs) {
+                        rmax_abs = ax;
+                        rmax_val = xv;
+                        rmax_idx = relem + j;
+                    }
+                }
+            }
+            barrier();  /* chunk reads done before sh_abs is reused */
+
+            sh_abs[tid] = rmax_abs;
+            sh_val[tid] = rmax_val;
+            sh_idx[tid] = rmax_idx;
+            barrier();
+
+            for (uint s = 32u; s > 0u; s >>= 1u) {
+                if (rlid < s) {
+                    float other_abs = sh_abs[tid + s];
+                    uint other_idx = sh_idx[tid + s];
+                    if (other_abs > sh_abs[tid] || (other_abs == sh_abs[tid] && other_idx < sh_idx[tid])) {
+                        sh_abs[tid] = other_abs;
+                        sh_val[tid] = sh_val[tid + s];
+                        sh_idx[tid] = other_idx;
+                    }
+                }
+                barrier();
+            }
+
+            float rmaxv = sh_val[rsub * 64u];
+            float riscale = rmaxv != 0.0f ? float(-127.0 / double(rmaxv)) : 0.0f;
+            float rd = riscale != 0.0f ? float(1.0 / double(riscale)) : 0.0f;
+
+            int rqv[4];
+            int rsum4 = 0;
+            if (ractive) {
+                for (uint j = 0u; j < 4u; ++j) {
+                    int q = riscale != 0.0f ? nearest_int(riscale * qregs[j]) : 0;
+                    if (q > 127) q = 127;
+                    rqv[j] = q;
+                    rsum4 += q;
+                }
+
+                uint out_base = (row * pc.blocks + rb) * Q8K_WORDS;
+                if (rlid == 0u) {
+                    had_q8[out_base + 0u] = floatBitsToUint(rd);
+                    had_q8[out_base + 1u] = 0u;
+                }
+                had_q8[out_base + 2u + rlid] = pack_i8x4(rqv[0], rqv[1], rqv[2], rqv[3]);
+            }
+
+            sh_sum4[tid] = rsum4;
+            barrier();
+
+            if (ractive && (rlid & 3u) == 0u) {
+                sh_bsum[rsub * 16u + (rlid >> 2u)] = sh_sum4[tid] + sh_sum4[tid + 1u] +
+                                                     sh_sum4[tid + 2u] + sh_sum4[tid + 3u];
+            }
+            barrier();
+
+            if (ractive && rlid < 8u) {
+                uint out_base = (row * pc.blocks + rb) * Q8K_WORDS;
+                int s0 = sh_bsum[rsub * 16u + 2u * rlid + 0u];
+                int s1 = sh_bsum[rsub * 16u + 2u * rlid + 1u];
+                had_q8[out_base + 66u + rlid] = (uint(s0) & 0xffffu) | ((uint(s1) & 0xffffu) << 16u);
+            }
+            barrier();
+        }
     }
 }

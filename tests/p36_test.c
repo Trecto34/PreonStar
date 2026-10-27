@@ -3681,7 +3681,9 @@ static void test_dense_quant_model_rows(void) {
     static const uint32_t types[] = {
         10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 42, 142, 143,
     };
-    static const uint32_t token_counts[] = {1u, 2u, 4u, 8u};
+    /* 16 and 32 also exercise the n_tok > 8 mmq tile kernel, which the
+     * small-batch nx path hides. */
+    static const uint32_t token_counts[] = {1u, 2u, 4u, 8u, 16u, 32u};
     enum {
         out_dim = 8,
         N_TYPE = (int)(sizeof(types) / sizeof(types[0])),

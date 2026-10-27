@@ -277,6 +277,7 @@ typedef struct {
     p36_vk_kernel dense_extra_small_q2_0;
     p36_vk_kernel dense_extra_small_pq2_0;
     p36_vk_kernel dense_extra_decode_ptq1_0;
+    p36_vk_kernel dense_extra_decode_ptq1_0_nx;
     p36_vk_kernel dense_extra_decode_iq2s_pair;
     p36_vk_kernel dense_extra_decode_iq2s;
     p36_vk_kernel dense_extra_decode_iq2xxs;
@@ -568,6 +569,10 @@ typedef struct {
     uint64_t submit_ns;
     uint64_t gpu_ns;
     uint64_t wall_ns;
+    /* Per-dispatch workgroup distribution (P36_VK_PROF_WG_HIST=1), bucketed
+     * <5, 5-20, 20-40, >40 WGs.  Host-side counters only: no GPU cost, so it
+     * can stay on during timed runs. */
+    uint32_t wg_hist[4];
 } p36_vk_prof_op_row;
 
 typedef struct {
@@ -581,6 +586,10 @@ static const char *p36_vk_prof_query_op[P36_VK_PROF_QUERY_CAP / 2];
 static uint64_t p36_vk_prof_query_groups[P36_VK_PROF_QUERY_CAP / 2];
 static uint64_t p36_vk_prof_query_host_ns[P36_VK_PROF_QUERY_CAP / 2];
 static uint32_t p36_vk_prof_query_count;
+/* Open op-group bracket: one timestamp pair per run of consecutive dispatches
+ * of the same kernel.  Bracket indices, not dispatch indices. */
+static uint32_t p36_vk_prof_grp_base = UINT32_MAX;
+static const char *p36_vk_prof_grp_path = NULL;
 /* Optional per-dispatch GPU timeline (P36_VK_PROF_TIMELINE=<path>).  Bounded
  * diagnostic for separating host record cadence, GPU work and dependency
  * gaps; the aggregate profile cannot show overlap or idle time. */

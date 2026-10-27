@@ -166,6 +166,15 @@ static void p36_vk_prof_op_add(const char *name,
 
 /* Barrier ownership: the barrier belongs to the dispatch that needs it, so the
  * op rows show which chain is serializing the token. */
+static void p36_vk_prof_wg_hist_add(const char *name, uint64_t groups) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("P36_VK_PROF_WG_HIST") != NULL;
+    if (!enabled) return;
+    p36_vk_prof_op_row *r = p36_vk_prof_op_get(name);
+    if (!r) return;
+    r->wg_hist[groups < 5 ? 0 : groups < 20 ? 1 : groups <= 40 ? 2 : 3]++;
+}
+
 static void p36_vk_prof_op_barrier(const char *name) {
     if (!p36_vk.prof_ops) return;
     p36_vk_prof_op_row *r = p36_vk_prof_op_get(name);
@@ -201,6 +210,22 @@ static void p36_vk_prof_kernel_add(const char *path, uint64_t groups, uint64_t g
         .groups = groups,
         .gpu_ns = gpu_ns,
     };
+}
+
+/* Close the open op-group bracket (if any) on the current command buffer.
+ * Called when the kernel path changes and at vkEndCommandBuffer, so every
+ * opened pair gets its end timestamp inside the same submission. */
+static void p36_vk_prof_group_close_locked(void) {
+    if (p36_vk_prof_grp_base == UINT32_MAX) return;
+    if (p36_vk.query_pool && p36_vk.command_buffer) {
+        /* COMPUTE_SHADER, not BOTTOM_OF_PIPE: the compute pipeline has no
+         * later stage here, so this is the completion time without paying a
+         * full pipe drain per group. */
+        vkCmdWriteTimestamp(p36_vk.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            p36_vk.query_pool, p36_vk_prof_grp_base + 1u);
+    }
+    p36_vk_prof_grp_base = UINT32_MAX;
+    p36_vk_prof_grp_path = NULL;
 }
 
 static void p36_vk_prof_kernel_collect_unlocked(void) {

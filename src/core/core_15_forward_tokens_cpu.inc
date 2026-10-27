@@ -183,12 +183,26 @@ static bool p36_hadamard_prepare(p36_vulkan_runtime *rt,
                                  const p36_gpu_tensor *src,
                                  uint32_t width, uint32_t n_rows) {
     uint32_t offset = 0;
+    /* DIAGNOSTIC: measures the fusion ceiling by leaving had_q8 stale. */
+    if (getenv("P36_VK_SKIP_HADAMARD")) return true;
+    /* DIAGNOSTIC: see p36_hadamard_prepare. */
+    if (getenv("P36_VK_SKIP_HADAMARD")) return true;
     if (!rt || !rt->had_q8 || !rt->had_signs) return false;
     if (!p36_hadamard_sign_offset(width, &offset)) return false;
     return p36_gpu_hadamard_prepare_tensor(rt->had_q8, src, rt->had_signs,
                                            width, n_rows, offset,
                                            p36_hadamard_total_signs(),
                                            g_p36_hadamard.inv_sqrt_block, 0);
+}
+
+/* Opt-in only.  Measured on BC-250 / Ternary-Bonsai-2-27B at ctx 2048:
+ * fused 27.8 t/s vs 28.4 t/s unfused (byte-identical output).  The standalone
+ * prepare runs 5 workgroups for a 5120-wide row, the epilogue runs serialised
+ * inside the norm's single decode workgroup, so fusing costs more GPU time
+ * than the dispatch it removes.  P36_VK_SKIP_HADAMARD puts the whole rotation
+ * at ~+5%, i.e. even a free fusion cannot pay for itself here. */
+static bool p36_vk_use_fused_had(void) {
+    return getenv("P36_VK_FUSED_HAD") != NULL;
 }
 
 /* Diagnostic: does the fused norm's Q8 output agree with a fresh quantization
@@ -310,6 +324,7 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
                                          uint32_t n_tok,
                                          const p36_gpu_tensor *inp,
                                          p36_gpu_tensor *out,
+                                         const p36_gpu_tensor *inp_q8_rot,
                                          bool session_batch) {
     p36_gpu_moe_weight gate;
     p36_gpu_moe_weight up;
@@ -324,12 +339,18 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
         bool gate_rot = p36_hadamard_rotate_enabled(l->ffn_gate_shexp) ||
                         p36_hadamard_rotate_enabled(l->ffn_up_shexp);
         if (gate_rot) {
-            if (!p36_hadamard_prepare(rt, inp, P36_N_EMBD, n_tok)) return false;
-            /* The fused prepare writes only had_q8; folded weights always take
-             * the q8_K path, so ffn_in stays the f32 source and is unused.
-             * ponytail: a folded f32/f16/q8_0 weight would need the prepare
-             * kernel to also emit the f32 activation. */
-            ffn_q8 = rt->had_q8;
+            /* The fused norm can emit this rotation itself: same bytes, one
+             * dispatch fewer, and it is already in LDS there. */
+            if (inp_q8_rot) {
+                ffn_q8 = inp_q8_rot;
+            } else {
+                if (!p36_hadamard_prepare(rt, inp, P36_N_EMBD, n_tok)) return false;
+                /* The fused prepare writes only had_q8; folded weights always take
+                 * the q8_K path, so ffn_in stays the f32 source and is unused.
+                 * ponytail: a folded f32/f16/q8_0 weight would need the prepare
+                 * kernel to also emit the f32 activation. */
+                ffn_q8 = rt->had_q8;
+            }
         } else if (!rt->inp_q8_valid && !p36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, P36_N_EMBD, n_tok)) {
             return false;
         }
@@ -565,7 +586,8 @@ static bool p36_forward_ffn_vulkan(p36_session *s,
                                    uint32_t il,
                                    uint32_t n_tok,
                                    const p36_gpu_tensor *inp,
-                                   p36_gpu_tensor *out) {
+                                   p36_gpu_tensor *out,
+                                   const p36_gpu_tensor *inp_q8_rot) {
     p36_engine *e;
     if (!s) return false;
     e = s->engine;
@@ -577,6 +599,7 @@ static bool p36_forward_ffn_vulkan(p36_session *s,
                                         n_tok,
                                         inp,
                                         out,
+                                        inp_q8_rot,
                                         false);
 }
 
@@ -1243,18 +1266,40 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
                     pos0, il, l->kind == P36_LAYER_FULL_ATTN ? "full" : "recurrent");
             return false;
         }
-        bool fused_norm = p36_gpu_add_rms_norm_q8_k_tensor(
-            rt->norm, rt->inp_q8, rt->next_hidden, rt->next_hidden, rt->hidden,
-            e->model.map, e->model.size, l->post_attention_norm->abs_offset,
-            P36_N_EMBD, n_tok, P36_RMS_EPS);
-        if (!fused_norm && !p36_gpu_add_rms_norm_tensor(
+        /* Folded gate/up weights make the FFN consume the rotated activation,
+         * so let the fused norm emit it while the rows are still in LDS.  The
+         * pointer is advisory: if the FFN decides it wants no rotation it
+         * simply ignores it, and if it does want one and the pointer is NULL it
+         * falls back to the standalone prepare. */
+        const p36_gpu_tensor *norm_rot_q8 = NULL;
+        uint32_t rot_off = 0;
+        bool want_rot = P36_MODEL_DENSE && rt->had_signs && rt->had_q8 &&
+                        p36_vk_use_fused_had() &&
+                        (p36_hadamard_rotate_enabled(l->ffn_gate_shexp) ||
+                         p36_hadamard_rotate_enabled(l->ffn_up_shexp)) &&
+                        p36_hadamard_sign_offset(P36_N_EMBD, &rot_off);
+        bool fused_norm = want_rot &&
+                          p36_gpu_add_rms_norm_q8_k_rot_tensor(
+                              rt->norm, rt->inp_q8, rt->had_q8, rt->next_hidden,
+                              rt->next_hidden, rt->hidden, rt->had_signs, rot_off,
+                              g_p36_hadamard.inv_sqrt_block,
+                              e->model.map, e->model.size,
+                              l->post_attention_norm->abs_offset,
+                              P36_N_EMBD, n_tok, P36_RMS_EPS) != 0;
+        if (fused_norm) norm_rot_q8 = rt->had_q8;
+        if (!fused_norm &&
+            !p36_gpu_add_rms_norm_q8_k_tensor(
+                rt->norm, rt->inp_q8, rt->next_hidden, rt->next_hidden, rt->hidden,
+                e->model.map, e->model.size, l->post_attention_norm->abs_offset,
+                P36_N_EMBD, n_tok, P36_RMS_EPS) &&
+            !p36_gpu_add_rms_norm_tensor(
                 rt->norm, rt->next_hidden, rt->next_hidden, rt->hidden,
                 e->model.map, e->model.size, l->post_attention_norm->abs_offset,
                 P36_N_EMBD, n_tok, P36_RMS_EPS)) {
             return false;
         }
         if (fused_norm) rt->inp_q8_valid = true;
-        if (!p36_forward_ffn_vulkan(s, l, il, n_tok, rt->norm, rt->hidden)) {
+        if (!p36_forward_ffn_vulkan(s, l, il, n_tok, rt->norm, rt->hidden, norm_rot_q8)) {
             fprintf(stderr, "p36: ffn block failed at pos=%u layer=%u\n", pos0, il);
             return false;
         }
@@ -1656,11 +1701,29 @@ static bool p36_sessions_eval_batch_vulkan(p36_decode_item *items, int count) {
                     e->directional_steering_attn_scale) != 0;
         }
         if (ok) {
-            bool fused_norm = p36_gpu_add_rms_norm_q8_k_tensor(
-                    rt->norm, rt->inp_q8, rt->next_hidden, rt->next_hidden, rt->hidden,
-                    e->model.map, e->model.size,
-                    l->post_attention_norm->abs_offset,
-                    P36_N_EMBD, rows, P36_RMS_EPS) != 0;
+            const p36_gpu_tensor *norm_rot_q8 = NULL;
+            uint32_t rot_off = 0;
+            bool want_rot = P36_MODEL_DENSE && rt->had_signs && rt->had_q8 &&
+                            p36_vk_use_fused_had() &&
+                            (p36_hadamard_rotate_enabled(l->ffn_gate_shexp) ||
+                             p36_hadamard_rotate_enabled(l->ffn_up_shexp)) &&
+                            p36_hadamard_sign_offset(P36_N_EMBD, &rot_off);
+            bool fused_norm = want_rot &&
+                              p36_gpu_add_rms_norm_q8_k_rot_tensor(
+                                  rt->norm, rt->inp_q8, rt->had_q8, rt->next_hidden,
+                                  rt->next_hidden, rt->hidden, rt->had_signs, rot_off,
+                                  g_p36_hadamard.inv_sqrt_block,
+                                  e->model.map, e->model.size,
+                                  l->post_attention_norm->abs_offset,
+                                  P36_N_EMBD, rows, P36_RMS_EPS) != 0;
+            if (fused_norm) norm_rot_q8 = rt->had_q8;
+            if (!fused_norm) {
+                fused_norm = p36_gpu_add_rms_norm_q8_k_tensor(
+                        rt->norm, rt->inp_q8, rt->next_hidden, rt->next_hidden, rt->hidden,
+                        e->model.map, e->model.size,
+                        l->post_attention_norm->abs_offset,
+                        P36_N_EMBD, rows, P36_RMS_EPS) != 0;
+            }
             if (fused_norm) {
                 rt->inp_q8_valid = true;
             } else {
@@ -1670,11 +1733,11 @@ static bool p36_sessions_eval_batch_vulkan(p36_decode_item *items, int count) {
                         l->post_attention_norm->abs_offset,
                         P36_N_EMBD, rows, P36_RMS_EPS) != 0;
             }
-        }
-        if (ok) {
-            ok = p36_forward_ffn_vulkan_model(
-                    rt, &e->model, l, e->expert_weights_scale, il,
-                    rows, rt->norm, rt->hidden, true);
+            if (ok) {
+                ok = p36_forward_ffn_vulkan_model(
+                        rt, &e->model, l, e->expert_weights_scale, il,
+                        rows, rt->norm, rt->hidden, norm_rot_q8, true);
+            }
         }
         if (ok && e->directional_steering_ffn_scale != 0.0f) {
             ok = p36_gpu_directional_steering_project_tensor(
@@ -2021,6 +2084,7 @@ static bool p36_mtp_forward_vulkan(p36_session *s,
                                       1,
                                       rt->norm,
                                       rt->mtp_cur,
+                                      NULL,
                                       false)) return false;
     if (!p36_gpu_add_tensor(rt->mtp_cur, rt->mtp_next, rt->mtp_cur, P36_N_EMBD)) return false;
     if (!p36_gpu_rms_norm_weight_rows_tensor(rt->mtp_head,
@@ -2036,14 +2100,28 @@ static bool p36_mtp_forward_vulkan(p36_session *s,
          * the verifier accepted): stop before the 508 MB output projection. */
         return true;
     }
-    if (!p36_gpu_tensor_matmul_scaled(&e->model,
-                                      e->weights.output,
-                                      rt->mtp_head,
-                                      rt->mtp_logits,
-                                      P36_N_EMBD,
-                                      P36_N_VOCAB,
-                                      1,
-                                      p36_tensor_scalar_or(&e->model, e->weights.output_scale, 1.0f))) return false;
+    /* The shared projection is the target's own output tensor, so it needs the
+     * target's own recipe: a Prism-rotated (ternary) output weight is only
+     * consumable through the prepared q8_k activation, never as a raw float
+     * row.  Mirrors p36_forward_tokens' logits branch. */
+    {
+        const float head_scale = p36_tensor_scalar_or(&e->model, e->weights.output_scale, 1.0f);
+        bool head_ok;
+        if (p36_hadamard_rotate_enabled(e->weights.output)) {
+            head_ok = p36_hadamard_prepare(rt, rt->mtp_head, P36_N_EMBD, 1) &&
+                      p36_gpu_tensor_matmul_q8_or_float_scaled(&e->model, e->weights.output,
+                                                               rt->mtp_head, rt->had_q8,
+                                                               rt->mtp_logits,
+                                                               P36_N_EMBD, P36_N_VOCAB, 1,
+                                                               head_scale);
+        } else {
+            head_ok = p36_gpu_tensor_matmul_scaled(&e->model, e->weights.output,
+                                                   rt->mtp_head, rt->mtp_logits,
+                                                   P36_N_EMBD, P36_N_VOCAB, 1,
+                                                   head_scale);
+        }
+        if (!head_ok) return false;
+    }
     if (e->quality && !p36_gpu_tensor_all_finite(rt->mtp_logits, P36_N_VOCAB)) return false;
     /* The row stays on the device: the drafter only needs top-2, and pulling
      * 1 MB of logits back per draft costs more than the draft itself. */

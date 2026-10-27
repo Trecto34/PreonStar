@@ -65,6 +65,19 @@ static void p36_vk_prof_report(void) {
         fclose(p36_vk_prof_timeline_fp);
         p36_vk_prof_timeline_fp = NULL;
     }
+    if (getenv("P36_VK_PROF_WG_HIST")) {
+        static const char *labels[4] = {"<5", "5-20", "20-40", ">40"};
+        fprintf(stderr, "p36: WG histogram (dispatches per bucket, by op)\n");
+        for (uint32_t i = 0; i < p36_vk_prof_op_n; i++) {
+            const p36_vk_prof_op_row *r = &p36_vk_prof_op_rows[i];
+            uint32_t total = r->wg_hist[0] + r->wg_hist[1] + r->wg_hist[2] + r->wg_hist[3];
+            if (!total) continue;
+            fprintf(stderr, "p36:   wg %-28s n=%u", r->name, total);
+            for (uint32_t b = 0; b < 4; b++)
+                fprintf(stderr, " %s=%u", labels[b], r->wg_hist[b]);
+            fprintf(stderr, "\n");
+        }
+    }
 }
 
 void p36_gpu_cleanup(void) {
@@ -123,6 +136,7 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.dense_extra_small_pq2_0);
     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_q2_0);
     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode);
+    p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_ptq1_0_nx);
     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_iq2s_pair);
     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_iq2s);
     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_iq2xxs);

@@ -480,6 +480,27 @@ int p36_gpu_add_rms_norm_tensor(
         uint32_t                rows,
         float                   eps);
 
+/* As below, plus out_had_q8 = q8_K(H(signs . out_norm) / sqrt(1024)) for the
+ * rotated-weight path (same bytes hadamard_prepare_tensor would produce, so
+ * that dispatch can be skipped).  Pass signs == NULL or out_had_q8 == NULL to
+ * skip the extra epilogue. */
+int p36_gpu_add_rms_norm_q8_k_rot_tensor(
+        p36_gpu_tensor       *out_norm,
+        p36_gpu_tensor       *out_q8,
+        p36_gpu_tensor       *out_had_q8,
+        p36_gpu_tensor       *out_sum,
+        const p36_gpu_tensor *a,
+        const p36_gpu_tensor *b,
+        const p36_gpu_tensor *signs,
+        uint32_t              sign_offset,
+        float                 rot_scale,
+        const void            *model_map,
+        uint64_t                model_size,
+        uint64_t                weight_offset,
+        uint32_t                n,
+        uint32_t                rows,
+        float                   eps);
+
 /* out_sum = a + b, out_norm = rmsnorm(out_sum) * weight, out_q8 = q8_K(out_norm), fused per row.
  * out_sum may alias a or b. */
 int p36_gpu_add_rms_norm_q8_k_tensor(

@@ -203,17 +203,21 @@ static bool p36_vk_use_fused_rms_q8(void) {
     return true;
 }
 
-int p36_gpu_add_rms_norm_q8_k_tensor(p36_gpu_tensor *out_norm,
-                                     p36_gpu_tensor *out_q8,
-                                     p36_gpu_tensor *out_sum,
-                                     const p36_gpu_tensor *a,
-                                     const p36_gpu_tensor *b,
-                                     const void *model_map,
-                                     uint64_t model_size,
-                                     uint64_t weight_offset,
-                                     uint32_t n,
-                                     uint32_t rows,
-                                     float eps) {
+int p36_gpu_add_rms_norm_q8_k_rot_tensor(p36_gpu_tensor *out_norm,
+                                         p36_gpu_tensor *out_q8,
+                                         p36_gpu_tensor *out_had_q8,
+                                         p36_gpu_tensor *out_sum,
+                                         const p36_gpu_tensor *a,
+                                         const p36_gpu_tensor *b,
+                                         const p36_gpu_tensor *signs,
+                                         uint32_t sign_offset,
+                                         float rot_scale,
+                                         const void *model_map,
+                                         uint64_t model_size,
+                                         uint64_t weight_offset,
+                                         uint32_t n,
+                                         uint32_t rows,
+                                         float eps) {
     if (!out_q8 || p36_gpu_quality || !p36_vk_use_add_rms() || !p36_vk_use_gpu_rms() ||
         !p36_vk_use_fused_rms_q8() ||
         (n & (P36_VK_QK_K - 1u)) != 0 || n > 5120u) {
@@ -229,6 +233,10 @@ int p36_gpu_add_rms_norm_q8_k_tensor(p36_gpu_tensor *out_norm,
         !p36_gpu_tensor_range_ok(out_q8, 0, q8_bytes)) {
         return 0;
     }
+    /* The rotated path needs both the sign table and somewhere to put the
+     * Q8_K of the transformed row; without them the epilogue is skipped. */
+    uint32_t rot = out_had_q8 && signs && (n & 1023u) == 0u ? 1u : 0u;
+    if (rot && !p36_gpu_tensor_range_ok(out_had_q8, 0, q8_bytes)) return 0;
     const float *weight = (const float *)p36_gpu_weight_bytes(model_map, model_size, weight_offset,
                                                               (uint64_t)n * sizeof(float));
     if (!weight) return 0;
@@ -237,16 +245,38 @@ int p36_gpu_add_rms_norm_q8_k_tensor(p36_gpu_tensor *out_norm,
         uint32_t n;
         float eps;
         uint32_t blocks;
-    } push = { n, eps, blocks };
+        uint32_t rot;
+        uint32_t sign_offset;
+        float inv_sqrt_block;
+    } push = { n, eps, blocks, rot, sign_offset, rot_scale };
     pthread_mutex_lock(&p36_vk_mu);
     p36_gpu_tensor *wt = p36_vk_weight_get_unlocked(weight, (uint64_t)n * sizeof(float));
     int ok = wt != NULL;
     if (ok) {
-        const p36_gpu_tensor *bindings[6] = { a, b, wt, out_sum, out_norm, out_q8 };
+        /* rot == 0 still has to supply in-range descriptors for 6 and 7. */
+        const p36_gpu_tensor *bindings[8] = { a, b, wt, out_sum, out_norm, out_q8,
+                                              rot ? signs : out_norm,
+                                              rot ? out_had_q8 : out_q8 };
         ok = p36_vk_run_unlocked("add_rms_norm_q8_k", &p36_vk.add_rms_norm_q8_k, bindings, &push, sizeof(push), rows, 1, 1);
     }
     pthread_mutex_unlock(&p36_vk_mu);
     return ok;
+}
+
+int p36_gpu_add_rms_norm_q8_k_tensor(p36_gpu_tensor *out_norm,
+                                     p36_gpu_tensor *out_q8,
+                                     p36_gpu_tensor *out_sum,
+                                     const p36_gpu_tensor *a,
+                                     const p36_gpu_tensor *b,
+                                     const void *model_map,
+                                     uint64_t model_size,
+                                     uint64_t weight_offset,
+                                     uint32_t n,
+                                     uint32_t rows,
+                                     float eps) {
+    return p36_gpu_add_rms_norm_q8_k_rot_tensor(out_norm, out_q8, NULL, out_sum, a, b, NULL, 0u,
+                                                0.0f, model_map, model_size, weight_offset, n,
+                                                rows, eps);
 }
 
 

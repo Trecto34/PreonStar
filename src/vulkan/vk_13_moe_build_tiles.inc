@@ -505,7 +505,53 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                             (uint32_t)blocks, (uint32_t)row_bytes, scale,
                         };
                         ok = p36_vk_run_unlocked(op, small, bindings, &spush, sizeof(spush),
-                                                 ((uint32_t)out_dim + 1u) / 2u, 1, 1);
+                                                 ((uint32_t)out_dim + 3u) / 4u, 1, 1);
+                    }
+                    pthread_mutex_unlock(&p36_vk_mu);
+                    return ok;
+                }
+                /* PTQ1_0 small batches: the 64-token mmq tile costs the same
+                 * for 2 rows as for 64 (a 2-token MTP verify batch measured
+                 * 22x a decode step), so stream each ternary block once for up
+                 * to 2 tokens instead.  Row-identical to the one-token decode
+                 * kernel, which stays the n_tok == 1 path above. */
+                uint32_t nx_first = 0;
+                bool nx_small = is_ptq1_0 && p36_vk.have_int_dot &&
+                                p36_vk.subgroup_size == 64u && p36_vk.subgroup_arithmetic;
+                if (nx_small && n_tok > 8u) {
+                    /* Ragged tail past whole 64-token tiles: the mmq tile takes
+                     * the aligned head, the small kernel the last <= 8 rows. */
+                    uint32_t rem = (uint32_t)n_tok % 64u;
+                    if (rem > 0u && rem <= 8u) nx_first = (uint32_t)n_tok - rem;
+                    else nx_small = false;
+                }
+                if (nx_small) {
+                    if (nx_first) {
+                        push.n_tok = nx_first;
+                        ok = p36_vk_run_unlocked(
+                            op, &p36_vk.dense_extra_mmq_ptq1_0,
+                            bindings, &push, sizeof(push),
+                            ((uint32_t)out_dim + 31u) / 32u, nx_first / 64u, 1);
+                        push.n_tok = n_tok;
+                    }
+                    for (uint32_t tok0 = nx_first; ok && tok0 < (uint32_t)n_tok; tok0 += 2u) {
+                        uint32_t group = (uint32_t)n_tok - tok0;
+                        if (group > 2u) group = 2u;
+                        struct {
+                            uint32_t out_dim;
+                            uint32_t n_tok;
+                            uint32_t tok0;
+                            uint32_t blocks;
+                            uint32_t row_bytes;
+                            float scale;
+                        } spush = {
+                            (uint32_t)out_dim, group, tok0,
+                            (uint32_t)blocks, (uint32_t)row_bytes, scale,
+                        };
+                        ok = p36_vk_run_unlocked("dense_extra_nx",
+                                                 &p36_vk.dense_extra_decode_ptq1_0_nx,
+                                                 bindings, &spush, sizeof(spush),
+                                                 ((uint32_t)out_dim + 3u) / 4u, 1, 1);
                     }
                     pthread_mutex_unlock(&p36_vk_mu);
                     return ok;

@@ -368,6 +368,7 @@ static int p36_vk_submit_current_unlocked(bool host_read) {
                              VK_PIPELINE_STAGE_HOST_BIT,
                              0, 1, &host_barrier, 0, NULL, 0, NULL);
     }
+    p36_vk_prof_group_close_locked();
     {
         /* P36_VK_PROF_KERNEL splits the submit path, which no other counter
          * covers: driver-side command buffer teardown versus queue submit. */

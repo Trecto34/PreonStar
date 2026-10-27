@@ -143,23 +143,38 @@ static int p36_vk_run_unlocked(
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, kernel->pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, kernel->layout, 0, 1, &set, 0, NULL);
     if (push_bytes) vkCmdPushConstants(cmd, kernel->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push);
-    uint32_t query0 = UINT32_MAX;
-    if (p36_vk.prof_kernel && p36_vk_prof_skip_left > 0) {
-        p36_vk_prof_skip_left--;
-    } else if (p36_vk.prof_kernel && p36_vk.query_pool && p36_vk_prof_query_count + 2u <= P36_VK_PROF_QUERY_CAP) {
-        query0 = p36_vk_prof_query_count;
-        p36_vk_prof_query_count += 2u;
-        p36_vk_prof_query_path[query0 / 2u] = kernel->path;
-        p36_vk_prof_query_op[query0 / 2u] = prof_op;
-        p36_vk_prof_query_groups[query0 / 2u] = groups_total;
-        p36_vk_prof_query_host_ns[query0 / 2u] = p36_vk_now_ns();
-        vkCmdResetQueryPool(cmd, p36_vk.query_pool, query0, 2);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, p36_vk.query_pool, query0);
+    /* Bracketing is per op-group, not per dispatch: 756 decode dispatches per
+     * token would each force a BOTTOM_OF_PIPE flush and change the thing being
+     * measured.  A group opens on the first dispatch of a kernel path, stays
+     * open across consecutive dispatches of that path and closes when the path
+     * changes (or at vkEndCommandBuffer). */
+    if (p36_vk.prof_kernel && p36_vk.query_pool) {
+        if (p36_vk_prof_skip_left > 0) {
+            p36_vk_prof_skip_left--;
+            p36_vk_prof_group_close_locked();
+        } else if (p36_vk_prof_grp_path != kernel->path) {
+            p36_vk_prof_group_close_locked();
+            if (p36_vk_prof_query_count + 2u <= P36_VK_PROF_QUERY_CAP) {
+                uint32_t q0 = p36_vk_prof_query_count;
+                p36_vk_prof_query_count += 2u;
+                p36_vk_prof_query_path[q0 / 2u] = kernel->path;
+                p36_vk_prof_query_op[q0 / 2u] = prof_op;
+                p36_vk_prof_query_groups[q0 / 2u] = 0;
+                p36_vk_prof_query_host_ns[q0 / 2u] = p36_vk_now_ns();
+                /* Reset exactly the pair about to be written.  Resetting the
+                 * whole pool once per command buffer hangs the RADV device
+                 * (pending queries from an in-flight submission are clobbered). */
+                vkCmdResetQueryPool(cmd, p36_vk.query_pool, q0, 2);
+                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, p36_vk.query_pool, q0);
+                p36_vk_prof_grp_base = q0;
+                p36_vk_prof_grp_path = kernel->path;
+            }
+        }
+        if (p36_vk_prof_grp_base != UINT32_MAX)
+            p36_vk_prof_query_groups[p36_vk_prof_grp_base / 2u] += groups_total;
     }
+    p36_vk_prof_wg_hist_add(prof_op, groups_total);
     vkCmdDispatch(cmd, groups_x, groups_y, groups_z);
-    if (query0 != UINT32_MAX) {
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, p36_vk.query_pool, query0 + 1u);
-    }
     if (p36_vk.prof_ops) {
         uint64_t now = p36_vk_now_ns();
         p36_vk_prof_cmd_ns += now - prof_ph;
@@ -222,7 +237,8 @@ int p36_gpu_init(void) {
     p36_vk.directional_steering = P36_VK_KERNEL("vulkan/directional_steering.spv", 2, 16, 1u << 0);
     p36_vk.rms_norm = P36_VK_KERNEL("vulkan/rms_norm.spv", 3, 12, 1u << 2);
     p36_vk.add_rms_norm = P36_VK_KERNEL("vulkan/add_rms_norm.spv", 5, 8, (1u << 3) | (1u << 4));
-    p36_vk.add_rms_norm_q8_k = P36_VK_KERNEL("vulkan/add_rms_norm_q8_k.spv", 6, 12, (1u << 3) | (1u << 4) | (1u << 5));
+    p36_vk.add_rms_norm_q8_k = P36_VK_KERNEL("vulkan/add_rms_norm_q8_k.spv", 8, 24,
+                                                 (1u << 3) | (1u << 4) | (1u << 5) | (1u << 7));
     p36_vk.swiglu = P36_VK_KERNEL("vulkan/swiglu.spv", 3, 12, 1u << 2);
     p36_vk.swiglu_q8_k = P36_VK_KERNEL("vulkan/swiglu_q8_k.spv", 4, 20,
                                         (1u << 2) | (1u << 3));
@@ -348,6 +364,7 @@ int p36_gpu_init(void) {
     p36_vk.dense_extra_small_q2_0 = P36_VK_KERNEL("vulkan/dense_extra_small_q2_0.spv", 4, 24, 1u << 2);
     p36_vk.dense_extra_small_pq2_0 = P36_VK_KERNEL("vulkan/dense_extra_small_pq2_0.spv", 4, 24, 1u << 2);
     p36_vk.dense_extra_decode_ptq1_0 = P36_VK_KERNEL("vulkan/dense_extra_decode_ptq1_0.spv", 4, 20, 1u << 2);
+    p36_vk.dense_extra_decode_ptq1_0_nx = P36_VK_KERNEL("vulkan/dense_extra_decode_ptq1_0_nx.spv", 4, 24, 1u << 2);
     p36_vk.dense_extra_decode_iq2s_pair = P36_VK_KERNEL(
         "vulkan/dense_extra_decode_iq2s_pair.spv", 6, 24, (1u << 4) | (1u << 5));
     p36_vk.dense_extra_decode_iq2s = P36_VK_KERNEL("vulkan/dense_extra_decode_iq2s.spv", 4, 20, 1u << 2);
@@ -471,6 +488,18 @@ int p36_gpu_init(void) {
     p36_vk.subgroup_clustered =
         (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_CLUSTERED_BIT) != 0;
     p36_vk.bc250 = p36_vk.props.vendorID == 0x1002u && p36_vk.props.deviceID == 0x13feu;
+    /* Timestamp capability first: every GPU-ms number below divides by
+     * timestampPeriod, so log it (and whether the chosen queue supports
+     * timestamps at all) before any measurement can be trusted. */
+    fprintf(stderr,
+            "p36: timestamps period_ns=%.6f computeAndGraphics=%u valid_bits=%u "
+            "queue_family=%u (%s) ace=%d\n",
+            (double)p36_vk.props.limits.timestampPeriod,
+            (unsigned)p36_vk.props.limits.timestampComputeAndGraphics,
+            p36_vk.timestamp_valid_bits,
+            p36_vk.queue_family,
+            p36_vk.ace_queue ? "ACE compute" : "graphics fallback",
+            (int)p36_vk.ace_queue);
 #ifdef P36_VULKAN_REQUIRE_BC250
     if (!p36_vk.bc250) {
         fprintf(stderr, "p36: this vulkan-bc250 build requires an AMD BC-250 (1002:13fe)\n");
@@ -650,7 +679,8 @@ int p36_gpu_init(void) {
 
     p36_vk.ready = true;
     p36_vk_stream_profile_init();
-    if (getenv("P36_VK_PROF") || getenv("P36_VK_PROF_KERNEL") || getenv("P36_VK_PROF_OP")) atexit(p36_vk_prof_report);
+    if (getenv("P36_VK_PROF") || getenv("P36_VK_PROF_KERNEL") || getenv("P36_VK_PROF_OP") ||
+        getenv("P36_VK_PROF_WG_HIST")) atexit(p36_vk_prof_report);
     pthread_mutex_unlock(&p36_vk_mu);
     return 1;
 
