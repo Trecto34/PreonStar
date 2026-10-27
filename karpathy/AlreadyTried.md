@@ -3386,3 +3386,37 @@ is bit-identical (frontier logits equal at chunk 64 and 256) but moved the
 kernel only 392.4 -> 385.3 ms (CyberTiel ctx 512 chunk 64). The per-workgroup
 A dequant + staging, shared by all waves, is the cost; a narrower tile has to
 re-amortize that, it is not idle-wave ALU. Reverted.
+
+## PITFALL: candidate binaries load the *caller's* shaders (2026-10-27)
+
+`p36_read_file` resolves `vulkan/*.spv` against `getcwd()` (`p36_vk.shader_root`)
+**before** the binary's own directory. Running a worktree binary from the main
+checkout therefore runs the main checkout's SPIR-V for every shader file that
+exists there; only brand-new shader files come from the worktree. Every speed
+verdict on a *modified* shader measured that way compared old vs old shader
+code. `tests/bench_ab.sh` now pins each arm with
+`P36_SHADER_DIR=$(dirname binary)`; set it by hand for any manual run
+(`P36_SHADER_DIR=/path/to/worktree ./wt/p36 ...`).
+Verdicts this session that are **invalid** (shader edited in place, measured
+from the main checkout) and need a re-measure: parallel conv tiles (prefill),
+MoE down split rebuild ("decode halved" = old fused shader on an 8x grid),
+`add_rms_norm_q8_k` subgroup shuffles ("neutral"), mmq dead-wave skip
+("-1.8%"). Their parity checks ran inside the worktree and stand. Unaffected:
+13eb0aa, 8409f3a, 7c7863d (new .spv files), the vocab-prefix verdict, aa7dc67.
+
+## MTP verify: identity expert kernels over all verify rows at once — ACCEPTED (2026-10-27)
+
+A 2..4-row MTP verify ran the routed experts as one identity pass per row
+(`P36_VK_MOE_F32_ROWS` loop): 2 dispatches per row per layer, every expert
+row read once per verify row. The identity gate/up kernel already indexed the
+token by `pair / n_used`; `moe_down_q2k_sum_decode` now takes the token from
+`gl_WorkGroupID.y`, and the host sets identity for the whole micro-batch
+(`multi_rows`), so a layer is 2 dispatches regardless of rows. Per-slot math is
+unchanged: an in-run check (per-row loop vs batched, same inputs) gave
+maxdiff 0 on every layer, and greedy MTP text (200 tok) is byte-identical in
+all runs. A token loop inside the workgroup (cache reuse of shared experts) was
+slower than grid.y (93.8/87.0 vs 94.6/97.1) and dropped. MTP generation,
+CyberTiel + APEX head, draft 3 margin 2, 3 interleaved pairs vs
+`P36_VK_MOE_ROWS_SHARE=0`: 94.73/91.35/77.13 -> 99.06/92.52/99.35 (median
+91.35 -> 99.06; one off-arm outlier, ~+4% against the clean off runs). Plain
+decode/prefill vs `aa7dc67` unchanged (-0.12% / -0.42%, `evidence/raw/w-mtp-multirow/`).

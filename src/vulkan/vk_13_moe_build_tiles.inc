@@ -1304,16 +1304,27 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
      * turns, and it was 1.1-2x slower than the GEMM at 4..64 tokens. */
     const uint32_t apex_gemm_min = p36_vk_micro_batch ? p36_vk_moe_gemm_min() : 2u;
     const bool apex_prefill = n_tok >= apex_gemm_min;
+    /* A 2..4-row MTP verify takes the identity decode kernels over all its
+     * slots at once (one gate/up and one down-sum dispatch per layer, each
+     * expert row read once per dispatch) instead of one identity pass per
+     * row.  Per-slot math is the same, so it matches the per-row loop bit
+     * for bit; P36_VK_MOE_ROWS_SHARE=0 restores the loop (diagnostic). */
+    const bool multi_rows = selected && weights && p36_vk_micro_batch &&
+        n_tok > 1u && n_tok <= 4u && p36_vk_moe_pair_decode() &&
+        p36_vk_env_default_on("P36_VK_MOE_F32_ROWS") &&
+        p36_vk_env_default_on("P36_VK_MOE_ROWS_SHARE") &&
+        p36_vk_use_moe_down_sum_decode() &&
+        !(p36_vk_stream.enabled && layer >= p36_vk_stream.full_layers);
     /* The IQ3_XXS expert pair is the identity-decode schedule, not a prefill
      * GEMM: gate+up go out in one dispatch, the down sum in another, and the
      * q8_K staging stage disappears.  Behind the prefill threshold it never
      * ran at n_tok 1, which cost Occamy 54 -> 76 t/s.  On by default; it
      * moves tokens against the q8 route on some prompts, so
      * P36_VK_MOE_PAIR_DECODE=0 restores the bit-exact q8 path. */
-    bool apex_iq3xxs = (apex_prefill || (n_tok == 1u && p36_vk_moe_pair_decode())) &&
+    bool apex_iq3xxs = (apex_prefill || ((n_tok == 1u || multi_rows) && p36_vk_moe_pair_decode())) &&
                        gu_iq3xxs && down_iq3xxs &&
                        p36_vk_env_default_on("P36_VK_MOE_APEX_IQ3XXS");
-    bool apex_q3k = (apex_prefill || (n_tok == 1u && p36_vk_moe_pair_decode())) &&
+    bool apex_q3k = (apex_prefill || ((n_tok == 1u || multi_rows) && p36_vk_moe_pair_decode())) &&
                     gu_q3k && down_q3k &&
                     p36_vk_env_default_on("P36_VK_MOE_APEX_Q3K");
     bool apex = apex_iq3xxs_q3k || apex_iq2s_iq3xxs || apex_iq2s_iq2xxs_iq3xxs || apex_q3k || apex_iq3xxs;
@@ -1327,7 +1338,7 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
         ((gu_q3k && down_q3k) || (gu_iq3xxs && down_iq3xxs) ||
          (gu_iq3xxs && down_q3k) || (gu_iq2s && down_iq3xxs) ||
          (gu_iq2s_iq2xxs && down_iq3xxs) || (gu_iq2xxs && down_q2k));
-    if (row_pair && rows_on && p36_vk_micro_batch && n_tok > 1u && n_tok <= 4u) {
+    if (row_pair && rows_on && p36_vk_micro_batch && n_tok > 1u && n_tok <= 4u && !multi_rows) {
         p36_gpu_tensor *vx[4] = {0}, *vs[4] = {0}, *vw[4] = {0}, *vo[4] = {0};
         uint64_t x_row = (uint64_t)in_dim * sizeof(float);
         uint64_t o_row = (uint64_t)out_dim * sizeof(float);
@@ -1470,7 +1481,7 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
 
     /* Decode: one distinct expert per slot, so the selection itself is the
      * schedule and the tile build dispatch is skipped. */
-    bool identity = n_tok == 1u && !overflow;
+    bool identity = (n_tok == 1u || (multi_rows && row_pair)) && !overflow;
     bool down_sum_decode = identity && p36_vk_use_moe_down_sum_decode();
     /* Prefill batches route to the register-tiled GEMM kernels: wider
      * expert token tiles amortize the dequant and weight reads that bound
@@ -1615,7 +1626,7 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                 uint32_t has_scales;
                 uint32_t identity;
             } dpush = { out_dim, mid_dim, mid_dim / P36_VK_QK_K, n_used, down->has_scales ? 1u : 0u,
-                        identity ? 1u : 0u };
+                        identity ? (uint32_t)n_tok : 0u };  /* down-sum: token count */
             const p36_gpu_tensor *schedule = identity ? (sel_slots ? sel_slots : selected) : wave_tiles;
             if (down_sum_decode) {
                 const p36_gpu_tensor *db[7] = {
@@ -1636,7 +1647,7 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                                        &p36_vk.moe_down_q2k_sum_decode;
                 ok = p36_vk_run_unlocked(dname, dkernel,
                                          db, &dpush, sizeof(dpush),
-                                         out_dim, 1, 1);
+                                         out_dim, identity ? (uint32_t)n_tok : 1u, 1);
             } else {
                 const p36_gpu_tensor *db[6] = {
                     down_bank, mid8, schedule,

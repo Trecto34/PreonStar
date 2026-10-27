@@ -27,7 +27,7 @@ layout(push_constant) uniform Push {
     uint blocks;
     uint n_used;
     uint has_scales;
-    uint pad;
+    uint n_tok;     /* identity tokens (MTP verify rows); host-side only */
 } pc;
 
 const uint Q2K_U16 = 42u;
@@ -101,16 +101,21 @@ void main(void) {
 #else
     uint row_u16 = pc.blocks * Q2K_U16;
 #endif
+    /* Identity batches (MTP verify rows) put the token on grid.y; each
+     * token's sum keeps the single-token order.  Decode dispatches y = 1. */
+    {
+    uint t = gl_WorkGroupID.y;
     float sum = 0.0;
 
     for (uint u = 0u; u < pc.n_used; u++) {
-        uint expert = selected[u];
+        uint slot = t * pc.n_used + u;
+        uint expert = selected[slot];
 #if defined(P36_MOE_IQ2S) || defined(P36_MOE_IQ3S) || defined(P36_MOE_IQ3XXS) || defined(P36_MOE_Q3K)
         uint base_bytes = (expert * pc.out_dim + row) * row_bytes;
 #else
         uint base_u16 = (expert * pc.out_dim + row) * row_u16;
 #endif
-        uint m2 = u * pc.in_dim / 2u;
+        uint m2 = slot * pc.in_dim / 2u;
         float acc = 0.0;
 
 #ifdef P36_MOE_IQ3XXS
@@ -288,8 +293,9 @@ void main(void) {
         acc = subgroupAdd(acc);
         if (tid == 0u) {
             float sc = pc.has_scales != 0u ? scales[expert] : 1.0;
-            sum = fma32(acc * sc, route[u], sum);
+            sum = fma32(acc * sc, route[slot], sum);
         }
     }
-    if (tid == 0u) y[row] = sum;
+    if (tid == 0u) y[t * pc.out_dim + row] = sum;
+    }
 }

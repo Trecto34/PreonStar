@@ -57,7 +57,11 @@ run_one() { # $1=label $2=binary $3=rep
     local label="$1" bin="$2" rep="$3" tag st et row
     tag="$(mktemp)"
     st="$(gpu_temp)"
-    if ! timeout --kill-after=5s 300s "$bin" --vulkan -m "$model" \
+    # The engine resolves vulkan/*.spv against the current directory before
+    # the binary's own directory, so pin each arm to its own shaders: without
+    # this a worktree candidate silently runs the caller's checkout's SPIR-V.
+    if ! P36_SHADER_DIR="$(dirname -- "$(readlink -f -- "$bin")")" \
+        timeout --kill-after=5s 300s "$bin" --vulkan -m "$model" \
         --prompt-file "$root_dir/tests/long_context_story_prompt.txt" \
         --ctx-start "$ctx" --ctx-max "$ctx" --ctx-alloc "$(( ctx + gen + 256 ))" \
         --prefill-chunk "$chunk" --gen-tokens "$gen" >"$tag" 2>&1; then
