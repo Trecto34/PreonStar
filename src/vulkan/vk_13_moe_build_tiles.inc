@@ -1298,7 +1298,12 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
     /* Prefill batches only: the f32-activation GEMM is what makes IQ3_XXS/Q3_K
      * prefill ~4x faster, but it moves logits against the q8 route (~0.4-1.0
      * at decode), so decode and small batches keep the q8 route. */
-    const bool apex_prefill = n_tok >= p36_vk_moe_gemm_min();
+    /* APEX expert recipes take the GEMM from 2 tokens up outside MTP
+     * micro-batches: their decode already runs the f32 pair, so the q8 route
+     * no longer buys decode-matching numerics for chunk tails and short
+     * turns, and it was 1.1-2x slower than the GEMM at 4..64 tokens. */
+    const uint32_t apex_gemm_min = p36_vk_micro_batch ? p36_vk_moe_gemm_min() : 2u;
+    const bool apex_prefill = n_tok >= apex_gemm_min;
     /* The IQ3_XXS expert pair is the identity-decode schedule, not a prefill
      * GEMM: gate+up go out in one dispatch, the down sum in another, and the
      * q8_K staging stage disappears.  Behind the prefill threshold it never
@@ -1474,7 +1479,7 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
      * decode bit for bit; the GEMM's k order is fixed but differs from
      * decode, which the relaxed warm==cold session gate absorbs. */
     bool gemm = !identity && !p36_vk_micro_batch &&
-                n_tok >= p36_vk_moe_gemm_min() &&
+                n_tok >= (apex ? apex_gemm_min : p36_vk_moe_gemm_min()) &&
                 p36_vk_env_default_on("P36_VK_MOE_GEMM");
     /* IQ2_S experts: the prefill GEMM pair, the identity decode pair, and the
      * small-batch (2..127 token) f32 pair.  The f32 pair needs an IQ2_S down

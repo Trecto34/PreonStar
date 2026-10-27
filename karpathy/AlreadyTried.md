@@ -3358,3 +3358,21 @@ CyberTiel + APEX head, draft 3 margin 2, V=32768 vs full: code prompt
 98.26/86.98/104.29 vs 96.75/97.51/97.93 (median +0.8%, high spread), prose
 82.96 vs 87.36 (-5%). Rejected. `reconsider_if`: verify becomes bit-exact
 with serial decode, or a longer A/B shows a consistent gain across prompts.
+
+## APEX MoE: GEMM from 2 tokens for small prefill batches — ACCEPTED, +93% prefill at chunk 64 (2026-10-27)
+
+Prefill batches of 2..127 tokens on APEX expert recipes (chunk tails, short
+agent turns, small prompts) took neither the identity decode pair nor the GEMM
+(`apex_prefill`/`gemm` required n_tok >= `P36_VK_MOE_GEMM_MIN` = 128) and fell
+back to the q8 `moe_matvec` route; a 36-token prompt prefilled at ~84 t/s.
+The q8 route's reason (decode-matching numerics) no longer holds since APEX
+decode runs the f32 pair. Outside MTP micro-batches the APEX GEMM now starts
+at 2 tokens. Env probe first, CyberTiel prefill t/s q8 -> GEMM: chunk 64
+148 -> 293, 32 123 -> 189, 16 88 -> 119, 8 64 -> 74, 4 70 -> 79.
+Numerics (frontier 512 vs the chunk-256 all-GEMM reference): top-1 preserved,
+top-64 57/57 (chunk 64) and 55 vs 57 (chunk 16), max_abs 1.83 vs 1.46-1.62 for
+the old route — chunking-level drift, same GEMM k-order as accepted >=128
+prefill. A/B 3 pairs ctx 512 chunk 64 vs `7127dfe`: prefill
+150.31 -> 290.66 (+93%), decode flat. Occamy MiniPlus: chunk-64 prefill
+176 -> 277, route misses 640 -> 0, decode equal (77.8/78.3 vs 77.4/78.3).
+`evidence/raw/w-apex-small-gemm/`.
