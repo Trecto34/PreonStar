@@ -1941,10 +1941,11 @@ static bool p36_mtp_concat(p36_gpu_tensor *out,
                                b, 0, (uint64_t)P36_N_EMBD * sizeof(float));
 }
 
-static bool p36_mtp_eval_vulkan(p36_session *s,
-                                int token,
-                                uint32_t pos,
-                                const p36_gpu_tensor *h_in) {
+static bool p36_mtp_forward_vulkan(p36_session *s,
+                                   int token,
+                                   uint32_t pos,
+                                   const p36_gpu_tensor *h_in,
+                                   bool need_logits) {
     p36_engine *e;
     p36_vulkan_runtime *rt;
     p36_mtp_weights *mw;
@@ -2030,6 +2031,11 @@ static bool p36_mtp_eval_vulkan(p36_session *s,
                                              P36_N_EMBD,
                                              1,
                                              P36_RMS_EPS)) return false;
+    if (!need_logits) {
+        /* Filling the head's KV for a row we already know (a lookup draft that
+         * the verifier accepted): stop before the 508 MB output projection. */
+        return true;
+    }
     if (!p36_gpu_tensor_matmul_scaled(&e->model,
                                       e->weights.output,
                                       rt->mtp_head,
@@ -2042,6 +2048,13 @@ static bool p36_mtp_eval_vulkan(p36_session *s,
     /* The row stays on the device: the drafter only needs top-2, and pulling
      * 1 MB of logits back per draft costs more than the draft itself. */
     return true;
+}
+
+static bool p36_mtp_eval_vulkan(p36_session *s,
+                                int token,
+                                uint32_t pos,
+                                const p36_gpu_tensor *h_in) {
+    return p36_mtp_forward_vulkan(s, token, pos, h_in, true);
 }
 
 /* Top-2 of the head's logits without the 1 MB readback: one device reduction,

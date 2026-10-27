@@ -2979,3 +2979,16 @@ share the unpacked weight word across rows instead of re-unpacking per row.
 * Break-even per verify row is ~0.36 accepted tokens; we measure 0.3-0.35. The
   1.7x upstream figure needs near-flat row cost, i.e. multi-row MoE kernels.
 
+## 2026-10-26 Prompt lookup rides the MTP verifier - LANDS
+
+* `--lookup-k N` blends with MTP: the chain is appended only when the first MTP
+  draft equals the chain's first step, then verified in the same forward. Head
+  KV for committed lookup rows is refilled by a projection-free head forward.
+* Verbatim-repeat prompt: 95.21 plain -> 124.33 t/s (`--mtp-draft 3
+  --mtp-margin 2 --lookup-k 8 --lookup-order 5`), i.e. +31%; lookup-only 108.8,
+  MTP-only 107.6. Output byte-identical to MTP-only.
+* Cost when it does not fire (code prose): ~1%. Opt-in, so defaults unchanged.
+* Parity note: MTP can flip near-ties against plain serial decode (batched
+  verify forward); strict mode is 0.37 t/s, so this is inherent, not a bug in
+  the MoE row-pair path.
+

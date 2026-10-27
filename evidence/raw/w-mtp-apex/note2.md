@@ -82,3 +82,37 @@ Verify cost is linear in rows with no cliff (IQ2XXS): n=3 18.2 ms, n=5 27.2,
 n=6 30.9, n=8 39.1 (~3.7-4.1 ms per extra row). Break-even needs ~0.36 accepted
 tokens per row; measured marginal acceptance is ~0.3-0.35, which is exactly why
 the win sits at 4-12% instead of the 1.7x upstream gets with near-flat rows.
+
+## Lookup drafts ride the MTP verifier (+31% on repeat-heavy turns)
+
+`--lookup-k N` now feeds the same verify forward when the MTP draft agrees with
+the lookup chain's first step (`lookup[0] == pending && draft == lookup[1]`), and
+when the margin gate takes every draft but the history repeats verbatim
+(`lookup[0] == pending`) the chain is verified instead of drafting nothing.  The
+head's KV is filled for committed lookup rows by a head forward that stops before
+the output projection (`p36_mtp_forward_vulkan(..., need_logits=false)`), and the
+row/context budget is `max(mtp_draft - 1, lookup_k)`.
+
+Verbatim-repeat prompt (240 tokens), IQ2XXS-Q2K:
+
+| config | t/s |
+|---|---:|
+| plain | 95.21 |
+| `--lookup-k 8` (lookup only) | 108.77 |
+| `--mtp-draft 3 --mtp-margin 2` (MTP only) | 107.60 |
+| `--mtp-draft 3 --mtp-margin 2 --lookup-k 8 --lookup-order 5` | **124.33** |
+
+Output is byte-identical to MTP-without-lookup on that prompt: lookup only adds
+rows the verifier accepts, it never changes a decision.  On non-repetitive code
+prose the lookup chain costs ~1% (106.16 -> 105.19) because coincidence matches
+add rows that get rejected, so it stays opt-in (`--lookup-order 5` all but
+removes the false matches; order 4 with k=12 is much worse).
+
+## Numerics caveat found while checking parity
+
+On one long instruct prompt the MTP output differs from plain decode at temp 0.
+The verify forward is a *batch*, so it is not bit-identical to serial decode and
+near-ties flip: `P36_VK_MOE_F32_ROWS=0` does not restore parity (the difference
+comes from the batched trunk, not just the MoE row-pair path), and `--quality`
+(strict) runs at 0.37 t/s.  Same property exists upstream; worth knowing when
+comparing engine outputs token by token.

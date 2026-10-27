@@ -86,6 +86,7 @@ static int p36_spec_commit_tokens(p36_session *s, const int *verify, int verify_
 static int p36_spec_commit_pending(p36_session *s, const int *verify, int verify_n,
                                    uint32_t start_pos, const int *row_tops,
                                    int eos_token, int *accepted,
+                                   int head_covered, int n_lookup,
                                    char *err, size_t errlen) {
     p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
     int commit_n = 1;
@@ -133,6 +134,20 @@ static int p36_spec_commit_pending(p36_session *s, const int *verify, int verify
     }
     s->checkpoint_valid = true;
     p36_mtp_stats_add(verify_n, commit_n, commit_n == verify_n);
+    if (n_lookup > 0 && commit_n > head_covered) {
+        /* Lookup rows were committed without a head forward; fill the head's
+         * KV for them (no output projection needed) so the next cycle's drafts
+         * attend over the whole accepted prefix. */
+        for (int i = head_covered; i < commit_n; i++) {
+            p36_gpu_tensor *row_h = p36_vulkan_row(rt->next_hidden,
+                                                   (uint32_t)(i - 1), P36_N_EMBD);
+            bool ok = row_h && p36_mtp_forward_vulkan(s, verify[i],
+                                                      start_pos + (uint32_t)i,
+                                                      row_h, false);
+            p36_gpu_tensor_free(row_h);
+            if (!ok) break;
+        }
+    }
     return commit_n;
 }
 
@@ -219,7 +234,12 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
         p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
         int verify[P36_MTP_MAX_DRAFT];
         int row_tops[P36_MTP_MAX_DRAFT];
-        int draft_cap = e->mtp_draft_tokens - 1;
+        int lookup[P36_MTP_MAX_DRAFT];
+        int mtp_cap = e->mtp_draft_tokens - 1;
+        int draft_cap = mtp_cap;
+        int lookup_n = 0;
+        int n_lookup = 0;
+        int head_covered = 0;
         int verify_n;
         int commit_n;
         uint32_t start_pos;
@@ -245,6 +265,11 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
         if (draft_cap > max_tokens) draft_cap = max_tokens;
         if (draft_cap > s->ctx_size - s->checkpoint.len) draft_cap = s->ctx_size - s->checkpoint.len;
         if (rt->prefill_cap > 0 && draft_cap > (int)rt->prefill_cap) draft_cap = (int)rt->prefill_cap;
+        if (mtp_cap > draft_cap) mtp_cap = draft_cap;
+        /* Lookup drafts ride the same verifier: a repeat-heavy turn gets rows
+         * for free, so the row budget is whichever source asks for more. */
+        if (e->lookup_k > draft_cap) draft_cap = e->lookup_k;
+        if (mtp_cap > draft_cap) mtp_cap = draft_cap;
         if (first_token == eos_token || draft_cap <= 1) {
             if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
             accepted[0] = first_token;
@@ -259,10 +284,15 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
          * target runs: the verify pass below covers the pending token and every
          * draft in one target forward, so a cycle costs one forward no matter
          * how deep the draft goes. */
+        /* History here still ends at the token before the pending one, so
+         * lookup[0] is the proposal for the pending token's own position and
+         * lookup[1] is the first continuation the MTP draft must agree with. */
+        if (e->lookup_k > 1 && draft_cap > 2)
+            lookup_n = p36_lookup_propose(s, e->lookup_order, draft_cap - 1, lookup);
         verify[0] = first_token;
         verify_n = 1;
         prev_token = first_token;
-        while (verify_n < draft_cap && prev_token != eos_token) {
+        while (verify_n < mtp_cap && prev_token != eos_token) {
             float margin = 0.0f;
             const p36_gpu_tensor *h = verify_n == 1
                 ? (rt->last_h_raw ? rt->last_h_raw : rt->last_h)
@@ -280,10 +310,32 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
             verify[verify_n++] = tok;
             prev_token = tok;
             n_draft++;
+            if (lookup_n > 2 && verify_n == 2 && lookup[0] == first_token &&
+                tok == lookup[1] && tok != eos_token) {
+                /* The draft agreed with the chain's first step: take the rest
+                 * of the chain, it costs verify rows and no head forward. */
+                for (int li = 2; li < lookup_n && verify_n < draft_cap; li++) {
+                    verify[verify_n++] = lookup[li];
+                    n_lookup++;
+                    if (lookup[li] == eos_token) break;
+                }
+                break;
+            }
         }
+        head_covered = verify_n;
         if (mtp_timing) {
             tc_fwd = p36_now_sec();
             tc_draft = tc_fwd;
+        }
+        if (verify_n <= 1 && lookup_n > 1 && lookup[0] == first_token &&
+            first_token != eos_token) {
+            /* No usable MTP draft, but the history repeats verbatim: verify the
+             * lookup continuation in the same single target forward. */
+            for (int li = 1; li < lookup_n && verify_n < draft_cap; li++) {
+                verify[verify_n++] = lookup[li];
+                n_lookup++;
+                if (lookup[li] == eos_token) break;
+            }
         }
         if (verify_n <= 1) {
             /* The gate took every draft: decode the pending token plainly. */
@@ -307,7 +359,8 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
         }
         if (mtp_timing) tc_verify = p36_now_sec();
         commit_n = p36_spec_commit_pending(s, verify, verify_n, start_pos, row_tops,
-                                           eos_token, accepted, err, errlen);
+                                           eos_token, accepted, head_covered, n_lookup,
+                                           err, errlen);
         if (commit_n < 0) return -1;
         if (mtp_timing) {
             p36_mtp_timing_report(start_pos,
