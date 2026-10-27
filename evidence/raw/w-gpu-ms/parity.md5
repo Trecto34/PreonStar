@@ -1,0 +1,3 @@
+      5 e7c953fccb64ac6285b5eb4aea48604a
+# 5 dumps (off/on/hoist/split/split4) hashed identical; dumps dropped, regenerate with
+# --dump-frontier-logits-dir. Cyber-Tiel 35B-A3B, ctx 2048, 1 frontier token.

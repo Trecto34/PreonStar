@@ -2992,3 +2992,263 @@ share the unpacked weight word across rows instead of re-unpacking per row.
   verify forward); strict mode is 0.37 t/s, so this is inherent, not a bug in
   the MoE row-pair path.
 
+
+## 2026-10-27 PTQ1_0 small-batch matmul LANDS, in-file MTP REJECTED (Bonsai 27B)
+
+Model `gguf/Ternary-Bonsai-2-27B-PTQ1_0-mtp-procreations.gguf` (qwen35 hybrid,
+16 attention + 48 recurrent layers, all dense weights PTQ1_0 1.75 bpw, 5.95 GB,
+in-file nextn head at `blk.64`). Evidence: `evidence/raw/w-bonsai-ptq1/`.
+Baseline ctx 512, 128 gen: prefill 94-100 t/s, decode 29.4-32.1 t/s.
+
+* **Fixed (ACCEPTED): in-file MTP head never worked for a multi-row verify.**
+  `--mtp-draft 3` (>1 draft => mtp_cap >= 2 => 2 verify rows) aborted at
+  `MTP draft failed at pos N`. `p36_mtp_forward_vulkan` projected the head's
+  logits with `p36_gpu_tensor_matmul_scaled`, which ignores the prism Hadamard
+  rotation that `output.weight` carries on every Prism quant; the target head
+  has the rotation branch, the MTP head did not. Now branches on
+  `p36_hadamard_rotate_enabled(weights.output)` and calls the
+  rotate+q8_K+`matmul_q8_or_float_scaled` path. Greedy output with
+  `--mtp-draft 3 --mtp-margin 0` is byte-identical to MTP off.
+* **Landed: `vulkan/dense_extra_decode_ptq1_0_nx.comp`, PTQ1_0 small batches.**
+  PTQ1_0 had no small-batch kernel, so every `n_tok != 1` forward used the
+  64-token MMQ tile, which costs the same for 2 rows as for 64: a 2-row MTP
+  verify measured ~550 ms/cycle (2.80 t/s decode). The new kernel streams each
+  ternary block once for 2 tokens (ROWS=4, NT=2, wave64, same per-row int order
+  and `subgroupAdd` as the one-token kernel, so row outputs are identical) and
+  is selected for `n_tok <= 8` plus the ragged tail past whole 64-row tiles.
+  2-row forward **~550 -> 57-60 ms**; `--mtp-draft 3` decode **2.80 -> 22.4
+  t/s**. Greedy-identical to the 1-row path at chunk 2/4/8.
+* **REJECTED: MTP on this model.** `--mtp-draft 3 --mtp-margin 0` = 20.3-22.4
+  t/s vs 29.4-32.1 plain (0.66-0.70x); draft 4/5 = 15.9/12.4; draft 3 with the
+  default margin gate = 28.2. Acceptance 1.54 tokens/cycle (1:38, 2:45 over 83
+  cycles). Two independent blockers, both measured:
+  1. A verify row is not cheap: marginal cost of an extra row in a batched
+     PTQ1_0 forward is ~24 ms, a full weight pass (6.39 GB / 24 ms = 266 GB/s,
+     against a 333 GB/s sibling). Chunk scaling: 1 row 35.3 ms, 2 rows 57-60,
+     4 rows 103, 8 rows 198 -> the ternary kernel is token-linear, so the one
+     structural lever a hybrid decode has is unavailable here. Break-even at
+     1.54 tokens/cycle needs a 2-row verify under 35.5 ms, i.e. 13.5% *faster*
+     than a 1-row forward.
+  2. 48 of 64 layers are recurrent, so a partial accept cannot truncate state.
+     The cycle restores the frontier snapshot and replays the accepted prefix
+     (28.5 ms, a full forward); 46% of cycles are partial.
+  `reconsider_if`: a trit kernel that adds a verify row for <2 ms, or per-row
+  recurrent-state checkpoints inside the batched SSM kernels so a partial
+  accept rolls back without replaying the forward.
+
+## 2026-10-27 PTQ1_0 speed attempts that measured flat - REVERTED
+
+Bonsai 27B PTQ1_0 (5.95 GB dense), BC-250/gfx1013. Baseline ctx 512:
+prefill 98-100 t/s, decode 31.5-33.6 t/s. Evidence: `evidence/raw/w-bonsai-ptq1/`.
+
+* **int8 dot4 tile kernel: 13% slower.** Full rewrite of
+  `dense_extra_mmq_ptq1_0.comp` staging trits as int8 quads and using
+  `dotPacked4x8EXT` (256 dots replacing 512 packed `i16vec2` madds per slice,
+  same element pairing, 128 trits = 32 quads, sections 80/40/8). 85.7 t/s vs
+  98.0. gfx1013 `v_dot4` gives no MAC-width win over `v_mad_i16`, so the i16
+  kernel stays (it already sits at 5.4 of ~6.1 T-MAC/s packed-i16 peak, and the
+  trit unpack is free: 100.03 t/s with the decode deleted).
+* **One-token decode ROWS 8: flat.** 33.10 t/s both ways.
+* Do not re-test either without new evidence that gfx1013 dot4 is full rate.
+* Operational trap worth remembering: `p36*` load `vulkan/*.spv` from disk at
+  run time, so re-running an older binary after editing a shader silently uses
+  the new shader. Restore `.spv` for A/B text comparisons.
+  Follow-up: a uvec2 (4-weights-per-8-byte-LDS) staging rewrite also went
+  degenerate on the first try and was reverted unmeasured; both re-layouts
+  failed the same way, so any future attempt must come with a kernel-level unit
+  test (single tensor, tile kernel vs one-token kernel) instead of whole-model
+  text diffs.
+  Correction to the entry above: the tile kernel is not numerically broken -
+  `--dump-logprobs` shows max |dlogp| = 0.106 vs the one-token kernel, and the
+  text divergence is one borderline argmax flip 24 tokens in. Greedy text is
+  too coarse to validate tile-kernel edits; build the single-tensor kernel unit
+  test first.
+* Oracle note: `./p36_test --dense-quant-model-rows --model <bonsai.gguf>` now
+  covers the tile kernel (token_counts extended to 16/32 in
+  `tests/p36_test.c:3684`); 18 PTQ1_0 cases pass at max_abs 2.1e-07. The tile
+  kernel is CPU-exact, so remaining prefill work is pure throughput - use this
+  test (~40 s) to check any staging rewrite instead of greedy text.
+
+## 2026-10-27 Hazard-barrier scope narrowing - REVERTED (4% slower)
+
+`P36_VK_SKIP_BARRIERS=1` gives decode 43.05 vs 31.63 t/s (+36%), but that upper
+bound removes real RAW ordering. Narrowing the per-dispatch global
+`VkMemoryBarrier` to buffer-scoped `VkBufferMemoryBarrier`s over the dispatch's
+own hazard roots is correct yet 4% slower (31.42/30.43/29.88 vs
+33.16/31.95/30.99, interleaved). The cost is pipeline drain on genuine
+write->read edges in the per-token chain; only removing those edges (fuse
+hadamard_prepare into the matmul, 254 dispatches/barriers per token, or
+double-buffer) can reclaim it. reconsider_if: hadamard fusion or double-buffered
+activations land.
+
+## 2026-10-27 Hadamard prepare: ceiling measured, barrier shortcuts rejected
+
+`P36_VK_SKIP_HADAMARD=1` (diagnostic stub in core_15, default off) removes the
+254 prepare dispatches+barriers per decoded token: decode 37.5 vs 31.0 t/s
+(+21%). Cheaper ways to get it:
+* execution-only global barrier (access masks 0): **wrong output** - greedy text
+  diverges, RADV needs the cache masks. Reverted.
+* buffer-scoped barriers: -4% (see previous entry). Reverted.
+Only fusion removes the edge; spec in evidence/raw/w-bonsai-ptq1/note.md.
+reconsider_if: fused FWHT+q8 lands inside dense_extra_decode_ptq1_0.comp.
+
+## 2026-10-27 Hadamard prepare: 40 CU proof, subgroup rewrite, latency floor (CLOSED)
+
+Cu unlock is live: `bc250_cc_write_mode=3`, journal shows `active_cu_number 40`
+(SE 2, SH 2, CU 10) and `bc250-40cu-enable: CC=0xfff80000->0xffe00000
+SPI=0x7->0x1f`. Scaling probe (`/tmp/cuprobe/cu_scale.c`, 8 FMA chains, 256
+thr/WG) is flat 24.3-24.4 ms from 1 to 40 workgroups, then 41 -> 33.10 ms.
+Knee exactly at 40, so 40 CUs are co-schedulable. Nothing saturates at 24.
+
+Decode does not use them: profiler dispatch-weighted occupancy 27.9/40 (70%),
+43% of launches are under 40 WGs (`hadamard_prepare` 12.5, `add_rms_norm_q8_k`
+1.5, `delta_gates` 1.5). Prefill is 39.9/40 (100%). Cause is dispatch size and
+a 10-deep dependency chain, not the unlock.
+
+Subgroup FWHT rewrite (stages h=4..32 via `subgroupShuffleXor`, h=64..512 stay
+on LDS+barrier, 11 -> 5 dynamic barriers per WG): **bit-exact** (frontier_002048
+logits md5 97ae3f86... unchanged) but **+0.5%** median over 6 interleaved reps
+(28.84 -> 28.98). KEPT: equal speed, fewer explicit barriers. Reason it does
+nothing: `subgroupShuffleXor` lowers to `ds_bpermute_b32`, the same LDS
+crossbar plus an implicit wave sync - the critical path is unchanged.
+
+Ablation decomposition, all wall-clock, same 192 tok / ctx 2048 A/B:
+thread mapping 256->1024 = 0.0%; barriers 11->5 = +0.5%; nop body = +12.0%;
+skip kernel entirely = +16.5%. So the body is load-to-use latency on 5
+workgroups (width 5120/1024) at 12.5% occupancy, not bandwidth (9.2 KB per
+dispatch) and not synchronisation. 157 dispatches/token x ~27 us each.
+reconsider_if: rotation is folded into the consumer tile load so no separate
+single-row pass exists. Fusion into add_rms_norm_q8_k was measured earlier at
+-2.3% (serialises 5 CUs into 1) and is not the answer.
+
+Profiling tools added/documented:
+* `P36_VK_PROF_KERNEL=1` enables timestamp queries; gpu_ms is raw ticks x
+  `timestampPeriod` (10.0 ns here, `timestampComputeAndGraphics` true, 64-bit
+  results). Bracketing is per op-group (a run of consecutive same-path
+  dispatches), not per dispatch.
+* Cost of that instrumentation is 4-6% of gen t/s, so ON-run t/s are not
+  comparable to OFF.
+* Absolute per-op gpu_ms are unusable for long consecutive runs: a group
+  interval absorbs host-recording gaps (dense_extra_mmq reported 641 ms for a
+  prefill that takes 101 ms). Use the wall-clock ablations instead.
+* Do NOT reset the whole query pool once per command buffer - it hangs RADV
+  (pending query pairs from an in-flight submission get clobbered). Reset the
+  exact pair being written.
+
+## APEX-I-NanoPlus MoE decode: real GPU ms, and the merge point is the engine not the kernel (2026-10-27)
+
+First per-op-group GPU-ms breakdown for the two 35B-A3B APEX-I-NanoPlus files
+(`Qwen3.6-…` 13.03 GiB and `Cyber-Tiel-Coder-…` 12.55 GiB; both run headless of
+MTP on the 14 GiB board). ctx 2048, 192 tokens, 3 interleaved pairs. Evidence:
+`evidence/raw/w-gpu-ms/`.
+
+- **Unlock OK.** `bc250_cc_write_mode=3`; `RADV_DEBUG=info` reports `num_se 2,
+  num_cu 40` (journalctl needs sudo, unavailable this session);
+  `/tmp/cuprobe/cu_scale` re-run on an idle GPU is flat 36..40 WG (48.5 ms) and
+  steps to 65.9 ms at 41 WG — knee exactly at 40.
+- **Timestamps cost 14%, not 4-6%.** ON 66.79 vs OFF 77.63 t/s (CyberTiel) and
+  66.72 vs 77.72 (Qwen). Host-only `P36_VK_PROF` and `P36_VK_PROF_WG_HIST` are
+  free; the cost is the per-bracket drain, 2.1 ms/token over ~1081 brackets =
+  **~1.9 us per serialization point**. So the earlier "4-6%" note is a
+  dense-model number; on a 1002-dispatch/token MoE token the drain-dominated
+  cost is 14%. Decode bracket sum reconciles with wall (1.04x) once prefill rows
+  are excluded; prefill rows still absorb gaps (0.84x of prefill wall).
+- **Decode is 1001.8 dispatches/token; prefill is 1.26.** Same kernels, 794x
+  asymmetry — the MoE decode is a latency/occupancy problem in the engine, not
+  a CU problem.
+- **48.6% of decode dispatches run on ≤20 of 40 CUs** (<5: 282.8/token,
+  5-20: 203.0, 20-40: 90.6, >40: 423.3 per token). Ops that are majority ≤20 WG
+  hold 486 dispatches/token but only 2.72 ms/token = 17% of decode GPU time.
+- **The expert launch loop does not exist.** 8 experts x 40 layers = up to 320
+  expert-FFN slots/token are served by **72 dispatches/token** (36
+  `moe_*_gate_up_decode` + 36 `moe_*_down_sum_decode`, 36-55 us each). MoE
+  decode = 3.76 ms/token = 24.1% of decode GPU time. Removing every one of those
+  launches saves 72 x 1.9 us = 0.14 ms/token (0.9%), so "batched expert GEMM"
+  as a launch-count lever is already shipped; the remaining MoE lever is inside
+  the grouped kernels (`moe_iq3xxs_down_sum_decode` 1.95 ms/token, 12.5%).
+- **Router is already fused and device-side**: `router_topk` = 1 dispatch/layer,
+  5.8 us, 0.24 ms/token (1.5%); top-2 is read from the device buffer already.
+- Ceiling for any dispatch-elimination plan: 1002 x 1.9 us = 1.9 ms/token
+  (12-15%). `reconsider_if`: a fusion merges ≥3 of {q8_k_quant 125/token,
+  add_rms_norm_q8_k 80, swiglu 40, router_topk 40, moe_tail 40,
+  dense_f32f_d_1xN 40} per layer; single-kernel fusions buy ~0.5-1% and the
+  `P36_VK_FUSED_HAD` -2.3% precedent applies.
+
+## APEX-I-NanoPlus MoE down_sum: the gap is thread count, not the grid (2026-10-27)
+
+Shape pass (`P36_VK_PROF_SHAPE=1`) on `moe_iq3xxs_down_sum_decode` vs the
+IQ3_XXS gate/up build, same model/ctx/run:
+
+| | down_sum | gate_up (IQ3_XXS) |
+|---|---:|---:|
+| workgroups | 2048 (51/CU) | 4096 |
+| local_size | 32 | 64 |
+| experts per WG | 8 serial + subgroupAdd each | 1 |
+| threads/dispatch | 65,536 | 262,144 |
+| bytes/dispatch | 3.06 MiB | 6.42 MiB |
+| time | 54.5 us | 44.6 us |
+| achieved | **58 GB/s** | **144 GB/s** |
+
+2.5x the throughput for 2.1x the bytes, same quant format and table lookups.
+Not the grid (2048 WGs already 51/CU), and not the format (a 62,080-WG
+32-thread kernel, `dense_q6k_decode_2048x248320_n1`, sustains 348 GB/s).
+
+Two bit-exact attempts, both measured on 3 interleaved pairs, logits md5
+unchanged:
+* force wave32 (`P36_VK_WAVE32_MOE_DOWN=1`, added to the wave32 forcing path):
+  +0.2% (77.57 -> 77.75 median, overlapping ranges). NULL. Switch kept,
+  default OFF.
+* hoist the 8 per-expert `subgroupAdd` into `part[8]` and apply the route sum
+  afterwards: -1.4% (77.75 -> 76.68, disjoint). REVERTED - the 8-slot array
+  spills to scratch.
+
+Remaining lever is the structure the prefill path already uses: 2D grid
+`(out_dim, n_used)` = 16,384 WGs writing per-expert partials + a
+`moe_reduce`-style sum. Ceiling from the measured sibling rates: 1.96 ->
+0.74-0.5 ms/token (6.5-9% of the 12.9 ms decode token). Not implemented: it
+changes the reduction order, so logits drift, and it needs an extra dispatch
+per layer. Evidence: `evidence/raw/w-gpu-ms/`.
+
+## MoE down sum: split expert grid + ordered reduce — bit-exact, +3.1%, reverted (2026-10-27)
+
+Built the 2D-grid split (`(out_dim, n_used)`, one (row, expert) per WG, partial
+`acc*scales[expert]` buffer) plus a separate ordered reduce that replays the
+fused accumulation `sum = fma32(part[u], route[u], sum)` with the same software
+`fma32`. Logits md5 `e7c953fc…` **identical** with the split on.
+
+3 interleaved pairs, ctx 2048, 192 tok: fused 76.52/77.46/77.36 (median 77.36)
+vs split 79.11/79.82/79.79 (median **79.79**) = **+3.1%**, disjoint.
+
+Kernel accounting: down_sum 54.5 -> 38.3 us/dispatch (58 -> 84 GB/s), 1.96 ->
+1.379 ms/token, plus a new 0.118 ms/token reduce (40 dispatches) = 1.497
+ms/token, i.e. 3.6% of the 12.9 ms token. Below the 5-6% bar, so the variant
+was removed rather than parked behind a flag (AGENT.md: no permanent semantic
+variants). Default path unchanged, post-revert baseline re-measured at 77.59.
+
+reconsider_if: rows-per-workgroup is raised on the split grid (4 rows = 784 B
+contiguous per WG, 4096 WGs) instead of 1 row = 196 B; the split trades the
+serial expert chain for short-stream latency and lands at 84 GB/s against the
+144 GB/s its 1.2 KB-per-WG sibling reaches.
+
+## MoE down split: 4-row workgroups do not add bandwidth (bit-exact, +2.0%, reverted) (2026-10-27)
+
+Follow-up to the 1-row split (+3.1%). Same ordered reduce, but each workgroup
+owns 4 consecutive output rows: 4096 workgroups instead of 16384, 784 B
+contiguous per (tile, expert). Logits md5 `e7c953fc…` identical again.
+
+3 pairs, ctx 2048, 192 tok: fused 76.09/78.10/77.52 (median 77.52) vs split
+79.41/79.08/78.51 (median **79.08**) = +2.0%, i.e. *worse* than the 1-row
+split. Instrumented: 4096 WG, 40.0 us/dispatch, 1.440 ms/token, **80 GB/s**
+against the 1-row variant's 84 GB/s. Row packing moved nothing.
+
+Conclusion: the 196 B burst was not the limiter. Both split tilings sit at
+80-84 GB/s while the 64-thread IQ3_XXS gate/up sibling reaches 144 GB/s, and
+the per-workgroup fixed cost (selected[]/scales load, pointer setup,
+subgroupAdd, partial store) is spread over 8x fewer elements in a 512-wide down
+row. Both variants reverted; default fused path unchanged, tree clean,
+post-revert baseline 77.26 t/s.
+
+reconsider_if: the split is retried only together with amortising that fixed
+cost (e.g. 1 expert x 8-16 rows and two experts per workgroup), and only with a
+prior measurement showing the fused kernel's us/dispatch floor is not itself
+that fixed cost.

@@ -1,0 +1,13 @@
+# Ternary-Bonsai-2-27B-PTQ1_0-mtp: PTQ1_0 matmul cost per forward width.
+# p36-bench --vulkan, ctx frontier 512, --prefill-chunk N, --gen-tokens 4,
+# 2-row rows repeat the same frontier 3x (median quoted in note.md).
+arm,forward_rows,prefill_tps,ms_per_forward
+chunk1_1row,1,28.33,35.3
+chunk2_2row_r4,2,33.73,59.3
+chunk2_2row_r4,2,33.29,60.1
+chunk2_2row_r4,2,34.53,57.9
+chunk4_4row,4,38.94,102.7
+chunk8_8row,8,40.47,197.7
+chunk2_2row_r8,2,36.28,55.1
+chunk2_2row_r8,2,36.45,54.9
+chunk2_2row_r8,2,38.41,52.1
