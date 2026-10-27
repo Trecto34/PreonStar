@@ -3420,3 +3420,17 @@ CyberTiel + APEX head, draft 3 margin 2, 3 interleaved pairs vs
 `P36_VK_MOE_ROWS_SHARE=0`: 94.73/91.35/77.13 -> 99.06/92.52/99.35 (median
 91.35 -> 99.06; one off-arm outlier, ~+4% against the clean off runs). Plain
 decode/prefill vs `aa7dc67` unchanged (-0.12% / -0.42%, `evidence/raw/w-mtp-multirow/`).
+
+## MTP verify: read each shared expert once across verify rows (gate/up dedupe) — REJECTED, neutral (2026-10-27)
+
+Measured first: over a 100-token MTP run, 16.7% of verify expert slots are
+duplicates of an expert another verify row already picked (28,526 slots,
+23,754 unique; mostly 2-row verifies). Built on top of `d696e02`: in
+`moe_gate_up_decode` the workgroup owning an expert's first slot dequantizes
+each weight once and accumulates every row that picked it (per-row
+accumulators, single-token fma order, static-index row arrays); duplicate
+slots exit. Bit-identical (MTP text md5 equal in all runs). MTP generation
+3 pairs vs `d696e02`: 96.00/93.55/95.09 -> 94.15/95.25/96.89 (median +0.2%),
+plain decode -0.76% (80.71/80.41/80.40 -> 80.54/79.77/79.80). The saved reads
+are spent on the owner workgroup doing the shared rows serially; reverted.
+The batched identity pass (`d696e02`) is the part of this lever that pays.
