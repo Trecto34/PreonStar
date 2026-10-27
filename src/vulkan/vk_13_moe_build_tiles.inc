@@ -1236,10 +1236,12 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
     bool gu_iq3xxs = gate->type == P36_VK_TENSOR_IQ3_XXS && up->type == P36_VK_TENSOR_IQ3_XXS;
     bool gu_iq2s_iq2xxs = gate->type == P36_VK_TENSOR_IQ2_S && up->type == P36_VK_TENSOR_IQ2_XXS;
     bool gu_q3k = gate->type == P36_VK_TENSOR_Q3_K && up->type == P36_VK_TENSOR_Q3_K;
+    bool gu_iq2xxs = gate->type == P36_VK_TENSOR_IQ2_XXS && up->type == P36_VK_TENSOR_IQ2_XXS;
     bool down_iq2s = down->type == P36_VK_TENSOR_IQ2_S;
     bool down_iq3s = down->type == P36_VK_TENSOR_IQ3_S;
     bool down_iq3xxs = down->type == P36_VK_TENSOR_IQ3_XXS;
     bool down_q3k = down->type == P36_VK_TENSOR_Q3_K;
+    bool down_q2k = down->type == P36_VK_TENSOR_Q2_K;
     bool iq2s = gu_iq2s && (down_iq2s || down_iq3s);
     bool apex_iq3xxs_q3k = gu_iq3xxs && down_q3k &&
                            p36_vk_env_default_on("P36_VK_MOE_APEX_IQ3XXS_Q3K");
@@ -1273,7 +1275,7 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
     bool row_pair = selected && weights && p36_vk_moe_pair_decode() &&
         ((gu_q3k && down_q3k) || (gu_iq3xxs && down_iq3xxs) ||
          (gu_iq3xxs && down_q3k) || (gu_iq2s && down_iq3xxs) ||
-         (gu_iq2s_iq2xxs && down_iq3xxs));
+         (gu_iq2s_iq2xxs && down_iq3xxs) || (gu_iq2xxs && down_q2k));
     if (row_pair && rows_on && p36_vk_micro_batch && n_tok > 1u && n_tok <= 4u) {
         p36_gpu_tensor *vx[4] = {0}, *vs[4] = {0}, *vw[4] = {0}, *vo[4] = {0};
         uint64_t x_row = (uint64_t)in_dim * sizeof(float);

@@ -2039,10 +2039,38 @@ static bool p36_mtp_eval_vulkan(p36_session *s,
                                       1,
                                       p36_tensor_scalar_or(&e->model, e->weights.output_scale, 1.0f))) return false;
     if (e->quality && !p36_gpu_tensor_all_finite(rt->mtp_logits, P36_N_VOCAB)) return false;
-    return p36_gpu_tensor_read(rt->mtp_logits,
-                               0,
-                               s->mtp_logits,
-                               (uint64_t)P36_N_VOCAB * sizeof(*s->mtp_logits)) != 0;
+    /* The row stays on the device: the drafter only needs top-2, and pulling
+     * 1 MB of logits back per draft costs more than the draft itself. */
+    return true;
+}
+
+/* Top-2 of the head's logits without the 1 MB readback: one device reduction,
+ * then 8 bytes of ids and (only when a gate wants it) the two logit values. */
+static int p36_mtp_pick(p36_session *s, float *margin) {
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int32_t ids[2] = {-1, -1};
+    if (!rt || !rt->mtp_logits) return -1;
+    if (p36_gpu_spec_verify_tops(rt->mtp_logits, rt->spec_tops, rt->mtp_logits,
+                                 1u, P36_N_VOCAB) &&
+        p36_gpu_tensor_read(rt->spec_tops, 0, ids, sizeof(ids)) != 0) {
+        if (ids[0] < 0) return -1;
+        if (margin) {
+            float v0 = 0.0f, v1 = 0.0f;
+            if (p36_gpu_tensor_read(rt->mtp_logits, (uint64_t)ids[0] * sizeof(float),
+                                    &v0, sizeof(v0)) == 0) return -1;
+            *margin = 0.0f;
+            if (ids[1] >= 0) {
+                if (p36_gpu_tensor_read(rt->mtp_logits, (uint64_t)ids[1] * sizeof(float),
+                                        &v1, sizeof(v1)) == 0) return -1;
+                *margin = v0 - v1;
+            }
+        }
+        return ids[0];
+    }
+    /* Fallback for boards without the device reduction: read and sample. */
+    if (p36_gpu_tensor_read(rt->mtp_logits, 0, s->mtp_logits,
+                            (uint64_t)P36_N_VOCAB * sizeof(*s->mtp_logits)) == 0) return -1;
+    return sample_argmax_margin(s->mtp_logits, P36_N_VOCAB, margin);
 }
 #endif
 

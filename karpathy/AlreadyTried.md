@@ -2956,3 +2956,16 @@ share the unpacked weight word across rows instead of re-unpacking per row.
 * APEX-I head: only ~50% acceptance after Q4_0 -> Q4_K requant; the same
   treatment of the IQ2_XXS head keeps 96.8%, so the APEX head itself is suspect.
 
+## 2026-10-26 MTP speed pass 2 - LANDS (1.06x)
+
+* MoE row-pair path extended to the native IQ2_XXS/Q2_K recipe; the verify batch
+  (2..31 rows) used to fall off the fast MoE path entirely. 99.1 -> 106.5 t/s
+  (n=96); 3-rep n=128: plain 96.05, draft 3 margin 1 = 101.43, draft 4 margin 2
+  = 101.93. Parity exact.
+* Drafting reads top-2 from the device instead of the 1 MB logits row.
+* The APEX support head must be re-extracted after any extractor change - the
+  stale file explained its 50% acceptance (now 92.9%), but APEX stays at parity
+  (80.4 vs 84.4) because a verify row costs ~4.2 ms and only ~0.3 extra tokens
+  are accepted per row.
+* `reconsider_if`: row cost under ~3.5 ms or per-row acceptance above 0.35.
+

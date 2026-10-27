@@ -274,7 +274,7 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
                 p36_session_invalidate(s);
                 return -1;
             }
-            int tok = sample_argmax_margin(s->mtp_logits, P36_N_VOCAB, &margin);
+            int tok = p36_mtp_pick(s, &margin);
             if (tok < 0) break;
             if (e->mtp_margin > 0.0f && margin < e->mtp_margin) break;
             verify[verify_n++] = tok;
