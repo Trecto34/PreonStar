@@ -2969,3 +2969,13 @@ share the unpacked weight word across rows instead of re-unpacking per row.
   are accepted per row.
 * `reconsider_if`: row cost under ~3.5 ms or per-row acceptance above 0.35.
 
+## 2026-10-26 MTP tuning by content - LANDS (1.12x on code)
+
+* Best flags: IQ2XXS-Q2K `--mtp-draft 3 --mtp-margin 2` (95.24 -> 106.77 t/s,
+  3 reps, code prompt); APEX-I `--mtp-draft 4 --mtp-margin 2` (84.48 -> 88.05).
+  Prose prompts give 1.06x and 1.00x - acceptance is content-dependent.
+* 21% of cycles at the best setting are `no-draft` (gate rejects the first
+  draft), costing one 1.6 ms head forward each.
+* Break-even per verify row is ~0.36 accepted tokens; we measure 0.3-0.35. The
+  1.7x upstream figure needs near-flat row cost, i.e. multi-row MoE kernels.
+

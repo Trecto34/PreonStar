@@ -60,3 +60,25 @@ Three-rep, 128 tokens, temp 0:
 | `--mtp-draft 4 --mtp-margin 2` | 101.93 |
 | `--mtp-draft 3 --mtp-margin 0` | 92.86 |
 | `--mtp-draft 5 --mtp-margin 2` | 97.42 |
+
+## Content matters more than the tuning knobs
+
+Three-rep A/B, 200 tokens, temp 0, code prompt ("merge two sorted lists"):
+
+| model / config | t/s | vs plain |
+|---|---:|---:|
+| IQ2XXS-Q2K plain | 95.24 | 1.00x |
+| IQ2XXS-Q2K `--mtp-draft 3 --mtp-margin 2` | **106.77** | 1.12x |
+| APEX-I plain | 84.48 | 1.00x |
+| APEX-I `--mtp-draft 4 --mtp-margin 2` | **88.05** | 1.04x |
+
+Prose prompt, same models: 96.05 -> 101.9 (1.06x) and 84.4 -> 84.5 (1.00x).
+
+Cycle mix at the best IQ2XXS setting (113 cycles / 200 tokens): 86 full-accept,
+24 no-draft (the margin gate rejected the first draft), 3 partial. The 24
+no-draft cycles pay the 1.6 ms head forward for nothing (~2% of the run).
+
+Verify cost is linear in rows with no cliff (IQ2XXS): n=3 18.2 ms, n=5 27.2,
+n=6 30.9, n=8 39.1 (~3.7-4.1 ms per extra row). Break-even needs ~0.36 accepted
+tokens per row; measured marginal acceptance is ~0.3-0.35, which is exactly why
+the win sits at 4-12% instead of the 1.7x upstream gets with near-flat rows.
