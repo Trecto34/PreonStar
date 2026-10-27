@@ -497,19 +497,53 @@ int p36_gpu_copy_f32_tensor(p36_gpu_tensor *dst,
 /* Host-side mirror of the quantized embedding table, uploaded once.  It is
  * read on every decode token and would otherwise have to be dequantized by
  * the CPU, so it gets its own exact-size device allocation instead of
- * competing with the expert banks for arena blocks. */
+ * competing with the expert banks for arena blocks.
+ *
+ * Prefill embeds on the host and never reads this table, so the first
+ * prefill only starts the upload on a background thread: the ~270 MiB
+ * copy is disk-bound (~360 ms cold) and used to stall the first chunk.
+ * The first decode-side use joins it.  The thread touches only the
+ * mapped table memory, never p36_vk_mu or the command stream. */
 static p36_gpu_tensor *p36_vk_embed_table;
 static uint64_t p36_vk_embed_table_off;
 static bool p36_vk_embed_table_failed;
+static pthread_t p36_vk_embed_thread;
+static bool p36_vk_embed_pending;
+static uint64_t p36_vk_embed_t0;
+static p36_vk_weight_copy_ctx p36_vk_embed_copy;
+
+static void *p36_vk_embed_copy_main(void *arg) {
+    p36_vk_weight_copy_ctx *c = (p36_vk_weight_copy_ctx *)arg;
+    uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+    uintptr_t lo = (uintptr_t)c->src & ~(page - 1u);
+    /* Readahead for the whole range first; the copy then mostly hits the
+     * page cache instead of faulting one page at a time. */
+    (void)madvise((void *)lo, (size_t)((uintptr_t)c->src + c->bytes - lo), MADV_WILLNEED);
+    memcpy(c->dst, c->src, (size_t)c->bytes);
+    return NULL;
+}
+
+/* Caller holds p36_vk_mu. */
+static void p36_vk_embed_join_unlocked(void) {
+    if (!p36_vk_embed_pending) return;
+    pthread_join(p36_vk_embed_thread, NULL);
+    p36_vk_embed_pending = false;
+    fprintf(stderr, "p36: embedding table %.1f MiB resident on device (%.0f ms, async)\n",
+            (double)p36_vk_embed_copy.bytes / (1024.0 * 1024.0),
+            (double)(p36_vk_now_ns() - p36_vk_embed_t0) / 1e6);
+}
 
 static p36_gpu_tensor *p36_vk_embed_table_resident(const void *model_map,
                                                    uint64_t model_size,
                                                    uint64_t table_offset,
-                                                   uint64_t table_bytes) {
+                                                   uint64_t table_bytes,
+                                                   bool async) {
     const unsigned char *source;
     uint64_t t0;
     if (table_bytes == 0) return NULL;
     pthread_mutex_lock(&p36_vk_mu);
+    if (!async || (p36_vk_embed_table && p36_vk_embed_table_off != table_offset))
+        p36_vk_embed_join_unlocked();
     if (p36_vk_embed_table && p36_vk_embed_table_off != table_offset) {
         p36_vk_tensor_free_unlocked(p36_vk_embed_table);
         p36_vk_embed_table = NULL;
@@ -519,29 +553,34 @@ static p36_gpu_tensor *p36_vk_embed_table_resident(const void *model_map,
         p36_vk_embed_table = source ?
             p36_vk_tensor_alloc_kind_unlocked(table_bytes, true, false) : NULL;
         if (p36_vk_embed_table) {
-            t0 = p36_vk_now_ns();
-            {
-                p36_vk_weight_copy_ctx c = { p36_vk_embed_table->data, source, table_bytes };
-                p36_gpu_parallel_for_rows((table_bytes + ((1u << 20) - 1)) >> 20, 8,
-                                          p36_vk_weight_copy_rows, &c);
-            }
             p36_vk_embed_table_off = table_offset;
-            fprintf(stderr, "p36: embedding table %.1f MiB resident on device (%.0f ms)\n",
-                    (double)table_bytes / (1024.0 * 1024.0),
-                    (double)(p36_vk_now_ns() - t0) / 1e6);
+            p36_vk_embed_copy = (p36_vk_weight_copy_ctx){ p36_vk_embed_table->data, source, table_bytes };
+            p36_vk_embed_t0 = p36_vk_now_ns();
+            if (async && pthread_create(&p36_vk_embed_thread, NULL,
+                                        p36_vk_embed_copy_main, &p36_vk_embed_copy) == 0) {
+                p36_vk_embed_pending = true;
+            } else {
+                t0 = p36_vk_embed_t0;
+                p36_gpu_parallel_for_rows((table_bytes + ((1u << 20) - 1)) >> 20, 8,
+                                          p36_vk_weight_copy_rows, &p36_vk_embed_copy);
+                fprintf(stderr, "p36: embedding table %.1f MiB resident on device (%.0f ms)\n",
+                        (double)table_bytes / (1024.0 * 1024.0),
+                        (double)(p36_vk_now_ns() - t0) / 1e6);
+            }
         } else {
             p36_vk_embed_table_failed = true;
             fprintf(stderr, "p36: embedding table does not fit on device, "
                             "keeping the host dequant path\n");
         }
     }
+    p36_gpu_tensor *table = p36_vk_embed_pending ? NULL : p36_vk_embed_table;
     pthread_mutex_unlock(&p36_vk_mu);
-    return p36_vk_embed_table;
+    return table;
 }
 
 void p36_gpu_embed_table_prepare(const void *model_map, uint64_t model_size,
                                  uint64_t table_offset, uint64_t table_bytes) {
-    (void)p36_vk_embed_table_resident(model_map, model_size, table_offset, table_bytes);
+    (void)p36_vk_embed_table_resident(model_map, model_size, table_offset, table_bytes, true);
 }
 /* Decode-path embedding: read one quantized row off the device copy of the
  * table instead of dequantizing it on the host.  The id comes from a
@@ -581,7 +620,7 @@ int p36_gpu_embed_row_tensor(p36_gpu_tensor *dst,
     push.type = type;
     source = p36_gpu_weight_bytes(model_map, model_size, table_offset, table_bytes);
     if (!source) return 0;
-    weights = p36_vk_embed_table_resident(model_map, model_size, table_offset, table_bytes);
+    weights = p36_vk_embed_table_resident(model_map, model_size, table_offset, table_bytes, false);
     if (weights) {
         const p36_gpu_tensor *bindings[3] = { weights, ids ? ids : dst, dst };
         ok = p36_vk_run_unlocked("embed_row", &p36_vk.embed_row, bindings,

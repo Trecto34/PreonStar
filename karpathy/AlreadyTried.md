@@ -3304,3 +3304,17 @@ chunk-256/chunk-1 frontier logits and greedy text), independently reviewed.
 80.46/81.65/81.47 vs B 81.53/81.10/80.56 (median -0.45%, overlapping),
 prefill +1.6% (inside the 3.4% floor). The barriers are not where this
 kernel's time goes. `evidence/raw/w-decode-reorder/ab-norm-shuffle.csv`.
+
+## Embedding table upload off the first prefill chunk — ACCEPTED, +15.8% cold prefill (2026-10-27)
+
+Host profile of a 1024-token prefill (CyberTiel): first 256-token chunk 780 ms,
+later chunks ~370 ms. 363 ms of the difference was `p36_gpu_embed_table_prepare`
+copying the 272.8 MiB Q4_K token table to the device synchronously, at NVMe
+speed (cold pages). Prefill embeds on the host and never reads that table, so
+the first prefill now starts the copy on a background thread (`madvise
+WILLNEED` + memcpy into the mapped buffer) and the first decode-side
+`p36_gpu_embed_row_tensor` joins it. Same kernels and paths, byte-identical
+output. 3 interleaved pairs vs `13eb0aa`, ctx 1024 gen 128: prefill
+528.7 -> 612.4 t/s median (+15.8%, disjoint), decode 81.24 -> 81.06 (noise).
+Scope: a process's first prefill (bench, one-shot CLI, first server request);
+a warm server already had the table. `evidence/raw/w-decode-reorder/ab-embed-async.csv`.
