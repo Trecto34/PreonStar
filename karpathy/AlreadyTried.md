@@ -3252,3 +3252,43 @@ reconsider_if: the split is retried only together with amortising that fixed
 cost (e.g. 1 expert x 8-16 rows and two experts per workgroup), and only with a
 prior measurement showing the fused kernel's us/dispatch floor is not itself
 that fixed cost.
+
+## Decode: reuse the norm's q8_K and record the K-quant shared expert first — ACCEPTED, +3.34% decode (2026-10-27)
+
+Three bit-identical changes in `core_15_forward_tokens_cpu.inc`:
+
+- **Bug:** the post-attention `add_rms_norm_q8_k` writes `rt->inp_q8`, but only
+  the Hadamard variant set `inp_q8_valid`, so every MoE FFN quantized the same
+  row again. Now `inp_q8_valid = norm_q8` / `= fused_next`.
+- **MoE K-quant `ssm_alpha`/`ssm_beta`** read the live `rt->inp_q8` instead of
+  the float route's internal requantize (`p36_recur_q8_reuse`).
+- **Shared expert first:** a non-Q8_0 shared expert is recorded before the
+  routed pass for `n_tok <= 4`, so its gate/up need no barrier after
+  `router_topk` and overlap the expert kernels. At prefill size the same order
+  cost ~3% (shared GEMMs contend with expert GEMMs), hence the gate.
+
+Parity: frontier logits (chunk 256 and chunk 1) and 96-token greedy text
+byte-identical vs `f220af7` on CyberTiel, Qwen3.6 NanoPlus, Occamy MiniPlus,
+MiniCPM NanoPlus and Bonsai PTQ1_0 (`evidence/raw/w-decode-reorder/parity-split.txt`,
+the split build includes this change). A/B CyberTiel ctx 1024, gen 128, 5
+interleaved pairs: decode **78.52 -> 81.14 t/s (+3.34%)**, disjoint ranges;
+prefill +0.86% (noise). `ab-tiel2.{csv,summary}`.
+
+## Parallel token tiles for `recur_conv_silu_decode` at prefill — REJECTED (2026-10-27)
+
+Grid (channels, n_tok/16) instead of one thread per channel looping all
+tokens: bit-identical but the kernel went 21.9 -> 59-60 ms per 1024-token
+prefill on CyberTiel, both with arrays and with the window in three
+registers. The serial kernel already streams at ~92 GB/s and is only 1.4% of
+prefill at ctx 1024; the 494 us/dispatch that motivated it was a
+timestamp-contaminated ctx-2048 number. Not worth more work.
+
+## MoE down split + ordered reduce, rebuilt as the default — REJECTED, decode halved (2026-10-27)
+
+Rebuilt the §3212 experiment (grid.y = expert, partials, `moe_down_route_reduce`)
+for all five sum_decode builds. Bit-identical on 5 models, but CyberTiel decode
+**78.34 -> 36.74 t/s**: `moe_iq3xxs_down_sum_decode` 54 -> 383 us/dispatch.
+Moving the partials from scratch to a dedicated device-local buffer did not
+change it (36.74 again), so host-mapped memory is not the cause; the
+2026-10-27 split that measured +3.1% differed in some way this rebuild did not
+reproduce. `ab-split2.{csv,summary}`. Not pursued further.

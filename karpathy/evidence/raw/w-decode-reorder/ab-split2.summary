@@ -1,0 +1,7 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    5     524.04         3.030     78.34          0.280     /home/server/p36-wt/base-f220af7/p36-bench
+B    5     521.28         8.260     36.74          0.080     /home/server/p36-wt/split/p36-bench
+
+B vs A prefill: -0.53%   decode: -53.10%   (gate: +1.50%)
+verdict: FAIL (prefill)

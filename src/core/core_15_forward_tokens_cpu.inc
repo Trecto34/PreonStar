@@ -469,6 +469,43 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
             P36_N_EMBD, 1, n_tok, 1.0f)) {
         return false;
     }
+    /* A non-Q8_0 shared expert never takes the fused decode branch below,
+     * so record it before the routed pass: its gate/up only read the norm
+     * q8, so they need no barrier after router_topk and overlap it and the
+     * expert kernels instead of extending the per-layer dependency chain.
+     * Same kernels, same inputs, same tail -- the order is the only change.
+     * Decode/verify sized batches only: at prefill the shared GEMMs then
+     * contend with the expert GEMMs and prefill measured ~3% slower. */
+    const bool shared_first = n_tok <= 4u &&
+                              (l->ffn_gate_shexp->type != P36_TENSOR_Q8_0 ||
+                               l->ffn_up_shexp->type != P36_TENSOR_Q8_0 ||
+                               l->ffn_down_shexp->type != P36_TENSOR_Q8_0);
+    if (shared_first) {
+        if (!rt->inp_q8_valid &&
+            !p36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, P36_N_EMBD, n_tok)) {
+            return false;
+        }
+        rt->inp_q8_valid = false;
+        if (!p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->ffn_gate_shexp, inp, rt->inp_q8, rt->ffn_shared_gate,
+                                                      P36_N_EMBD, P36_N_FF_SHARED, n_tok,
+                                                      p36_tensor_scalar_or(m, l->ffn_gate_shexp_scale, 1.0f))) {
+            return false;
+        }
+        if (!p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->ffn_up_shexp, inp, rt->inp_q8, rt->ffn_shared_up,
+                                                      P36_N_EMBD, P36_N_FF_SHARED, n_tok,
+                                                      p36_tensor_scalar_or(m, l->ffn_up_shexp_scale, 1.0f))) {
+            return false;
+        }
+        if (!p36_gpu_swiglu_tensor(rt->ffn_shared_mid, rt->ffn_shared_gate, rt->ffn_shared_up,
+                                   n_tok * P36_N_FF_SHARED, 0.0f, 1.0f)) {
+            return false;
+        }
+        if (!p36_gpu_tensor_matmul_scaled(m, l->ffn_down_shexp, rt->ffn_shared_mid, rt->ffn_shared_out,
+                                          P36_N_FF_SHARED, P36_N_EMBD, n_tok,
+                                          p36_tensor_scalar_or(m, l->ffn_down_shexp_scale, 1.0f))) {
+            return false;
+        }
+    }
     /* Fast routed pass, decode and prefill: f32 activations straight into
      * the fused IQ2_XXS gate/up and Q2_K down kernels, expert schedule
      * built and consumed on GPU. When it runs, the q8_K input staging is
@@ -537,23 +574,25 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
             if (session_batch && ok) return true;
         }
     }
-    if ((!routed_done ||
-         l->ffn_gate_shexp->type != P36_TENSOR_Q8_0 ||
-         l->ffn_up_shexp->type != P36_TENSOR_Q8_0) &&
-        !rt->inp_q8_valid &&
-        !p36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, P36_N_EMBD, n_tok)) {
-        return false;
-    }
-    rt->inp_q8_valid = false;
-    if (!p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->ffn_gate_shexp, inp, rt->inp_q8, rt->ffn_shared_gate,
-                                                  P36_N_EMBD, P36_N_FF_SHARED, n_tok,
-                                                  p36_tensor_scalar_or(m, l->ffn_gate_shexp_scale, 1.0f))) {
-        return false;
-    }
-    if (!p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->ffn_up_shexp, inp, rt->inp_q8, rt->ffn_shared_up,
-                                                  P36_N_EMBD, P36_N_FF_SHARED, n_tok,
-                                                  p36_tensor_scalar_or(m, l->ffn_up_shexp_scale, 1.0f))) {
-        return false;
+    if (!shared_first) {
+        if ((!routed_done ||
+             l->ffn_gate_shexp->type != P36_TENSOR_Q8_0 ||
+             l->ffn_up_shexp->type != P36_TENSOR_Q8_0) &&
+            !rt->inp_q8_valid &&
+            !p36_gpu_quantize_q8_k_tensor(rt->inp_q8, inp, P36_N_EMBD, n_tok)) {
+            return false;
+        }
+        rt->inp_q8_valid = false;
+        if (!p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->ffn_gate_shexp, inp, rt->inp_q8, rt->ffn_shared_gate,
+                                                      P36_N_EMBD, P36_N_FF_SHARED, n_tok,
+                                                      p36_tensor_scalar_or(m, l->ffn_gate_shexp_scale, 1.0f))) {
+            return false;
+        }
+        if (!p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->ffn_up_shexp, inp, rt->inp_q8, rt->ffn_shared_up,
+                                                      P36_N_EMBD, P36_N_FF_SHARED, n_tok,
+                                                      p36_tensor_scalar_or(m, l->ffn_up_shexp_scale, 1.0f))) {
+            return false;
+        }
     }
     if (!routed_done &&
         !p36_gpu_moe_ffn_q8_tensor(out, m->map, m->size,
@@ -563,14 +602,16 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
                                    P36_N_EMBD, P36_N_FF_EXP, P36_N_EMBD, P36_N_EXPERT)) {
         return false;
     }
-    if (!p36_gpu_swiglu_tensor(rt->ffn_shared_mid, rt->ffn_shared_gate, rt->ffn_shared_up,
-                               n_tok * P36_N_FF_SHARED, 0.0f, 1.0f)) {
-        return false;
-    }
-    if (!p36_gpu_tensor_matmul_scaled(m, l->ffn_down_shexp, rt->ffn_shared_mid, rt->ffn_shared_out,
-                                      P36_N_FF_SHARED, P36_N_EMBD, n_tok,
-                                      p36_tensor_scalar_or(m, l->ffn_down_shexp_scale, 1.0f))) {
-        return false;
+    if (!shared_first) {
+        if (!p36_gpu_swiglu_tensor(rt->ffn_shared_mid, rt->ffn_shared_gate, rt->ffn_shared_up,
+                                   n_tok * P36_N_FF_SHARED, 0.0f, 1.0f)) {
+            return false;
+        }
+        if (!p36_gpu_tensor_matmul_scaled(m, l->ffn_down_shexp, rt->ffn_shared_mid, rt->ffn_shared_out,
+                                          P36_N_FF_SHARED, P36_N_EMBD, n_tok,
+                                          p36_tensor_scalar_or(m, l->ffn_down_shexp_scale, 1.0f))) {
+            return false;
+        }
     }
     /* Shared-expert tail on the host: the CPU compiles "out += shared * g"
      * to one fma after the down projection's scale, so the fused rounding
@@ -819,6 +860,15 @@ static bool p36_forward_full_attn_vulkan(p36_session *s,
                                               out);
 }
 
+/* K-quant alpha/beta on a MoE file can read the live q8_K input: the
+ * float route would quantize the same row into identical bytes first. */
+static bool p36_recur_q8_reuse(const p36_tensor *t, bool live) {
+    return live && !P36_MODEL_DENSE && !p36_hadamard_rotate_enabled(t) &&
+           (t->type == P36_TENSOR_Q2_K || t->type == P36_TENSOR_Q3_K ||
+            t->type == P36_TENSOR_Q4_K || t->type == P36_TENSOR_Q5_K ||
+            t->type == P36_TENSOR_Q6_K);
+}
+
 static bool p36_forward_recurrent_vulkan(p36_session *s,
                                          const p36_layer_weights *l,
                                          uint32_t il,
@@ -841,6 +891,11 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
         return false;
     }
     rt->inp_q8_valid = false;
+    /* rt->inp_q8 now holds q8_K(inp) and nothing below writes it before
+     * the alpha/beta projections, so K-quant ones can read it directly
+     * instead of quantizing inp again (MoE files route them float-side). */
+    const bool inp_q8_live = l->attn_qkv->type != P36_TENSOR_Q8_0 ||
+                             l->attn_gate->type != P36_TENSOR_Q8_0;
     const p36_gpu_tensor *qkv_in = inp;
     const p36_gpu_tensor *qkv_q8 = rt->inp_q8;
     if (p36_hadamard_rotate_enabled(l->attn_qkv) ||
@@ -987,14 +1042,18 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
             p36_tensor_scalar_or(&e->model, l->ssm_alpha_scale, 1.0f));
     }
     if (!pair_projected) {
-        if (!p36_gpu_tensor_matmul_dense_q8_scaled(
+        if (!(p36_recur_q8_reuse(l->ssm_beta, inp_q8_live) ?
+                  p36_gpu_tensor_matmul_q8_or_float_scaled :
+                  p36_gpu_tensor_matmul_dense_q8_scaled)(
                 &e->model, l->ssm_beta, inp, rt->inp_q8, rt->recur_beta,
                 P36_N_EMBD, P36_N_SSM_DT_RANK, n_tok,
                 p36_tensor_scalar_or(&e->model, l->ssm_beta_scale, 1.0f))) {
             fprintf(stderr, "p36: recurrent ssm_beta failed at layer=%u\n", il);
             return false;
         }
-        if (!p36_gpu_tensor_matmul_dense_q8_scaled(
+        if (!(p36_recur_q8_reuse(l->ssm_alpha, inp_q8_live) ?
+                  p36_gpu_tensor_matmul_q8_or_float_scaled :
+                  p36_gpu_tensor_matmul_dense_q8_scaled)(
                 &e->model, l->ssm_alpha, inp, rt->inp_q8, rt->recur_alpha,
                 P36_N_EMBD, P36_N_SSM_DT_RANK, n_tok,
                 p36_tensor_scalar_or(&e->model, l->ssm_alpha_scale, 1.0f))) {
@@ -1287,18 +1346,22 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
                               l->post_attention_norm->abs_offset,
                               P36_N_EMBD, n_tok, P36_RMS_EPS) != 0;
         if (fused_norm) norm_rot_q8 = rt->had_q8;
-        if (!fused_norm &&
-            !p36_gpu_add_rms_norm_q8_k_tensor(
+        /* The plain fused norm writes rt->inp_q8 too; mark it so the FFN
+         * reuses those bytes instead of quantizing the same row again. */
+        bool norm_q8 = fused_norm;
+        if (!norm_q8)
+            norm_q8 = p36_gpu_add_rms_norm_q8_k_tensor(
                 rt->norm, rt->inp_q8, rt->next_hidden, rt->next_hidden, rt->hidden,
                 e->model.map, e->model.size, l->post_attention_norm->abs_offset,
-                P36_N_EMBD, n_tok, P36_RMS_EPS) &&
+                P36_N_EMBD, n_tok, P36_RMS_EPS) != 0;
+        if (!norm_q8 &&
             !p36_gpu_add_rms_norm_tensor(
                 rt->norm, rt->next_hidden, rt->next_hidden, rt->hidden,
                 e->model.map, e->model.size, l->post_attention_norm->abs_offset,
                 P36_N_EMBD, n_tok, P36_RMS_EPS)) {
             return false;
         }
-        if (fused_norm) rt->inp_q8_valid = true;
+        rt->inp_q8_valid = norm_q8;
         if (!p36_forward_ffn_vulkan(s, l, il, n_tok, rt->norm, rt->hidden, norm_rot_q8)) {
             fprintf(stderr, "p36: ffn block failed at pos=%u layer=%u\n", pos0, il);
             return false;
@@ -1331,7 +1394,7 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
                     P36_N_EMBD, n_tok, P36_RMS_EPS)) {
                 return false;
             }
-            if (fused_next) rt->inp_q8_valid = true;
+            rt->inp_q8_valid = fused_next;
         }
         if (e->quality && !p36_gpu_tensor_all_finite(rt->hidden, n_tok * P36_N_EMBD)) {
             fprintf(stderr, "p36: non-finite hidden state at pos=%u layer=%u\n", pos0, il);

@@ -1,0 +1,35 @@
+== Cyber-Tiel-Coder-35B-A3B.APEX-I-NanoPlus
+base chunk256 rc=0 74c028059dc407d8d7632d9232e8c142  -
+base chunk1 rc=0 006be91addb190d57cf799e7a19e98c8  -
+base text rc=0 3a4a99d2539c2395be3857afa9437e7a  -
+cand chunk256 rc=0 74c028059dc407d8d7632d9232e8c142  -
+cand chunk1 rc=0 006be91addb190d57cf799e7a19e98c8  -
+cand text rc=0 3a4a99d2539c2395be3857afa9437e7a  -
+== Qwen3.6-35B-A3B.APEX-I-NanoPlus
+base chunk256 rc=0 027a5a7c52336a485d62d977518c7a24  -
+base chunk1 rc=0 e8588f56d9925d97527af0708c08dd50  -
+base text rc=0 bad5bcf3886b3a27ef368798d2d25fa0  -
+cand chunk256 rc=0 027a5a7c52336a485d62d977518c7a24  -
+cand chunk1 rc=0 e8588f56d9925d97527af0708c08dd50  -
+cand text rc=0 bad5bcf3886b3a27ef368798d2d25fa0  -
+== Occamy-1.0.APEX-I-MiniPlus-V2.1
+base chunk256 rc=0 1a5a5a8393321cd4cc4429ec84490fc7  -
+base chunk1 rc=0 e41a1f817544f649c9b21b0a5b89c416  -
+base text rc=0 28479f8dd4836173673308c69b14b5a8  -
+cand chunk256 rc=0 1a5a5a8393321cd4cc4429ec84490fc7  -
+cand chunk1 rc=0 e41a1f817544f649c9b21b0a5b89c416  -
+cand text rc=0 28479f8dd4836173673308c69b14b5a8  -
+== MiniCPM-V-4.7-35B-A3B.APEX-I-NanoPlus-V2.1
+base chunk256 rc=0 d052407c8310bba289e2e29a1ba2d13c  -
+base chunk1 rc=0 1d7aa98bc5e08583b5599e7267b860c9  -
+base text rc=0 a835b2c47daebd51a07fe5cf2f2e1cf0  -
+cand chunk256 rc=0 d052407c8310bba289e2e29a1ba2d13c  -
+cand chunk1 rc=0 1d7aa98bc5e08583b5599e7267b860c9  -
+cand text rc=0 a835b2c47daebd51a07fe5cf2f2e1cf0  -
+== Ternary-Bonsai-2-27B-PTQ1_0-mtp-procreations
+base chunk256 rc=0 30759c18bf2cede1ce3367d7d02f05dd  -
+base chunk1 rc=0 e5c8fffae1620c3371c7aa596893dd7e  -
+base text rc=0 4729bfc9d512db845338c5228d639ea6  -
+cand chunk256 rc=0 30759c18bf2cede1ce3367d7d02f05dd  -
+cand chunk1 rc=0 e5c8fffae1620c3371c7aa596893dd7e  -
+cand text rc=0 4729bfc9d512db845338c5228d639ea6  -
