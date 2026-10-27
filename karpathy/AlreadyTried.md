@@ -3457,3 +3457,16 @@ shader (shader-dir pitfall). With each binary on its own shaders,
 Bit-identical frontier logits at chunk 64 and 256. 3 pairs vs `d696e02`,
 ctx 512 chunk 64: prefill 293.97/288.06/288.08 -> 298.73/310.88/305.13
 (+5.92%). `evidence/raw/w-down-split/ab-mmq-deadwave.csv`.
+
+## MoE GEMMs: skip the padded half of the 32-slot tile — ACCEPTED, +4.1% chunk-64 / +3.6% chunk-256 prefill (2026-10-27)
+
+`moe_gate_up_gemm` / `moe_down_gemm` give each thread a 4-row x 2-slot tile
+(slots sl and sl+16 of a 32-slot expert tile). An expert usually gets <= 16 of a
+batch's routed slots (chunk 256 x 8 / 256 experts ~ 8 per expert), so the sl+16
+half is padding for the whole workgroup. `hi_live` (any slot 16..31 live, read
+once from `sh_slot` after the staging barrier) selects the original FMA loop
+or a copy without the b1 loads / [1] accumulations. Uniform, bit-identical
+(frontier logits equal at chunk 64 and 256). Expert GEMM GPU time at ctx 512
+chunk 64: 1116 -> 1013 ms (down IQ3_XXS -18%, gate/up -7..8%). 3 pairs vs
+`4f0ab41`: chunk 64 308.36 -> 321.04 (+4.11%), ctx 1024 chunk 256
+598.21 -> 619.97 (+3.64%), decode flat. `evidence/raw/w-moe-gemm-half/`.

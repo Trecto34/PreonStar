@@ -185,6 +185,12 @@ void main(void) {
     uint sub_word = sub >> 1u;
     uint sub_shift = 8u * (sub & 1u);
 
+    /* Short batches leave most expert tiles with <= 16 live slots: then the
+     * sl+16 half of every thread's 2-slot register tile is padding for the
+     * whole workgroup, so the FMA loops skip it (uniform; live slots' sums
+     * are untouched). */
+    bool hi_live = false;
+    for (uint j = 16u; j < SLOT_TILE; j++) hi_live = hi_live || sh_slot[j] != INVALID;
     bool live_b = (bc < SLOT_TILE) && (sh_slot[bc] != INVALID);
     uint b_k = (bc < SLOT_TILE) ? (bkk ^ P36_SWZ(bc)) : 0u;
     uint b_base = (bc < SLOT_TILE && live_b) ? (sh_x4[bc] + bkk) : 0u;
@@ -392,6 +398,7 @@ void main(void) {
                     pku[i][j] = f16vec2(0.0hf);
                 }
             }
+            if (hi_live) {
             [[unroll]]
             for (uint e = 0u; e < 4u; e++) {
                 uint kk = (kk_lo ^ (h * 4u)) + e;
@@ -407,6 +414,21 @@ void main(void) {
                     pku[i][0] = fma(au.zw, b0.zw, fma(au.xy, b0.xy, pku[i][0]));
                     pku[i][1] = fma(au.zw, b1.zw, fma(au.xy, b1.xy, pku[i][1]));
                 }
+            }
+            } else {
+            [[unroll]]
+            for (uint e = 0u; e < 4u; e++) {
+                uint kk = (kk_lo ^ (h * 4u)) + e;
+                uint kkb = kk ^ swz_sl;
+                f16vec4 b0 = Bs[sl      ][kkb];
+                uint kka = kk ^ swz_ry;
+                for (uint i = 0u; i < 4u; i++) {
+                    f16vec4 ag = Ag[arow[i]][kka];
+                    f16vec4 au = Au[arow[i]][kka];
+                    pkg[i][0] = fma(ag.zw, b0.zw, fma(ag.xy, b0.xy, pkg[i][0]));
+                    pku[i][0] = fma(au.zw, b0.zw, fma(au.xy, b0.xy, pku[i][0]));
+                }
+            }
             }
             for (uint i = 0u; i < 4u; i++) {
                 /* The stored slots holding the low nibble are the ones with
@@ -431,6 +453,7 @@ void main(void) {
                 pku[i][j] = f16vec2(0.0hf);
             }
         }
+        if (hi_live) {
         [[unroll]]
         for (uint kk = 0u; kk < KK; kk++) {
             uint kkb = kk ^ swz_sl;
@@ -445,6 +468,20 @@ void main(void) {
                 pku[i][0] = fma(au.zw, b0.zw, fma(au.xy, b0.xy, pku[i][0]));
                 pku[i][1] = fma(au.zw, b1.zw, fma(au.xy, b1.xy, pku[i][1]));
             }
+        }
+        } else {
+        [[unroll]]
+        for (uint kk = 0u; kk < KK; kk++) {
+            uint kkb = kk ^ swz_sl;
+            f16vec4 b0 = Bs[sl      ][kkb];
+            uint kka = kk ^ swz_ry;
+            for (uint i = 0u; i < 4u; i++) {
+                f16vec4 ag = Ag[arow[i]][kka];
+                f16vec4 au = Au[arow[i]][kka];
+                pkg[i][0] = fma(ag.zw, b0.zw, fma(ag.xy, b0.xy, pkg[i][0]));
+                pku[i][0] = fma(au.zw, b0.zw, fma(au.xy, b0.xy, pku[i][0]));
+            }
+        }
         }
         for (uint i = 0u; i < 4u; i++) {
             float dg = Dg[arow[i]];
