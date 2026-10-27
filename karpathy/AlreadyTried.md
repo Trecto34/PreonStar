@@ -3376,3 +3376,13 @@ prefill. A/B 3 pairs ctx 512 chunk 64 vs `7127dfe`: prefill
 150.31 -> 290.66 (+93%), decode flat. Occamy MiniPlus: chunk-64 prefill
 176 -> 277, route misses 640 -> 0, decode equal (77.8/78.3 vs 77.4/78.3).
 `evidence/raw/w-apex-small-gemm/`.
+
+## K-quant mmq: skip FMAs in waves past n_tok (small prefill chunks) — REJECTED, -1.8% kernel time (2026-10-27)
+
+At chunk 64 `dense_kquant_mmq_q4k` costs ~2.4x per token vs chunk 256 (128-token
+tile, 4 wave32 x 32 tokens, half the waves on zero padding). Skipping the FMA
+loop in waves whose slice is entirely past n_tok (wave-uniform, barriers kept)
+is bit-identical (frontier logits equal at chunk 64 and 256) but moved the
+kernel only 392.4 -> 385.3 ms (CyberTiel ctx 512 chunk 64). The per-workgroup
+A dequant + staging, shared by all waves, is the cost; a narrower tile has to
+re-amortize that, it is not idle-wave ALU. Reverted.
