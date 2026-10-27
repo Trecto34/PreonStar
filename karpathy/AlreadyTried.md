@@ -3292,3 +3292,15 @@ Moving the partials from scratch to a dedicated device-local buffer did not
 change it (36.74 again), so host-mapped memory is not the cause; the
 2026-10-27 split that measured +3.1% differed in some way this rebuild did not
 reproduce. `ab-split2.{csv,summary}`. Not pursued further.
+
+## `add_rms_norm_q8_k`: subgroup shuffles for the in-wave reduction levels — REJECTED, neutral (2026-10-27)
+
+The decode norm is one 1024-thread workgroup at ~9.5 us, 80x/token. Replaced
+the in-subgroup levels of the fp64 sum-of-squares tree and of the 64-lane
+argmax tree with `subgroupShuffleDown` in the same pairing (12 fewer
+1024-thread barriers per call). Bit-identical (CyberTiel, Bonsai PTQ1_0:
+chunk-256/chunk-1 frontier logits and greedy text), independently reviewed.
+3 interleaved pairs vs `13eb0aa`, CyberTiel ctx 1024 gen 128: decode A
+80.46/81.65/81.47 vs B 81.53/81.10/80.56 (median -0.45%, overlapping),
+prefill +1.6% (inside the 3.4% floor). The barriers are not where this
+kernel's time goes. `evidence/raw/w-decode-reorder/ab-norm-shuffle.csv`.
