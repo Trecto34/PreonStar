@@ -3543,3 +3543,16 @@ ctx 512 chunk 64 313.83/318.96/320.24 -> 329.23/327.90/329.25 (+3.22%,
 disjoint); ctx 1024 chunk 256 +0.82% (32-slot path, noise).
 `evidence/raw/w-moe-tile16/`. The trunk's 64-token mmq tile stays rejected
 (`experiment/mmq-bn64`, +10.8% kernel time).
+
+## MTP verify: read each shared expert once in gate/up AND down — REJECTED, -8% (2026-10-27)
+
+`experiment/mtp-share` (`b7dfa86` + next): share builds of both
+`moe_gate_up_decode` and the split `moe_down_q2k_sum_decode`, used only for
+2..4-row identity batches. The owner slot applies each dequantized weight to
+every verify row that picked the expert and writes each slot's partial;
+duplicates exit. Bit-identical (decode logits/text, MTP text), but MTP
+generation 98.97/98.57/100.38 -> 90.95/92.70/81.86 (~-8%) vs `6c11c8c`. In the
+split down kernel each workgroup is tiny (one row x one slot), so the
+duplicate scan is a large fixed cost per workgroup; the 16.7% duplicate reads
+it saves do not cover it. Every "read each shared expert once" variant tried
+(gate only: -1.5%, gate+down: -8%) loses to plain batching (`d696e02`).
