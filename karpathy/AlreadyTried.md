@@ -3556,3 +3556,13 @@ split down kernel each workgroup is tiny (one row x one slot), so the
 duplicate scan is a large fixed cost per workgroup; the 16.7% duplicate reads
 it saves do not cover it. Every "read each shared expert once" variant tried
 (gate only: -1.5%, gate+down: -8%) loses to plain batching (`d696e02`).
+
+## Shader lookup now prefers the binary's directory (2026-10-27)
+
+Follow-up to the shader-dir pitfall: `p36_read_file` resolves `vulkan/*.spv`
+as `P36_SHADER_DIR` -> the binary's own directory -> the current directory ->
+the raw path (the cwd used to win over the binary's directory). p36, p36-agent
+and p36-server now always run the SPIR-V built with them. Checked from an
+unrelated cwd: p36 CLI greedy 128 tok 83.39 t/s, p36-server 256-token greedy
+chat completion 88.8 t/s (2883 ms decode), p36-agent non-interactive turn OK;
+all three profiles show `moe_down_route_reduce` / the split down sum.

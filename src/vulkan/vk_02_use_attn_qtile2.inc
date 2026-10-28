@@ -328,11 +328,10 @@ static void *p36_read_file(const char *path, size_t *len_out) {
         snprintf(rooted, sizeof(rooted), "%s/%s", env_dir, path) < (int)sizeof(rooted)) {
         fp = fopen(rooted, "rb");
     }
-    if (!fp && path && path[0] != '/' && p36_vk.shader_root[0] &&
-        snprintf(rooted, sizeof(rooted), "%s/%s",
-                 p36_vk.shader_root, path) < (int)sizeof(rooted)) {
-        fp = fopen(rooted, "rb");
-    }
+    /* The binary's own directory before the current one: p36, p36-server and
+     * p36-agent must run the SPIR-V built with them, not whatever vulkan/
+     * the caller happens to stand in (an older checkout or worktree silently
+     * ran stale kernels that way).  The cwd stays as a fallback. */
     if (!fp && path && path[0] != '/') {
         char exe[PATH_MAX];
         ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
@@ -346,6 +345,11 @@ static void *p36_read_file(const char *path, size_t *len_out) {
                 }
             }
         }
+    }
+    if (!fp && path && path[0] != '/' && p36_vk.shader_root[0] &&
+        snprintf(rooted, sizeof(rooted), "%s/%s",
+                 p36_vk.shader_root, path) < (int)sizeof(rooted)) {
+        fp = fopen(rooted, "rb");
     }
     if (!fp) fp = fopen(path, "rb");
     if (!fp) return NULL;
