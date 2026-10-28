@@ -252,10 +252,14 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
                 weight_type, (uint32_t)n_tok, (uint32_t)in_dim,
                 (uint32_t)out_dim, mmq_op);
             ok = b16 != NULL &&
-                 p36_vk_run_unlocked(op, &p36_vk.dense_kquant_mmq,
-                                     bindings, &push, sizeof(push),
-                                     ((uint32_t)out_dim + 31u) / 32u,
-                                     ((uint32_t)n_tok + 127u) / 128u, 1);
+                 (n_tok <= 64u ?
+                  p36_vk_run_unlocked(op, &p36_vk.dense_kquant_mmq_bn64,
+                                      bindings, &push, sizeof(push),
+                                      ((uint32_t)out_dim + 31u) / 32u, 1, 1) :
+                  p36_vk_run_unlocked(op, &p36_vk.dense_kquant_mmq,
+                                      bindings, &push, sizeof(push),
+                                      ((uint32_t)out_dim + 31u) / 32u,
+                                      ((uint32_t)n_tok + 127u) / 128u, 1));
         }
         pthread_mutex_unlock(&p36_vk_mu);
         return ok;

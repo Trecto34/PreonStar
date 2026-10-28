@@ -4,7 +4,16 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
 
+/* P36_MMQ_BN64: a 64-token tile (two wave32s) for short prefill chunks.
+ * Same per-thread 4-row x 8-token register tile and k order, so every output
+ * is bit-identical to the 128-token build; the weight tile it stages is
+ * shared by 64 instead of 128 token slots, so it only pays when fewer than
+ * 65 tokens would fill the 128 tile. */
+#ifdef P36_MMQ_BN64
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+#else
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+#endif
 
 layout(set = 0, binding = 0) readonly buffer Weights { uint wb[]; };
 layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
@@ -27,7 +36,11 @@ const uint Q4_K = 12u;
 const uint Q5_K = 13u;
 const uint Q6_K = 14u;
 const uint BM = 32u;
+#ifdef P36_MMQ_BN64
+const uint BN = 64u;
+#else
 const uint BN = 128u;
+#endif
 const uint BK = 32u;
 const uint STRIDE = BK / 2u + 1u;
 const uint Q8K_WORDS = 74u;
@@ -250,7 +263,7 @@ void main(void) {
         }
         barrier();
         for (uint slice = 0u; slice < 8u; slice++) {
-            for (uint i = lid; i < BM * 8u; i += 128u) {
+            for (uint i = lid; i < BM * 8u; i += BN) {
                 uint lr = i >> 3u;
                 uint kw = i & 7u;
                 uint row = row0 + lr;
@@ -259,7 +272,7 @@ void main(void) {
                 buf_a[dst] = f16vec2(v.xy);
                 buf_a[dst + 1u] = f16vec2(v.zw);
             }
-            for (uint i = lid; i < BN * 2u; i += 128u) {
+            for (uint i = lid; i < BN * 2u; i += BN) {
                 uint lt = i >> 1u;
                 uint kh = i & 1u;
                 uint tok = tok0 + lt;

@@ -193,6 +193,7 @@ VULKAN_SHADERS := \
 	vulkan/dense_extra_mmq.spv \
 	vulkan/dense_extra_mmq_q2_0.spv \
 	vulkan/dense_kquant_mmq.spv \
+	vulkan/dense_kquant_mmq_bn64.spv \
 	vulkan/dense_kquant_decode.spv \
 	vulkan/dense_q4k_decode.spv \
 	vulkan/dense_q5k_decode.spv \
@@ -1093,3 +1094,6 @@ p36_eval_cases.o: p36_eval_cases.c p36_eval_cases.h
 
 vulkan/moe_down_route_reduce.spv: vulkan/moe_down_route_reduce.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/dense_kquant_mmq_bn64.spv: vulkan/dense_kquant_mmq.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MMQ_BN64 -o $@ $<

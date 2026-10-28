@@ -376,6 +376,7 @@ int p36_gpu_init(void) {
     p36_vk.dense_extra_mmq_ptq1_0 = P36_VK_KERNEL("vulkan/dense_extra_mmq_ptq1_0.spv", 4, 24, 1u << 2);
     p36_vk.dense_extra_mmq_iq2s = P36_VK_KERNEL("vulkan/dense_extra_mmq_iq2s.spv", 4, 24, 1u << 2);
     p36_vk.dense_kquant_mmq = P36_VK_KERNEL("vulkan/dense_kquant_mmq.spv", 4, 28, 1u << 2);
+    p36_vk.dense_kquant_mmq_bn64 = P36_VK_KERNEL("vulkan/dense_kquant_mmq_bn64.spv", 4, 28, 1u << 2);
     p36_vk.predequant_b16 = P36_VK_KERNEL("vulkan/predequant_b16.spv", 2, 4, 1u << 1);
     p36_vk.dense_kquant_decode = P36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
     p36_vk.dense_q4k_decode = P36_VK_KERNEL("vulkan/dense_q4k_decode.spv", 3, 28, 1u << 2);

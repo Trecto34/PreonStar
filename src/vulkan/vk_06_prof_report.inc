@@ -147,6 +147,7 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_decode);
     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs);
     p36_vk_kernel_destroy(&p36_vk.dense_kquant_mmq);
+    p36_vk_kernel_destroy(&p36_vk.dense_kquant_mmq_bn64);
     p36_vk_kernel_destroy(&p36_vk.predequant_b16);
     p36_vk_kernel_destroy(&p36_vk.dense_kquant_decode);
     p36_vk_kernel_destroy(&p36_vk.dense_q4k_decode);
