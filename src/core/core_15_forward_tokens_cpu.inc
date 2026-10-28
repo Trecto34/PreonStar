@@ -1914,6 +1914,17 @@ static bool p36_forward_tokens_vulkan(p36_session *s, const int *tokens, uint32_
         if (p36_gpu_top2_tensor(top2, rt->logits, P36_N_VOCAB)) {
             if (hprof_on) h3 = p36_hprof_ns();
             if (s->defer_top2) {
+                /* Chained sampled decode: overwrite top2[0] with the device
+                 * draw, so the next token embeds the sampled id. */
+                if (s->gs_on && n_tok == 1u) {
+                    if (s->gs_ridx >= s->gs_cap ||
+                        !p36_gpu_logits_minp_pack(rt->minp_pack, rt->logits, P36_N_VOCAB,
+                                                  s->gs_temp, s->gs_reject) ||
+                        !p36_gpu_minp_sample(top2, rt->minp_pack, (p36_gpu_tensor *)s->gs_rnd,
+                                             P36_N_VOCAB, s->gs_ridx, s->gs_reject, s->gs_min_p))
+                        return false;
+                    s->gs_ridx++;
+                }
                 /* Chained decode: publish the submission, not the value, so
                  * the host can record the next token (which embeds this id
                  * from the device) before waiting for exactly this result. */

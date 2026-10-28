@@ -636,6 +636,59 @@ static int run_sampled_generation(p36_engine *engine, const cli_config *cfg, con
         ((uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)clock());
     int generated = 0;
     const double t_decode0 = cli_now_sec();
+    /* Default min-p sampler without MTP: chain the decode on the device.  The
+     * first token is drawn on the host, every later one by the forward pass
+     * that precedes it (p36_session_gpu_sample_begin), so the host only reads
+     * ids back while the next token is already running. */
+    if (cfg->gen.temperature > 0.0f && !p36_engine_spec_enabled(engine) && max_tokens > 1) {
+        int token = p36_session_sample(session, cfg->gen.temperature, cfg->gen.top_k,
+                                       cfg->gen.top_p, cfg->gen.min_p, &rng);
+        int raw = token;
+        token = p36_session_eos_to_think_close(session, token);
+        if (token == p36_token_eos(engine)) {
+            max_tokens = 0;
+        } else if (token == raw &&
+                   p36_session_gpu_sample_begin(session, cfg->gen.temperature, cfg->gen.top_k,
+                                                cfg->gen.top_p, cfg->gen.min_p, &rng, max_tokens)) {
+            bool fail = p36_session_eval(session, token, err, sizeof(err)) != 0;
+            while (!fail) {
+                size_t piece_len = 0;
+                char *piece = p36_token_text(engine, token, &piece_len);
+                token_printer_write_text(&printer, piece, piece_len);
+                fflush(stdout);
+                free(piece);
+                if (++generated >= max_tokens || cli_interrupt_requested()) break;
+                if (p36_session_eval_device_next(session, &token, err, sizeof(err)) != 0) {
+                    fail = true;
+                    break;
+                }
+                /* The device already embedded the raw draw; a think-close
+                 * rewrite would diverge from it, so stop there as on EOS. */
+                if (token == p36_token_eos(engine) ||
+                    p36_session_eos_to_think_close(session, token) != token) break;
+            }
+            p36_session_gpu_sample_end(session);
+            if (fail) {
+                fprintf(stderr, "p36: decode failed: %s\n", err);
+                p36_session_free(session);
+                return 1;
+            }
+            max_tokens = generated;   /* skip the host loop below */
+        } else {
+            /* Not eligible: evaluate the host draw and continue on the host. */
+            if (p36_session_eval(session, token, err, sizeof(err)) != 0) {
+                fprintf(stderr, "p36: decode failed: %s\n", err);
+                p36_session_free(session);
+                return 1;
+            }
+            size_t piece_len = 0;
+            char *piece = p36_token_text(engine, token, &piece_len);
+            token_printer_write_text(&printer, piece, piece_len);
+            fflush(stdout);
+            free(piece);
+            generated++;
+        }
+    }
     while (generated < max_tokens && !cli_interrupt_requested()) {
         int token = p36_session_sample(session,
                                        cfg->gen.temperature,

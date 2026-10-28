@@ -667,6 +667,12 @@ struct p36_session {
     bool gpu_top2_valid;
     uint64_t gpu_top2_seq;   /* submission carrying the pending top-2 result */
     bool defer_top2;         /* chained decode: publish top-2 lazily (see generate_argmax) */
+    /* Chained sampled decode (p36_session_gpu_sample_begin): the forward pass
+     * also packs the min-p survivors and draws on the device into top2[0]. */
+    bool gs_on;
+    float gs_temp, gs_min_p, gs_reject;
+    uint32_t gs_ridx, gs_cap;
+    void *gs_rnd;            /* p36_gpu_tensor *: precomputed uniform draws */
     uint8_t gpu_top2_slot;   /* which rt->top2 buffer the result landed in */
     int gpu_top2[2];
     void *runtime;

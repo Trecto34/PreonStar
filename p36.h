@@ -360,6 +360,11 @@ int p36_session_token_rank(p36_session *s, int token, int max_rank);
 int p36_session_top_logprobs(p36_session *s, p36_token_score *out, int k);
 int p36_session_eval(p36_session *s, int token, char *err, size_t errlen);
 int p36_session_eval_device(p36_session *s, char *err, size_t errlen);
+int p36_session_gpu_sample_begin(p36_session *s, float temperature, int top_k,
+                                 float top_p, float min_p, uint64_t *rng,
+                                 int n_tokens);
+void p36_session_gpu_sample_end(p36_session *s);
+int p36_session_eval_device_next(p36_session *s, int *token, char *err, size_t errlen);
 int p36_session_top2_resolve(p36_session *s, uint64_t seq, uint32_t slot);
 int p36_session_commit_token(p36_session *s, int token);
 int p36_session_device_embed_ok(p36_session *s);

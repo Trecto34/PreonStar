@@ -5,6 +5,7 @@ void p36_session_free(p36_session *s) {
     p36_tokens_free(&s->checkpoint);
     if (p36_engine_uses_vulkan_runtime(s->engine)) {
 #ifndef P36_NO_GPU
+        p36_gpu_tensor_free((p36_gpu_tensor *)s->gs_rnd);
         p36_vulkan_runtime_free((p36_vulkan_runtime *)s->runtime);
 #endif
     } else {
@@ -558,6 +559,87 @@ static int p36_session_sample_packed(p36_session *s, float temperature,
     (void)s; (void)temperature; (void)top_k; (void)top_p; (void)min_p; (void)rng;
     return -1;
 #endif
+}
+
+/* Chained sampled decode for the default min-p sampler: from the next eval on,
+ * the forward pass also packs the survivors and draws the next token on the
+ * device into the top-2 buffer that p36_session_eval_device() embeds from, so
+ * the host never sits between two tokens.  The uniform draws for up to
+ * n_tokens tokens are taken from *rng now, in the order the host sampler
+ * would take them.  Returns 1 when enabled, 0 when the sampler or backend is
+ * not eligible (callers then keep the host loop). */
+int p36_session_gpu_sample_begin(p36_session *s, float temperature, int top_k,
+                                 float top_p, float min_p, uint64_t *rng,
+                                 int n_tokens) {
+#ifndef P36_NO_GPU
+    float reject_scaled = P36_NEG_INF;
+    bool have_reject = false;
+    if (!s || !rng || n_tokens <= 0 || !(temperature > 0.0f)) return 0;
+    if (top_k != 0 || !(top_p >= 1.0f)) return 0;
+    if (!(min_p > 0.0f) || !(min_p <= 1.0f) || !isfinite(min_p)) return 0;
+    if (getenv("P36_GPU_SAMPLE") && getenv("P36_GPU_SAMPLE")[0] == '0') return 0;
+    if (!p36_session_device_embed_ok(s)) return 0;
+    {
+        float cutoff = logf(min_p);
+        for (int i = 0; i < 8 && isfinite(cutoff); i++) {
+            cutoff = nextafterf(cutoff, -FLT_MAX);
+            if (expf(cutoff) < min_p) { reject_scaled = cutoff; have_reject = true; break; }
+        }
+    }
+    if (!have_reject) return 0;
+    p36_gpu_tensor *rnd = p36_gpu_tensor_alloc((uint64_t)n_tokens * sizeof(float));
+    if (!rnd) return 0;
+    float *u = xmalloc((size_t)n_tokens * sizeof(*u));
+    for (int i = 0; i < n_tokens; i++) u[i] = p36_sample_rng_f32(rng);
+    int ok = p36_gpu_tensor_write(rnd, 0, u, (uint64_t)n_tokens * sizeof(*u));
+    free(u);
+    if (!ok) { p36_gpu_tensor_free(rnd); return 0; }
+    p36_gpu_tensor_free((p36_gpu_tensor *)s->gs_rnd);
+    s->gs_rnd = rnd;
+    s->gs_cap = (uint32_t)n_tokens;
+    s->gs_ridx = 0;
+    s->gs_temp = temperature;
+    s->gs_min_p = min_p;
+    s->gs_reject = reject_scaled;
+    s->gs_on = true;
+    s->defer_top2 = true;
+    return 1;
+#else
+    (void)s; (void)temperature; (void)top_k; (void)top_p; (void)min_p; (void)rng; (void)n_tokens;
+    return 0;
+#endif
+}
+
+/* One chained step: evaluate the token whose id the previous step left on
+ * the device, then resolve which token that was.  *token gets that id; the
+ * forward for it is already queued, so the GPU never waits for the host. */
+int p36_session_eval_device_next(p36_session *s, int *token, char *err, size_t errlen) {
+    uint64_t seq;
+    uint32_t slot;
+    int t;
+    if (!s || !token || !s->gpu_top2_seq) {
+        if (err && errlen) snprintf(err, errlen, "no device token pending");
+        return 1;
+    }
+    seq = s->gpu_top2_seq;
+    slot = s->gpu_top2_slot;
+    s->gpu_top2_seq = 0;
+    s->gpu_top2_valid = false;
+    if (p36_session_eval_device(s, err, errlen) != 0) return 1;
+    t = p36_session_top2_resolve(s, seq, slot);
+    if (t < 0) {
+        if (err && errlen) snprintf(err, errlen, "device token read failed");
+        return 1;
+    }
+    p36_session_commit_token(s, t);
+    *token = t;
+    return 0;
+}
+
+void p36_session_gpu_sample_end(p36_session *s) {
+    if (!s) return;
+    s->gs_on = false;
+    s->defer_top2 = false;
 }
 
 int p36_session_sample(p36_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {

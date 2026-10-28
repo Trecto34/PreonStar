@@ -131,6 +131,7 @@ VULKAN_SHADERS := \
 	vulkan/argmax_rows.spv \
 	vulkan/topk8.spv \
 	vulkan/logits_minp_pack.spv \
+	vulkan/minp_sample.spv \
 	vulkan/moe_gate_up_f32b.spv \
 	vulkan/moe_gate_up_f32b_iq2s.spv \
 	vulkan/moe_down_q2k_f32b_iq2s.spv \

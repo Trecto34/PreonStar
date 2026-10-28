@@ -120,6 +120,7 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.top2);
     p36_vk_kernel_destroy(&p36_vk.topk8);
     p36_vk_kernel_destroy(&p36_vk.logits_minp);
+    p36_vk_kernel_destroy(&p36_vk.minp_sample);
     p36_vk_kernel_destroy(&p36_gdn_front);
     p36_vk_kernel_destroy(&p36_vk.recur_norm_gate);
     p36_vk_kernel_destroy(&p36_vk.recur_norm_gate_q8_k);

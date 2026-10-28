@@ -690,6 +690,30 @@ int p36_gpu_logits_minp_pack(p36_gpu_tensor *out, const p36_gpu_tensor *logits,
     return ok;
 }
 
+/* Device draw over a logits_minp_pack result (see minp_sample.comp): writes
+ * the sampled id to out[0] so the next token can embed it without a read. */
+int p36_gpu_minp_sample(p36_gpu_tensor *out, const p36_gpu_tensor *pack,
+                        const p36_gpu_tensor *rnd, uint32_t count, uint32_t ridx,
+                        float reject_scaled, float min_p) {
+    const uint32_t nb = P36_GPU_MINP_NB(count);
+    if (!p36_gpu_tensor_range_ok(pack, 0, P36_GPU_MINP_BYTES(count)) ||
+        !p36_gpu_tensor_range_ok(rnd, 0, ((uint64_t)ridx + 1u) * sizeof(float)) ||
+        !p36_gpu_tensor_range_ok(out, 0, sizeof(int32_t))) return 0;
+    struct {
+        uint32_t nb;
+        uint32_t cap;
+        uint32_t ridx;
+        float reject_scaled;
+        float min_p;
+    } push = { nb, P36_GPU_MINP_CAP, ridx, reject_scaled, min_p };
+    const p36_gpu_tensor *bindings[3] = { pack, rnd, out };
+    pthread_mutex_lock(&p36_vk_mu);
+    int ok = p36_vk_run_unlocked("minp_sample", &p36_vk.minp_sample, bindings,
+                                 &push, sizeof(push), 1, 1, 1);
+    pthread_mutex_unlock(&p36_vk_mu);
+    return ok;
+}
+
 int p36_gpu_topk8_tensor(p36_gpu_tensor *out, const p36_gpu_tensor *logits,
                          uint32_t count) {
     if (!p36_vk_env_default_on("P36_VK_TOPK8")) return 0;

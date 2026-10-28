@@ -227,6 +227,7 @@ typedef struct {
     p36_vk_kernel argmax_rows;
     p36_vk_kernel topk8;
     p36_vk_kernel logits_minp;
+    p36_vk_kernel minp_sample;
     p36_vk_kernel moe_gate_up_f32b;
     p36_vk_kernel moe_gate_up_f32b_iq2s;
     p36_vk_kernel moe_gate_up_decode;

@@ -1,0 +1,104 @@
+#version 460
+
+/* Device-side draw for the default min-p sampler (top_k 0, top_p 1), so a
+ * chained decode can embed the sampled token without a host round trip.
+ * Reads the survivors logits_minp_pack.comp compacted per 256-logit block and
+ * replays the host walk in p36_session_sample_packed: p = exp(scaled) for
+ * scaled > reject, drop p < min_p, r = u * sum, take the first survivor whose
+ * running sum reaches r (best-p fallback).  u comes from a buffer the host
+ * filled from the session RNG.  Not bit-identical to the host path: GPU exp
+ * and the per-thread partial sums round differently, so a draw that lands on
+ * a boundary can pick the neighbour; the distribution is the same.  A block
+ * over its cap samples only its first `cap` survivors. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Pack { uint w[]; };
+layout(set = 0, binding = 1) readonly buffer Rnd { float rnd[]; };
+layout(set = 0, binding = 2) buffer Out { int ids[]; };
+
+layout(push_constant) uniform Push {
+    uint nb;
+    uint cap;
+    uint ridx;
+    float reject_scaled;
+    float min_p;
+} pc;
+
+const uint HDR = 4u;
+
+shared float s_pre[256];
+shared float s_best[256];
+shared int s_bid[256];
+shared float s_total;
+shared int s_hit;
+
+float prob(uint slot, uint scl0) {
+    float scaled = uintBitsToFloat(w[scl0 + slot]);
+    float p = -1.0;
+    if (scaled > pc.reject_scaled) {
+        p = exp(scaled);
+        if (p < pc.min_p) p = -1.0;
+    }
+    return p;
+}
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint cnt0 = HDR + pc.nb;
+    uint idx0 = cnt0 + pc.nb;
+    uint scl0 = idx0 + pc.nb * pc.cap;
+    uint per = (pc.nb + 255u) / 256u;
+    uint b0 = min(tid * per, pc.nb);
+    uint b1 = min(b0 + per, pc.nb);
+
+    float local = 0.0;
+    float best = -1.0;
+    int bid = -1;
+    for (uint b = b0; b < b1; b++) {
+        uint n = min(w[cnt0 + b], pc.cap);
+        for (uint k = 0u; k < n; k++) {
+            uint slot = b * pc.cap + k;
+            float p = prob(slot, scl0);
+            if (p >= 0.0) local += p;
+            if (p > best) { best = p; bid = int(w[idx0 + slot]); }
+        }
+    }
+    s_pre[tid] = local;
+    s_best[tid] = best;
+    s_bid[tid] = bid;
+    barrier();
+    if (tid == 0u) {
+        /* Exclusive prefix in block order, and the first best-p survivor. */
+        float total = 0.0;
+        float bb = -1.0;
+        int bi = -1;
+        for (uint t = 0u; t < 256u; t++) {
+            float v = s_pre[t];
+            s_pre[t] = total;
+            total += v;
+            if (s_best[t] > bb) { bb = s_best[t]; bi = s_bid[t]; }
+        }
+        s_total = total;
+        s_hit = 0;
+        ids[0] = bi;   /* overwritten below unless the walk misses */
+    }
+    barrier();
+    float r = rnd[pc.ridx] * s_total;
+    if (s_total > 0.0 && r > s_pre[tid] && r <= s_pre[tid] + local) {
+        float rr = r - s_pre[tid];
+        for (uint b = b0; b < b1; b++) {
+            uint n = min(w[cnt0 + b], pc.cap);
+            for (uint k = 0u; k < n; k++) {
+                uint slot = b * pc.cap + k;
+                float p = prob(slot, scl0);
+                if (p < 0.0) continue;
+                rr -= p;
+                if (rr <= 0.0) {
+                    if (atomicExchange(s_hit, 1) == 0) ids[0] = int(w[idx0 + slot]);
+                    return;
+                }
+            }
+        }
+    }
+}

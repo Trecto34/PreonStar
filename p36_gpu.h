@@ -837,6 +837,9 @@ int p36_gpu_topk8_tensor(
 #define P36_GPU_MINP_BYTES(count) \
     ((uint64_t)P36_GPU_MINP_WORDS(count) * sizeof(uint32_t))
 
+int p36_gpu_minp_sample(p36_gpu_tensor *out, const p36_gpu_tensor *pack,
+                        const p36_gpu_tensor *rnd, uint32_t count, uint32_t ridx,
+                        float reject_scaled, float min_p);
 int p36_gpu_logits_minp_pack(
         p36_gpu_tensor       *out,
         const p36_gpu_tensor *logits,
