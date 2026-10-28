@@ -1579,7 +1579,7 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                 uint32_t identity;
             } gpush = { mid_dim, in_dim / P36_VK_QK_K, n_used,
                         gate->has_scales ? 1u : 0u, up->has_scales ? 1u : 0u,
-                        identity ? 1u : 0u };
+                        identity ? (uint32_t)n_tok : 0u };  /* share build: token count */
             const p36_gpu_tensor *gb[8] = {
                 gate_bank, up_bank, x, identity ? (sel_slots ? sel_slots : selected) : wave_tiles,
                 gate_scales ? gate_scales : gate_bank,
@@ -1611,6 +1611,12 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                                                (gu_iq2s_iq2xxs ? "moe_iq2s_iq2xxs_gate_up_decode" :
                                                                 (gu_iq2s ? "moe_iq2s_gate_up_decode" : "moe_iq2_gate_up_decode")))
                                                          : (gu_iq2s ? "moe_iq2s_gate_up_f32b" : "moe_iq2_gate_up"),
+                                                identity && n_tok > 1u ?
+                                                           (gu_q3k ? &p36_vk.moe_gate_up_share_q3k :
+                                                            gu_iq3xxs ? &p36_vk.moe_gate_up_share_iq3xxs :
+                                                            (gu_iq2s_iq2xxs ? &p36_vk.moe_gate_up_share_iq2s_iq2xxs :
+                                                             (gu_iq2s ? &p36_vk.moe_gate_up_share_iq2s
+                                                                      : &p36_vk.moe_gate_up_share))) :
                                                 identity ? (gu_q3k ? &p36_vk.moe_gate_up_decode_q3k :
                                                             gu_iq3xxs ? &p36_vk.moe_gate_up_decode_iq3xxs :
                                                             (gu_iq2s_iq2xxs ? &p36_vk.moe_gate_up_decode_iq2s_iq2xxs :

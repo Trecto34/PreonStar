@@ -25,8 +25,20 @@ layout(push_constant) uniform Push {
     uint n_used;
     uint has_gate_scales;
     uint has_up_scales;
-    uint pad;
+    uint n_tok;     /* identity tokens (MTP verify rows) */
 } pc;
+
+/* P36_MOE_SHARE build (MTP verify, 2..MAXR identity tokens): the workgroup
+ * that owns an expert's first slot dequantizes each weight once and applies
+ * it to every token that picked that expert; duplicate slots exit.  Each
+ * token keeps its own accumulators and the single-token fma order, so every
+ * slot is bit-identical to one identity pass per token.  Decode builds use
+ * MAXR = 1 and never scan. */
+#ifdef P36_MOE_SHARE
+const uint MAXR = 4u;
+#else
+const uint MAXR = 1u;
+#endif
 
 const uint IQ2_U16 = 33u;
 
@@ -81,15 +93,37 @@ const uint TAB_IQ3XXS_GRID = 3104u;
 #endif
 
 shared uint sh_grid[512];
-shared float sh_gate[2];
-shared float sh_up[2];
+shared float sh_gate[2 * MAXR];
+shared float sh_up[2 * MAXR];
 
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
     uint row = gl_WorkGroupID.x;
     uint pair = gl_WorkGroupID.y;
     uint expert = selected[pair];
-    uint x4 = (pair / pc.n_used) * pc.blocks * 64u;
+    uint nrow = 1u;
+    uint rslot[MAXR];
+    uint xk[MAXR];
+    rslot[0] = pair;
+    xk[0] = (pair / pc.n_used) * pc.blocks * 64u;
+#ifdef P36_MOE_SHARE
+    uint ntok = clamp(pc.n_tok, 1u, MAXR);
+    for (uint j = 0u; j < pair; j++)
+        if (selected[j] == expert) return;   /* an earlier slot owns it */
+    nrow = 0u;
+    for (uint t = 0u; t < MAXR; t++) {
+        if (t >= ntok) break;
+        for (uint u = 0u; u < pc.n_used; u++) {
+            uint sl = t * pc.n_used + u;
+            if (selected[sl] == expert) {
+                for (uint k = 0u; k < MAXR; k++)   /* static index: stay in VGPRs */
+                    if (k == nrow) { rslot[k] = sl; xk[k] = t * pc.blocks * 64u; }
+                nrow++;
+                break;
+            }
+        }
+    }
+#endif
     uint itid = tid & 15u;
     uint ix = tid >> 4u;
 
@@ -114,8 +148,9 @@ void main(void) {
 #endif
     uint ib32 = itid >> 1u;
     uint qpair = itid & 1u;
-    float gate_acc = 0.0;
-    float up_acc = 0.0;
+    float gacc[MAXR];
+    float uacc[MAXR];
+    for (uint k = 0u; k < MAXR; k++) { gacc[k] = 0.0; uacc[k] = 0.0; }
 
     for (uint i = ix; i < pc.blocks; i += 4u) {
 #if defined(P36_MOE_Q3K)
@@ -137,9 +172,12 @@ void main(void) {
         for (uint l = 0u; l < 4u; l++) {
             vec4 gv = q3k_vec(g_u32(qo + 4u * l), g_u32(ho + 4u * l), qsh, hbit);
             vec4 uv = q3k_vec(u_u32(qo + 4u * l), u_u32(ho + 4u * l), qsh, hbit);
-            vec4 bv = xv[x4 + y4 + l];
-            gate_acc = fma(gd, dot(bv, gv), gate_acc);
-            up_acc = fma(ud, dot(bv, uv), up_acc);
+            for (uint k = 0u; k < MAXR; k++) {
+                if (k >= nrow) break;
+                vec4 bv = xv[xk[k] + y4 + l];
+                gacc[k] = fma(gd, dot(bv, gv), gacc[k]);
+                uacc[k] = fma(ud, dot(bv, uv), uacc[k]);
+            }
         }
 #elif defined(P36_MOE_IQ3XXS)
         uint bb = base_bytes + i * IQ3XXS_BYTES;
@@ -175,9 +213,12 @@ void main(void) {
                                     ((usign >> (ss + 1u)) & 1u) != 0u,
                                     ((usign >> (ss + 2u)) & 1u) != 0u,
                                     ((usign >> (ss + 3u)) & 1u) != 0u));
-            vec4 bv = xv[x4 + y4 + l];
-            gate_acc = fma(gd, dot(bv, gv), gate_acc);
-            up_acc = fma(ud, dot(bv, uv), up_acc);
+            for (uint k = 0u; k < MAXR; k++) {
+                if (k >= nrow) break;
+                vec4 bv = xv[xk[k] + y4 + l];
+                gacc[k] = fma(gd, dot(bv, gv), gacc[k]);
+                uacc[k] = fma(ud, dot(bv, uv), uacc[k]);
+            }
         }
 #elif defined(P36_MOE_MIX_IQ2S_IQ2XXS)
         uint gbb = gbase_bytes + i * IQ2S_BYTES;
@@ -207,10 +248,13 @@ void main(void) {
             vec4 u1 = vec4(unpack8(sh_grid[uqs * 2u + 1u]));
             u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
             u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (bitCount(usign) & 1) != 0));
-            vec4 b0 = xv[x4 + y4 + 2u * l];
-            vec4 b4 = xv[x4 + y4 + 2u * l + 1u];
-            gate_acc = fma(gdb, dot(b0, g0) + dot(b4, g1), gate_acc);
-            up_acc = fma(udb, dot(b0, u0) + dot(b4, u1), up_acc);
+            for (uint k = 0u; k < MAXR; k++) {
+                if (k >= nrow) break;
+                vec4 b0 = xv[xk[k] + y4 + 2u * l];
+                vec4 b4 = xv[xk[k] + y4 + 2u * l + 1u];
+                gacc[k] = fma(gdb, dot(b0, g0) + dot(b4, g1), gacc[k]);
+                uacc[k] = fma(udb, dot(b0, u0) + dot(b4, u1), uacc[k]);
+            }
         }
 #elif defined(P36_MOE_IQ2S)
         uint bb = base_bytes + i * IQ2S_BYTES;
@@ -245,10 +289,13 @@ void main(void) {
             u1 = mix(u1, -u1, bvec4((usig & 16u) != 0u, (usig & 32u) != 0u,
                                     (usig & 64u) != 0u, (usig & 128u) != 0u));
 
-            vec4 b0 = xv[x4 + y4 + 2u * l];
-            vec4 b4 = xv[x4 + y4 + 2u * l + 1u];
-            gate_acc = fma(gdb, dot(b0, g0) + dot(b4, g1), gate_acc);
-            up_acc = fma(udb, dot(b0, u0) + dot(b4, u1), up_acc);
+            for (uint k = 0u; k < MAXR; k++) {
+                if (k >= nrow) break;
+                vec4 b0 = xv[xk[k] + y4 + 2u * l];
+                vec4 b4 = xv[xk[k] + y4 + 2u * l + 1u];
+                gacc[k] = fma(gdb, dot(b0, g0) + dot(b4, g1), gacc[k]);
+                uacc[k] = fma(udb, dot(b0, u0) + dot(b4, u1), uacc[k]);
+            }
         }
 #else
         uint gb = base_u16 + i * IQ2_U16;
@@ -283,32 +330,38 @@ void main(void) {
             u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u,
                                      (usign & 64u) != 0u, (bitCount(usign) & 1) != 0));
 
-            vec4 b0 = xv[x4 + y4 + 2u * l];
-            vec4 b4 = xv[x4 + y4 + 2u * l + 1u];
-            gate_acc = fma(gdb, dot(b0, g0) + dot(b4, g1), gate_acc);
-            up_acc = fma(udb, dot(b0, u0) + dot(b4, u1), up_acc);
+            for (uint k = 0u; k < MAXR; k++) {
+                if (k >= nrow) break;
+                vec4 b0 = xv[xk[k] + y4 + 2u * l];
+                vec4 b4 = xv[xk[k] + y4 + 2u * l + 1u];
+                gacc[k] = fma(gdb, dot(b0, g0) + dot(b4, g1), gacc[k]);
+                uacc[k] = fma(udb, dot(b0, u0) + dot(b4, u1), uacc[k]);
+            }
         }
 #endif
     }
 
-    gate_acc = subgroupAdd(gate_acc);
-    up_acc = subgroupAdd(up_acc);
-    if (gl_NumSubgroups > 1u) {
-        if (subgroupElect()) {
-            sh_gate[gl_SubgroupID] = gate_acc;
-            sh_up[gl_SubgroupID] = up_acc;
+    for (uint k = 0u; k < MAXR; k++) {
+        if (k >= nrow) break;
+        float gate_acc = subgroupAdd(gacc[k]);
+        float up_acc = subgroupAdd(uacc[k]);
+        if (gl_NumSubgroups > 1u) {
+            if (subgroupElect()) {
+                sh_gate[2u * k + gl_SubgroupID] = gate_acc;
+                sh_up[2u * k + gl_SubgroupID] = up_acc;
+            }
+            barrier();
+            if (tid == 0u) {
+                gate_acc += sh_gate[2u * k + 1u];
+                up_acc += sh_up[2u * k + 1u];
+            }
         }
-        barrier();
         if (tid == 0u) {
-            gate_acc += sh_gate[1];
-            up_acc += sh_up[1];
+            float g = gate_acc *
+                      (pc.has_gate_scales != 0u ? gate_scales[expert] : 1.0);
+            float v = up_acc *
+                      (pc.has_up_scales != 0u ? up_scales[expert] : 1.0);
+            y[rslot[k] * pc.mid_dim + row] = (g / (1.0f + exp(-g))) * v;
         }
-    }
-    if (tid == 0u) {
-        float g = gate_acc *
-                  (pc.has_gate_scales != 0u ? gate_scales[expert] : 1.0);
-        float v = up_acc *
-                  (pc.has_up_scales != 0u ? up_scales[expert] : 1.0);
-        y[pair * pc.mid_dim + row] = (g / (1.0f + exp(-g))) * v;
     }
 }

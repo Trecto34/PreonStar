@@ -318,6 +318,11 @@ int p36_gpu_init(void) {
     p36_vk.moe_gate_up_decode_iq3xxs = P36_VK_KERNEL("vulkan/moe_gate_up_decode_iq3xxs.spv", 8, 24, 1u << 6);
     p36_vk.moe_gate_up_decode_q3k = P36_VK_KERNEL("vulkan/moe_gate_up_decode_q3k.spv", 8, 24, 1u << 6);
     p36_vk.moe_gate_up_decode_iq2s_iq2xxs = P36_VK_KERNEL("vulkan/moe_gate_up_decode_iq2s_iq2xxs.spv", 8, 24, 1u << 6);
+    p36_vk.moe_gate_up_share = P36_VK_KERNEL("vulkan/moe_gate_up_share.spv", 8, 24, 1u << 6);
+    p36_vk.moe_gate_up_share_iq2s = P36_VK_KERNEL("vulkan/moe_gate_up_share_iq2s.spv", 8, 24, 1u << 6);
+    p36_vk.moe_gate_up_share_iq3xxs = P36_VK_KERNEL("vulkan/moe_gate_up_share_iq3xxs.spv", 8, 24, 1u << 6);
+    p36_vk.moe_gate_up_share_q3k = P36_VK_KERNEL("vulkan/moe_gate_up_share_q3k.spv", 8, 24, 1u << 6);
+    p36_vk.moe_gate_up_share_iq2s_iq2xxs = P36_VK_KERNEL("vulkan/moe_gate_up_share_iq2s_iq2xxs.spv", 8, 24, 1u << 6);
     p36_vk.moe_down_q2k_f32b = P36_VK_KERNEL("vulkan/moe_down_q2k_f32b.spv", 5, 24, 1u << 4);
     p36_vk.moe_down_q2k_f32b_iq2s = P36_VK_KERNEL("vulkan/moe_down_q2k_f32b_iq2s.spv", 6, 24, 1u << 4);
     p36_vk.moe_down_q2k_sum_decode = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode.spv", 6, 24, 1u << 5);

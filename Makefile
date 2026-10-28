@@ -207,6 +207,11 @@ VULKAN_SHADERS := \
 	vulkan/dense_q5k_rows2.spv \
 	vulkan/dense_q6k_rows2.spv \
 	vulkan/moe_reduce.spv \
+	vulkan/moe_gate_up_share.spv \
+	vulkan/moe_gate_up_share_iq2s.spv \
+	vulkan/moe_gate_up_share_iq3xxs.spv \
+	vulkan/moe_gate_up_share_q3k.spv \
+	vulkan/moe_gate_up_share_iq2s_iq2xxs.spv \
 	vulkan/moe_down_route_reduce.spv \
 	vulkan/ffn_tail.spv
 
@@ -1093,3 +1098,19 @@ p36_eval_cases.o: p36_eval_cases.c p36_eval_cases.h
 
 vulkan/moe_down_route_reduce.spv: vulkan/moe_down_route_reduce.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/moe_gate_up_share.spv: vulkan/moe_gate_up_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -o $@ $<
+
+vulkan/moe_gate_up_share_iq2s.spv: vulkan/moe_gate_up_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -DP36_MOE_IQ2S -o $@ $<
+
+vulkan/moe_gate_up_share_iq3xxs.spv: vulkan/moe_gate_up_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -DP36_MOE_IQ3XXS -o $@ $<
+
+vulkan/moe_gate_up_share_q3k.spv: vulkan/moe_gate_up_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -DP36_MOE_Q3K -o $@ $<
+
+vulkan/moe_gate_up_share_iq2s_iq2xxs.spv: vulkan/moe_gate_up_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -DP36_MOE_MIX_IQ2S_IQ2XXS -o $@ $<
+
