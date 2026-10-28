@@ -3529,3 +3529,17 @@ draw ~11). CyberTiel, `--temp 0.6 --top-k 0 --top-p 1 --min-p 0.05 --seed 42`,
 pairs host 85.92/81.94/84.50 vs device 84.02/83.95/86.23 (median -0.6%).
 Same finding as the greedy chain: with the next token queued there is no
 measurable inter-token GPU gap left on this board. Not merged.
+
+## MoE GEMMs: 16-slot expert tiles for <= 64-token batches — ACCEPTED, +3.2% chunk-64 prefill (2026-10-27)
+
+The narrow-tile half of the short-chunk item, for the expert GEMMs. `P36_SLOT_TILE`
+in `moe_gate_up_gemm.comp` / `moe_down_gemm.comp` (store loop bounded by the
+tile), ten `*_t16.spv` builds, and the host picks `pair_tile = 16` plus the t16
+kernels when a GEMM batch has <= 64 tokens. All-16 experiment
+(`experiment/moe-tile16`): chunk 64 +1.72%, chunk 256 -1.16% (an expert with
+> 16 slots is staged twice) — hence the n_tok gate. Shipped selection vs
+`2050825`, bit-identical frontier logits at chunk 64 and 256, 3 pairs:
+ctx 512 chunk 64 313.83/318.96/320.24 -> 329.23/327.90/329.25 (+3.22%,
+disjoint); ctx 1024 chunk 256 +0.82% (32-slot path, noise).
+`evidence/raw/w-moe-tile16/`. The trunk's 64-token mmq tile stays rejected
+(`experiment/mmq-bn64`, +10.8% kernel time).

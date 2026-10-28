@@ -206,6 +206,16 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.moe_down_gemm_iq3s);
     p36_vk_kernel_destroy(&p36_vk.moe_down_gemm_iq3xxs);
     p36_vk_kernel_destroy(&p36_vk.moe_down_gemm_q3k);
+    p36_vk_kernel_destroy(&p36_vk.moe_gate_up_gemm_t16);
+    p36_vk_kernel_destroy(&p36_vk.moe_gate_up_gemm_iq2s_t16);
+    p36_vk_kernel_destroy(&p36_vk.moe_gate_up_gemm_iq3xxs_t16);
+    p36_vk_kernel_destroy(&p36_vk.moe_gate_up_gemm_q3k_t16);
+    p36_vk_kernel_destroy(&p36_vk.moe_gate_up_gemm_iq2s_iq2xxs_t16);
+    p36_vk_kernel_destroy(&p36_vk.moe_down_gemm_t16);
+    p36_vk_kernel_destroy(&p36_vk.moe_down_gemm_iq2s_t16);
+    p36_vk_kernel_destroy(&p36_vk.moe_down_gemm_iq3s_t16);
+    p36_vk_kernel_destroy(&p36_vk.moe_down_gemm_iq3xxs_t16);
+    p36_vk_kernel_destroy(&p36_vk.moe_down_gemm_q3k_t16);
     p36_vk_kernel_destroy(&p36_vk.attn_decode_fused);
     p36_vk_kernel_destroy(&p36_vk.attn_decode_split);
     p36_vk_kernel_destroy(&p36_vk.attn_prefill_qtile);

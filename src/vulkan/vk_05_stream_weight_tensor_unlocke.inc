@@ -337,6 +337,16 @@ int p36_gpu_init(void) {
     p36_vk.moe_down_gemm_iq3s = P36_VK_KERNEL("vulkan/moe_down_gemm_iq3s.spv", 6, 24, 1u << 4);
     p36_vk.moe_down_gemm_iq3xxs = P36_VK_KERNEL("vulkan/moe_down_gemm_iq3xxs.spv", 6, 24, 1u << 4);
     p36_vk.moe_down_gemm_q3k = P36_VK_KERNEL("vulkan/moe_down_gemm_q3k.spv", 5, 24, 1u << 4);
+    p36_vk.moe_gate_up_gemm_t16 = P36_VK_KERNEL("vulkan/moe_gate_up_gemm_t16.spv", 8, 24, 1u << 6);
+    p36_vk.moe_gate_up_gemm_iq2s_t16 = P36_VK_KERNEL("vulkan/moe_gate_up_gemm_iq2s_t16.spv", 8, 24, 1u << 6);
+    p36_vk.moe_gate_up_gemm_iq3xxs_t16 = P36_VK_KERNEL("vulkan/moe_gate_up_gemm_iq3xxs_t16.spv", 8, 24, 1u << 6);
+    p36_vk.moe_gate_up_gemm_q3k_t16 = P36_VK_KERNEL("vulkan/moe_gate_up_gemm_q3k_t16.spv", 8, 24, 1u << 6);
+    p36_vk.moe_gate_up_gemm_iq2s_iq2xxs_t16 = P36_VK_KERNEL("vulkan/moe_gate_up_gemm_iq2s_iq2xxs_t16.spv", 8, 24, 1u << 6);
+    p36_vk.moe_down_gemm_t16 = P36_VK_KERNEL("vulkan/moe_down_gemm_t16.spv", 5, 24, 1u << 4);
+    p36_vk.moe_down_gemm_iq2s_t16 = P36_VK_KERNEL("vulkan/moe_down_gemm_iq2s_t16.spv", 6, 24, 1u << 4);
+    p36_vk.moe_down_gemm_iq3s_t16 = P36_VK_KERNEL("vulkan/moe_down_gemm_iq3s_t16.spv", 6, 24, 1u << 4);
+    p36_vk.moe_down_gemm_iq3xxs_t16 = P36_VK_KERNEL("vulkan/moe_down_gemm_iq3xxs_t16.spv", 6, 24, 1u << 4);
+    p36_vk.moe_down_gemm_q3k_t16 = P36_VK_KERNEL("vulkan/moe_down_gemm_q3k_t16.spv", 5, 24, 1u << 4);
     p36_vk.moe_matvec = P36_VK_KERNEL("vulkan/moe_matvec.spv", 6, 36, 1u << 4);
     p36_vk.moe_matvec_fast = P36_VK_KERNEL("vulkan/moe_matvec_fast.spv", 6, 36, 1u << 4);
     p36_vk.dense_iq3_xxs_decode = P36_VK_KERNEL("vulkan/dense_iq3_xxs_decode.spv", 4, 16, 1u << 2);

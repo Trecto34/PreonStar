@@ -1501,7 +1501,12 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
      * routed batches retain the generic path until their f32 pair kernels
      * are selected below as well. */
     if (apex && !(gemm || (identity && down_sum_decode))) return 0;
-    uint32_t pair_tile = gemm ? P36_VK_MOE_GEMM_TILE : P36_VK_MOE_PAIR_TILE;
+    /* Short GEMM batches (<= 64 tokens: chunk tails, short turns) give an
+     * expert a few slots, so they use 16-slot expert tiles (*_t16 builds):
+     * +1.7% at chunk 64; full 256-token chunks keep 32-slot tiles, where the
+     * narrower tile re-stages experts that get more than 16 slots (-1.2%). */
+    const bool t16 = gemm && n_tok <= 64u;
+    uint32_t pair_tile = gemm ? (t16 ? 16u : P36_VK_MOE_GEMM_TILE) : P36_VK_MOE_PAIR_TILE;
     uint32_t tile_count = (uint32_t)n_slot;
     if (!identity && !overflow) {
         tiles = p36_vk_moe_tiles_gpu(selected, (uint32_t)n_slot, n_expert,
@@ -1600,6 +1605,10 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                                 gu_iq3xxs ? "moe_iq3xxs_gate_up_gemm" :
                                                 (gu_iq2s_iq2xxs ? "moe_iq2s_iq2xxs_gate_up_gemm" :
                                                  (gu_iq2s ? "moe_iq2s_gate_up_gemm" : "moe_iq2_gate_up_gemm")),
+                                                t16 ? (gu_q3k ? &p36_vk.moe_gate_up_gemm_q3k_t16 :
+                                                       gu_iq3xxs ? &p36_vk.moe_gate_up_gemm_iq3xxs_t16 :
+                                                       (gu_iq2s_iq2xxs ? &p36_vk.moe_gate_up_gemm_iq2s_iq2xxs_t16 :
+                                                        (gu_iq2s ? &p36_vk.moe_gate_up_gemm_iq2s_t16 : &p36_vk.moe_gate_up_gemm_t16))) :
                                                 gu_q3k ? &p36_vk.moe_gate_up_gemm_q3k :
                                                 gu_iq3xxs ? &p36_vk.moe_gate_up_gemm_iq3xxs :
                                                 (gu_iq2s_iq2xxs ? &p36_vk.moe_gate_up_gemm_iq2s_iq2xxs :
@@ -1672,7 +1681,12 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                     down_iq3xxs ? "moe_iq3xxs_down_gemm" :
                                     down_iq3s ? "moe_iq3s_down_gemm" :
                                     down_iq2s ? "moe_iq2s_down_gemm" : "moe_q2k_down_gemm";
-                p36_vk_kernel *dkernel = down_q3k ? &p36_vk.moe_down_gemm_q3k :
+                p36_vk_kernel *dkernel = t16 ?
+                                          (down_q3k ? &p36_vk.moe_down_gemm_q3k_t16 :
+                                           down_iq3xxs ? &p36_vk.moe_down_gemm_iq3xxs_t16 :
+                                           down_iq3s ? &p36_vk.moe_down_gemm_iq3s_t16 :
+                                           down_iq2s ? &p36_vk.moe_down_gemm_iq2s_t16 : &p36_vk.moe_down_gemm_t16) :
+                                          down_q3k ? &p36_vk.moe_down_gemm_q3k :
                                           down_iq3xxs ? &p36_vk.moe_down_gemm_iq3xxs :
                                           down_iq3s ? &p36_vk.moe_down_gemm_iq3s :
                                           down_iq2s ? &p36_vk.moe_down_gemm_iq2s : &p36_vk.moe_down_gemm;
