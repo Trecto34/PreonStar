@@ -3470,3 +3470,25 @@ or a copy without the b1 loads / [1] accumulations. Uniform, bit-identical
 chunk 64: 1116 -> 1013 ms (down IQ3_XXS -18%, gate/up -7..8%). 3 pairs vs
 `4f0ab41`: chunk 64 308.36 -> 321.04 (+4.11%), ctx 1024 chunk 256
 598.21 -> 619.97 (+3.64%), decode flat. `evidence/raw/w-moe-gemm-half/`.
+
+## Inter-token gap: chained decode with the token id kept on the device — RE-MEASURED, neutral; GPU sampling not built (2026-10-27)
+
+Re-ran the stashed "C: lagged decode loop" (`stash@{0}`) on `46df8b5`, branch
+`experiment/gpu-chain` (`p36-wt/chain`): token i+1 is recorded with its
+embedding row read from token i's device top-2 buffer (`embed_row` ids
+binding), the host seals the batch and later waits only for token i's
+submission (`p36_gpu_tensor_read_begin/_wait`), so the GPU always has the next
+token queued. Two fixes over the stash: `argmax_excluding` / `token_rank` now
+resolve a pending read (they silently fell back to a 1 MB logits read), and
+deferral is gated to the chained loop (`s->defer_top2`) because deferring in
+the unchained bench loop cost -0.49%. Output identical (CLI greedy 256 tok md5
+equal; bench parity, MTP text unchanged). CLI `--temp 0`, CyberTiel, 6
+interleaved pairs vs `46df8b5`: A 85.59/84.59/83.70/85.49/83.00/85.48,
+B 87.75/85.49/87.00/85.68/83.67/85.24 (pooled medians ~85.0 vs ~85.6,
++0.7%, inside noise); unchained bench -0.11%.
+Verdict: with the next token always queued the GPU-idle round trip buys
+nothing measurable here, so GPU-side sampling for temp > 0 (the same
+dependency removal, plus a sampler port) is not worth building. Kept on the
+experiment branch, not merged. `reconsider_if`: a profile without timestamp
+brackets shows a real inter-token GPU gap (the 0.6-0.76 ms figure comes from
+timestamp-instrumented runs, which add ~1.9 us per bracket).
