@@ -784,7 +784,40 @@ int p36_engine_generate_argmax(p36_engine *e, const p36_tokens *prompt,
     int room = p36_session_ctx(s) - p36_session_pos(s);
     int max_tokens = room <= 1 ? 0 : n_predict;
     if (max_tokens > room - 1) max_tokens = room - 1;
-    for (int i = 0; i < max_tokens; i++) {
+    if (max_tokens > 0 && p36_session_device_embed_ok(s)) {
+        /* Lagged decode: the first token is evaluated from an id the host
+         * already has, then every following forward pass takes its row
+         * index straight from the previous top-2 buffer.  The host ends up
+         * recording token i+1 before it resolves token i+1's id, so the GPU
+         * has a token of work queued when the readback lands instead of
+         * idling through it.  The price is one wasted token on EOS, and the
+         * embedded id is the raw top-2 winner (the EOS rewrite below only
+         * affects what is emitted). */
+        int token = p36_session_argmax(s);
+        if (token < 0) goto done;
+        token = p36_session_eos_to_think_close(s, token);
+        if (token != eos) {
+            if (emit) emit(emit_ud, token);
+            s->defer_top2 = true;
+            if (p36_session_eval(s, token, err, sizeof(err)) != 0) goto done;
+            generated++;
+            for (int i = 1; i < max_tokens; i++) {
+                uint64_t seq = s->gpu_top2_seq;
+                uint32_t slot = (uint32_t)s->gpu_top2_slot;
+                int next;
+                s->gpu_top2_seq = 0;
+                s->gpu_top2_valid = false;
+                if (p36_session_eval_device(s, err, sizeof(err)) != 0) goto done;
+                next = p36_session_top2_resolve(s, seq, slot);
+                if (next < 0) goto done;
+                p36_session_commit_token(s, next);
+                next = p36_session_eos_to_think_close(s, next);
+                if (next == eos) break;
+                if (emit) emit(emit_ud, next);
+                generated++;
+            }
+        }
+    } else for (int i = 0; i < max_tokens; i++) {
         int token = p36_session_argmax(s);
         if (token < 0) goto done;
         token = p36_session_eos_to_think_close(s, token);
@@ -930,7 +963,7 @@ int p36_session_create(p36_session **out, p36_engine *e, int ctx_size) {
     s->sample_probs = xmalloc((size_t)P36_N_VOCAB * sizeof(*s->sample_probs));
     memset(s->logits, 0, (size_t)P36_N_VOCAB * sizeof(*s->logits));
     s->logits_host_valid = true;
-    s->gpu_top2_valid = false;
+    s->gpu_top2_valid = false; s->gpu_top2_seq = 0;
     if (p36_engine_uses_vulkan_runtime(e)) {
 #ifdef P36_NO_GPU
         s->runtime = NULL;

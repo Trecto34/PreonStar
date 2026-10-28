@@ -107,7 +107,7 @@ static bool p36_forward_tokens_cpu(p36_session *s,
             return false;
         }
         s->logits_host_valid = true;
-        s->gpu_top2_valid = false;
+        s->gpu_top2_valid = false; s->gpu_top2_seq = 0;
     }
     return true;
 }
@@ -1190,7 +1190,10 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
         if (embeddings) {
             if (!p36_gpu_tensor_write(stage, 0, embeddings,
                     (uint64_t)n_tok * P36_N_EMBD * sizeof(*embeddings))) return false;
-        } else if (!p36_gpu_embed_tokens(&e->model, e->weights.token_embd, tokens, n_tok, stage)) {
+        } else if (!p36_gpu_embed_tokens(&e->model, e->weights.token_embd, tokens, n_tok,
+                                         stage,
+                                         (n_tok == 1 && tokens[0] < 0)
+                                             ? rt->top2[s->gpu_top2_slot & 1u] : NULL)) {
             fprintf(stderr, "p36: embed failed for %u tokens at pos=%u\n", n_tok, pos0);
             return false;
         }
@@ -1739,7 +1742,7 @@ static bool p36_sessions_eval_batch_vulkan(p36_decode_item *items, int count) {
     for (int i = 0; i < count; i++) tokens[i] = items[i].token;
     p36_gpu_stream_expert_cache_note_tokens(rows);
     if (!p36_gpu_embed_tokens(&e->model, e->weights.token_embd,
-                              tokens, rows, rt->embed_stage[0]) ||
+                              tokens, rows, rt->embed_stage[0], NULL) ||
         !p36_gpu_copy_f32_tensor(rt->hidden, rt->embed_stage[0],
                                  rows * P36_N_EMBD) ||
         !p36_gpu_rms_norm_weight_rows_tensor(
@@ -1860,7 +1863,7 @@ static bool p36_sessions_eval_batch_vulkan(p36_decode_item *items, int count) {
             return false;
         }
         items[i].session->logits_host_valid = true;
-        items[i].session->gpu_top2_valid = false;
+        items[i].session->gpu_top2_valid = false; items[i].session->gpu_top2_seq = 0;
     }
     return true;
 }
@@ -1901,7 +1904,7 @@ static bool p36_forward_tokens_vulkan(p36_session *s, const int *tokens, uint32_
     if (!p36_vulkan_update_last_h(rt, n_tok - 1u)) return false;
     if (hprof_on) h2 = p36_hprof_ns();
     if (compute_logits) {
-        s->gpu_top2_valid = false;
+        s->gpu_top2_valid = false; s->gpu_top2_seq = 0;
         s->logits_host_valid = false;
         /* Alternate buffers per token: the reader can still be waiting on
          * this result while the next token's dispatch writes the other. */
@@ -1909,14 +1912,22 @@ static bool p36_forward_tokens_vulkan(p36_session *s, const int *tokens, uint32_
         s->gpu_top2_slot = (uint8_t)(rt->top2_flip & 1u);
         rt->top2_flip ^= 1u;
         if (p36_gpu_top2_tensor(top2, rt->logits, P36_N_VOCAB)) {
-            int32_t ids[2] = {-1, -1};
             if (hprof_on) h3 = p36_hprof_ns();
-            if (!p36_gpu_tensor_read(top2, 0, ids, sizeof(ids)))
-                return false;
-            if (hprof_on) h4 = p36_hprof_ns();
-            s->gpu_top2[0] = ids[0];
-            s->gpu_top2[1] = ids[1];
-            s->gpu_top2_valid = ids[0] >= 0 && ids[1] >= 0;
+            if (s->defer_top2) {
+                /* Chained decode: publish the submission, not the value, so
+                 * the host can record the next token (which embeds this id
+                 * from the device) before waiting for exactly this result. */
+                s->gpu_top2_seq = p36_gpu_tensor_read_begin();
+                if (hprof_on) h4 = h3;
+            } else {
+                int32_t ids[2] = {-1, -1};
+                if (!p36_gpu_tensor_read(top2, 0, ids, sizeof(ids)))
+                    return false;
+                if (hprof_on) h4 = p36_hprof_ns();
+                s->gpu_top2[0] = ids[0];
+                s->gpu_top2[1] = ids[1];
+                s->gpu_top2_valid = ids[0] >= 0 && ids[1] >= 0;
+            }
         } else {
             if (!p36_gpu_tensor_read(
                     rt->logits, 0, s->logits,
@@ -1951,7 +1962,7 @@ static bool p36_forward_embeddings_vulkan(p36_session *s, const int *tokens,
             compute_logits ? rt->logits : NULL, false) ||
         !p36_vulkan_update_last_h(rt, n_tok - 1u)) return false;
     if (compute_logits) {
-        s->gpu_top2_valid = false;
+        s->gpu_top2_valid = false; s->gpu_top2_seq = 0;
         s->logits_host_valid = false;
     }
     return true;
@@ -2052,7 +2063,7 @@ static bool p36_vulkan_verify_suffix_tops(p36_session *s,
         s->logits, (uint64_t)P36_N_VOCAB * sizeof(*s->logits)) != 0;
     if (ok) {
         s->logits_host_valid = true;
-        s->gpu_top2_valid = false;
+        s->gpu_top2_valid = false; s->gpu_top2_seq = 0;
     }
     return ok;
 }
@@ -2083,7 +2094,7 @@ static bool p36_mtp_forward_vulkan(p36_session *s,
     mw = &e->mtp_weights;
     l = &mw->block;
 
-    if (!p36_gpu_embed_tokens(&e->model, mw->token_embd, &token, 1, rt->mtp_tok_embd)) return false;
+    if (!p36_gpu_embed_tokens(&e->model, mw->token_embd, &token, 1, rt->mtp_tok_embd, NULL)) return false;
     if (!p36_gpu_rms_norm_weight_rows_tensor(rt->mtp_e_norm,
                                              rt->mtp_tok_embd,
                                              e->mtp_model.map,
@@ -2301,7 +2312,7 @@ static bool p36_forward_token_cpu(p36_session *s, int token, uint32_t pos, bool 
             return false;
         }
         s->logits_host_valid = true;
-        s->gpu_top2_valid = false;
+        s->gpu_top2_valid = false; s->gpu_top2_seq = 0;
     }
     return true;
 }

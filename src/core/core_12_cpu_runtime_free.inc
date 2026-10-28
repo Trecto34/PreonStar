@@ -62,7 +62,8 @@ static bool p36_gpu_tensor_scale_host(p36_gpu_tensor *tensor, uint32_t n, float 
 }
 
 static bool p36_gpu_embed_tokens(const p36_model *m, const p36_tensor *t,
-                                 const int *tokens, uint32_t n_tok, p36_gpu_tensor *dst) {
+                                 const int *tokens, uint32_t n_tok, p36_gpu_tensor *dst,
+                                 const p36_gpu_tensor *ids) {
     /* Decode takes the row straight off the device copy of the table: no
      * host dequant, and no host write into a staging buffer the GPU is
      * about to read.  Prefill batches and the hadamard-inverse variant
@@ -72,11 +73,21 @@ static bool p36_gpu_embed_tokens(const p36_model *m, const p36_tensor *t,
         p36_gpu_embed_table_prepare(m->map, m->size, t->abs_offset, t->bytes);
     }
     if (n_tok == 1 && !t->hadamard_inverse &&
-        tokens[0] >= 0 && tokens[0] < (int)P36_N_VOCAB &&
-        p36_gpu_embed_row_tensor(dst, m->map, m->size, t->abs_offset, t->bytes,
-                                 P36_N_EMBD, (uint32_t)t->type, NULL,
-                                 (uint32_t)tokens[0])) {
-        return true;
+        (t->type == P36_TENSOR_Q8_0 || t->type == P36_TENSOR_Q4_K)) {
+        /* A negative token means "the id is already in device memory": the
+         * row index comes from the previous token's top-2 result, so the
+         * host does not have to wait for it before recording this one. */
+        if (ids && tokens[0] < 0 &&
+            p36_gpu_embed_row_tensor(dst, m->map, m->size, t->abs_offset, t->bytes,
+                                     P36_N_EMBD, (uint32_t)t->type, ids, 0)) {
+            return true;
+        }
+        if (!ids && tokens[0] >= 0 && tokens[0] < (int)P36_N_VOCAB &&
+            p36_gpu_embed_row_tensor(dst, m->map, m->size, t->abs_offset, t->bytes,
+                                     P36_N_EMBD, (uint32_t)t->type, NULL,
+                                     (uint32_t)tokens[0])) {
+            return true;
+        }
     }
     float *p = p36_gpu_tensor_contents_named(dst, "submit_wait_embed_tokens");
     if (!p) return false;

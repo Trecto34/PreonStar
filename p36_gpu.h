@@ -574,6 +574,12 @@ int p36_gpu_copy_f32_tensor(
 void p36_gpu_embed_table_prepare(const void *model_map, uint64_t model_size,
                                  uint64_t table_offset, uint64_t table_bytes);
 
+/* Split the D2H read: seal what is recorded now, wait for exactly that
+ * submission later, so the host can record the next token in between. */
+uint64_t p36_gpu_tensor_read_begin(void);
+int p36_gpu_tensor_read_wait(const p36_gpu_tensor *tensor, uint64_t offset,
+                             void *data, uint64_t bytes, uint64_t seq);
+
 int p36_gpu_embed_row_tensor(
         p36_gpu_tensor       *dst,
         const void           *model_map,

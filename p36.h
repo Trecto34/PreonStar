@@ -359,6 +359,10 @@ int p36_session_eos_to_think_close(p36_session *s, int token);
 int p36_session_token_rank(p36_session *s, int token, int max_rank);
 int p36_session_top_logprobs(p36_session *s, p36_token_score *out, int k);
 int p36_session_eval(p36_session *s, int token, char *err, size_t errlen);
+int p36_session_eval_device(p36_session *s, char *err, size_t errlen);
+int p36_session_top2_resolve(p36_session *s, uint64_t seq, uint32_t slot);
+int p36_session_commit_token(p36_session *s, int token);
+int p36_session_device_embed_ok(p36_session *s);
 int p36_sessions_eval_batch(p36_decode_item *items, int count,
                             char *err, size_t errlen);
 int p36_sessions_eval_batch_with_prefill(

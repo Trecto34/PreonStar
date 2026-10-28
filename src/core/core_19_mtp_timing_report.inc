@@ -388,7 +388,7 @@ const float *p36_session_logits(p36_session *s, int *n_vocab) {
 static void p36_session_reset_runtime(p36_session *s) {
     if (!s) return;
     s->logits_host_valid = false;
-    s->gpu_top2_valid = false;
+    s->gpu_top2_valid = false; s->gpu_top2_seq = 0;
     if (p36_engine_uses_vulkan_runtime(s->engine)) {
 #ifndef P36_NO_GPU
         (void)p36_vulkan_runtime_reset((p36_vulkan_runtime *)s->runtime);
@@ -973,7 +973,7 @@ int p36_session_load_payload(p36_session *s, FILE *fp, uint64_t payload_bytes, c
                                    (uint64_t)P36_N_VOCAB * sizeof(float),
                                    &remaining, err, errlen) != 0) return 1;
         s->logits_host_valid = true;
-        s->gpu_top2_valid = false;
+        s->gpu_top2_valid = false; s->gpu_top2_seq = 0;
         for (uint32_t il = 0; il < P36_N_LAYER; il++) {
             if (p36_layer_is_full_attention(il)) {
                 uint32_t rows = 0;
@@ -1004,7 +1004,7 @@ int p36_session_load_payload(p36_session *s, FILE *fp, uint64_t payload_bytes, c
                                     (uint64_t)P36_N_VOCAB * sizeof(float),
                                     &remaining, err, errlen) != 0) return 1;
         s->logits_host_valid = false;
-        s->gpu_top2_valid = false;
+        s->gpu_top2_valid = false; s->gpu_top2_seq = 0;
         for (uint32_t il = 0; il < P36_N_LAYER; il++) {
             if (p36_layer_is_full_attention(il)) {
                 uint32_t rows = 0;

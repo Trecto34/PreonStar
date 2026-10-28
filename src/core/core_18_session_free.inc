@@ -393,17 +393,64 @@ static bool p36_session_ensure_logits_host(p36_session *s) {
     return false;
 }
 
+/* Resolve a published top-2 submission: wait only that far, then copy the
+ * ping-pong buffer it landed in.  No-op when the host already resolved it. */
+static bool p36_session_top2_fetch_at(p36_session *s, uint64_t seq, uint32_t slot) {
+    int32_t ids[2] = {-1, -1};
+    p36_vulkan_runtime *rt;
+    if (!s || !s->runtime || !seq || slot > 1u) return false;
+    rt = (p36_vulkan_runtime *)s->runtime;
+    if (!p36_gpu_tensor_read_wait(rt->top2[slot], 0, ids, sizeof(ids), seq)) return false;
+    s->gpu_top2[0] = ids[0];
+    s->gpu_top2[1] = ids[1];
+    s->gpu_top2_valid = ids[0] >= 0 && ids[1] >= 0;
+    return s->gpu_top2_valid;
+}
+
+static bool p36_session_top2_fetch(p36_session *s) {
+    if (!s || !s->gpu_top2_seq) return s->gpu_top2_valid;
+    if (!p36_session_top2_fetch_at(s, s->gpu_top2_seq, s->gpu_top2_slot)) return false;
+    s->gpu_top2_seq = 0;
+    return true;
+}
+
 int p36_session_argmax(p36_session *s) {
     if (!s || !s->logits) return -1;
+    if (s->gpu_top2_seq) p36_session_top2_fetch(s);
     if (s->gpu_top2_valid) return s->gpu_top2[0];
     if (!p36_session_ensure_logits_host(s)) return -1;
     return sample_argmax(s->logits, P36_N_VOCAB);
+}
+
+/* Resolve a top-2 result the caller saved before recording more work. */
+int p36_session_top2_resolve(p36_session *s, uint64_t seq, uint32_t slot) {
+    if (!p36_session_top2_fetch_at(s, seq, slot)) return -1;
+    return s->gpu_top2[0];
+}
+
+/* Fill in the checkpoint slot that p36_session_eval_device() pushed as a
+ * placeholder once the id it stood for is known. */
+int p36_session_commit_token(p36_session *s, int token) {
+    if (!s || !s->checkpoint.v || s->checkpoint.len <= 0) return 0;
+    s->checkpoint.v[s->checkpoint.len - 1] = token;
+    return 1;
+}
+
+/* True when the embedding can take its row index from device memory, which
+ * is what lets the decode loop record a token before sampling it. */
+int p36_session_device_embed_ok(p36_session *s) {
+    const p36_tensor *t;
+    if (!s || !s->engine || !p36_engine_uses_vulkan_runtime(s->engine)) return 0;
+    t = s->engine->weights.token_embd;
+    return t && !t->hadamard_inverse &&
+           (t->type == P36_TENSOR_Q8_0 || t->type == P36_TENSOR_Q4_K);
 }
 
 int p36_session_argmax_excluding(p36_session *s, int excluded_id) {
     int best = -1;
     float best_logit = P36_NEG_INF;
     if (!s || !s->logits) return -1;
+    if (s->gpu_top2_seq) p36_session_top2_fetch(s);
     if (s->gpu_top2_valid) {
         return s->gpu_top2[0] == excluded_id
             ? s->gpu_top2[1] : s->gpu_top2[0];
@@ -613,6 +660,7 @@ int p36_session_eos_to_think_close(p36_session *s, int token) {
 int p36_session_token_rank(p36_session *s, int token, int max_rank) {
     if (!s || !s->logits || token < 0 || token >= (int)P36_N_VOCAB ||
         max_rank <= 0) return 0;
+    if (s->gpu_top2_seq) p36_session_top2_fetch(s);
     if (s->gpu_top2_valid) {
         if (s->gpu_top2[0] == token) return 1;
         if (s->gpu_top2[1] == token) return max_rank >= 2 ? 2 : 0;
@@ -725,6 +773,42 @@ static int p36_session_eval_internal(p36_session *s, int token, bool update_mtp,
 
 int p36_session_eval(p36_session *s, int token, char *err, size_t errlen) {
     return p36_session_eval_internal(s, token, false, err, errlen);
+}
+
+/* Evaluate the token whose id already sits in the top-2 buffer of the
+ * previous step.  The host never sees the id, so the pointer chase of the
+ * decode loop (sample -> embed -> dispatch) becomes record -> sample. */
+int p36_session_eval_device(p36_session *s, char *err, size_t errlen) {
+    uint32_t pos;
+    if (!s) {
+        if (err && errlen) snprintf(err, errlen, "missing session");
+        return 1;
+    }
+    if (s->checkpoint.len >= s->ctx_size) {
+        if (err && errlen) snprintf(err, errlen, "context exhausted");
+        return 1;
+    }
+    if (!p36_session_device_embed_ok(s)) {
+        if (err && errlen) snprintf(err, errlen, "device token id unsupported");
+        return 1;
+    }
+    if (!p36_session_reserve_kv(s, (uint32_t)s->checkpoint.len + 1u,
+                                (uint32_t)s->checkpoint.len)) {
+        if (err && errlen) snprintf(err, errlen, "failed to grow KV cache");
+        return 1;
+    }
+    s->mtp_draft_valid = false;
+    pos = (uint32_t)s->checkpoint.len;
+    if (!p36_forward_token_vulkan(s, -1, pos, true)) {
+        if (err && errlen) snprintf(err, errlen, "vulkan decode failed at pos %u", pos);
+        s->checkpoint_valid = false;
+        return 1;
+    }
+    /* Position has to advance now; the id is patched in by
+     * p36_session_commit_token() as soon as the top-2 read lands. */
+    p36_tokens_push(&s->checkpoint, -1);
+    s->checkpoint_valid = true;
+    return 0;
 }
 
 #ifndef P36_NO_GPU

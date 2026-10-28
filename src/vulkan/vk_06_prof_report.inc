@@ -416,6 +416,44 @@ int p36_gpu_tensor_write(p36_gpu_tensor *tensor, uint64_t offset, const void *da
     return 1;
 }
 
+/* Seal the open batch so everything recorded so far (the top-2 dispatch
+ * included) is submitted, and hand back that submission's sequence number.
+ * p36_gpu_tensor_read_wait() then waits only up to it instead of draining
+ * the queue, which lets the host record the next token in between. */
+uint64_t p36_gpu_tensor_read_begin(void) {
+    uint64_t seq;
+    pthread_mutex_lock(&p36_vk_mu);
+    if (p36_vk_batch_recording && p36_vk_submit_current_unlocked(true)) {
+        uint32_t next = (p36_vk_ring_cur + 1u) % P36_VK_CB_RING;
+        p36_vk_slot_wait_unlocked(&p36_vk_ring[next]);
+        p36_vk_ring_activate_unlocked(next);
+        p36_vk_retired_sweep_unlocked();
+    }
+    seq = p36_vk_submit_seq;
+    pthread_mutex_unlock(&p36_vk_mu);
+    return seq;
+}
+
+int p36_gpu_tensor_read_wait(const p36_gpu_tensor *tensor, uint64_t offset,
+                             void *data, uint64_t bytes, uint64_t seq) {
+    uint64_t root_offset = 0;
+    p36_gpu_tensor *root;
+    if (!tensor || !data || !seq || !p36_gpu_tensor_range_ok(tensor, offset, bytes)) return 0;
+    root = p36_gpu_tensor_root((p36_gpu_tensor *)tensor, &root_offset);
+    if (!root || !root->data) return 0;
+    pthread_mutex_lock(&p36_vk_mu);
+    for (uint32_t i = 0; i < P36_VK_CB_RING; i++) {
+        p36_vk_cb_slot *s = &p36_vk_ring[i];
+        if (s->pending && s->seq <= seq && !p36_vk_slot_wait_unlocked(s)) {
+            pthread_mutex_unlock(&p36_vk_mu);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&p36_vk_mu);
+    memcpy(data, (const unsigned char *)root->data + root_offset + offset, (size_t)bytes);
+    p36_vk_read_bytes_total += bytes;
+    return 1;
+}
 int p36_gpu_tensor_read(const p36_gpu_tensor *tensor, uint64_t offset, void *data, uint64_t bytes) {
     unsigned char *src = p36_vk_tensor_contents_labeled((p36_gpu_tensor *)tensor, "submit_wait_tensor_read");
     if (!src || !data || !p36_gpu_tensor_range_ok(tensor, offset, bytes)) return 0;
