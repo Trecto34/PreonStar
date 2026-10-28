@@ -212,6 +212,16 @@ VULKAN_SHADERS := \
 	vulkan/moe_gate_up_share_iq3xxs.spv \
 	vulkan/moe_gate_up_share_q3k.spv \
 	vulkan/moe_gate_up_share_iq2s_iq2xxs.spv \
+	vulkan/moe_gate_up_gemm_t16.spv \
+	vulkan/moe_gate_up_gemm_iq2s_t16.spv \
+	vulkan/moe_gate_up_gemm_iq3xxs_t16.spv \
+	vulkan/moe_gate_up_gemm_q3k_t16.spv \
+	vulkan/moe_gate_up_gemm_iq2s_iq2xxs_t16.spv \
+	vulkan/moe_down_gemm_t16.spv \
+	vulkan/moe_down_gemm_iq2s_t16.spv \
+	vulkan/moe_down_gemm_iq3s_t16.spv \
+	vulkan/moe_down_gemm_iq3xxs_t16.spv \
+	vulkan/moe_down_gemm_q3k_t16.spv \
 	vulkan/moe_down_route_reduce.spv \
 	vulkan/ffn_tail.spv
 
@@ -1114,3 +1124,32 @@ vulkan/moe_gate_up_share_q3k.spv: vulkan/moe_gate_up_decode.comp
 vulkan/moe_gate_up_share_iq2s_iq2xxs.spv: vulkan/moe_gate_up_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -DP36_MOE_MIX_IQ2S_IQ2XXS -o $@ $<
 
+vulkan/moe_gate_up_gemm_t16.spv: vulkan/moe_gate_up_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_gate_up_gemm_iq2s_t16.spv: vulkan/moe_gate_up_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_IQ2S -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_gate_up_gemm_iq3xxs_t16.spv: vulkan/moe_gate_up_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_IQ3XXS -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_gate_up_gemm_q3k_t16.spv: vulkan/moe_gate_up_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_Q3K -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_gate_up_gemm_iq2s_iq2xxs_t16.spv: vulkan/moe_gate_up_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_MIX_IQ2S_IQ2XXS -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_down_gemm_t16.spv: vulkan/moe_down_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_down_gemm_iq2s_t16.spv: vulkan/moe_down_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_IQ2S -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_down_gemm_iq3s_t16.spv: vulkan/moe_down_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_IQ3S -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_down_gemm_iq3xxs_t16.spv: vulkan/moe_down_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_IQ3XXS -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_down_gemm_q3k_t16.spv: vulkan/moe_down_gemm.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_Q3K -DP36_SLOT_TILE=16u -o $@ $<

@@ -42,7 +42,11 @@ layout(push_constant) uniform Push {
 
 /* One IQ2_XXS superblock is 33 uint16 words: [d_f16][32 x qs words]. */
 const uint IQ2_U16 = 33u;
-const uint SLOT_TILE = 32u;
+#ifndef P36_SLOT_TILE
+#define P36_SLOT_TILE 32u
+#endif
+/* P36_SLOT_TILE 16: one 16-slot tile per expert chunk (narrow-tile experiment). */
+const uint SLOT_TILE = P36_SLOT_TILE;
 const uint TILE_WORDS = 1u + SLOT_TILE;
 const uint INVALID = 0xffffffffu;
 const uint BM = 64u;
@@ -498,6 +502,7 @@ void main(void) {
     float gsc = pc.has_gate_scales != 0u ? gate_scales[expert] : 1.0;
     float usc = pc.has_up_scales != 0u ? up_scales[expert] : 1.0;
     for (uint j = 0u; j < 2u; j++) {
+        if (sl + 16u * j >= SLOT_TILE) continue;
         uint slot = sh_slot[sl + 16u * j];
         if (slot == INVALID) continue;
         for (uint i = 0u; i < 4u; i++) {

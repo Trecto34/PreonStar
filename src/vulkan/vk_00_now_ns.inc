@@ -258,6 +258,16 @@ typedef struct {
     p36_vk_kernel moe_down_gemm_iq3s;
     p36_vk_kernel moe_down_gemm_iq3xxs;
     p36_vk_kernel moe_down_gemm_q3k;
+    p36_vk_kernel moe_gate_up_gemm_t16;
+    p36_vk_kernel moe_gate_up_gemm_iq2s_t16;
+    p36_vk_kernel moe_gate_up_gemm_iq3xxs_t16;
+    p36_vk_kernel moe_gate_up_gemm_q3k_t16;
+    p36_vk_kernel moe_gate_up_gemm_iq2s_iq2xxs_t16;
+    p36_vk_kernel moe_down_gemm_t16;
+    p36_vk_kernel moe_down_gemm_iq2s_t16;
+    p36_vk_kernel moe_down_gemm_iq3s_t16;
+    p36_vk_kernel moe_down_gemm_iq3xxs_t16;
+    p36_vk_kernel moe_down_gemm_q3k_t16;
     p36_vk_kernel moe_matvec;
     p36_vk_kernel moe_matvec_fast;
     p36_vk_kernel dense_iq3_xxs_decode;
