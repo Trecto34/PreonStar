@@ -1659,6 +1659,11 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                     down_iq3s ? "moe_iq3s_down_sum_decode" :
                                     down_iq2s ? "moe_iq2s_down_sum_decode" : "moe_q2k_down_sum_decode";
                 p36_vk_kernel *dkernel = q4k ? &p36_vk.moe_down_q4k_sum_decode :
+                                          n_tok > 1u ?
+                                          (down_q3k ? &p36_vk.moe_down_share_q3k :
+                                           down_iq3xxs ? &p36_vk.moe_down_share_iq3xxs :
+                                           down_iq3s ? &p36_vk.moe_down_share_iq3s :
+                                           down_iq2s ? &p36_vk.moe_down_share_iq2s : &p36_vk.moe_down_share) :
                                           down_q3k ? &p36_vk.moe_down_q2k_sum_decode_q3k :
                                           down_iq3xxs ? &p36_vk.moe_down_q2k_sum_decode_iq3xxs :
                                           down_iq3s ? &p36_vk.moe_down_q2k_sum_decode_iq3s :

@@ -26,8 +26,19 @@ layout(push_constant) uniform Push {
     uint blocks;
     uint n_used;
     uint has_scales;
-    uint n_tok;     /* identity tokens (MTP verify rows); host-side only */
+    uint n_tok;     /* identity tokens (MTP verify rows) */
 } pc;
+
+/* P36_MOE_SHARE build (MTP verify, 2..MAXR identity tokens): the workgroup
+ * of an expert's first slot applies each dequantized weight to the mid row of
+ * every token that picked that expert and writes each slot's partial; later
+ * duplicate slots exit.  Per-slot math is unchanged (bit-identical).  Decode
+ * builds use MAXR = 1. */
+#ifdef P36_MOE_SHARE
+const uint MAXR = 4u;
+#else
+const uint MAXR = 1u;
+#endif
 
 const uint Q2K_U16 = 42u;
 #if defined(P36_MOE_IQ2S) || defined(P36_MOE_IQ3S) || defined(P36_MOE_IQ3XXS) || defined(P36_MOE_Q3K)
@@ -93,19 +104,42 @@ void main(void) {
     {
         uint slot = gl_WorkGroupID.y;
         uint expert = selected[slot];
+        uint nrow = 1u;
+        uint rs[MAXR];
+        uint m2k[MAXR];
+        rs[0] = slot;
+        m2k[0] = slot * pc.in_dim / 2u;
+#ifdef P36_MOE_SHARE
+        for (uint j = 0u; j < slot; j++)
+            if (selected[j] == expert) return;   /* an earlier slot owns it */
+        uint ntok = clamp(pc.n_tok, 1u, MAXR);
+        nrow = 0u;
+        for (uint t = 0u; t < MAXR; t++) {
+            if (t >= ntok) break;
+            for (uint u = 0u; u < pc.n_used; u++) {
+                uint sl = t * pc.n_used + u;
+                if (selected[sl] == expert) {
+                    for (uint k = 0u; k < MAXR; k++)   /* static index */
+                        if (k == nrow) { rs[k] = sl; m2k[k] = sl * pc.in_dim / 2u; }
+                    nrow++;
+                    break;
+                }
+            }
+        }
+#endif
 #if defined(P36_MOE_IQ2S) || defined(P36_MOE_IQ3S) || defined(P36_MOE_IQ3XXS) || defined(P36_MOE_Q3K)
         uint base_bytes = (expert * pc.out_dim + row) * row_bytes;
 #else
         uint base_u16 = (expert * pc.out_dim + row) * row_u16;
 #endif
-        uint m2 = slot * pc.in_dim / 2u;
-        float acc = 0.0;
+        float acc[MAXR];
+        for (uint k = 0u; k < MAXR; k++) acc[k] = 0.0;
 
 #ifdef P36_MOE_IQ3XXS
         for (uint i = ix; i < pc.blocks; i += 2u) {
             uint bb = base_bytes + i * IQ3XXS_BYTES;
             float d = unpackHalf2x16(uint(wb[bb >> 1u])).x;
-            uint y2 = m2 + ((i * 256u + y_off) >> 1u);
+            uint yo = (i * 256u + y_off) >> 1u;
             /* n advances by 16 per step, so two consecutive p share one 32-bit
              * aux word; keep the last one instead of reloading it. */
             uint cg32 = 0xffffffffu;
@@ -129,14 +163,17 @@ void main(void) {
                                bvec2(((signs >> (m & 7u)) & 1u) != 0u,
                                      ((signs >> ((m & 7u) + 1u)) & 1u) != 0u));
                 float wsc = d * 0.25 * float(2u * (aux >> 28u) + 1u);
-                acc = fma(wsc, dot(gv * gsg, mid[y2 + 8u * p]), acc);
+                for (uint k = 0u; k < MAXR; k++) {
+                    if (k >= nrow) break;
+                    acc[k] = fma(wsc, dot(gv * gsg, mid[m2k[k] + yo + 8u * p]), acc[k]);
+                }
             }
         }
 #elif defined(P36_MOE_Q3K)
         for (uint i = ix; i < pc.blocks; i += 2u) {
             uint bb = base_bytes + i * Q3K_BYTES;
             float d = unpackHalf2x16(uint(wb[(bb + 108u) >> 1u])).x;
-            uint y2 = m2 + ((i * 256u + y_off) >> 1u);
+            uint yo = (i * 256u + y_off) >> 1u;
             for (uint p = 0u; p < 8u; p++) {
                 uint n = y_off + 16u * p;
                 uint group = n >> 4u;
@@ -154,7 +191,10 @@ void main(void) {
                     uint lo = (q >> (2u * (g16 >> 1u))) & 3u;
                     qv[z] = float(int(lo) - ((wb_u8(bb + (nn & 31u)) & mask) != 0u ? 0 : 4));
                 }
-                acc = fma(d * float(sc), dot(qv, mid[y2 + 8u * p]), acc);
+                for (uint k = 0u; k < MAXR; k++) {
+                    if (k >= nrow) break;
+                    acc[k] = fma(d * float(sc), dot(qv, mid[m2k[k] + yo + 8u * p]), acc[k]);
+                }
             }
         }
 #elif defined(P36_MOE_IQ2S)
@@ -164,7 +204,7 @@ void main(void) {
         for (uint i = ix; i < pc.blocks; i += 2u) {
             uint bb = base_bytes + i * IQ2S_BYTES;
             float d = unpackHalf2x16(uint(wb[bb >> 1u])).x;
-            uint y2 = m2 + ((i * 256u + y_off) >> 1u);
+            uint yo = (i * 256u + y_off) >> 1u;
             for (uint p = 0u; p < 8u; p++) {
                 uint n = y_off + 16u * p;
                 uint ib32 = n >> 5u;
@@ -183,8 +223,11 @@ void main(void) {
                 vec2 gsg = mix(vec2(1.0), vec2(-1.0),
                                bvec2(((signs >> j) & 1u) != 0u,
                                      ((signs >> (j + 1u)) & 1u) != 0u));
-                vec2 bv = mid[y2 + 8u * p];
-                acc = fma(wsc, dot(gv * gsg, bv), acc);
+                for (uint k = 0u; k < MAXR; k++) {
+                    if (k >= nrow) break;
+                    vec2 bv = mid[m2k[k] + yo + 8u * p];
+                    acc[k] = fma(wsc, dot(gv * gsg, bv), acc[k]);
+                }
             }
         }
 #elif defined(P36_MOE_IQ3S)
@@ -194,7 +237,7 @@ void main(void) {
         for (uint i = ix; i < pc.blocks; i += 2u) {
             uint bb = base_bytes + i * IQ3S_BYTES;
             float d = unpackHalf2x16(uint(wb[bb >> 1u])).x;
-            uint y2 = m2 + ((i * 256u + y_off) >> 1u);
+            uint yo = (i * 256u + y_off) >> 1u;
             for (uint p = 0u; p < 8u; p++) {
                 uint n = y_off + 16u * p;
                 uint g32 = n >> 5u;
@@ -213,8 +256,11 @@ void main(void) {
                 vec2 gsg = mix(vec2(1.0), vec2(-1.0),
                                bvec2(((sgn >> m) & 1u) != 0u,
                                      ((sgn >> (m + 1u)) & 1u) != 0u));
-                vec2 bv = mid[y2 + 8u * p];
-                acc = fma(wsc, dot(gv * gsg, bv), acc);
+                for (uint k = 0u; k < MAXR; k++) {
+                    if (k >= nrow) break;
+                    vec2 bv = mid[m2k[k] + yo + 8u * p];
+                    acc[k] = fma(wsc, dot(gv * gsg, bv), acc[k]);
+                }
             }
         }
 #else
@@ -239,7 +285,9 @@ void main(void) {
 
             vec2 dm = unpackHalf2x16(uint(wb[bb + 40u]) |
                                      (uint(wb[bb + 41u]) << 16u));
-            uint yb = m2 + ((i * 256u + y_off) >> 1u);
+            for (uint k = 0u; k < MAXR; k++) {
+            if (k >= nrow) break;
+            uint yb = m2k[k] + ((i * 256u + y_off) >> 1u);
             vec2 b0 = mid[yb + 0u];
             vec2 b16 = mid[yb + 8u];
             vec2 b32 = mid[yb + 16u];
@@ -269,14 +317,16 @@ void main(void) {
                        fma(b96[l], sc2[6],
                        fma(b112[l], sc2[7], sum2))))))));
             }
-            acc = fma(dm.x, sum1, fma(-dm.y, sum2, acc));
+            acc[k] = fma(dm.x, sum1, fma(-dm.y, sum2, acc[k]));
+            }
         }
 #endif
 
-        acc = subgroupAdd(acc);
-        if (tid == 0u) {
-            float sc = pc.has_scales != 0u ? scales[expert] : 1.0;
-            y[slot * pc.out_dim + row] = acc * sc;
+        float sc = pc.has_scales != 0u ? scales[expert] : 1.0;
+        for (uint k = 0u; k < MAXR; k++) {
+            if (k >= nrow) break;
+            float a = subgroupAdd(acc[k]);
+            if (tid == 0u) y[rs[k] * pc.out_dim + row] = a * sc;
         }
     }
 }

@@ -207,6 +207,11 @@ VULKAN_SHADERS := \
 	vulkan/dense_q5k_rows2.spv \
 	vulkan/dense_q6k_rows2.spv \
 	vulkan/moe_reduce.spv \
+	vulkan/moe_down_share.spv \
+	vulkan/moe_down_share_iq2s.spv \
+	vulkan/moe_down_share_iq3s.spv \
+	vulkan/moe_down_share_iq3xxs.spv \
+	vulkan/moe_down_share_q3k.spv \
 	vulkan/moe_gate_up_share.spv \
 	vulkan/moe_gate_up_share_iq2s.spv \
 	vulkan/moe_gate_up_share_iq3xxs.spv \
@@ -1153,3 +1158,19 @@ vulkan/moe_down_gemm_iq3xxs_t16.spv: vulkan/moe_down_gemm.comp
 
 vulkan/moe_down_gemm_q3k_t16.spv: vulkan/moe_down_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_Q3K -DP36_SLOT_TILE=16u -o $@ $<
+
+vulkan/moe_down_share.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -o $@ $<
+
+vulkan/moe_down_share_iq2s.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -DP36_MOE_IQ2S -o $@ $<
+
+vulkan/moe_down_share_iq3s.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -DP36_MOE_IQ3S -o $@ $<
+
+vulkan/moe_down_share_iq3xxs.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -DP36_MOE_IQ3XXS -o $@ $<
+
+vulkan/moe_down_share_q3k.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_SHARE -DP36_MOE_Q3K -o $@ $<
+
