@@ -3492,3 +3492,25 @@ dependency removal, plus a sampler port) is not worth building. Kept on the
 experiment branch, not merged. `reconsider_if`: a profile without timestamp
 brackets shows a real inter-token GPU gap (the 0.6-0.76 ms figure comes from
 timestamp-instrumented runs, which add ~1.9 us per bracket).
+
+## Narrower tiles for short prefill chunks — BUILT, REJECTED (2026-10-27)
+
+- **Trunk, 64-token K-quant mmq tile** (`experiment/mmq-bn64`, `P36_MMQ_BN64`,
+  64 threads = 2 wave32, same 4x8 per-thread tile, picked for n_tok <= 64):
+  bit-identical (chunk-64 frontier logits equal) but `dense_kquant_mmq_q4k` at
+  ctx 512 chunk 64 went 312.3 -> 346.0 ms (+10.8%) vs `2050825`. The weight
+  tile staged per workgroup is shared by half the tokens; the dead-wave skip
+  (`4f0ab41`) removes the padded FMAs without that cost.
+- **Experts, 16-slot tile**: not built separately. For a tile with <= 16 live
+  slots the shipped `hi_live` path (`46df8b5`) already runs exactly the
+  16-slot computation; a 16-slot tile would only add a second staging of the
+  same expert weights whenever an expert gets > 16 slots.
+
+## MTP verify: per-expert share build re-tried with decode isolated — REJECTED (2026-10-27)
+
+`experiment/mtp-share` (`a34f4fd`): the dedupe moved into separate
+`moe_gate_up_share*.spv` builds used only for 2..4-row identity batches, so
+decode keeps its kernel (decode +0.25%, bit-identical). MTP generation vs
+`4f0ab41`, 3 pairs: 99.53/101.07/102.10 -> 101.64/99.54/99.52 (median -1.5%,
+overlapping). Reading a shared expert once does not pay at a 16.7% duplicate
+rate; the owner workgroup serializes the shared rows.
