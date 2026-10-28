@@ -3514,3 +3514,18 @@ decode keeps its kernel (decode +0.25%, bit-identical). MTP generation vs
 `4f0ab41`, 3 pairs: 99.53/101.07/102.10 -> 101.64/99.54/99.52 (median -1.5%,
 overlapping). Reading a shared expert once does not pay at a 16.7% duplicate
 rate; the owner workgroup serializes the shared rows.
+
+## Inter-token gap: GPU-side sampling for chained sampled decode — BUILT, neutral (2026-10-27)
+
+`experiment/gpu-chain` (on top of the chained greedy loop): `minp_sample.comp`
+(256 threads, per-thread block ranges + ordered scan) draws the next token from
+the `logits_minp_pack` survivors with uniform draws the host precomputed from
+the session RNG in host order, and writes the id into the top-2 buffer that
+`embed_row` reads for the next token; `p36_session_gpu_sample_begin` arms it in
+the forward pass and the CLI's default min-p sampler loop chains on
+`p36_session_eval_device_next`. Cost ~21 us/token on the device (pack ~10 +
+draw ~11). CyberTiel, `--temp 0.6 --top-k 0 --top-p 1 --min-p 0.05 --seed 42`,
+256 tokens: text identical to the host sampler in all 6 runs; 3 interleaved
+pairs host 85.92/81.94/84.50 vs device 84.02/83.95/86.23 (median -0.6%).
+Same finding as the greedy chain: with the next token queued there is no
+measurable inter-token GPU gap left on this board. Not merged.
