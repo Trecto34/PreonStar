@@ -102,6 +102,7 @@ int p36_gpu_prepare_q5_k_output_cache(const void *model_map,
 void p36_gpu_set_quality(bool quality);
 void p36_gpu_set_dense_model(bool dense);
 void p36_gpu_set_micro_batch(bool enabled);
+void p36_gpu_set_wide_rows(bool enabled);
 /* True when the fused attention path will serve p36_gpu_attn_decode_tensor;
  * the runtime then skips the per-context scores scratch. Sampled once. */
 bool p36_gpu_attn_fused_enabled(void);
@@ -555,6 +556,18 @@ int p36_gpu_recurrent_conv_silu_tensor(
         uint32_t              n_taps,
         uint32_t              n_tok);
 
+int p36_gpu_clover_conv_silu_tensor(
+        const p36_gpu_tensor *cache_conv,
+        const p36_gpu_tensor *cur,
+        p36_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              kernel_offset,
+        uint64_t              kernel_right_offset,
+        uint32_t              conv_dim,
+        uint32_t              n_taps,
+        uint32_t              n_tok);
+
 int p36_gpu_extract_full_attn_q_tensor(
         p36_gpu_tensor       *dst,
         const p36_gpu_tensor *qg,
@@ -729,6 +742,25 @@ int p36_gpu_delta_net_decode_tensor(
         uint32_t                state_dim,
         uint32_t                n_tok);
 
+int p36_gpu_clover_bd_gdn_tensor(
+        const p36_gpu_tensor *state,
+        const p36_gpu_tensor *q,
+        const p36_gpu_tensor *k,
+        const p36_gpu_tensor *v,
+        const p36_gpu_tensor *gb,
+        p36_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              logit_scale_offset,
+        uint64_t              hist_bias_offset,
+        uint64_t              hist_weight_offset,
+        uint32_t              n_heads,
+        uint32_t              state_dim,
+        uint32_t              n_tok,
+        float                 log_ratio);
+
+void p36_gpu_set_attn_bidirectional(bool enabled);
+
 /* p36_full_attn_cache_store(): append n_tok K/V row pairs starting at pos0. */
 int p36_gpu_attn_kv_store_tensor(
         p36_gpu_tensor       *k_cache,
@@ -781,6 +813,16 @@ int p36_gpu_router_topk_tensor(
         uint32_t                n_used,
         uint32_t                n_tok,
         float                   route_scale);
+
+int p36_gpu_clover_router_topk_tensor(
+        p36_gpu_tensor       *selected,
+        p36_gpu_tensor       *weights,
+        const p36_gpu_tensor *logits,
+        uint32_t              n_expert,
+        uint32_t              n_used,
+        uint32_t              n_tok,
+        float                 route_scale,
+        float                 top_p);
 
 /* Find the highest and second-highest F32 entries on the GPU.  The result is
  * two int32 token ids in descending logit order.  Unsupported backends return

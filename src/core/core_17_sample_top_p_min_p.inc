@@ -411,8 +411,18 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
         P36_MODEL_DENSE ? e->weights.layer[0].ffn_gate_shexp->type :
                           e->weights.layer[0].ffn_gate_exps->type);
     e->expert_weights_scale = 1.0f;
-    model_get_f32_compat(&e->model, "qwen35moe.expert_weights_scale", &e->expert_weights_scale);
+    if (!model_get_f32_compat(&e->model, "qwen35moe.expert_weights_scale", &e->expert_weights_scale))
+        model_get_f32_compat(&e->model, "clover_moe.expert_weights_scale", &e->expert_weights_scale);
     e->mtp_expert_weights_scale = e->expert_weights_scale;
+    if (e->variant == P36_VARIANT_CLOVER_35B_A3B) {
+        uint32_t bs = 32;
+        model_get_u32(&e->model, "clover_moe.block_size", &bs);
+        e->clover_block_size = bs ? bs : 32;
+        e->clover_mask_token_id = 151669;
+        e->clover_coreset_enabled = true;
+        e->clover_coreset_top_p = 0.9f;
+        model_get_f32_compat(&e->model, "clover_moe.moe_block_coreset_top_p", &e->clover_coreset_top_p);
+    }
     if (opt->mtp_path && opt->mtp_path[0]) {
         if (P36_MODEL_DENSE) {
             fprintf(stderr, "p36: Qwen3.6 27B dense does not support a MoE MTP model\n");
@@ -675,11 +685,13 @@ int p36_engine_set_power(p36_engine *e, int power_percent) {
 const char *p36_engine_model_name(p36_engine *e) {
     if (e && e->kat_coder) return "kat-coder-v2.5-dev";
     if (e && e->variant == P36_VARIANT_27B) return "qwen3.6-27b";
+    if (e && e->variant == P36_VARIANT_CLOVER_35B_A3B) return "clover-35b-a3b";
     return "qwen3.6-35b-a3b";
 }
 
 int p36_engine_model_id(p36_engine *e) {
     if (e && e->kat_coder) return 2;
+    if (e && e->variant == P36_VARIANT_CLOVER_35B_A3B) return 4;
     return e && e->variant == P36_VARIANT_27B ? 3 : 1;
 }
 
@@ -710,6 +722,13 @@ void p36_engine_sampling_defaults(p36_engine *e, float *temperature,
     *top_k = 0;
     *top_p = P36_DEFAULT_TOP_P;
     *min_p = P36_DEFAULT_MIN_P;
+    if (e && e->variant == P36_VARIANT_CLOVER_35B_A3B) {
+        *temperature = 0.0f;
+        *top_k = 1;
+        *top_p = 1.0f;
+        *min_p = 0.0f;
+        return;
+    }
     if (!e || !e->kat_coder) return;
     *temperature = 0.7f;
     *top_k = 20;
@@ -938,11 +957,15 @@ int p36_session_create(p36_session **out, p36_engine *e, int ctx_size) {
         s->runtime = p36_vulkan_runtime_create(ctx_size,
                                                p36_engine_gpu_prefill_cap(e),
                                                e->mtp_ready,
-                                               e->lookup_k > 1,
+                                               e->lookup_k > 1 || e->variant == P36_VARIANT_CLOVER_35B_A3B,
                                                e->quality,
                                                e->ssd_streaming,
                                                e->cache_type_k,
                                                e->cache_type_v);
+        if (s->runtime) {
+            ((p36_vulkan_runtime *)s->runtime)->clover_block_size =
+                e->clover_block_size ? e->clover_block_size : 32u;
+        }
 #endif
     } else {
         s->runtime = p36_cpu_runtime_create(ctx_size,

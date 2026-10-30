@@ -28,6 +28,12 @@ static void p36_vk_attn_host_rows(void *opaque, uint64_t row0, uint64_t row1) {
     }
 }
 
+static bool p36_vk_attn_bidir = false;
+
+void p36_gpu_set_attn_bidirectional(bool enabled) {
+    p36_vk_attn_bidir = enabled;
+}
+
 int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
                                const p36_gpu_tensor *q,
                                const p36_gpu_tensor *qg,
@@ -90,6 +96,7 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
          * sharing a KV head and folds eight spans into each partial. */
         if (n_tok >= 2u && n_head / n_head_kv <= 8u &&
             p36_vk_use_attn_qtile()) {
+            uint32_t sinks_pack = (has_sinks ? 1u : 0u) | (p36_vk_attn_bidir ? (kv_max << 1u) : 0u);
             uint32_t n_spans = (kv_max + 511u) / 512u;
             uint32_t n_groups = (n_spans + 7u) / 8u;
             uint32_t attn_chunk = n_tok;
@@ -114,7 +121,7 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
                 uint32_t k_row_bytes;
                 uint32_t v_row_bytes;
                 uint32_t tok0;
-            } qpush = { pos0, n_head, n_head_kv, head_dim, n_groups, 0, has_sinks ? 1u : 0u,
+            } qpush = { pos0, n_head, n_head_kv, head_dim, n_groups, 0, sinks_pack,
                         k_cache_type, v_cache_type, k_cache_row_bytes, v_cache_row_bytes, 0 };
             struct {
                 uint32_t pos0;
@@ -126,7 +133,7 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
                 uint32_t span_keys;
                 uint32_t tok0;
             } cpush = { pos0, n_head, head_dim, n_groups,
-                        (uint32_t)qg_stride, has_sinks ? 1u : 0u, 4096u, 0 };
+                        (uint32_t)qg_stride, sinks_pack, 4096u, 0 };
             pthread_mutex_lock(&p36_vk_mu);
             p36_gpu_tensor *part = p36_vk.attn_part;
             if (!part || p36_vk.attn_part_bytes < part_bytes) {
@@ -192,6 +199,7 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
          * from n_head workgroups to n_head * spans.  A single-span split is
          * bit-identical to the fused kernel (span 0 seeds its max with the
          * sink), so gating on kv_max keeps per-token n_tok-invariance. */
+        uint32_t sinks_pack = (has_sinks ? 1u : 0u) | (p36_vk_attn_bidir ? (kv_max << 1u) : 0u);
         uint32_t span_keys = p36_vk_attn_span();
         uint32_t n_spans = (kv_max + span_keys - 1u) / span_keys;
         if (n_spans > 1u && head_dim <= 256u && p36_vk_use_attn_splitk()) {
@@ -208,7 +216,7 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
                 uint32_t k_row_bytes;
                 uint32_t v_row_bytes;
                 uint32_t span_keys;
-            } spush = { pos0, n_head, n_head_kv, head_dim, n_spans, has_sinks ? 1u : 0u,
+            } spush = { pos0, n_head, n_head_kv, head_dim, n_spans, sinks_pack,
                         k_cache_type, v_cache_type, k_cache_row_bytes, v_cache_row_bytes,
                         span_keys };
             struct {
@@ -221,7 +229,7 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
                 uint32_t span_keys;
                 uint32_t tok0;
             } cpush = { pos0, n_head, head_dim, n_spans,
-                        (uint32_t)qg_stride, has_sinks ? 1u : 0u, span_keys, 0 };
+                        (uint32_t)qg_stride, sinks_pack, span_keys, 0 };
             pthread_mutex_lock(&p36_vk_mu);
             /* The partials scratch lives on the runtime and only grows: an
              * alloc/free per attention call showed up as ~0.2ms of host
@@ -265,7 +273,7 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
             uint32_t v_row_bytes;
         } fpush = {
             pos0, n_head, n_head_kv, head_dim,
-            (uint32_t)qg_stride, has_sinks ? 1u : 0u,
+            (uint32_t)qg_stride, sinks_pack,
             k_cache_type, v_cache_type, k_cache_row_bytes, v_cache_row_bytes,
         };
         pthread_mutex_lock(&p36_vk_mu);
@@ -554,6 +562,41 @@ int p36_gpu_router_topk_tensor(p36_gpu_tensor *selected,
     ok = 1;
 done:
     p36_vk_prof_scope_end(&prof);
+    return ok;
+}
+
+int p36_gpu_clover_router_topk_tensor(p36_gpu_tensor *selected,
+                                      p36_gpu_tensor *weights,
+                                      const p36_gpu_tensor *logits,
+                                      uint32_t n_expert,
+                                      uint32_t n_used,
+                                      uint32_t n_tok,
+                                      float route_scale,
+                                      float top_p) {
+    if (p36_gpu_quality || n_expert == 0 || n_expert > 256 || n_used == 0 || n_used > 8 ||
+        n_used > n_expert || n_tok == 0) {
+        return 0;
+    }
+    if (!p36_gpu_tensor_range_ok(logits, 0, (uint64_t)n_tok * n_expert * sizeof(float)) ||
+        !p36_gpu_tensor_range_ok(selected, 0, (uint64_t)n_tok * n_used * sizeof(uint32_t)) ||
+        !p36_gpu_tensor_range_ok(weights, 0, (uint64_t)n_tok * n_used * sizeof(float))) {
+        return 0;
+    }
+    if (top_p <= 0.0f || top_p >= 1.0f || !p36_vk_env_default_on("P36_VK_CLOVER_CORESET")) {
+        return p36_gpu_router_topk_tensor(selected, weights, logits, n_expert, n_used, n_tok, route_scale);
+    }
+    struct {
+        uint32_t n_expert;
+        uint32_t n_used;
+        uint32_t n_tok;
+        float route_scale;
+        float top_p;
+    } push = { n_expert, n_used, n_tok, route_scale, top_p };
+    const p36_gpu_tensor *bindings[3] = { logits, selected, weights };
+    pthread_mutex_lock(&p36_vk_mu);
+    int ok = p36_vk_run_unlocked("clover_router_topk", &p36_vk.clover_router_topk, bindings,
+                                 &push, sizeof(push), 1, 1, 1);
+    pthread_mutex_unlock(&p36_vk_mu);
     return ok;
 }
 

@@ -307,6 +307,10 @@ int p36_gpu_init(void) {
     p36_vk.moe_gate_up = P36_VK_KERNEL("vulkan/moe_gate_up.spv", 8, 28, 1u << 6);
     p36_vk.moe_gate_up_iq2s = P36_VK_KERNEL("vulkan/moe_gate_up_iq2s.spv", 8, 28, 1u << 6);
     p36_vk.router_topk = P36_VK_KERNEL("vulkan/router_topk.spv", 3, 16, (1u << 1) | (1u << 2));
+    p36_vk.clover_conv_silu = P36_VK_KERNEL("vulkan/clover_conv_silu.spv", 5, 12, 1u << 4);
+    p36_vk.clover_bd_gdn = P36_VK_KERNEL("vulkan/clover_bd_gdn.spv", 9, 16, 1u << 8);
+    p36_vk.clover_bd_gdn_f16 = P36_VK_KERNEL("vulkan/clover_bd_gdn_f16.spv", 9, 16, 1u << 8);
+    p36_vk.clover_router_topk = P36_VK_KERNEL("vulkan/clover_router_topk.spv", 3, 20, (1u << 1) | (1u << 2));
     p36_vk.moe_tiles = P36_VK_KERNEL("vulkan/moe_tiles.spv", 3, 20, 1u << 1);
     p36_vk.kv_store = P36_VK_KERNEL("vulkan/kv_store.spv", 4, 16, (1u << 0) | (1u << 1));
     p36_vk.kv_store_quant = P36_VK_KERNEL("vulkan/kv_store_quant.spv", 2, 20, 1u << 0);

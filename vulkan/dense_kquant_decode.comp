@@ -228,7 +228,9 @@ void main(void) {
     uint lid = gl_LocalInvocationID.x;
     uint itid = lid & 15u;
     uint first_row = gl_WorkGroupID.x * ROWS;
-    uint ntok = clamp(pc.n_tok, 1u, TOK);
+    uint tok0 = gl_WorkGroupID.y * TOK;
+    uint rem_tok = pc.n_tok > tok0 ? pc.n_tok - tok0 : 1u;
+    uint ntok = clamp(rem_tok, 1u, TOK);
     float acc[ROWS][TOK];
     for (uint r = 0u; r < ROWS; r++)
         for (uint t = 0u; t < TOK; t++) acc[r][t] = 0.0;
@@ -242,7 +244,7 @@ void main(void) {
         float qsum[TOK];
         float yd[TOK];
         for (uint t = 0u; t < TOK; t++) {
-            uint qrow = b + min(t, ntok - 1u) * pc.blocks;
+            uint qrow = b + (tok0 + min(t, ntok - 1u)) * pc.blocks;
             uint qbase = qrow * Q8K_WORDS;
             for (uint i = 0u; i < 4u; i++)
                 qvec[t][i] = unpack_i8(q8[qbase + 2u + 4u * itid + i]);
@@ -458,8 +460,8 @@ void main(void) {
 #if P36_BOUNDS
                 && row < pc.out_dim
 #endif
-                && t < pc.n_tok
-            ) y[t * pc.out_dim + row] = total * pc.scale;
+                && (tok0 + t) < pc.n_tok
+            ) y[(tok0 + t) * pc.out_dim + row] = total * pc.scale;
         }
     }
 }

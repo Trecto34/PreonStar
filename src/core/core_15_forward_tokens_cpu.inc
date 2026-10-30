@@ -460,10 +460,15 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
     if (!p36_gpu_tensor_matmul_scaled(
             m, l->ffn_gate_inp, inp, rt->ffn_gate_logits,
             P36_N_EMBD, P36_N_EXPERT, n_tok, 1.0f) ||
-        !p36_gpu_router_topk_tensor(
-            rt->ffn_selected, rt->ffn_weights, rt->ffn_gate_logits,
-            P36_N_EXPERT, P36_N_EXPERT_USED, n_tok,
-            expert_weights_scale) ||
+        !(rt->clover_preview && n_tok > 1u
+              ? p36_gpu_clover_router_topk_tensor(
+                    rt->ffn_selected, rt->ffn_weights, rt->ffn_gate_logits,
+                    P36_N_EXPERT, P36_N_EXPERT_USED, n_tok,
+                    expert_weights_scale, 0.9f)
+              : p36_gpu_router_topk_tensor(
+                    rt->ffn_selected, rt->ffn_weights, rt->ffn_gate_logits,
+                    P36_N_EXPERT, P36_N_EXPERT_USED, n_tok,
+                    expert_weights_scale)) ||
         !p36_gpu_tensor_matmul_scaled(
             m, l->ffn_gate_inp_shexp, inp, rt->ffn_scalar,
             P36_N_EMBD, 1, n_tok, 1.0f)) {
@@ -795,25 +800,28 @@ static bool p36_forward_full_attn_vulkan_model(p36_vulkan_runtime *rt,
                                               cache->v_row_bytes)) return false;
         }
     }
-    if (!p36_gpu_attn_decode_tensor(rt->attn_out,
-                                    rt->attn_q,
-                                    rt->attn_qg,
-                                     cache->k,
-                                     cache->v,
-                                     rt->scores,
-                                     m->map,
-                                     m->size,
-                                     l->attn_sinks ? l->attn_sinks->abs_offset : 0,
-                                    l->attn_sinks != NULL,
-                                    pos0,
-                                    n_tok,
-                                    P36_N_HEAD,
-                                    P36_N_HEAD_KV,
-                                    P36_N_HEAD_DIM,
-                                    cache->type_k,
-                                    cache->type_v,
-                                    cache->k_row_bytes,
-                                    cache->v_row_bytes)) {
+    if (rt->clover_preview) p36_gpu_set_attn_bidirectional(true);
+    bool attn_ok = p36_gpu_attn_decode_tensor(rt->attn_out,
+                                              rt->attn_q,
+                                              rt->attn_qg,
+                                              cache->k,
+                                              cache->v,
+                                              rt->scores,
+                                              m->map,
+                                              m->size,
+                                              l->attn_sinks ? l->attn_sinks->abs_offset : 0,
+                                              l->attn_sinks != NULL,
+                                              pos0,
+                                              n_tok,
+                                              P36_N_HEAD,
+                                              P36_N_HEAD_KV,
+                                              P36_N_HEAD_DIM,
+                                              cache->type_k,
+                                              cache->type_v,
+                                              cache->k_row_bytes,
+                                              cache->v_row_bytes) != 0;
+    if (rt->clover_preview) p36_gpu_set_attn_bidirectional(false);
+    if (!attn_ok) {
         return false;
     }
     if (p36_hadamard_rotate_enabled(l->attn_output)) {
@@ -974,7 +982,7 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
     }
     bool front=false;
 #ifndef P36_METAL
-    if (!e->quality && !e->ssd_streaming && n_tok==1u && rt->recur_conv_fused &&
+    if (!rt->clover_preview && !e->quality && !e->ssd_streaming && n_tok==1u && rt->recur_conv_fused &&
         P36_N_SSM_STATE==128u && P36_N_SSM_CONV==4u &&
         l->ssm_alpha->type==P36_TENSOR_Q8_0 && l->ssm_beta->type==P36_TENSOR_Q8_0) {
         const uint64_t offsets[5]={l->ssm_conv1d->abs_offset,l->ssm_alpha->abs_offset,
@@ -987,29 +995,9 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
     }
 #endif
     if (front) goto recurrent_update;
-    {
-        if (!rt->recur_conv_fused) {
-            if (!p36_gpu_recurrent_conv_step_tensor(cache->conv, rt->recur_qkv,
-                                                    rt->recur_window, n_tok)) return false;
-            if (!p36_gpu_ssm_conv_silu_tensor(rt->recur_conv,
-                                              rt->recur_window,
-                                              e->model.map,
-                                              e->model.size,
-                                              l->ssm_conv1d->abs_offset,
-                                              P36_N_SSM_CONV_DIM,
-                                              P36_N_SSM_CONV,
-                                              n_tok)) return false;
-        } else if (!p36_gpu_recurrent_conv_silu_tensor(
-                       cache->conv, rt->recur_qkv, rt->recur_conv,
-                       e->model.map, e->model.size, l->ssm_conv1d->abs_offset,
-                       P36_N_SSM_CONV_DIM, P36_N_SSM_CONV, n_tok)) {
-            return false;
-        }
-    }
-    if (e->quality && !p36_gpu_tensor_all_finite(rt->recur_conv, n_tok * P36_N_SSM_CONV_DIM)) {
-        fprintf(stderr, "p36: recurrent conv non-finite at layer=%u\n", il);
-        return false;
-    }
+    /* alpha/beta read only inp (clean since the qkv barrier): issue them
+     * before the conv step so they share qkv/gate's barrier epoch instead
+     * of each draining the queue behind conv. */
     pair_projected = q8_pair && n_tok == 1u &&
                      l->ssm_beta->type == P36_TENSOR_Q8_0 &&
                      l->ssm_alpha->type == P36_TENSOR_Q8_0 &&
@@ -1062,6 +1050,54 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
         }
     }
     {
+        if (rt->clover_preview && l->ssm_conv1d_right) {
+            if (!p36_gpu_clover_conv_silu_tensor(
+                    cache->conv, rt->recur_qkv, rt->recur_conv,
+                    e->model.map, e->model.size,
+                    l->ssm_conv1d->abs_offset, l->ssm_conv1d_right->abs_offset,
+                    P36_N_SSM_CONV_DIM, P36_N_SSM_CONV, n_tok)) {
+                return false;
+            }
+        } else if (!rt->recur_conv_fused) {
+            if (!p36_gpu_recurrent_conv_step_tensor(cache->conv, rt->recur_qkv,
+                                                    rt->recur_window, n_tok)) return false;
+            if (!p36_gpu_ssm_conv_silu_tensor(rt->recur_conv,
+                                              rt->recur_window,
+                                              e->model.map,
+                                              e->model.size,
+                                              l->ssm_conv1d->abs_offset,
+                                              P36_N_SSM_CONV_DIM,
+                                              P36_N_SSM_CONV,
+                                              n_tok)) return false;
+        } else if (!p36_gpu_recurrent_conv_silu_tensor(
+                       cache->conv, rt->recur_qkv, rt->recur_conv,
+                       e->model.map, e->model.size, l->ssm_conv1d->abs_offset,
+                       P36_N_SSM_CONV_DIM, P36_N_SSM_CONV, n_tok)) {
+            return false;
+        }
+    }
+    /* The gates read only alpha/beta, already behind the conv barrier, so
+     * they ride that epoch instead of draining again after qkv_l2. */
+    if (!p36_gpu_delta_net_gates_tensor(
+            rt->recur_gb, rt->recur_alpha, rt->recur_beta,
+            e->model.map, e->model.size, l->ssm_dt->abs_offset,
+            l->ssm_a->abs_offset, P36_N_SSM_DT_RANK, n_tok)) {
+        return false;
+    }
+    if (!rt->clover_preview && n_tok > 1u && n_tok <= P36_MTP_MAX_DRAFT &&
+        rt->spec_recur_qkv[il] && rt->spec_recur_gb[il]) {
+        if (!p36_gpu_copy_f32_tensor(rt->spec_recur_qkv[il], rt->recur_qkv,
+                                     n_tok * P36_N_SSM_CONV_DIM) ||
+            !p36_gpu_copy_f32_tensor(rt->spec_recur_gb[il], rt->recur_gb,
+                                     n_tok * P36_N_SSM_DT_RANK * 2u)) {
+            return false;
+        }
+    }
+    if (e->quality && !p36_gpu_tensor_all_finite(rt->recur_conv, n_tok * P36_N_SSM_CONV_DIM)) {
+        fprintf(stderr, "p36: recurrent conv non-finite at layer=%u\n", il);
+        return false;
+    }
+    {
         const char *env = getenv("P36_VK_DELTA_QKV");
         bool fused = !e->quality && !e->ssd_streaming &&
                      (!env || !env[0] || env[0] != '0') &&
@@ -1085,26 +1121,33 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
             if (!p36_gpu_extract_recurrent_v_tensor(rt->recur_v, rt->recur_conv, n_tok)) return false;
         }
     }
-    if (!p36_gpu_delta_net_gates_tensor(
-            rt->recur_gb, rt->recur_alpha, rt->recur_beta,
-            e->model.map, e->model.size, l->ssm_dt->abs_offset,
-            l->ssm_a->abs_offset, P36_N_SSM_DT_RANK, n_tok)) {
-        return false;
-    }
 recurrent_update:
     if (e->quality && !p36_gpu_tensor_all_finite(rt->recur_gb, n_tok * P36_N_SSM_DT_RANK * 2u)) {
         fprintf(stderr, "p36: recurrent gate non-finite at layer=%u\n", il);
         return false;
     }
-    if (!p36_gpu_delta_net_decode_tensor(cache->state,
-                                         rt->recur_q,
-                                         rt->recur_k,
-                                         rt->recur_v,
-                                         rt->recur_gb,
-                                         rt->recur_proj,
-                                         P36_N_SSM_DT_RANK,
-                                         P36_N_SSM_STATE,
-                                         n_tok)) {
+    if (rt->clover_preview && l->ssm_bd_logit_scale &&
+        l->ssm_bd_history_bias && l->ssm_bd_history_weight) {
+        float log_ratio = logf((float)n_tok / (float)(rt->clover_block_size ? rt->clover_block_size : 32u));
+        if (!p36_gpu_clover_bd_gdn_tensor(
+                cache->state, rt->recur_q, rt->recur_k, rt->recur_v, rt->recur_gb,
+                rt->recur_proj, e->model.map, e->model.size,
+                l->ssm_bd_logit_scale->abs_offset,
+                l->ssm_bd_history_bias->abs_offset,
+                l->ssm_bd_history_weight->abs_offset,
+                P36_N_SSM_DT_RANK, P36_N_SSM_STATE,
+                n_tok, log_ratio)) {
+            return false;
+        }
+    } else if (!p36_gpu_delta_net_decode_tensor(cache->state,
+                                                rt->recur_q,
+                                                rt->recur_k,
+                                                rt->recur_v,
+                                                rt->recur_gb,
+                                                rt->recur_proj,
+                                                P36_N_SSM_DT_RANK,
+                                                P36_N_SSM_STATE,
+                                                n_tok)) {
         return false;
     }
     if (e->quality && !p36_gpu_tensor_all_finite(rt->recur_proj, n_tok * P36_N_SSM_INNER)) {
@@ -2055,6 +2098,81 @@ static bool p36_vulkan_verify_suffix_tops(p36_session *s,
         s->gpu_top2_valid = false;
     }
     return ok;
+}
+
+static bool p36_vulkan_spec_commit_partial(p36_session *s, uint32_t commit_n) {
+    p36_engine *e;
+    p36_vulkan_runtime *rt;
+    int32_t ids[2] = {-1, -1};
+    if (!s || commit_n == 0 || commit_n > P36_MTP_MAX_DRAFT) return false;
+    e = s->engine;
+    rt = (p36_vulkan_runtime *)s->runtime;
+    if (!e || !rt || !rt->recur_conv_fused || !rt->spec_logits || !rt->spec_tops) return false;
+    if (!p36_gpu_tensor_read(rt->spec_tops,
+                             (uint64_t)(commit_n - 1u) * 2u * sizeof(int32_t),
+                             ids, sizeof(ids))) return false;
+    if (!p36_vulkan_spec_frontier_restore(rt)) return false;
+    for (uint32_t il = 0; il < P36_N_LAYER; il++) {
+        if (p36_layer_is_full_attention(il)) continue;
+        const p36_layer_weights *l = &e->weights.layer[il];
+        p36_vulkan_recurrent_cache *cache = &rt->recurrent[il];
+        if (!rt->spec_recur_qkv[il] || !rt->spec_recur_gb[il]) return false;
+        if (!p36_gpu_recurrent_conv_silu_tensor(
+                cache->conv, rt->spec_recur_qkv[il], rt->recur_conv,
+                e->model.map, e->model.size, l->ssm_conv1d->abs_offset,
+                P36_N_SSM_CONV_DIM, P36_N_SSM_CONV, commit_n)) return false;
+        if (!p36_gpu_delta_qkv_l2_norm_tensor(
+                rt->recur_q, rt->recur_k, rt->recur_v, rt->recur_conv,
+                P36_N_SSM_DT_RANK, P36_N_SSM_GROUP, P36_N_SSM_STATE,
+                P36_N_SSM_CONV_DIM, commit_n, P36_RMS_EPS)) return false;
+        if (!p36_gpu_delta_net_decode_tensor(
+                cache->state, rt->recur_q, rt->recur_k, rt->recur_v,
+                rt->spec_recur_gb[il], rt->recur_proj,
+                P36_N_SSM_DT_RANK, P36_N_SSM_STATE, commit_n)) return false;
+    }
+    if (!p36_vulkan_update_last_h(rt, commit_n - 1u)) return false;
+    if (!p36_gpu_tensor_copy(rt->logits, 0, rt->spec_logits,
+                             (uint64_t)(commit_n - 1u) * P36_N_VOCAB * sizeof(float),
+                             (uint64_t)P36_N_VOCAB * sizeof(float))) return false;
+    s->gpu_top2[0] = ids[0];
+    s->gpu_top2[1] = ids[1];
+    s->gpu_top2_valid = ids[0] >= 0 && ids[1] >= 0;
+    s->logits_host_valid = false;
+    return true;
+}
+
+static int p36_clover_preview_draft(p36_session *s, int first_tok, uint32_t pos0,
+                                    uint32_t block_len, int *draft_out) {
+    p36_engine *e;
+    p36_vulkan_runtime *rt;
+    int block_toks[P36_MTP_MAX_DRAFT];
+    int32_t tops[2 * P36_MTP_MAX_DRAFT];
+    int mask_id;
+    bool fwd;
+    if (!s || !draft_out || block_len <= 1u || block_len > P36_MTP_MAX_DRAFT) return 0;
+    e = s->engine;
+    rt = (p36_vulkan_runtime *)s->runtime;
+    if (!e || !rt || !rt->spec_logits || !rt->spec_tops) return 0;
+    mask_id = e->clover_mask_token_id > 0 ? e->clover_mask_token_id : 151669;
+    block_toks[0] = first_tok;
+    for (uint32_t i = 1; i < block_len; i++) block_toks[i] = mask_id;
+    rt->clover_preview = true;
+    p36_gpu_set_micro_batch(true);
+    fwd = p36_forward_tokens_vulkan_into(s, block_toks, NULL, NULL,
+                                         block_len, pos0, rt->spec_logits, true);
+    p36_gpu_set_micro_batch(false);
+    rt->clover_preview = false;
+    if (!fwd) return 0;
+    if (!p36_gpu_spec_verify_tops(rt->logits, rt->spec_tops, rt->spec_logits,
+                                  block_len, P36_N_VOCAB)) return 0;
+    if (!p36_gpu_tensor_read(rt->spec_tops, 0, tops,
+                             (uint64_t)block_len * 2u * sizeof(int32_t))) return 0;
+    for (uint32_t i = 1; i < block_len; i++) {
+        int32_t t0 = tops[2u * i];
+        int32_t t1 = tops[2u * i + 1u];
+        draft_out[i - 1u] = (t0 == mask_id && t1 >= 0) ? t1 : t0;
+    }
+    return (int)(block_len - 1u);
 }
 
 static bool p36_mtp_concat(p36_gpu_tensor *out,

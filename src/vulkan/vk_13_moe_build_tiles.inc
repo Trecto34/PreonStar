@@ -1311,7 +1311,7 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
      * row.  Per-slot math is the same, so it matches the per-row loop bit
      * for bit; P36_VK_MOE_ROWS_SHARE=0 restores the loop (diagnostic). */
     const bool multi_rows = selected && weights && p36_vk_micro_batch &&
-        n_tok > 1u && n_tok <= 4u && p36_vk_moe_pair_decode() &&
+        n_tok > 1u && n_tok <= p36_vk_rows_max() && p36_vk_moe_pair_decode() &&
         p36_vk_env_default_on("P36_VK_MOE_F32_ROWS") &&
         p36_vk_env_default_on("P36_VK_MOE_ROWS_SHARE") &&
         p36_vk_use_moe_down_sum_decode() &&

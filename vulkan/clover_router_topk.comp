@@ -1,0 +1,200 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Logits {
+    float logits[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer Selected {
+    uint selected[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Weights {
+    float wout[];
+};
+
+layout(push_constant) uniform Push {
+    uint n_expert;
+    uint n_used;
+    uint n_tok;
+    float route_scale;
+    float top_p;
+} pc;
+
+shared uint tok_win_i[32][8];
+shared float tok_win_p[32][8];
+shared float totals[256];
+shared uint allowed[256];
+
+void main(void) {
+    uint lid = gl_LocalInvocationID.x;
+    uint sg = gl_SubgroupID;
+    uint nsub = gl_NumSubgroups;
+    uint lane = gl_SubgroupInvocationID;
+    uint gsz = gl_SubgroupSize;
+
+    totals[lid] = 0.0f;
+    allowed[lid] = 0u;
+    barrier();
+
+    /* Phase 1: Each subgroup processes tokens in parallel using subgroup reductions
+     * with zero workgroup barriers inside the loop. */
+    for (uint tok = sg; tok < pc.n_tok; tok += nsub) {
+        float v0[8];
+        float v[8];
+        uint base = tok * pc.n_expert;
+        for (uint c = 0u; c < 8u; c++) {
+            uint e = lane + c * gsz;
+            float val = (e < pc.n_expert) ? logits[base + e] : (-1.0 / 0.0);
+            v0[c] = val;
+            v[c] = val;
+        }
+
+        uint win_i[8];
+        float win_v[8];
+        for (uint k = 0u; k < pc.n_used; k++) {
+            float loc_v = -1.0 / 0.0;
+            uint loc_i = 0xffffffffu;
+            for (uint c = 0u; c < 8u; c++) {
+                uint e = lane + c * gsz;
+                if (e < pc.n_expert) {
+                    float val = v[c];
+                    if (val > loc_v || (val == loc_v && e < loc_i)) {
+                        loc_v = val;
+                        loc_i = e;
+                    }
+                }
+            }
+            float m = subgroupMax(loc_v);
+            uint bi = subgroupMin((loc_v == m) ? loc_i : 0xffffffffu);
+            win_i[k] = bi;
+            win_v[k] = m;
+            for (uint c = 0u; c < 8u; c++) {
+                if (lane + c * gsz == bi) v[c] = -1.0 / 0.0;
+            }
+        }
+
+        float maxv = win_v[0];
+        float loc_sum = 0.0f;
+        for (uint c = 0u; c < 8u; c++) {
+            uint e = lane + c * gsz;
+            if (e < pc.n_expert) loc_sum += exp(v0[c] - maxv);
+        }
+        float denom = max(subgroupAdd(loc_sum), 1e-20f);
+        if (lane < pc.n_used) {
+            tok_win_i[tok][lane] = win_i[lane];
+            tok_win_p[tok][lane] = exp(win_v[lane] - maxv) / denom;
+        }
+    }
+    barrier();
+
+    /* Phase 2: Subgroup 0 accumulates block coreset mass and selects top_p experts
+     * entirely in registers + subgroup reductions, with zero workgroup barriers. */
+    if (sg == 0u) {
+        if (lane == 0u) {
+            for (uint t = 0u; t < pc.n_tok; t++) {
+                for (uint k = 0u; k < pc.n_used; k++) {
+                    totals[tok_win_i[t][k]] += tok_win_p[t][k];
+                }
+            }
+        }
+        subgroupBarrier();
+
+        float tv[8];
+        float loc_tot = 0.0f;
+        for (uint c = 0u; c < 8u; c++) {
+            uint e = lane + c * gsz;
+            float val = (e < pc.n_expert) ? totals[e] : 0.0f;
+            tv[c] = val;
+            loc_tot += val;
+        }
+        float total_mass = subgroupAdd(loc_tot);
+        if (total_mass <= 0.0f) {
+            for (uint c = 0u; c < 8u; c++) {
+                uint e = lane + c * gsz;
+                if (e < pc.n_expert) allowed[e] = 1u;
+            }
+        } else {
+            float thresh = total_mass * pc.top_p;
+            float cum = 0.0f;
+            for (uint r = 0u; r < pc.n_expert; r++) {
+                float loc_v = -1.0f;
+                uint loc_i = 0xffffffffu;
+                for (uint c = 0u; c < 8u; c++) {
+                    uint e = lane + c * gsz;
+                    if (e < pc.n_expert) {
+                        float val = tv[c];
+                        if (val > loc_v || (val == loc_v && e < loc_i)) {
+                            loc_v = val;
+                            loc_i = e;
+                        }
+                    }
+                }
+                float bv = subgroupMax(loc_v);
+                uint bi = subgroupMin((loc_v == bv) ? loc_i : 0xffffffffu);
+                if (lane == 0u && bi < pc.n_expert) {
+                    allowed[bi] = 1u;
+                }
+                cum += bv;
+                if (r + 1u >= pc.n_used && (cum >= thresh || bv <= 0.0f)) break;
+                for (uint c = 0u; c < 8u; c++) {
+                    if (lane + c * gsz == bi) tv[c] = -1.0f;
+                }
+            }
+        }
+    }
+    barrier();
+
+    /* Phase 3: Each subgroup selects masked top-k experts per token and renormalizes. */
+    for (uint tok = sg; tok < pc.n_tok; tok += nsub) {
+        float v[8];
+        uint base = tok * pc.n_expert;
+        for (uint c = 0u; c < 8u; c++) {
+            uint e = lane + c * gsz;
+            v[c] = (e < pc.n_expert && allowed[e] != 0u) ? logits[base + e] : (-1.0 / 0.0);
+        }
+
+        uint win_i[8];
+        float win_v[8];
+        for (uint k = 0u; k < pc.n_used; k++) {
+            float loc_v = -1.0 / 0.0;
+            uint loc_i = 0xffffffffu;
+            for (uint c = 0u; c < 8u; c++) {
+                uint e = lane + c * gsz;
+                if (e < pc.n_expert) {
+                    float val = v[c];
+                    if (val > loc_v || (val == loc_v && e < loc_i)) {
+                        loc_v = val;
+                        loc_i = e;
+                    }
+                }
+            }
+            float m = subgroupMax(loc_v);
+            uint bi = subgroupMin((loc_v == m) ? loc_i : 0xffffffffu);
+            win_i[k] = bi;
+            win_v[k] = m;
+            for (uint c = 0u; c < 8u; c++) {
+                if (lane + c * gsz == bi) v[c] = -1.0 / 0.0;
+            }
+        }
+
+        if (lane == 0u) {
+            float maxv = win_v[0];
+            double sum = 0.0;
+            float top_exp[8];
+            for (uint i = 0u; i < pc.n_used; i++) {
+                top_exp[i] = exp(win_v[i] - maxv);
+                sum += double(top_exp[i]);
+            }
+            if (sum < 6.103515625e-5) sum = 6.103515625e-5;
+            for (uint i = 0u; i < pc.n_used; i++) {
+                selected[tok * pc.n_used + i] = win_i[i];
+                wout[tok * pc.n_used + i] = float(double(top_exp[i]) / sum) * pc.route_scale;
+            }
+        }
+    }
+}

@@ -97,7 +97,8 @@ void main(void) {
     uint local0 = gl_WorkGroupID.y * QT;
     uint tok0 = pc.tok_base + local0;
     uint tn = min(QT, pc.n_tok - local0);
-    uint max_n_kv = pc.pos0 + tok0 + tn;
+    uint bidir_n_kv = pc.has_sinks >> 1u;
+    uint max_n_kv = bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + tok0 + tn);
     uint group = gl_WorkGroupID.z;
     uint span_first = group * SPAN_GROUP;
     uint max_spans = (max_n_kv + SPAN - 1u) / SPAN;
@@ -128,7 +129,7 @@ void main(void) {
         nibble_off[v] = v_off[v] + 2u + (j & 15u);
         high_nibble[v] = (j >= 16u);
     }
-    uint n_kv_rg = pc.pos0 + tok0 + rg + 1u;
+    uint n_kv_rg = bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + tok0 + rg + 1u);
     uint q_base[ROWS];
     for (uint rr = 0u; rr < ROWS; rr++) {
         q_base[rr] = (r0 + rr) * P36_QSTRIDE + (lane & 3u) * P36_QCHUNK;
@@ -144,7 +145,7 @@ void main(void) {
             uint r = r0 + rr;
             uint ti = r / HQ;
             uint j = r & (HQ - 1u);
-            m[rr] = span == 0u && pc.has_sinks != 0u && ti < tn ?
+            m[rr] = span == 0u && (pc.has_sinks & 1u) != 0u && ti < tn ?
                 sinks[h0 + j] : -3.402823466e38;
             l[rr] = 0.0;
             for (uint v = 0u; v < VD; v++) acc[rr][v] = 0.0;
@@ -258,7 +259,7 @@ void main(void) {
             uint ti = r / HQ;
             uint j = r & (HQ - 1u);
             uint tok = tok0 + ti;
-            uint n_kv = pc.pos0 + tok + 1u;
+            uint n_kv = bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + tok + 1u);
             uint row_spans = (n_kv + SPAN - 1u) / SPAN;
             if (ti >= tn || span0 >= n_kv || span_first >= row_spans) continue;
             uint pbase = (((local0 + ti) * pc.n_head + h0 + j) *

@@ -474,6 +474,52 @@ int p36_gpu_recurrent_conv_silu_tensor(p36_gpu_tensor *cache_conv,
     return ok;
 }
 
+int p36_gpu_clover_conv_silu_tensor(const p36_gpu_tensor *cache_conv,
+                                    const p36_gpu_tensor *cur,
+                                    p36_gpu_tensor *out,
+                                    const void *model_map,
+                                    uint64_t model_size,
+                                    uint64_t kernel_offset,
+                                    uint64_t kernel_right_offset,
+                                    uint32_t conv_dim,
+                                    uint32_t n_taps,
+                                    uint32_t n_tok) {
+    uint64_t row_bytes = (uint64_t)conv_dim * sizeof(float);
+    uint64_t kernel_bytes;
+    uint64_t kernel_right_bytes;
+    if (p36_gpu_quality || !p36_vk_use_gpu_recurrent() || conv_dim == 0 || n_taps != 4u || n_tok == 0 ||
+        !p36_u64_mul_ok(row_bytes, n_taps, &kernel_bytes) ||
+        !p36_u64_mul_ok(row_bytes, n_taps - 1u, &kernel_right_bytes) ||
+        !p36_gpu_tensor_range_ok(cache_conv, 0, (uint64_t)(n_taps - 1u) * row_bytes) ||
+        !p36_gpu_tensor_range_ok(cur, 0, (uint64_t)n_tok * row_bytes) ||
+        !p36_gpu_tensor_range_ok(out, 0, (uint64_t)n_tok * row_bytes)) {
+        return 0;
+    }
+    const float *kernel = (const float *)p36_gpu_weight_bytes(model_map, model_size,
+                                                              kernel_offset, kernel_bytes);
+    const float *kernel_r = (const float *)p36_gpu_weight_bytes(model_map, model_size,
+                                                                kernel_right_offset, kernel_right_bytes);
+    if (!kernel || !kernel_r) return 0;
+
+    pthread_mutex_lock(&p36_vk_mu);
+    p36_gpu_tensor *kt = p36_vk_weight_get_unlocked(kernel, kernel_bytes);
+    p36_gpu_tensor *krt = kt ? p36_vk_weight_get_unlocked(kernel_r, kernel_right_bytes) : NULL;
+    int ok = kt != NULL && krt != NULL;
+    if (ok) {
+        struct {
+            uint32_t conv_dim;
+            uint32_t n_taps;
+            uint32_t n_tok;
+        } push = { conv_dim, n_taps, n_tok };
+        const p36_gpu_tensor *bindings[5] = { cache_conv, cur, kt, krt, out };
+        ok = p36_vk_run_unlocked("clover_conv_silu", &p36_vk.clover_conv_silu,
+                                 bindings, &push, sizeof(push),
+                                 (conv_dim + 255u) / 256u, 1, 1);
+    }
+    pthread_mutex_unlock(&p36_vk_mu);
+    return ok;
+}
+
 int p36_gpu_copy_f32_tensor(p36_gpu_tensor *dst,
                             const p36_gpu_tensor *src,
                             uint32_t n_floats) {

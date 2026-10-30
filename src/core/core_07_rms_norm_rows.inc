@@ -414,6 +414,13 @@ static bool tensor_in_appended_nextn_block(const p36_model *m, p36_str name) {
  * in the reserved address range, so downstream code keeps addressing weights as
  * map + abs_offset.  Lossless: Q4_0 value (nibble - 8) is in [-8, 7] and keeps
  * the block's f16 scale, so the dequantized weights are bit-identical. */
+static bool tensor_is_clover_ssm_a(const p36_model *m, p36_str name) {
+    p36_str arch;
+    if (!model_get_string(m, "general.architecture", &arch) || !p36_streq(arch, "clover_moe"))
+        return false;
+    return name.len >= 6 && memcmp(name.ptr + name.len - 6, ".ssm_a", 6) == 0;
+}
+
 static void model_convert_q4_0(p36_model *m) {
     const uint64_t arena_off = align_up(m->file_size, 1u << 20);
     uint64_t used = 0;
@@ -429,15 +436,25 @@ static void model_convert_q4_0(p36_model *m) {
         }
         for (uint64_t i = 0; i < m->n_tensors; i++) {
             p36_tensor *t = &m->tensors[i];
-            if (!t->from_q4_0 && !t->from_q4_1) continue;
+            if (!t->from_q4_0 && !t->from_q4_1 && !t->clover_ssm_a) continue;
             uint64_t src = m->tensor_data_pos + t->rel_offset;
-            uint64_t q4_bytes = t->elements / P36_QK8_0 *
-                (t->from_q4_1 ? P36_Q4_1_BYTES : P36_Q4_0_BYTES);
-            if (src > m->file_size || q4_bytes > m->file_size - src)
+            uint64_t src_bytes = t->clover_ssm_a ? t->bytes :
+                t->elements / P36_QK8_0 * (t->from_q4_1 ? P36_Q4_1_BYTES : P36_Q4_0_BYTES);
+            if (src > m->file_size || src_bytes > m->file_size - src)
                 p36_die("tensor points outside GGUF file");
             uint64_t dst = align_up(used, 32);
             used = dst + t->bytes;
             if (pass == 0) continue;
+            if (t->clover_ssm_a) {
+                const float *a_log = (const float *)(const void *)(m->map + src);
+                float *a_out = (float *)(void *)((uint8_t *)m->map + arena_off + dst);
+                for (uint64_t j = 0; j < t->elements; j++) {
+                    a_out[j] = -expf(a_log[j]);
+                }
+                t->abs_offset = arena_off + dst;
+                if (t->bytes > m->max_tensor_bytes) m->max_tensor_bytes = t->bytes;
+                continue;
+            }
             const uint8_t *q4 = m->map + src;
             p36_block_q8_0 *q8 = (p36_block_q8_0 *)(void *)((uint8_t *)m->map + arena_off + dst);
             uint32_t stride = t->from_q4_1 ? P36_Q4_1_BYTES : P36_Q4_0_BYTES;
@@ -530,13 +547,16 @@ static void parse_tensors(p36_model *m, p36_cursor *c) {
             fprintf(stderr, "p36: unsupported tensor type %u for %.*s\n", t->type, (int)t->name.len, t->name.ptr);
             exit(1);
         }
+        if (t->type == P36_TENSOR_F32 && tensor_is_clover_ssm_a(m, t->name)) {
+            t->clover_ssm_a = true;
+        }
     }
     m->tensor_data_pos = align_up(c->pos, m->alignment);
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         p36_tensor *t = &m->tensors[i];
         if (t->rel_offset > UINT64_MAX - m->tensor_data_pos) p36_die("tensor offset overflow");
         t->abs_offset = m->tensor_data_pos + t->rel_offset;
-        if (t->from_q4_0) continue;   /* placed by model_convert_q4_0 */
+        if (t->from_q4_0 || t->from_q4_1 || t->clover_ssm_a) continue;   /* placed by model_convert_q4_0 */
         if (t->bytes != 0 && (t->abs_offset > m->size || t->bytes > m->size - t->abs_offset)) {
             p36_die("tensor points outside GGUF file");
         }

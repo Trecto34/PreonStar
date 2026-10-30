@@ -319,6 +319,8 @@ static void p36_vulkan_runtime_free(p36_vulkan_runtime *rt) {
         p36_gpu_tensor_free(rt->recurrent[il].state);
         p36_gpu_tensor_free(rt->spec_recurrent[il].conv);
         p36_gpu_tensor_free(rt->spec_recurrent[il].state);
+        p36_gpu_tensor_free(rt->spec_recur_qkv[il]);
+        p36_gpu_tensor_free(rt->spec_recur_gb[il]);
     }
     p36_gpu_tensor_free(rt->hidden);
     p36_gpu_tensor_free(rt->next_hidden);
@@ -664,12 +666,15 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
             offset += alias_bytes; \
         } while (0)
             P36_GPU_ALIAS_DENSE_RECUR(recur_conv, P36_N_SSM_CONV_DIM);
-            P36_GPU_ALIAS_DENSE_RECUR(recur_alpha, P36_N_SSM_DT_RANK);
-            P36_GPU_ALIAS_DENSE_RECUR(recur_beta, P36_N_SSM_DT_RANK);
-            P36_GPU_ALIAS_DENSE_RECUR(recur_gb, P36_N_SSM_DT_RANK * 2u);
             P36_GPU_ALIAS_DENSE_RECUR(recur_v, P36_N_SSM_INNER);
 #undef P36_GPU_ALIAS_DENSE_RECUR
         }
+        /* Own buffers, not aliases of the scratch root: beta, alpha and the
+         * gates are independent writes, and on one root the hazard tracker
+         * sees a write-after-write and drains the queue between them. */
+        P36_GPU_ALLOC_F32(recur_alpha, P36_N_SSM_DT_RANK);
+        P36_GPU_ALLOC_F32(recur_beta, P36_N_SSM_DT_RANK);
+        P36_GPU_ALLOC_F32(recur_gb, P36_N_SSM_DT_RANK * 2u);
         rt->ffn_shared_mid = p36_gpu_tensor_view(
             rt->ffn_shared_gate, 0,
             (uint64_t)P36_N_FF_SHARED * prefill_cap * sizeof(float));
@@ -737,7 +742,12 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
                 rt->spec_recurrent[il].conv = p36_gpu_tensor_alloc(hist_rows * P36_N_SSM_CONV_DIM * sizeof(float));
                 rt->spec_recurrent[il].state = p36_gpu_tensor_alloc(
                     state_dim * (rt->recur_state_f16 ? sizeof(uint16_t) : sizeof(float)));
-                if (!rt->spec_recurrent[il].conv || !rt->spec_recurrent[il].state) goto fail;
+                rt->spec_recur_qkv[il] = p36_gpu_tensor_alloc(
+                    (uint64_t)P36_MTP_MAX_DRAFT * P36_N_SSM_CONV_DIM * sizeof(float));
+                rt->spec_recur_gb[il] = p36_gpu_tensor_alloc(
+                    (uint64_t)P36_MTP_MAX_DRAFT * P36_N_SSM_DT_RANK * 2u * sizeof(float));
+                if (!rt->spec_recurrent[il].conv || !rt->spec_recurrent[il].state ||
+                    !rt->spec_recur_qkv[il] || !rt->spec_recur_gb[il]) goto fail;
             }
         }
     }

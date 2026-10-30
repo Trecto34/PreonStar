@@ -176,6 +176,10 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.moe_gate_up);
     p36_vk_kernel_destroy(&p36_vk.moe_gate_up_iq2s);
     p36_vk_kernel_destroy(&p36_vk.router_topk);
+    p36_vk_kernel_destroy(&p36_vk.clover_conv_silu);
+    p36_vk_kernel_destroy(&p36_vk.clover_bd_gdn);
+    p36_vk_kernel_destroy(&p36_vk.clover_bd_gdn_f16);
+    p36_vk_kernel_destroy(&p36_vk.clover_router_topk);
     p36_vk_kernel_destroy(&p36_vk.moe_tiles);
     p36_vk_kernel_destroy(&p36_vk.kv_store);
     p36_vk_kernel_destroy(&p36_vk.kv_store_quant);

@@ -137,7 +137,8 @@ void main(void) {
     uint heads_per_kv = pc.n_head / pc.n_head_kv;
     uint h0 = kvh * heads_per_kv;
     uint hn = min(HQ, heads_per_kv);
-    uint n_kv = pc.pos0 + qtok + 1u;
+    uint bidir_n_kv = pc.has_sinks >> 1u;
+    uint n_kv = bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + qtok + 1u);
     uint spans = (n_kv + SPAN - 1u) / SPAN;
     uint group = gl_WorkGroupID.z;
     uint span_first = group * SPAN_GROUP;
@@ -172,7 +173,7 @@ void main(void) {
         float acc[HQ];
         float nm[HQ];
         for (uint j = 0u; j < HQ; j++) {
-            m[j] = span == 0u && pc.has_sinks != 0u && j < hn ?
+            m[j] = span == 0u && (pc.has_sinks & 1u) != 0u && j < hn ?
                 sinks[h0 + j] : -3.402823466e38;
             l[j] = 0.0;
             acc[j] = 0.0;

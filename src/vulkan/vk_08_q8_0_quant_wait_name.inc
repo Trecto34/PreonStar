@@ -83,6 +83,19 @@ void p36_gpu_set_micro_batch(bool enabled) {
     p36_vk_micro_batch = enabled;
 }
 
+/* Clover block decode runs 5..16-row micro batches (block preview and its
+ * verify); only there do the multi-row matvec routes stretch past 4 rows.
+ * Every other model keeps the 4-row cap, so its routing is unchanged. */
+static bool p36_vk_wide_rows;
+
+void p36_gpu_set_wide_rows(bool enabled) {
+    p36_vk_wide_rows = enabled;
+}
+
+static uint64_t p36_vk_rows_max(void) {
+    return p36_vk_wide_rows && p36_vk_micro_batch ? 16u : 4u;
+}
+
 /* Prefill GEMM against raw f32 activations: 64x64 shared-memory tiles,
  * weights dequantized once per k-block for all tokens. Default is the
  * packed-f16 kernel; P36_VK_Q8_MM_F16=0 keeps the f32 tiles. */

@@ -94,6 +94,7 @@ enum {
 typedef enum {
     P36_VARIANT_35B_A3B,
     P36_VARIANT_27B,
+    P36_VARIANT_CLOVER_35B_A3B,
 } p36_variant;
 
 typedef struct {
@@ -104,6 +105,7 @@ typedef struct {
     uint32_t n_embd;
     uint32_t n_vocab;
     uint32_t n_tensor;
+    uint32_t ctx_train;
     uint32_t n_head;
     uint32_t n_head_kv;
     uint32_t n_head_dim;
@@ -130,6 +132,33 @@ static const p36_shape P36_SHAPE_35B_A3B = {
     .n_embd = 2048,
     .n_vocab = 248320,
     .n_tensor = 733,
+    .ctx_train = P36_CONTEXT_MAX,
+    .n_head = 16,
+    .n_head_kv = 2,
+    .n_head_dim = 256,
+    .n_value_dim = 256,
+    .n_rot = 64,
+    .n_expert = 256,
+    .n_expert_used = 8,
+    .n_ff_exp = 512,
+    .n_ff_shared = 512,
+    .n_ssm_conv = 4,
+    .n_ssm_state = 128,
+    .n_ssm_group = 16,
+    .n_ssm_dt_rank = 32,
+    .n_ssm_inner = 4096,
+    .full_attention_interval = 4,
+};
+
+static const p36_shape P36_SHAPE_CLOVER_35B_A3B = {
+    .name = "Clover 35B A3B",
+    .arch = "clover_moe",
+    .variant = P36_VARIANT_CLOVER_35B_A3B,
+    .n_layer = 40,
+    .n_embd = 2048,
+    .n_vocab = 248320,
+    .n_tensor = 853,
+    .ctx_train = 131072,
     .n_head = 16,
     .n_head_kv = 2,
     .n_head_dim = 256,
@@ -155,6 +184,7 @@ static const p36_shape P36_SHAPE_27B = {
     .n_embd = 5120,
     .n_vocab = 248320,
     .n_tensor = 851,
+    .ctx_train = P36_CONTEXT_MAX,
     .n_head = 24,
     .n_head_kv = 4,
     .n_head_dim = 256,
@@ -181,6 +211,7 @@ static p36_shape g_p36_shape = {
     .n_embd = 2048,
     .n_vocab = 248320,
     .n_tensor = 733,
+    .ctx_train = P36_CONTEXT_MAX,
     .n_head = 16,
     .n_head_kv = 2,
     .n_head_dim = 256,
@@ -202,7 +233,7 @@ static p36_shape g_p36_shape = {
 #define P36_N_EMBD                  (g_p36_shape.n_embd)
 #define P36_N_VOCAB                 (g_p36_shape.n_vocab)
 #define P36_TENSOR_COUNT            (g_p36_shape.n_tensor)
-#define P36_CONTEXT_TRAIN           P36_CONTEXT_MAX
+#define P36_CONTEXT_TRAIN           (g_p36_shape.ctx_train)
 #define P36_N_HEAD                  (g_p36_shape.n_head)
 #define P36_N_HEAD_KV               (g_p36_shape.n_head_kv)
 #define P36_N_HEAD_DIM              (g_p36_shape.n_head_dim)
@@ -340,6 +371,7 @@ typedef struct {
     bool hadamard_grouped;   /* GDN ssm_out: activation needs a tiled->grouped permute */
     bool from_q4_0;          /* file stores Q4_0; loader re-encodes it as Q8_0 in the arena */
     bool from_q4_1;          /* appended MTP block only: lossy Q4_1 -> Q8_0 for the draft head */
+    bool clover_ssm_a;       /* clover_moe stores raw A_log in ssm_a; loader converts to -exp(A_log) */
 } p36_tensor;
 
 typedef struct {
@@ -541,6 +573,10 @@ typedef struct {
     p36_tensor *ssm_alpha;
     p36_tensor *ssm_beta;
     p36_tensor *ssm_conv1d;
+    p36_tensor *ssm_conv1d_right;
+    p36_tensor *ssm_bd_logit_scale;
+    p36_tensor *ssm_bd_history_bias;
+    p36_tensor *ssm_bd_history_weight;
     p36_tensor *ssm_dt;
     p36_tensor *ssm_norm;
     p36_tensor *ssm_out;
@@ -648,6 +684,10 @@ struct p36_engine {
     char *chat_template;
     bool cpu_mmq_contract;   /* CPU reference emulates the f16 dense MMQ contract */
     p36_variant variant;
+    uint32_t clover_block_size;
+    int32_t clover_mask_token_id;
+    bool clover_coreset_enabled;
+    float clover_coreset_top_p;
 };
 
 struct p36_session {
@@ -677,6 +717,10 @@ struct p36_session {
     int mtp_draft_token;
     bool mtp_draft_valid;
     float mtp_draft_margin;
+    int32_t clover_draft[32];
+    uint32_t clover_draft_len;
+    int32_t clover_last_tok;
+    bool clover_has_last_tok;
 };
 
 typedef struct {
@@ -845,6 +889,10 @@ typedef struct {
     p36_gpu_tensor *scores;
     p36_vulkan_full_attn_cache mtp_full;
     p36_vulkan_recurrent_cache spec_recurrent[P36_MAX_LAYER];
+    p36_gpu_tensor *spec_recur_qkv[P36_MAX_LAYER];
+    p36_gpu_tensor *spec_recur_gb[P36_MAX_LAYER];
+    bool clover_preview;
+    uint32_t clover_block_size;
     p36_gpu_tensor *spec_logits;
     /* Top-2 of every speculative logits row, so verification reads n_draft
      * ints instead of n_draft full vocab rows. */

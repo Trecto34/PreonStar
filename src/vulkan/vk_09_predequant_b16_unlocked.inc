@@ -173,7 +173,8 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
                        weight_type == P36_VK_TENSOR_Q4_K ||
                        weight_type == P36_VK_TENSOR_Q5_K ||
                        weight_type == P36_VK_TENSOR_Q6_K;
-    if (!p36_gpu_quality && kquant_rows && n_tok > 1u && n_tok <= 4u &&
+    if (!p36_gpu_quality && kquant_rows && n_tok > 1u &&
+        n_tok <= p36_vk_rows_max() &&
         out_dim % P36_VK_KQUANT_ROWS == 0u &&
         p36_vk_env_default_on("P36_VK_DENSE_KQUANT_ROWS")) {
         pthread_mutex_lock(&p36_vk_mu);
@@ -202,6 +203,7 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
              * is, so a 2-row verify (the usual MTP draft-1 cycle) paid for
              * four; the 2-row build does only the live rows, same math. */
             bool two = n_tok == 2u;
+            uint32_t gy = two ? 1u : ((uint32_t)n_tok + 3u) / 4u;
             p36_vk_kernel *kernel =
                 weight_type == P36_VK_TENSOR_Q3_K ? (two ? &p36_vk.dense_q3k_rows2 : &p36_vk.dense_q3k_rows) :
                 weight_type == P36_VK_TENSOR_Q4_K ? (two ? &p36_vk.dense_q4k_rows2 : &p36_vk.dense_q4k_rows) :
@@ -209,7 +211,7 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
                                                     (two ? &p36_vk.dense_q6k_rows2 : &p36_vk.dense_q6k_rows);
             ok = p36_vk_run_unlocked(op, kernel, bindings, &push, sizeof(push),
                                      ((uint32_t)out_dim + P36_VK_KQUANT_ROWS - 1u) /
-                                         P36_VK_KQUANT_ROWS, 1, 1);
+                                         P36_VK_KQUANT_ROWS, gy, 1);
         }
         pthread_mutex_unlock(&p36_vk_mu);
         return ok;

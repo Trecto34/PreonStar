@@ -884,6 +884,19 @@ static void weights_validate_layout(const p36_weights *w, bool mixed_moe_quants)
                                      P36_TENSOR_F32, false,
                                      P36_N_EMBD, P36_N_SSM_DT_RANK);
             tensor_expect_layout(l->ssm_conv1d, P36_TENSOR_F32, 2, P36_N_SSM_CONV, P36_N_SSM_INNER * 2u, 0);
+            if (l->ssm_conv1d_right) {
+                tensor_expect_layout(l->ssm_conv1d_right, P36_TENSOR_F32, 2,
+                                     P36_N_SSM_CONV - 1u, P36_N_SSM_INNER * 2u, 0);
+            }
+            if (l->ssm_bd_logit_scale) {
+                tensor_expect_layout(l->ssm_bd_logit_scale, P36_TENSOR_F32, 1, P36_N_SSM_DT_RANK, 0, 0);
+            }
+            if (l->ssm_bd_history_bias) {
+                tensor_expect_layout(l->ssm_bd_history_bias, P36_TENSOR_F32, 1, P36_N_SSM_DT_RANK, 0, 0);
+            }
+            if (l->ssm_bd_history_weight) {
+                tensor_expect_layout(l->ssm_bd_history_weight, P36_TENSOR_F32, 1, P36_N_SSM_DT_RANK, 0, 0);
+            }
             tensor_expect_layout(l->ssm_dt, P36_TENSOR_F32, 1, P36_N_SSM_DT_RANK, 0, 0);
             tensor_expect_layout(l->ssm_norm, P36_TENSOR_F32, 1, P36_N_SSM_STATE, 0, 0);
             tensor_expect_moe_matrix(l->ssm_out, mixed_moe_quants,

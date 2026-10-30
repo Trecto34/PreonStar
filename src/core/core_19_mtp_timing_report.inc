@@ -50,7 +50,7 @@ static int p36_spec_commit_tokens(p36_session *s, const int *verify, int verify_
             p36_session_invalidate(s);
             return -1;
         }
-    } else {
+    } else if (!p36_vulkan_spec_commit_partial(s, (uint32_t)commit_n)) {
         if (!p36_vulkan_spec_frontier_restore(rt)) {
             if (err && errlen)
                 snprintf(err, errlen, "spec rollback failed at pos %u", start_pos);
@@ -110,7 +110,7 @@ static int p36_spec_commit_pending(p36_session *s, const int *verify, int verify
             p36_session_invalidate(s);
             return -1;
         }
-    } else {
+    } else if (!p36_vulkan_spec_commit_partial(s, (uint32_t)commit_n)) {
         if (!p36_vulkan_spec_frontier_restore(rt)) {
             if (err && errlen)
                 snprintf(err, errlen, "spec rollback failed at pos %u", start_pos);
@@ -212,6 +212,115 @@ static int p36_session_eval_lookup(p36_session *s, int first_token, int max_toke
                                 eos_token, accepted, err, errlen);
     return rc < 0 ? -1 : rc;
 }
+#ifndef P36_NO_GPU
+/* Clover block-diffusion self-speculative step (draft-self):
+ * 1. Run a bidirectional block-diffusion preview over [first_token, mask, ..., mask]
+ *    of length `block_len` (divisor of clover_block_size, up to 16) without mutating
+ *    recurrent state or advancing full-attention KV cache.
+ * 2. Read the argmax of the masked rows as `draft[0 .. block_len - 2]`.
+ * 3. Verify `[first_token, draft[0], ..., draft[block_len - 2]]` causally in one
+ *    batch and commit the accepted prefix via p36_spec_commit_pending (which uses
+ *    p36_vulkan_spec_commit_partial to replay only the 30 lightweight GDN state
+ *    kernels on partial accept instead of re-running the 40-layer forward pass). */
+static int p36_session_eval_clover_step(p36_session *s, int first_token, int max_tokens,
+                                        int eos_token, int *accepted, int accepted_cap,
+                                        char *err, size_t errlen) {
+    p36_engine *e = s->engine;
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int draft[P36_MTP_MAX_DRAFT];
+    int verify[P36_MTP_MAX_DRAFT];
+    int row_tops[P36_MTP_MAX_DRAFT];
+    int target_block = 8;
+    const char *env_bs = getenv("P36_CLOVER_BLOCK");
+    if (env_bs && env_bs[0]) {
+        int v = atoi(env_bs);
+        if (v >= 2 && v <= P36_MTP_MAX_DRAFT) target_block = v;
+    }
+    if (!rt || !rt->logits) return 0;
+    int draft_cap = target_block;
+    if (draft_cap > P36_MTP_MAX_DRAFT) draft_cap = P36_MTP_MAX_DRAFT;
+    if (draft_cap > accepted_cap) draft_cap = accepted_cap;
+    if (draft_cap > max_tokens) draft_cap = max_tokens;
+    if (draft_cap > s->ctx_size - s->checkpoint.len) draft_cap = s->ctx_size - s->checkpoint.len;
+    if (rt->prefill_cap > 0 && draft_cap > (int)rt->prefill_cap) draft_cap = (int)rt->prefill_cap;
+    uint32_t cbs = e->clover_block_size ? e->clover_block_size : 32u;
+    int block_len = 0;
+    static const int cand_lens[] = { 16, 8, 4, 2 };
+    for (size_t ci = 0; ci < sizeof(cand_lens) / sizeof(cand_lens[0]); ci++) {
+        int c = cand_lens[ci];
+        if (c <= draft_cap && (cbs % (uint32_t)c) == 0u) {
+            block_len = c;
+            break;
+        }
+    }
+    if (first_token == eos_token || block_len <= 1 || getenv("P36_CLOVER_DISABLE") != NULL) {
+        if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+        accepted[0] = first_token;
+        return 1;
+    }
+    uint32_t start_pos = (uint32_t)s->checkpoint.len;
+    if (!p36_session_reserve_kv(s, start_pos + (uint32_t)block_len, start_pos)) {
+        if (err && errlen) snprintf(err, errlen, "failed to grow Clover KV cache");
+        return -1;
+    }
+    const bool mtp_timing = getenv("P36_MTP_TIMING") != NULL;
+    double tc0 = 0.0, tc_draft = 0.0, tc_snap = 0.0, tc_verify = 0.0;
+    uint64_t tr0 = 0, tf0 = 0;
+    if (mtp_timing) {
+        tc0 = p36_now_sec();
+        tr0 = p36_gpu_read_bytes();
+        tf0 = p36_gpu_read_flushes();
+    }
+    int n_draft = p36_clover_preview_draft(s, first_token, start_pos, (uint32_t)block_len, draft);
+    if (mtp_timing) tc_draft = p36_now_sec();
+    if (n_draft <= 0) {
+        if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+        accepted[0] = first_token;
+        return 1;
+    }
+    verify[0] = first_token;
+    int verify_n = 1;
+    for (int i = 0; i < n_draft && verify_n < block_len; i++) {
+        verify[verify_n++] = draft[i];
+        if (draft[i] == eos_token) break;
+    }
+    if (!p36_vulkan_spec_frontier_snapshot(rt)) {
+        if (err && errlen) snprintf(err, errlen, "Clover state snapshot failed");
+        return -1;
+    }
+    if (mtp_timing) tc_snap = p36_now_sec();
+    if (!p36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
+        if (!p36_vulkan_spec_frontier_restore(rt)) p36_session_invalidate(s);
+        if (err && errlen) snprintf(err, errlen, "Clover target verifier failed at pos %u", start_pos);
+        return -1;
+    }
+    if (mtp_timing) tc_verify = p36_now_sec();
+    int commit_n = p36_spec_commit_pending(s, verify, verify_n, start_pos, row_tops,
+                                           eos_token, accepted, verify_n, 0,
+                                           err, errlen);
+    if (commit_n < 0) return -1;
+    if (mtp_timing) {
+        p36_mtp_timing_report(start_pos,
+                              commit_n == verify_n ? "full-accept" : "partial",
+                              verify_n, commit_n, n_draft, tc0, tc0, tc_draft,
+                              tc_snap, tc_verify, p36_now_sec(), tr0, tf0);
+    }
+    return commit_n;
+}
+
+/* Blocks past 4 rows take the multi-row matvec routes only here; see
+ * p36_gpu_set_wide_rows. */
+static int p36_session_eval_clover(p36_session *s, int first_token, int max_tokens,
+                                   int eos_token, int *accepted, int accepted_cap,
+                                   char *err, size_t errlen) {
+    p36_gpu_set_wide_rows(true);
+    int rc = p36_session_eval_clover_step(s, first_token, max_tokens, eos_token,
+                                          accepted, accepted_cap, err, errlen);
+    p36_gpu_set_wide_rows(false);
+    return rc;
+}
+#endif
+
 int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
                                         int max_tokens, int eos_token,
                                         int *accepted, int accepted_cap,
@@ -219,6 +328,13 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
     p36_engine *e;
     if (!s || !accepted || accepted_cap <= 0 || max_tokens <= 0) return 0;
     e = s->engine;
+#ifndef P36_NO_GPU
+    if (e && e->variant == P36_VARIANT_CLOVER_35B_A3B &&
+        p36_engine_uses_vulkan_runtime(e)) {
+        return p36_session_eval_clover(s, first_token, max_tokens, eos_token,
+                                       accepted, accepted_cap, err, errlen);
+    }
+#endif
     if (!e || !p36_engine_has_mtp(e) || e->mtp_draft_tokens <= 1 ||
         !p36_engine_uses_vulkan_runtime(e)) {
         /* No MTP head available: prompt lookup is the only draft source. */
@@ -463,7 +579,11 @@ int p36_engine_lookup_k(p36_engine *e) {
 
 /* Greedy decode can speculate when any draft source is armed. */
 bool p36_engine_spec_enabled(p36_engine *e) {
-    return p36_engine_mtp_draft_tokens(e) > 1 || p36_engine_lookup_k(e) > 1;
+    return p36_engine_mtp_draft_tokens(e) > 1 || p36_engine_lookup_k(e) > 1 ||
+           /* Clover block speculation is opt-in: draft + verify measured
+            * slower than plain decode (72 vs ~82 t/s at block 4). */
+           (e && e->variant == P36_VARIANT_CLOVER_35B_A3B && getenv("P36_CLOVER_BLOCK") &&
+            p36_engine_uses_vulkan_runtime(e));
 }
 
 const p36_tokens *p36_session_tokens(p36_session *s) {

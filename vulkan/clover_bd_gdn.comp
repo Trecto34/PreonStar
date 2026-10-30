@@ -1,0 +1,174 @@
+#version 460
+#ifdef P36_STATE_F16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#ifdef P36_STATE_F16
+layout(set = 0, binding = 0) readonly buffer State { float16_t s[]; };
+#else
+layout(set = 0, binding = 0) readonly buffer State { float s[]; };
+#endif
+layout(set = 0, binding = 1) readonly buffer Qbuf { float q[]; };
+layout(set = 0, binding = 2) readonly buffer Kbuf { float k[]; };
+layout(set = 0, binding = 3) readonly buffer Vbuf { float v[]; };
+layout(set = 0, binding = 4) readonly buffer GB { float gb[]; };
+layout(set = 0, binding = 5) readonly buffer LogitScale { float bd_scale[]; };
+layout(set = 0, binding = 6) readonly buffer HistBias { float bd_bias[]; };
+layout(set = 0, binding = 7) readonly buffer HistWeight { float bd_weight[]; };
+layout(set = 0, binding = 8) writeonly buffer Output { float y[]; };
+
+layout(push_constant) uniform Push {
+    uint n_heads;
+    uint state_dim;
+    uint n_tok;
+    float log_ratio;
+} pc;
+
+const uint N = 128u;
+const uint MAX_W = 16u;
+
+shared float sh_q[MAX_W * N];
+shared float sh_k[MAX_W * N];
+shared float sh_w[MAX_W * (MAX_W + 1u)];
+shared float sh_hist[MAX_W * N];
+
+void main(void) {
+    uint h = gl_WorkGroupID.x;
+    uint j = gl_LocalInvocationID.x;
+    if (h >= pc.n_heads || pc.state_dim != N || pc.n_tok == 0u || pc.n_tok > MAX_W) return;
+
+    for (uint tok = 0u; tok < pc.n_tok; tok++) {
+        uint idx = (tok * pc.n_heads + h) * N + j;
+        sh_q[tok * N + j] = q[idx];
+        sh_k[tok * N + j] = k[idx];
+    }
+    barrier();
+
+    uint mat = h * N * N;
+    float norm = inversesqrt(float(N));
+
+    if (pc.n_tok <= 4u) {
+        float h0 = 0.0f, h1 = 0.0f, h2 = 0.0f, h3 = 0.0f;
+        for (uint i = 0u; i < N; i++) {
+            float sij = float(s[mat + i * N + j]);
+            h0 = fma(sij, sh_q[0u * N + i], h0);
+            h1 = fma(sij, sh_q[1u * N + i], h1);
+            h2 = fma(sij, sh_q[2u * N + i], h2);
+            h3 = fma(sij, sh_q[3u * N + i], h3);
+        }
+        sh_hist[0u * N + j] = h0 * norm * gb[0u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 1u) sh_hist[1u * N + j] = h1 * norm * gb[1u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 2u) sh_hist[2u * N + j] = h2 * norm * gb[2u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 3u) sh_hist[3u * N + j] = h3 * norm * gb[3u * 2u * pc.n_heads + h];
+    } else if (pc.n_tok <= 8u) {
+        float h0 = 0.0f, h1 = 0.0f, h2 = 0.0f, h3 = 0.0f;
+        float h4 = 0.0f, h5 = 0.0f, h6 = 0.0f, h7 = 0.0f;
+        for (uint i = 0u; i < N; i++) {
+            float sij = float(s[mat + i * N + j]);
+            h0 = fma(sij, sh_q[0u * N + i], h0);
+            h1 = fma(sij, sh_q[1u * N + i], h1);
+            h2 = fma(sij, sh_q[2u * N + i], h2);
+            h3 = fma(sij, sh_q[3u * N + i], h3);
+            h4 = fma(sij, sh_q[4u * N + i], h4);
+            h5 = fma(sij, sh_q[5u * N + i], h5);
+            h6 = fma(sij, sh_q[6u * N + i], h6);
+            h7 = fma(sij, sh_q[7u * N + i], h7);
+        }
+        sh_hist[0u * N + j] = h0 * norm * gb[0u * 2u * pc.n_heads + h];
+        sh_hist[1u * N + j] = h1 * norm * gb[1u * 2u * pc.n_heads + h];
+        sh_hist[2u * N + j] = h2 * norm * gb[2u * 2u * pc.n_heads + h];
+        sh_hist[3u * N + j] = h3 * norm * gb[3u * 2u * pc.n_heads + h];
+        sh_hist[4u * N + j] = h4 * norm * gb[4u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 5u) sh_hist[5u * N + j] = h5 * norm * gb[5u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 6u) sh_hist[6u * N + j] = h6 * norm * gb[6u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 7u) sh_hist[7u * N + j] = h7 * norm * gb[7u * 2u * pc.n_heads + h];
+    } else {
+        float h0 = 0.0f, h1 = 0.0f, h2 = 0.0f, h3 = 0.0f;
+        float h4 = 0.0f, h5 = 0.0f, h6 = 0.0f, h7 = 0.0f;
+        float h8 = 0.0f, h9 = 0.0f, h10 = 0.0f, h11 = 0.0f;
+        float h12 = 0.0f, h13 = 0.0f, h14 = 0.0f, h15 = 0.0f;
+        for (uint i = 0u; i < N; i++) {
+            float sij = float(s[mat + i * N + j]);
+            h0 = fma(sij, sh_q[0u * N + i], h0);
+            h1 = fma(sij, sh_q[1u * N + i], h1);
+            h2 = fma(sij, sh_q[2u * N + i], h2);
+            h3 = fma(sij, sh_q[3u * N + i], h3);
+            h4 = fma(sij, sh_q[4u * N + i], h4);
+            h5 = fma(sij, sh_q[5u * N + i], h5);
+            h6 = fma(sij, sh_q[6u * N + i], h6);
+            h7 = fma(sij, sh_q[7u * N + i], h7);
+            h8 = fma(sij, sh_q[8u * N + i], h8);
+            h9 = fma(sij, sh_q[9u * N + i], h9);
+            h10 = fma(sij, sh_q[10u * N + i], h10);
+            h11 = fma(sij, sh_q[11u * N + i], h11);
+            h12 = fma(sij, sh_q[12u * N + i], h12);
+            h13 = fma(sij, sh_q[13u * N + i], h13);
+            h14 = fma(sij, sh_q[14u * N + i], h14);
+            h15 = fma(sij, sh_q[15u * N + i], h15);
+        }
+        sh_hist[0u * N + j] = h0 * norm * gb[0u * 2u * pc.n_heads + h];
+        sh_hist[1u * N + j] = h1 * norm * gb[1u * 2u * pc.n_heads + h];
+        sh_hist[2u * N + j] = h2 * norm * gb[2u * 2u * pc.n_heads + h];
+        sh_hist[3u * N + j] = h3 * norm * gb[3u * 2u * pc.n_heads + h];
+        sh_hist[4u * N + j] = h4 * norm * gb[4u * 2u * pc.n_heads + h];
+        sh_hist[5u * N + j] = h5 * norm * gb[5u * 2u * pc.n_heads + h];
+        sh_hist[6u * N + j] = h6 * norm * gb[6u * 2u * pc.n_heads + h];
+        sh_hist[7u * N + j] = h7 * norm * gb[7u * 2u * pc.n_heads + h];
+        sh_hist[8u * N + j] = h8 * norm * gb[8u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 9u) sh_hist[9u * N + j] = h9 * norm * gb[9u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 10u) sh_hist[10u * N + j] = h10 * norm * gb[10u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 11u) sh_hist[11u * N + j] = h11 * norm * gb[11u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 12u) sh_hist[12u * N + j] = h12 * norm * gb[12u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 13u) sh_hist[13u * N + j] = h13 * norm * gb[13u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 14u) sh_hist[14u * N + j] = h14 * norm * gb[14u * 2u * pc.n_heads + h];
+        if (pc.n_tok > 15u) sh_hist[15u * N + j] = h15 * norm * gb[15u * 2u * pc.n_heads + h];
+    }
+
+    float scale = bd_scale[h];
+    uint total_pairs = pc.n_tok * pc.n_tok;
+    for (uint idx = j; idx < total_pairs; idx += N) {
+        uint tok = idx / pc.n_tok;
+        uint s_idx = idx - tok * pc.n_tok;
+        float dot_qk = 0.0f;
+        for (uint i = 0u; i < N; i++) {
+            dot_qk = fma(sh_q[tok * N + i], sh_k[s_idx * N + i], dot_qk);
+        }
+        sh_w[tok * (MAX_W + 1u) + s_idx] = dot_qk * scale;
+    }
+
+    if (j < pc.n_tok) {
+        sh_w[j * (MAX_W + 1u) + pc.n_tok] = bd_bias[h] + bd_weight[h] * pc.log_ratio;
+    }
+    barrier();
+
+    if (j < pc.n_tok) {
+        uint row = j * (MAX_W + 1u);
+        float maxv = sh_w[row];
+        for (uint s_idx = 1u; s_idx <= pc.n_tok; s_idx++) {
+            maxv = max(maxv, sh_w[row + s_idx]);
+        }
+        float sum = 0.0f;
+        for (uint s_idx = 0u; s_idx <= pc.n_tok; s_idx++) {
+            float e = exp(sh_w[row + s_idx] - maxv);
+            sh_w[row + s_idx] = e;
+            sum += e;
+        }
+        float inv_sum = 1.0f / max(sum, 1e-20f);
+        for (uint s_idx = 0u; s_idx <= pc.n_tok; s_idx++) {
+            sh_w[row + s_idx] *= inv_sum;
+        }
+    }
+    barrier();
+
+    for (uint tok = 0u; tok < pc.n_tok; tok++) {
+        uint row = tok * (MAX_W + 1u);
+        float acc = sh_w[row + pc.n_tok] * sh_hist[tok * N + j];
+        for (uint s_idx = 0u; s_idx < pc.n_tok; s_idx++) {
+            acc = fma(sh_w[row + s_idx], v[(s_idx * pc.n_heads + h) * N + j], acc);
+        }
+        y[(tok * pc.n_heads + h) * N + j] = acc;
+    }
+}

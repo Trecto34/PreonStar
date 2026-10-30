@@ -169,7 +169,8 @@ void main(void) {
     uint h = gl_WorkGroupID.x;
     uint tok = gl_WorkGroupID.y;
     uint span = gl_WorkGroupID.z;
-    uint n_kv = pc.pos0 + tok + 1u;
+    uint bidir_n_kv = pc.has_sinks >> 1u;
+    uint n_kv = bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + tok + 1u);
     uint span0 = span * SPAN;
     uint span_end = min(span0 + SPAN, n_kv);
     /* (head_dim + 2) floats per partial: acc, then m, l. */
@@ -183,7 +184,7 @@ void main(void) {
     if (tid < pc.head_dim) sh_q[P36_QIDX(tid)] = q[(tok * pc.n_head + h) * pc.head_dim + tid];
     barrier();
 
-    float m = span == 0u && pc.has_sinks != 0u ? sinks[h] : -3.402823466e38;
+    float m = span == 0u && (pc.has_sinks & 1u) != 0u ? sinks[h] : -3.402823466e38;
     float l = 0.0;
     float acc = 0.0;
 

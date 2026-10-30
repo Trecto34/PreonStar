@@ -3596,3 +3596,33 @@ interleaved reps, greedy text identical in every arm.
   profile bucket is overlap, not real cost.
 * Not done: gdn_front for F32 ssm_alpha (would fold conv+l2+alpha+beta+gates
   into one dispatch; changes dot order, est. 1-2%).
+
+## Clover-35B-A3B block-diffusion self-speculation — MEASURED, slower than plain decode; both levers bounded below 100 t/s (2026-10-29)
+
+Clover preview path (draft = bidirectional preview over [anchor, mask...],
+then causal verify, `p36_session_eval_clover`) is opt-in via
+`P36_CLOVER_BLOCK`; default is plain decode. Greedy, ctx 1024:
+plain ~82 t/s (12.2 ms/token); block 4 72.5 t/s (draft 26.8 + verify 24.4 ms
+per cycle, 88-97% accept); block 8 63 t/s (75% accept). Pass cost is linear
+in rows: 1 row 12.2, 2 rows ~16, 4 rows ~25, 8 rows ~48 ms (~5 ms/row).
+
+- **Expert sharing measured** (unique experts / routed slots per layer):
+  block 4 preview 13.9/32, verify 20.7/32; block 8 preview 16.4/57,
+  verify 30.5/57. Far more sharing than plain MTP verify (16.7% dupes).
+- **Lever 1 upper bound (read each shared expert once): ~86 t/s.** Timing
+  build where duplicate slots exit without work (wrong output) cut MoE
+  decode kernel time per dispatch ~30-45% (gate/up IQ2_S 0.131 -> 0.081 ms,
+  down IQ3_XXS 0.160 -> 0.113 ms). That removes ~8 of the 51 ms cycle; a
+  real kernel (owner workgroup does the shared rows) lands below that bound.
+  The in-kernel dedupe built by an earlier agent session got 5-14% on gate/up
+  and regressed down (scratch spills); reverted.
+- **Lever 2 (verify block k and preview block k+1 in one pass): ~0 gain.**
+  Since pass cost is linear in rows, one 8-row pass costs the two 4-row
+  passes it replaces.
+- `reconsider_if`: the per-row marginal cost of a multi-row pass drops to
+  ~2 ms (needs dense multi-row matvec and MoE paths that are sublinear in
+  rows), which is the only route to 100+ t/s here.
+- Kept: multi-row K-quant / MoE identity routes up to 16 rows only inside
+  the Clover step (`p36_gpu_set_wide_rows`); other models keep the 4-row cap.
+  Greedy md5 identical to HEAD on CyberTiel (plain, MTP 3, MTP 7), Occamy
+  (plain, MTP 7), dense 27B (plain, MTP 7); speed within noise.

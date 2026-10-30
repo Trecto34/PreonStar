@@ -219,6 +219,10 @@ typedef struct {
     p36_vk_kernel moe_gate_up;
     p36_vk_kernel moe_gate_up_iq2s;
     p36_vk_kernel router_topk;
+    p36_vk_kernel clover_conv_silu;
+    p36_vk_kernel clover_bd_gdn;
+    p36_vk_kernel clover_bd_gdn_f16;
+    p36_vk_kernel clover_router_topk;
     p36_vk_kernel moe_tiles;
     p36_vk_kernel kv_store;
     p36_vk_kernel kv_store_quant;

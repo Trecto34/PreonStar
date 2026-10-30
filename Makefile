@@ -75,6 +75,10 @@ VULKAN_SHADERS := \
 	vulkan/recur_window.spv \
 	vulkan/conv_silu.spv \
 	vulkan/recur_conv_silu_decode.spv \
+	vulkan/clover_conv_silu.spv \
+	vulkan/clover_bd_gdn.spv \
+	vulkan/clover_bd_gdn_f16.spv \
+	vulkan/clover_router_topk.spv \
 	vulkan/recur_norm_gate.spv \
 	vulkan/recur_norm_gate_q8_k.spv \
 	vulkan/delta_qk.spv \
@@ -518,6 +522,12 @@ vulkan/delta_net_decode_reg.spv: vulkan/delta_net_decode_reg.comp
 
 vulkan/delta_net_decode_reg_f16.spv: vulkan/delta_net_decode_reg.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_STATE_F16=1 -DP36_COLS=32 -o $@ $<
+
+vulkan/clover_bd_gdn_f16.spv: vulkan/clover_bd_gdn.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_STATE_F16=1 -o $@ $<
+
+vulkan/clover_router_topk.spv: vulkan/clover_router_topk.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/attn_decode_fused.spv: vulkan/attn_decode_fused.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<

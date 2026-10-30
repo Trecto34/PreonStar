@@ -223,6 +223,8 @@ static void config_validate_model(const p36_model *m) {
     p36_str tok_pre = required_string(m, "tokenizer.ggml.pre");
     if (p36_streq(arch, P36_SHAPE_35B_A3B.arch)) {
         g_p36_shape = P36_SHAPE_35B_A3B;
+    } else if (p36_streq(arch, P36_SHAPE_CLOVER_35B_A3B.arch)) {
+        g_p36_shape = P36_SHAPE_CLOVER_35B_A3B;
     } else if (p36_streq(arch, P36_SHAPE_27B.arch)) {
         g_p36_shape = P36_SHAPE_27B;
     } else {
@@ -276,8 +278,10 @@ static void config_validate_model(const p36_model *m) {
     P36_EXPECT_U32("attention.value_length", P36_N_VALUE_DIM);
     P36_EXPECT_U32("rope.dimension_count", P36_N_ROT);
     P36_EXPECT_F32("rope.freq_base", 10000000.0f);
-    P36_META_KEY("rope.dimension_sections");
-    config_expect_u32_array(m, key, P36_ROPE_SECTIONS, 4);
+    if (g_p36_shape.variant != P36_VARIANT_CLOVER_35B_A3B) {
+        P36_META_KEY("rope.dimension_sections");
+        config_expect_u32_array(m, key, P36_ROPE_SECTIONS, 4);
+    }
     P36_EXPECT_F32("attention.layer_norm_rms_epsilon", P36_RMS_EPS);
     if (P36_MODEL_DENSE) {
         P36_EXPECT_U32("feed_forward_length", P36_N_FF_SHARED);
@@ -316,7 +320,8 @@ static void model_summary(const p36_model *m) {
     uint64_t params = 0;
     model_get_string(m, "general.name", &name);
     model_get_string(m, "general.architecture", &arch);
-    if (!model_get_u64_compat(m, "qwen35moe.context_length", &ctx_train))
+    if (!model_get_u64_compat(m, "qwen35moe.context_length", &ctx_train) &&
+        !model_get_u64_compat(m, "clover_moe.context_length", &ctx_train))
         model_get_u64_compat(m, "qwen35.context_length", &ctx_train);
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         tensor_bytes += m->tensors[i].bytes;

@@ -29,6 +29,10 @@ static void weights_bind(p36_weights *w, const p36_model *m) {
             l->ssm_alpha = required_tensorf(m, "blk.%u.ssm_alpha.weight", il);
             l->ssm_beta = required_tensorf(m, "blk.%u.ssm_beta.weight", il);
             l->ssm_conv1d = required_tensorf(m, "blk.%u.ssm_conv1d.weight", il);
+            l->ssm_conv1d_right = tensor_by_namef(m, "blk.%u.ssm_conv1d.weight_right", il);
+            l->ssm_bd_logit_scale = tensor_by_namef(m, "blk.%u.ssm_bd_logit_scale.weight", il);
+            l->ssm_bd_history_bias = tensor_by_namef(m, "blk.%u.ssm_bd_history.bias", il);
+            l->ssm_bd_history_weight = tensor_by_namef(m, "blk.%u.ssm_bd_history.weight", il);
             l->ssm_dt = required_tensorf(m, "blk.%u.ssm_dt.bias", il);
             l->ssm_norm = required_tensorf(m, "blk.%u.ssm_norm.weight", il);
             l->ssm_out = required_tensorf(m, "blk.%u.ssm_out.weight", il);

@@ -390,6 +390,61 @@ int p36_gpu_delta_net_decode_tensor(p36_gpu_tensor *state,
     return ok;
 }
 
+int p36_gpu_clover_bd_gdn_tensor(const p36_gpu_tensor *state,
+                                 const p36_gpu_tensor *q,
+                                 const p36_gpu_tensor *k,
+                                 const p36_gpu_tensor *v,
+                                 const p36_gpu_tensor *gb,
+                                 p36_gpu_tensor *out,
+                                 const void *model_map,
+                                 uint64_t model_size,
+                                 uint64_t logit_scale_offset,
+                                 uint64_t hist_bias_offset,
+                                 uint64_t hist_weight_offset,
+                                 uint32_t n_heads,
+                                 uint32_t state_dim,
+                                 uint32_t n_tok,
+                                 float log_ratio) {
+    uint64_t vec_bytes = (uint64_t)n_heads * state_dim * sizeof(float);
+    uint64_t gb_bytes = 2u * (uint64_t)n_heads * sizeof(float);
+    uint64_t state_bytes = vec_bytes * state_dim;
+    uint64_t head_vec_bytes = (uint64_t)n_heads * sizeof(float);
+    bool state_f16 = state && state->bytes == state_bytes / 2u;
+    if (p36_gpu_quality || n_heads == 0 || state_dim != 128u || n_tok == 0 || n_tok > 32u) return 0;
+    if (!p36_gpu_tensor_range_ok(state, 0, state_f16 ? state_bytes / 2u : state_bytes) ||
+        !p36_gpu_tensor_range_ok(q, 0, vec_bytes * n_tok) ||
+        !p36_gpu_tensor_range_ok(k, 0, vec_bytes * n_tok) ||
+        !p36_gpu_tensor_range_ok(v, 0, vec_bytes * n_tok) ||
+        !p36_gpu_tensor_range_ok(gb, 0, gb_bytes * n_tok) ||
+        !p36_gpu_tensor_range_ok(out, 0, vec_bytes * n_tok)) {
+        return 0;
+    }
+    const float *scale_w = (const float *)p36_gpu_weight_bytes(model_map, model_size, logit_scale_offset, head_vec_bytes);
+    const float *bias_w = (const float *)p36_gpu_weight_bytes(model_map, model_size, hist_bias_offset, head_vec_bytes);
+    const float *weight_w = (const float *)p36_gpu_weight_bytes(model_map, model_size, hist_weight_offset, head_vec_bytes);
+    if (!scale_w || !bias_w || !weight_w) return 0;
+
+    struct {
+        uint32_t n_heads;
+        uint32_t state_dim;
+        uint32_t n_tok;
+        float log_ratio;
+    } push = { n_heads, state_dim, n_tok, log_ratio };
+
+    pthread_mutex_lock(&p36_vk_mu);
+    p36_gpu_tensor *scale_t = p36_vk_weight_get_unlocked(scale_w, head_vec_bytes);
+    p36_gpu_tensor *bias_t = scale_t ? p36_vk_weight_get_unlocked(bias_w, head_vec_bytes) : NULL;
+    p36_gpu_tensor *weight_t = bias_t ? p36_vk_weight_get_unlocked(weight_w, head_vec_bytes) : NULL;
+    int ok = scale_t != NULL && bias_t != NULL && weight_t != NULL;
+    if (ok) {
+        const p36_gpu_tensor *bindings[9] = { state, q, k, v, gb, scale_t, bias_t, weight_t, out };
+        p36_vk_kernel *kernel = state_f16 ? &p36_vk.clover_bd_gdn_f16 : &p36_vk.clover_bd_gdn;
+        ok = p36_vk_run_unlocked("clover_bd_gdn", kernel, bindings, &push, sizeof(push), n_heads, 1, 1);
+    }
+    pthread_mutex_unlock(&p36_vk_mu);
+    return ok;
+}
+
 /* KV cache append, the GPU twin of p36_full_attn_cache_store(): row t of
  * k/v lands at position pos0 + t.  Rows are host-converted when the fast
  * f16 GPU append path is not applicable. */

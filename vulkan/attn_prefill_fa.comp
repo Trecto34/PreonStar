@@ -117,12 +117,13 @@ void main(void) {
     uint tn = min(QT, pc.n_tok - local0);
     uint group = gl_WorkGroupID.z;
     uint g0 = group * GROUP_KEYS;
-    uint g_end = min(g0 + GROUP_KEYS, pc.pos0 + tok0 + tn);
+    uint bidir_n_kv = pc.has_sinks >> 1u;
+    uint g_end = min(g0 + GROUP_KEYS, bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + tok0 + tn));
     if (g0 >= g_end) return;            /* uniform: before any barrier */
 
     bool tok_live = t < tn;
     uint tok = tok0 + t;
-    uint n_kv_row = pc.pos0 + tok + 1u;
+    uint n_kv_row = bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + tok + 1u);
 
     /* 1/sqrt(256) = 1/16 is a power of two, so pre-scaling Q is exact. */
     vec4 qr[RS][4];
@@ -140,7 +141,7 @@ void main(void) {
     float l[RS];
     vec4 acc[RS][4];
     [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
-        m[rr] = group == 0u && pc.has_sinks != 0u ? sinks[hbase + rr] : NEG_BIG;
+        m[rr] = group == 0u && (pc.has_sinks & 1u) != 0u ? sinks[hbase + rr] : NEG_BIG;
         l[rr] = 0.0;
         [[unroll]] for (uint i = 0u; i < 4u; i++) acc[rr][i] = vec4(0.0);
     }

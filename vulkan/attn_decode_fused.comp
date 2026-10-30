@@ -174,7 +174,8 @@ void main(void) {
     uint tid = gl_LocalInvocationID.x;
     uint h = gl_WorkGroupID.x;
     uint tok = gl_WorkGroupID.y;
-    uint n_kv = pc.pos0 + tok + 1u;
+    uint bidir_n_kv = pc.has_sinks >> 1u;
+    uint n_kv = bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + tok + 1u);
     uint kvh = h / (pc.n_head / pc.n_head_kv);
     uint half_dim = pc.head_dim >> 1;
     float scale = 1.0 / sqrt(float(pc.head_dim));
@@ -184,7 +185,7 @@ void main(void) {
         if (tid < pc.head_dim) sh_q[P36_QIDX(tid)] = q[(tok * pc.n_head + h) * pc.head_dim + tid];
         barrier();
 
-        float m = pc.has_sinks != 0u ? sinks[h] : -3.402823466e38;
+        float m = (pc.has_sinks & 1u) != 0u ? sinks[h] : -3.402823466e38;
         float l = 0.0;
         float acc = 0.0;
 
@@ -244,7 +245,7 @@ void main(void) {
             barrier();
         }
 
-        if (pc.has_sinks != 0u) l += exp(sinks[h] - m);
+        if ((pc.has_sinks & 1u) != 0u) l += exp(sinks[h] - m);
         float inv = l > 0.0 ? 1.0 / l : 1.0;
         if (tid < pc.head_dim) {
             float g = qg[tok * pc.qg_stride + h * (pc.head_dim * 2u) + pc.head_dim + tid];
@@ -267,7 +268,7 @@ void main(void) {
         if (tid < pc.head_dim) sh_q[P36_QIDX(tid)] = q[(tok * pc.n_head + h) * pc.head_dim + tid];
         barrier();
 
-        float m = pc.has_sinks != 0u ? sinks[h] : -3.402823466e38;
+        float m = (pc.has_sinks & 1u) != 0u ? sinks[h] : -3.402823466e38;
         float l = 0.0;
         float acc = 0.0;
 
@@ -322,7 +323,7 @@ void main(void) {
             barrier();
         }
 
-        if (pc.has_sinks != 0u) l += exp(sinks[h] - m);
+        if ((pc.has_sinks & 1u) != 0u) l += exp(sinks[h] - m);
         float inv = l > 0.0 ? 1.0 / l : 1.0;
         if (tid < pc.head_dim) {
             float g = qg[tok * pc.qg_stride + h * (pc.head_dim * 2u) + pc.head_dim + tid];
@@ -335,7 +336,7 @@ void main(void) {
     if (tid < pc.head_dim) sh_q[P36_QIDX(tid)] = q[(tok * pc.n_head + h) * pc.head_dim + tid];
     barrier();
 
-    float m = pc.has_sinks != 0u ? sinks[h] : -3.402823466e38;
+    float m = (pc.has_sinks & 1u) != 0u ? sinks[h] : -3.402823466e38;
     float l = 0.0;
     float acc = 0.0;
 
@@ -409,7 +410,7 @@ void main(void) {
         barrier();
     }
 
-    if (pc.has_sinks != 0u) l += exp(sinks[h] - m);
+    if ((pc.has_sinks & 1u) != 0u) l += exp(sinks[h] - m);
     float inv = l > 0.0 ? 1.0 / l : 1.0;
     if (tid < pc.head_dim) {
         float g = qg[tok * pc.qg_stride + h * (pc.head_dim * 2u) + pc.head_dim + tid];
