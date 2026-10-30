@@ -794,7 +794,8 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                     op, kernel,
                     mmq_bindings, &push, sizeof(push),
                     small_rows ? ((uint32_t)out_dim + 3u) / 4u :
-                    wide_rows ? ((uint32_t)out_dim + 63u) / 64u :
+                    wide_rows || weight_type == P36_VK_TENSOR_IQ3_XXS ?
+                                 ((uint32_t)out_dim + 63u) / 64u :
                                  ((uint32_t)out_dim + 31u) / 32u,
                     ((uint32_t)n_tok + 127u) / 128u, 1);
             }

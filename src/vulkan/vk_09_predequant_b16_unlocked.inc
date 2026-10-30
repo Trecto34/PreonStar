@@ -254,7 +254,7 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
             ok = b16 != NULL &&
                  p36_vk_run_unlocked(op, &p36_vk.dense_kquant_mmq,
                                      bindings, &push, sizeof(push),
-                                     ((uint32_t)out_dim + 31u) / 32u,
+                                     ((uint32_t)out_dim + 63u) / 64u,
                                      ((uint32_t)n_tok + 127u) / 128u, 1);
         }
         pthread_mutex_unlock(&p36_vk_mu);

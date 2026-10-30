@@ -26,7 +26,15 @@ const uint Q3_K = 11u;
 const uint Q4_K = 12u;
 const uint Q5_K = 13u;
 const uint Q6_K = 14u;
-const uint BM = 32u;
+/* 64 rows: each lane owns 8 rows x 8 tokens (sum[32], as in
+ * dense_iq3_xxs_mmq_pair), so one LDS read feeds twice the FMAs of the
+ * 32-row tile.  Every output keeps its own FMA chain, so values are
+ * identical to the 32-row build. */
+#ifndef P36_KQ_BM
+#define P36_KQ_BM 64u
+#endif
+const uint BM = P36_KQ_BM;
+const uint RPL = BM / 8u;   /* rows per lane */
 const uint BN = 128u;
 const uint BK = 32u;
 const uint STRIDE = BK / 2u + 1u;
@@ -206,10 +214,10 @@ void main(void) {
     uint lane = gl_SubgroupInvocationID;
     uint lane_row = lane & 7u;
     uint lane_tok = lane >> 3u;
-    uint out_row0 = row0 + lane_row * 4u;
+    uint out_row0 = row0 + lane_row * RPL;
     uint out_tok0 = tok0 + wave * 32u + lane_tok * 8u;
-    f16vec2 sum[16];
-    [[unroll]] for (uint i = 0u; i < 16u; i++) sum[i] = f16vec2(0.0);
+    f16vec2 sum[RPL * 4u];
+    [[unroll]] for (uint i = 0u; i < RPL * 4u; i++) sum[i] = f16vec2(0.0);
     bool wave_live = tok0 + wave * 32u < pc.n_tok;
 
     for (uint qb = 0u; qb < pc.blocks; qb++) {
@@ -280,13 +288,13 @@ void main(void) {
              * the 128-token tile) only multiplies zero padding: skip its
              * FMAs.  Wave-uniform, still joins every barrier. */
             if (wave_live) [[unroll]] for (uint k = 0u; k < BK / 2u; k++) {
-                f16vec2 av[4];
+                f16vec2 av[RPL];
                 f16vec2 bv[8];
-                [[unroll]] for (uint r = 0u; r < 4u; r++)
-                    av[r] = buf_a[(lane_row * 4u + r) * STRIDE + k];
+                [[unroll]] for (uint r = 0u; r < RPL; r++)
+                    av[r] = buf_a[(lane_row * RPL + r) * STRIDE + k];
                 [[unroll]] for (uint t = 0u; t < 8u; t++)
                     bv[t] = buf_b[(wave * 32u + lane_tok * 8u + t) * STRIDE + k];
-                [[unroll]] for (uint r = 0u; r < 4u; r++)
+                [[unroll]] for (uint r = 0u; r < RPL; r++)
                     [[unroll]] for (uint tp = 0u; tp < 4u; tp++)
                         sum[r * 4u + tp] = fma(f16vec2(av[r].x),
                             f16vec2(bv[2u * tp].x, bv[2u * tp + 1u].x),
@@ -298,7 +306,7 @@ void main(void) {
         }
     }
 
-    [[unroll]] for (uint r = 0u; r < 4u; r++) {
+    [[unroll]] for (uint r = 0u; r < RPL; r++) {
         uint row = out_row0 + r;
         if (row >= pc.out_dim) continue;
         [[unroll]] for (uint t = 0u; t < 8u; t++) {

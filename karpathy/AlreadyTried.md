@@ -3566,3 +3566,33 @@ and p36-server now always run the SPIR-V built with them. Checked from an
 unrelated cwd: p36 CLI greedy 128 tok 83.39 t/s, p36-server 256-token greedy
 chat completion 88.8 t/s (2883 ms decode), p36-agent non-interactive turn OK;
 all three profiles show `moe_down_route_reduce` / the split down sum.
+
+## 2026-10-28 Dense 27B (Qwen3.8 APEX-I-NanoPlus-V3): tiles + recurrent barriers
+
+Model `Huihui-Qwen3.8-27B-Coder390-EfficientThink-abliterated.VAL-APEX-I-NanoPlus-V3.gguf`
+(FFN IQ3_XXS/IQ4_XS, trunk Q3_K..Q5_K, ssm_beta Q8_0, ssm_alpha F32, in-file
+MTP head). 1329-token prefill ctx 2048, 128-token decode ctx 1024, 3
+interleaved reps, greedy text identical in every arm.
+
+* **ACCEPTED: 64-row `dense_kquant_mmq` tile** (lane owns 8 rows, sum[32] as in
+  the IQ3 pair kernel). Prefill 157.6 -> 163.9 (+4.0%). Bit-identical on
+  dense 27B, CyberTiel, Occamy, Qwen3.6 NanoPlus (per-output FMA chain
+  unchanged). 128 rows: 155, slower.
+* **ACCEPTED: 64-row `dense_iq3_xxs_mmq` tile** (FFN down). 163.6 -> 166.4
+  (+1.7%), bit-identical.
+* **ACCEPTED: recurrent alpha/beta/gates off the barrier chain.** ssm_beta and
+  ssm_alpha issue before the conv step (they read only `inp`), delta_gates
+  right after conv, and on dense models recur_alpha/beta/gb get their own
+  buffers instead of aliasing the ffn_shared_gate scratch root (the tracker
+  saw WAW on the shared root). -144 barriers/token; decode 22.97 -> 23.35
+  (+1.65%), bit-identical; CyberTiel identical, speed within noise.
+* **MTP works here:** `--mtp-draft 3 --mtp-margin 2` = 27.5 t/s vs 23.35
+  plain (+18%). draft 2 = no gain, draft 4 = 24.2.
+* **REJECTED: Q3_K scales precomputed in LDS** - neutral (bit-identical).
+  Ablating Q3_K dequant entirely only gains 2.5%: the "slow Q3_K mmq" in the
+  profile is the barrier-free Q4_K attn_gate overlapping into its bucket.
+* **REJECTED: narrow Q8_0 GEMM for out_dim < 64** (ssm_beta 5120x48 prefill,
+  one lane per row, 4 tokens per WG, bit-identical) - neutral; its 274 ms
+  profile bucket is overlap, not real cost.
+* Not done: gdn_front for F32 ssm_alpha (would fold conv+l2+alpha+beta+gates
+  into one dispatch; changes dot order, est. 1-2%).
