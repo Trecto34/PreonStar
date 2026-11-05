@@ -1,3 +1,4 @@
+#ifndef P36_NO_GPU
 static void p36_mtp_timing_report(uint32_t pos, const char *exit_reason,
                                   int verify_n, int commit_n, int n_draft,
                                   double c0, double c_fwd, double c_draft,
@@ -212,6 +213,7 @@ static int p36_session_eval_lookup(p36_session *s, int first_token, int max_toke
                                 eos_token, accepted, err, errlen);
     return rc < 0 ? -1 : rc;
 }
+#endif /* !P36_NO_GPU: speculative helpers need the Vulkan runtime */
 #ifndef P36_NO_GPU
 /* Clover block-diffusion self-speculative step (draft-self):
  * 1. Run a bidirectional block-diffusion preview over [first_token, mask, ..., mask]
@@ -338,9 +340,11 @@ int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
     if (!e || !p36_engine_has_mtp(e) || e->mtp_draft_tokens <= 1 ||
         !p36_engine_uses_vulkan_runtime(e)) {
         /* No MTP head available: prompt lookup is the only draft source. */
+#ifndef P36_NO_GPU
         if (e && e->lookup_k > 1 && p36_engine_uses_vulkan_runtime(e))
             return p36_session_eval_lookup(s, first_token, max_tokens, eos_token,
                                            accepted, accepted_cap, err, errlen);
+#endif
         if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
         accepted[0] = first_token;
         return 1;

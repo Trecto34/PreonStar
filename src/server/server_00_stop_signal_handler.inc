@@ -810,6 +810,9 @@ typedef struct {
     float presence_penalty;
     float frequency_penalty;
     float repeat_penalty;        /* multiplicative; 1.0 = off */
+    int *bias_ids;               /* logit_bias: server --ban-text defaults, then client entries */
+    float *bias_vals;
+    int n_bias;
     bool temperature_set;
     bool top_p_set;
     bool min_p_set;
@@ -978,6 +981,42 @@ static bool json_repeat_penalty(const char **p, float *out) {
     if (v < 0.5) v = 0.5;
     if (v > 2.0) v = 2.0;
     *out = (float)v;
+    return true;
+}
+
+/* Set (or replace) one logit_bias entry; a client entry overrides a server ban. */
+static void request_set_bias(request *r, int id, float v) {
+    for (int i = 0; i < r->n_bias; i++)
+        if (r->bias_ids[i] == id) { r->bias_vals[i] = v; return; }
+    r->bias_ids = xrealloc(r->bias_ids, (size_t)(r->n_bias + 1) * sizeof(*r->bias_ids));
+    r->bias_vals = xrealloc(r->bias_vals, (size_t)(r->n_bias + 1) * sizeof(*r->bias_vals));
+    r->bias_ids[r->n_bias] = id;
+    r->bias_vals[r->n_bias++] = v;
+}
+
+/* OpenAI logit_bias: {"<token_id>": -100..100}; null is accepted as absent. */
+static bool json_logit_bias(const char **p, request *r) {
+    json_ws(p);
+    if (**p != '{') return json_skip_value(p);
+    (*p)++;
+    json_ws(p);
+    while (**p && **p != '}') {
+        char *key = NULL, *end;
+        double v = 0.0;
+        if (!json_string(p, &key)) return false;
+        json_ws(p);
+        if (**p != ':') { free(key); return false; }
+        (*p)++;
+        const long id = strtol(key, &end, 10);
+        const bool ok = json_number(p, &v) && *key && !*end && id >= 0 && id < INT_MAX;
+        free(key);
+        if (!ok) return false;
+        request_set_bias(r, (int)id, (float)(v < -100.0 ? -100.0 : v > 100.0 ? 100.0 : v));
+        json_ws(p);
+        if (**p == ',') { (*p)++; json_ws(p); }
+    }
+    if (**p != '}') return false;
+    (*p)++;
     return true;
 }
 

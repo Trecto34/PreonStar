@@ -556,11 +556,15 @@ int p36_session_sample_penalized(p36_session *s,
                                  float presence_penalty,
                                  float frequency_penalty,
                                  float repeat_penalty,
+                                 const p36_logit_bias *bias,
                                  uint64_t *rng) {
     if (!s || !s->logits || !rng) return -1;
-    if (!tokens || n_tokens <= 0 ||
-        (presence_penalty == 0.0f && frequency_penalty == 0.0f &&
-         repeat_penalty == 1.0f)) {
+    /* Penalties and logit_bias need the full host logits; without either, keep
+     * the GPU top-k/min-p fast paths untouched. */
+    if ((!bias || bias->n <= 0) &&
+        (!tokens || n_tokens <= 0 ||
+         (presence_penalty == 0.0f && frequency_penalty == 0.0f &&
+          repeat_penalty == 1.0f))) {
         return p36_session_sample(s, temperature, top_k, top_p, min_p, rng);
     }
     if (!p36_session_ensure_logits_host(s)) return -1;
@@ -568,13 +572,14 @@ int p36_session_sample_penalized(p36_session *s,
     return p36_sample_logits_penalized(
         s->logits, P36_N_VOCAB, temperature, top_k, top_p, min_p,
         tokens, n_tokens, presence_penalty, frequency_penalty,
-        repeat_penalty, rng, s->sample_probs);
+        repeat_penalty, bias, rng, s->sample_probs);
 }
 
 int p36_session_argmax_penalized_excluding(p36_session *s, int excluded_id,
                                            const int *tokens, int n_tokens,
                                            float presence, float frequency,
-                                           float repeat_penalty) {
+                                           float repeat_penalty,
+                                           const p36_logit_bias *bias) {
     if (!s || excluded_id < 0 || excluded_id >= (int)P36_N_VOCAB ||
         !p36_session_ensure_logits_host(s)) return -1;
     float saved = s->logits[excluded_id];
@@ -582,7 +587,7 @@ int p36_session_argmax_penalized_excluding(p36_session *s, int excluded_id,
     uint64_t rng = 1;
     int token = p36_sample_logits_penalized(s->logits, P36_N_VOCAB,
         0, 0, 1, 0, tokens, n_tokens, presence, frequency, repeat_penalty,
-        &rng, s->sample_probs);
+        bias, &rng, s->sample_probs);
     s->logits[excluded_id] = saved;
     return token;
 }

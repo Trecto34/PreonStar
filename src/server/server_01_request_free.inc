@@ -11,6 +11,8 @@ static void request_free(request *r) {
     free(r->prompt_text);
     for (size_t i = 0; i < r->continuation_count; i++) free(r->continuation_ids[i]);
     free(r->continuation_ids);
+    free(r->bias_ids);
+    free(r->bias_vals);
     free(r->tool_schema_key);
     tool_schema_orders_free(&r->tool_orders);
     memset(r, 0, sizeof(*r));

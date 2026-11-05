@@ -405,6 +405,10 @@ struct server {
     bool default_top_p_set;
     bool default_min_p_set;
     bool default_repeat_penalty_set;
+    const char *ban_text[16];    /* --ban-text strings; ban_ids is rescanned per loaded model */
+    int n_ban_text;
+    int *ban_ids;
+    int n_ban_ids;
     kv_disk_cache kv;
     tool_memory tool_mem;
     bool disable_exact_tool_replay;
@@ -456,6 +460,7 @@ static void request_apply_default_penalties(request *r, server *s) {
     if (s->default_top_p_set) { r->top_p = s->default_top_p; r->top_p_set = true; }
     if (s->default_min_p_set) { r->min_p = s->default_min_p; r->min_p_set = true; }
     if (s->default_repeat_penalty_set) r->repeat_penalty = s->default_repeat_penalty;
+    for (int i = 0; i < s->n_ban_ids; i++) request_set_bias(r, s->ban_ids[i], -100.0f);
 }
 
 static void server_inference_lock(server *s) {

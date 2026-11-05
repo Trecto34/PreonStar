@@ -369,6 +369,31 @@ static void server_kv_open_for_model(server *s, int idx) {
     free(dir);
 }
 
+/* Ban every vocab token whose decoded bytes contain a --ban-text string.
+ * Whole-token matches only (a split UTF-8 byte sequence is not caught); special
+ * tokens, tool tags and JSON punctuation never contain the banned text. */
+static void server_scan_bans(server *s) {
+    free(s->ban_ids);
+    s->ban_ids = NULL;
+    s->n_ban_ids = 0;
+    const int nv = p36_engine_vocab_size(s->engine);
+    for (int t = 0; t < s->n_ban_text; t++) {
+        const size_t sl = strlen(s->ban_text[t]);
+        const int before = s->n_ban_ids;
+        for (int id = 0; id < nv; id++) {
+            size_t n = 0;
+            char *txt = p36_token_text(s->engine, id, &n);
+            if (memmem(txt, n, s->ban_text[t], sl)) {
+                s->ban_ids = xrealloc(s->ban_ids, (size_t)(s->n_ban_ids + 1) * sizeof(int));
+                s->ban_ids[s->n_ban_ids++] = id;
+            }
+            free(txt);
+        }
+        server_log(P36_LOG_DEFAULT, "p36-server: ban-text '%s': %d tokens", s->ban_text[t],
+                   s->n_ban_ids - before);
+    }
+}
+
 static bool server_model_open_engine(server *s, int idx) {
     p36_engine_options opt = s->engine_opt;
     opt.model_path = s->models[idx].path;
@@ -386,6 +411,7 @@ static bool server_model_open_engine(server *s, int idx) {
         return false;
     }
     s->engine = engine;
+    server_scan_bans(s);
     s->slots[0].session = session;
     s->session = session;
     s->model_current = idx;
@@ -651,6 +677,8 @@ typedef struct {
     bool default_top_p_set;
     bool default_min_p_set;
     bool default_repeat_penalty_set;
+    const char *ban_text[16];
+    int n_ban_text;
     const char *trace_path;
     const char *kv_disk_dir;
     const char *models_dir;
@@ -792,6 +820,9 @@ static void usage(FILE *fp) {
         "      Default min_p when the client omits one. Range 0..1. Default: model default. Explicit client values win.\n"
         "  --repeat-penalty F\n"
         "      Default repeat_penalty when the client omits one. Range 0.5..2.0. Default: 1 (off). Explicit client values win.\n"
+        "  --ban-text STR\n"
+        "      Repeatable (max 16). Ban every token whose text contains STR (logit_bias -100); a client\n"
+        "      logit_bias entry for the same id wins. Example: --ban-text '—' --ban-text '–'\n"
         "  -t, --threads N\n"
         "      CPU helper threads for lightweight host-side work.\n"
         "  --prefill-chunk N\n"

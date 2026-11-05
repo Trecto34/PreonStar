@@ -63,6 +63,12 @@ static server_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--frequency-penalty") || !strcmp(arg, "--default-frequency-penalty")) {
             c.default_frequency_penalty = parse_float_arg(need_arg(&i, argc, argv, arg), arg, -2.0f, 2.0f);
             c.default_frequency_penalty_set = true;
+        } else if (!strcmp(arg, "--ban-text")) {
+            if (c.n_ban_text == 16) {
+                server_log(P36_LOG_DEFAULT, "p36-server: too many --ban-text");
+                exit(2);
+            }
+            c.ban_text[c.n_ban_text++] = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--temp") || !strcmp(arg, "--temperature")) {
             c.default_temperature = parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.0f, 100.0f);
             c.default_temperature_set = true;
@@ -288,6 +294,9 @@ int main(int argc, char **argv) {
     s.default_top_p_set = cfg.default_top_p_set;
     s.default_min_p_set = cfg.default_min_p_set;
     s.default_repeat_penalty_set = cfg.default_repeat_penalty_set;
+    memcpy(s.ban_text, cfg.ban_text, sizeof(s.ban_text));
+    s.n_ban_text = cfg.n_ban_text;
+    server_scan_bans(&s);
     s.disable_exact_tool_replay = cfg.disable_exact_tool_replay;
     s.tool_mem.max_entries = cfg.tool_memory_max_ids;
     if (cfg.kv_disk_dir && s.model_count > 0) {

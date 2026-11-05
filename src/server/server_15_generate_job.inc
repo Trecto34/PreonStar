@@ -263,7 +263,6 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         float temperature, top_p, min_p;
         int top_k;
         request_sampling(&j->req, &temperature, &top_k, &top_p, &min_p);
-        const float payload_temperature = temperature;
         const bool greedy_tool_syntax = in_tool_call &&
             !qwen_tool_decode_state_uses_payload_sampling(qwen_tool_state);
         if (greedy_tool_syntax) temperature = 0.0f;
@@ -275,6 +274,10 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             frequency_penalty = 0.0f;
             repeat_penalty = 1.0f;
         }
+        /* Tool-call syntax is decoded greedily and unbiased, like the penalties. */
+        const p36_logit_bias bias = {j->req.bias_ids, j->req.bias_vals,
+            in_tool_call && !qwen_tool_decode_state_uses_payload_sampling(qwen_tool_state) ?
+            0 : j->req.n_bias};
         int close_rank = 0;
         const bool hard_think_close = think_close_id >= 0 && j->req.thinking_budget_hard &&
             p36_session_in_think(slot->session) && thinking_tokens >= j->req.thinking_budget;
@@ -296,7 +299,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             p36_session_sample_penalized(
                 slot->session, temperature, top_k, top_p, min_p,
                 generated_tokens.v, generated_tokens.len,
-                presence_penalty, frequency_penalty, repeat_penalty, &rng);
+                presence_penalty, frequency_penalty, repeat_penalty, &bias, &rng);
         if (hard_think_close)
             trace_event(s, trace_id, "hard thinking budget close at thinking_tokens=%d",
                         thinking_tokens);
@@ -306,7 +309,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         if (j->req.ignore_eos && token == p36_token_eos(s->engine))
             token = p36_session_argmax_penalized_excluding(slot->session, p36_token_eos(s->engine),
                 generated_tokens.v, generated_tokens.len, presence_penalty, frequency_penalty,
-                repeat_penalty);
+                repeat_penalty, &bias);
         else token = p36_session_eos_to_think_close(slot->session, token);
         if (token < 0) {
             finish = "error";
@@ -323,7 +326,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         const int block_start = p36_session_pos(slot->session);
         if (!multimodal && !s->batched_mode && temperature <= 0.0f &&
             presence_penalty == 0.0f && frequency_penalty == 0.0f &&
-            repeat_penalty == 1.0f &&
+            repeat_penalty == 1.0f && bias.n == 0 &&
             p36_engine_spec_enabled(s->engine) &&
             getenv("P36_MTP_SPEC_DISABLE") == NULL)
         {
@@ -538,11 +541,11 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             }
 
 
-
-            bool next_greedy = qwen_tool_decode_state_is_tool(qwen_tool_tracker.decode) &&
-                !qwen_tool_decode_state_uses_payload_sampling(qwen_tool_tracker.decode);
-            if (ti + 1 < ntok && payload_temperature > 0.0f &&
-                next_greedy != greedy_tool_syntax) break;
+            /* A speculative block that crosses the tool-syntax -> payload boundary is
+             * kept whole (the few payload tokens inside it are the verified greedy
+             * ones).  Cutting it would need p36_session_rewind, which re-prefills the
+             * entire context (the recurrent state cannot be truncated): ~4 s at 3k
+             * tokens, 0.3 s/token of tool-call decode in practice. */
         }
         if (kept < ntok && !text_stop && strcmp(finish, "error")) {
             pthread_mutex_lock(&s->inference_mu);

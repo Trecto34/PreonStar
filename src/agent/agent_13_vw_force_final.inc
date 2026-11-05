@@ -895,7 +895,7 @@ static int worker_sample_with_mode(agent_worker *w, const agent_config *cfg,
         w->session, request.temperature, request.top_k,
         request.top_p, request.min_p,
         request.penalty_tokens, request.penalty_token_count,
-        0.0f, request.frequency_penalty, request.repeat_penalty, rng);
+        0.0f, request.frequency_penalty, request.repeat_penalty, NULL, rng);
 }
 
 static const char agent_partial_tool_interrupt_warning[] =

@@ -115,6 +115,11 @@ static bool parse_chat_request(p36_engine *e, server *s, const char *body, int d
                 free(key);
                 goto bad;
             }
+        } else if (!strcmp(key, "logit_bias")) {
+            if (!json_logit_bias(&p, r)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "frequency_penalty")) {
             double v = 0.0;
             if (!json_number(&p, &v)) {

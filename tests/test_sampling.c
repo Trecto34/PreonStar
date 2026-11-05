@@ -340,7 +340,7 @@ int main(int argc, char **argv) {
     const int seen_once[] = {0};
     int token = p36_test_sample_logits_penalized(
         penalty_logits, 3, 0.0f, 0, 1.0f, 0.0f,
-        seen_once, 1, 1.0f, 0.0f, 1.0f, &penalty_rng, penalty_scratch);
+        seen_once, 1, 1.0f, 0.0f, 1.0f, NULL, &penalty_rng, penalty_scratch);
     CHECK(token == 1, "presence penalty expected token 1, got %d", token);
     CHECK(fabsf(penalty_logits[0]) < 1.0e-6f && penalty_logits[1] == -0.5f,
           "presence penalty did not restore logits");
@@ -348,7 +348,7 @@ int main(int argc, char **argv) {
     const int seen_twice[] = {0, 0};
     token = p36_test_sample_logits_penalized(
         penalty_logits, 3, 0.0f, 0, 1.0f, 0.0f,
-        seen_twice, 2, 0.0f, 0.3f, 1.0f, &penalty_rng, penalty_scratch);
+        seen_twice, 2, 0.0f, 0.3f, 1.0f, NULL, &penalty_rng, penalty_scratch);
     CHECK(token == 1, "frequency penalty expected token 1, got %d", token);
     CHECK(fabsf(penalty_logits[0]) < 1.0e-6f && penalty_logits[1] == -0.5f,
           "frequency penalty did not restore logits");
@@ -360,15 +360,47 @@ int main(int argc, char **argv) {
     const int seen_repeat[] = {0};
     token = p36_test_sample_logits_penalized(
         repeat_logits, 3, 0.0f, 0, 1.0f, 0.0f,
-        seen_repeat, 1, 0.0f, 0.0f, 2.0f, &repeat_rng, repeat_scratch);
+        seen_repeat, 1, 0.0f, 0.0f, 2.0f, NULL, &repeat_rng, repeat_scratch);
     CHECK(token == 1, "repeat penalty expected token 1, got %d", token);
     CHECK(repeat_logits[0] == 1.0f && repeat_logits[1] == 0.9f &&
           repeat_logits[2] == -2.0f, "repeat penalty did not restore logits");
     const int unpenalized = p36_test_sample_logits_penalized(
         repeat_logits, 3, 0.0f, 0, 1.0f, 0.0f,
-        seen_repeat, 1, 0.0f, 0.0f, 1.0f, &repeat_rng, repeat_scratch);
+        seen_repeat, 1, 0.0f, 0.0f, 1.0f, NULL, &repeat_rng, repeat_scratch);
     CHECK(unpenalized == 0, "repeat_penalty 1.0 expected token 0, got %d",
           unpenalized);
+
+    /* logit_bias: -100 bans the argmax id (greedy and sampled, top_k and
+     * full-vocab), logits are restored, and an empty bias is the plain path. */
+    float bias_logits[] = {5.0f, 4.0f, 0.0f};
+    float bias_scratch[3];
+    uint64_t bias_rng = 7;
+    const int ban_ids[] = {0};
+    const float ban_vals[] = {-100.0f, -100.0f};
+    const p36_logit_bias ban = {ban_ids, ban_vals, 1};
+    for (int i = 0; i < 200; i++) {
+        const float temp = i & 1 ? 1.0f : 0.0f;
+        const int topk = i & 2 ? 0 : 40;
+        token = p36_test_sample_logits_penalized(
+            bias_logits, 3, temp, topk, 1.0f, 0.0f, NULL, 0, 0.0f, 0.0f, 1.0f,
+            &ban, &bias_rng, bias_scratch);
+        CHECK(token == 1 || token == 2, "logit_bias sampled banned id %d", token);
+    }
+    CHECK(bias_logits[0] == 5.0f && bias_logits[1] == 4.0f && bias_logits[2] == 0.0f,
+          "logit_bias did not restore logits");
+    const p36_logit_bias none = {NULL, NULL, 0};
+    CHECK(p36_test_sample_logits_penalized(
+              bias_logits, 3, 0.0f, 0, 1.0f, 0.0f, NULL, 0, 0.0f, 0.0f, 1.0f,
+              &none, &bias_rng, bias_scratch) == 0, "empty bias changed argmax");
+    /* Bias composes with penalties on an overlapping id: ids 0,1 banned, 1 also penalized -> id 2. */
+    const int seen1[] = {1};
+    const int ban01[] = {0, 1};
+    const p36_logit_bias ban2 = {ban01, ban_vals, 2};
+    CHECK(p36_test_sample_logits_penalized(
+              bias_logits, 3, 0.0f, 0, 1.0f, 0.0f, seen1, 1, 0.0f, 0.0f, 2.0f,
+              &ban2, &bias_rng, bias_scratch) == 2, "bias+penalty expected 2");
+    CHECK(bias_logits[0] == 5.0f && bias_logits[1] == 4.0f,
+          "bias+penalty did not restore logits");
 
     free(logits);
     free(scratch);

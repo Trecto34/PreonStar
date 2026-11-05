@@ -60,6 +60,9 @@ typedef struct {
     float logprob;
 } p36_token_score;
 
+/* OpenAI-style logit_bias: vals[i] is added to the logit of ids[i] before sampling. */
+typedef struct { const int *ids; const float *vals; int n; } p36_logit_bias;
+
 /* ds4-style sampling: untouched temperature, no fixed-mass or fixed-count
  * truncation, min-p as the only filter.  The floor scales with the top
  * token, so confident steps prune hard while flat (quant-noise) steps drop
@@ -319,7 +322,8 @@ bool p36_session_vision_prefix_matches(const p36_session *s,
 int p36_session_argmax_penalized_excluding(p36_session *s, int excluded_id,
                                            const int *tokens, int n_tokens,
                                            float presence, float frequency,
-                                           float repeat_penalty);
+                                           float repeat_penalty,
+                                           const p36_logit_bias *bias);
 bool p36_session_has_vision_state(const p36_session *s);
 /* Identity metadata only; embedding data is NULL. Valid until the next sync. */
 const p36_vision_span *p36_session_vision_spans(const p36_session *s, size_t *count);
@@ -338,6 +342,7 @@ int p36_session_sample_penalized(p36_session *s,
                                  float presence_penalty,
                                  float frequency_penalty,
                                  float repeat_penalty,
+                                 const p36_logit_bias *bias,
                                  uint64_t *rng);
 #ifdef P36_TEST_HOOKS
 int p36_test_sample_logits(const float *logits, uint32_t n_vocab,
@@ -351,6 +356,7 @@ int p36_test_sample_logits_penalized(float *logits, uint32_t n_vocab,
                                      float presence_penalty,
                                      float frequency_penalty,
                                      float repeat_penalty,
+                                     const p36_logit_bias *bias,
                                      uint64_t *rng, float *prob_scratch);
 uint32_t p36_test_kv_next_cap(uint32_t cap, uint32_t need, uint32_t limit);
 #endif

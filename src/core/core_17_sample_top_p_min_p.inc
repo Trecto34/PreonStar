@@ -49,18 +49,21 @@ static int p36_sample_logits_penalized(float *logits, uint32_t n_vocab,
                                        float presence_penalty,
                                        float frequency_penalty,
                                        float repeat_penalty,
+                                       const p36_logit_bias *bias,
                                        uint64_t *rng, float *scratch) {
-    if (!tokens || n_tokens <= 0 ||
-        (presence_penalty == 0.0f && frequency_penalty == 0.0f &&
-         repeat_penalty == 1.0f)) {
+    const int n_bias = bias ? bias->n : 0;
+    if (!tokens || (presence_penalty == 0.0f && frequency_penalty == 0.0f &&
+                    repeat_penalty == 1.0f)) n_tokens = 0;
+    if (n_tokens <= 0 && n_bias <= 0) {
         return p36_sample_top_p_min_p(logits, n_vocab, temperature, top_k,
                                       top_p, min_p, rng, scratch);
     }
 
     /* Distinct seen ids plus their original logits, so the logits can be
-     * restored exactly after sampling (no float add-back drift). */
+     * restored exactly after sampling (no float add-back drift). Bias ids are
+     * appended after the penalty ids and restored first (reverse order). */
     struct { int id; float logit; } *saved =
-        malloc((size_t)n_tokens * sizeof(*saved));
+        malloc((size_t)(n_tokens + n_bias) * sizeof(*saved));
     if (!saved) {
         return p36_sample_top_p_min_p(logits, n_vocab, temperature, top_k,
                                       top_p, min_p, rng, scratch);
@@ -90,9 +93,18 @@ static int p36_sample_logits_penalized(float *logits, uint32_t n_vocab,
         scratch[token] += 1.0f;
         logits[token] -= frequency_penalty;
     }
+    /* OpenAI logit_bias: added to the (penalized) logits before top-k/min-p. */
+    for (int i = 0; i < n_bias; i++) {
+        const int id = bias->ids[i];
+        if (id < 0 || (uint32_t)id >= n_vocab) continue;
+        saved[n_saved].id = id;
+        saved[n_saved].logit = logits[id];
+        n_saved++;
+        logits[id] += bias->vals[i];
+    }
     int sampled = p36_sample_top_p_min_p(logits, n_vocab, temperature, top_k,
                                          top_p, min_p, rng, scratch);
-    for (int k = 0; k < n_saved; k++) logits[saved[k].id] = saved[k].logit;
+    for (int k = n_saved - 1; k >= 0; k--) logits[saved[k].id] = saved[k].logit;
     free(saved);
     return sampled;
 }
@@ -114,12 +126,13 @@ int p36_test_sample_logits_penalized(float *logits, uint32_t n_vocab,
                                      float presence_penalty,
                                      float frequency_penalty,
                                      float repeat_penalty,
+                                     const p36_logit_bias *bias,
                                      uint64_t *rng, float *prob_scratch) {
     if (!logits || !rng || !prob_scratch || n_vocab == 0) return -1;
     return p36_sample_logits_penalized(
         logits, n_vocab, temperature, top_k, top_p, min_p,
         tokens, n_tokens, presence_penalty, frequency_penalty,
-        repeat_penalty, rng, prob_scratch);
+        repeat_penalty, bias, rng, prob_scratch);
 }
 
 uint32_t p36_test_kv_next_cap(uint32_t cap, uint32_t need, uint32_t limit) {
@@ -797,8 +810,10 @@ int p36_engine_generate_argmax(p36_engine *e, const p36_tokens *prompt,
     if (p36_session_sync(s, prompt, err, sizeof(err)) != 0) goto done;
     t_prefill1 = p36_now_sec();
     eos = p36_token_eos(e);
+#ifndef P36_NO_GPU
     const bool prof_decode = getenv("P36_VK_PROF_DECODE") != NULL;
     if (prof_decode) p36_gpu_prof_reset();
+#endif
     t_decode0 = p36_now_sec();
     int room = p36_session_ctx(s) - p36_session_pos(s);
     int max_tokens = room <= 1 ? 0 : n_predict;
@@ -813,7 +828,9 @@ int p36_engine_generate_argmax(p36_engine *e, const p36_tokens *prompt,
         generated++;
     }
     t_decode1 = p36_now_sec();
+#ifndef P36_NO_GPU
     if (prof_decode) p36_gpu_prof_report("decode");
+#endif
     if (done) done(emit_ud);
     p36_log(stderr,
             P36_LOG_TIMING,
