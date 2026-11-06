@@ -1740,7 +1740,7 @@ static void *fake_srv_thread(void *arg) {
     return NULL;
 }
 
-static void fake_remote_roundtrip(const char *reply, bool chunked) {
+static int fake_remote_run(const char *reply, p36_remote_result *r) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     socklen_t al = sizeof(a);
@@ -1753,9 +1753,14 @@ static void fake_remote_roundtrip(const char *reply, bool chunked) {
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d", ntohs(a.sin_port));
     p36_remote_cfg cfg = {url, "k", 5};
-    p36_remote_result r;
-    int rc = p36_remote_chat(&cfg, "{\"stream\":true}", NULL, NULL, NULL, &r);
+    int rc = p36_remote_chat(&cfg, "{\"stream\":true}", NULL, NULL, NULL, r);
     pthread_join(th, NULL);
+    return rc;
+}
+
+static void fake_remote_roundtrip(const char *reply, bool chunked) {
+    p36_remote_result r;
+    int rc = fake_remote_run(reply, &r);
     AGENT_TEST_ASSERT(rc == 0);
     AGENT_TEST_ASSERT(r.content && !strcmp(r.content, "Hello wörld"));
     AGENT_TEST_ASSERT(r.reasoning && !strcmp(r.reasoning, "think"));
@@ -1799,6 +1804,29 @@ static void test_remote_client_sse(void) {
     }
     memcpy(chunked + n, "0\r\n\r\n", 6);
     fake_remote_roundtrip(chunked, true);
+    /* IO-3: bytes after the terminal chunk (trailers) are not chunk sizes.  The
+     * second trailer line starts with hex digits, which an END-less decoder
+     * reads as a 0xff-byte chunk and sinks into the SSE stream. */
+    static const char trailer[] =
+        "0\r\nT1: x\r\nff\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"XX\"}}]}\n\n\r\n";
+    memcpy(chunked + n, trailer, sizeof(trailer));
+    fake_remote_roundtrip(chunked, true);
+}
+
+/* IO-3: a tool_call index past the 64-call cap must not be folded into call 0. */
+static void test_remote_call_index_overflow_not_merged(void) {
+    const char *body =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c0\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":70,\"id\":\"c70\",\"function\":{\"name\":\"zzz\",\"arguments\":\"{\\\"x\\\":1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+    char reply[2048];
+    snprintf(reply, sizeof(reply), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n%s", body);
+    p36_remote_result r;
+    int rc = fake_remote_run(reply, &r);
+    AGENT_TEST_ASSERT(r.ncalls >= 1 && r.calls[0].name && !strcmp(r.calls[0].name, "read"));
+    AGENT_TEST_ASSERT(r.calls[0].arguments && !strcmp(r.calls[0].arguments, "{}"));
+    AGENT_TEST_ASSERT(rc != 0 && strstr(r.err, "tool calls"));
+    p36_remote_result_free(&r);
 }
 
 static void test_remote_errors_and_json(void) {
@@ -1970,6 +1998,7 @@ int main(int argc, char **argv) {
     test_action_leak_and_watchdog();
     test_think_policy_and_flags();
     test_remote_client_sse();
+    test_remote_call_index_overflow_not_merged();
     test_remote_errors_and_json();
     test_task_state_render();
     test_vw_replays_the_observed_pathology();
