@@ -21,6 +21,26 @@ static void session_init(p36_session *s, int ctx, int live_len, bool valid) {
     s->cancel = cancel_always;   /* keeps prefill_range off the engine */
 }
 
+static void test_rewrite_from_common(void) {
+    p36_tokens prompt = {0};
+    char err[128] = {0};
+    for (int i = 0; i < 5; i++) p36_tokens_push(&prompt, 100 + i);
+    /* A live vision checkpoint must be rebuilt by the vision path, never
+     * extended as text by the rewrite helper. */
+    p36_session sv;
+    session_init(&sv, 16, 3, true);
+    sv.vision_state = true;
+    CHECK(p36_session_rewrite_from_common(&sv, &prompt, 3, err, sizeof(err)) ==
+          P36_SESSION_REWRITE_REBUILD_NEEDED);
+    p36_tokens_free(&sv.checkpoint);
+    /* A BROKEN session (valid=false, len>0) must not be resurrected. */
+    p36_session sb;
+    session_init(&sb, 4, 3, false);   /* ctx 4: the rebuild sync refuses early */
+    (void)p36_session_rewrite_from_common(&sb, &prompt, 3, err, sizeof(err));
+    CHECK(!sb.checkpoint_valid);
+    p36_tokens_free(&sb.checkpoint);
+    p36_tokens_free(&prompt);
+}
 
 static void test_invariants(void) {
     p36_session s;
@@ -42,6 +62,7 @@ static void test_invariants(void) {
 
 
 int main(void) {
+    test_rewrite_from_common();
     test_invariants();
     if (failures) {
         fprintf(stderr, "state-machine tests: %d failure(s)\n", failures);
