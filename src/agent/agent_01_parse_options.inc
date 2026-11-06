@@ -142,6 +142,7 @@ static agent_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--seed")) {
             c.gen.seed = parse_u64(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--think")) {
+            c.gen.think_auto = false;   /* last thinking option wins */
             c.gen.think_mode = P36_THINK_HIGH;
             c.gen.think_mode_set = true;
             /* optional level: --think auto|low|medium|high */
@@ -154,18 +155,23 @@ static agent_config parse_options(int argc, char **argv) {
                 else if (!strcmp(lv, "medium")) c.gen.think_mode = P36_THINK_MEDIUM;
             }
         } else if (!strcmp(arg, "--think-low")) {
+            c.gen.think_auto = false;
             c.gen.think_mode = P36_THINK_LOW;
             c.gen.think_mode_set = true;
         } else if (!strcmp(arg, "--think-medium")) {
+            c.gen.think_auto = false;
             c.gen.think_mode = P36_THINK_MEDIUM;
             c.gen.think_mode_set = true;
         } else if (!strcmp(arg, "--think-xhigh")) {
+            c.gen.think_auto = false;
             c.gen.think_mode = P36_THINK_XHIGH;
             c.gen.think_mode_set = true;
         } else if (!strcmp(arg, "--think-max")) {
+            c.gen.think_auto = false;
             c.gen.think_mode = P36_THINK_MAX;
             c.gen.think_mode_set = true;
         } else if (!strcmp(arg, "--nothink")) {
+            c.gen.think_auto = false;
             c.gen.think_mode = P36_THINK_NONE;
             c.gen.think_mode_set = true;
         } else if (!strcmp(arg, "--backend")) {

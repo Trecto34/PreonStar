@@ -2082,6 +2082,19 @@ static void test_agt_m_hints_context_boundaries(void) {
     AGENT_TEST_ASSERT(h.enabled && agent_hints_note(&h) == agent_hints_prompt);
 }
 
+/* AGT-N: a later explicit thinking option replaces --think auto. */
+static void test_agt_n_nothink_clears_think_auto(void) {
+    char *a1[] = {"p36-agent", "--think", "auto", "--nothink"};
+    agent_config c = parse_options(4, a1);
+    AGENT_TEST_ASSERT(!c.gen.think_auto && c.gen.think_mode == P36_THINK_NONE);
+    char *a2[] = {"p36-agent", "--think", "auto", "--think-max"};
+    c = parse_options(4, a2);
+    AGENT_TEST_ASSERT(!c.gen.think_auto && c.gen.think_mode == P36_THINK_MAX);
+    char *a3[] = {"p36-agent", "--nothink", "--think", "auto"};
+    c = parse_options(4, a3);
+    AGENT_TEST_ASSERT(c.gen.think_auto && c.gen.think_mode == P36_THINK_HIGH);
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2157,6 +2170,7 @@ int main(int argc, char **argv) {
     test_agt_d_resume_think_mode();
     test_agt_g_think_marker_tails();
     test_agt_k4_tool_error_classifier();
+    test_agt_n_nothink_clears_think_auto();
     test_agt_m_hints_context_boundaries();
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
