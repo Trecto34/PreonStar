@@ -73,6 +73,15 @@ void p36_gpu_cleanup(void) {
     p36_vk_batch_dirty_all = false;
     p36_vk_submit_seq = 0;
     p36_vk_completed_seq = 0;
+    /* The device is destroyed below, so the latches that described the old one
+     * go with it: a later init must not inherit a half-consumed fault
+     * injection or profiler skip count, or a pool cursor.  (device_lost is
+     * cleared last, after every teardown call that checks it.) */
+    p36_vk_fault_inject_lost = 0;
+    p36_vk_submit_calls = 0;
+    p36_vk_prof_skip_left = 0;
+    p36_vk_pool_rr = 0;
+    p36_vk_private_pool_rr = 0;
     p36_vk_hazard_reset();
     p36_vk_b16_ring_destroy_unlocked();
     p36_vk_tensor_free_unlocked(p36_vk_vision_weight);
@@ -256,6 +265,7 @@ void p36_gpu_cleanup(void) {
     p36_vk_private_bytes = 0;
     p36_vk_private_peak = 0;
     p36_vk_moe_bank_cache = true;
+    p36_vk_device_lost = false;
     pthread_mutex_unlock(&p36_vk_mu);
     p36_vk_host_threads_shutdown();
 }
