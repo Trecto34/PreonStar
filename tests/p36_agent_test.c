@@ -2018,6 +2018,35 @@ static void test_agt_d_resume_think_mode(void) {
     AGENT_TEST_ASSERT(agent_resume_think_mode(&cfg, false) == P36_THINK_NONE);
 }
 
+/* AGT-G: golden normal think/answer rendering (captured from the code before
+ * the marker-tail reset) plus the cross-segment marker false positive. */
+static void test_agt_g_think_marker_tails(void) {
+    const char *text = "<think>plan\nnotes</think>\n\nAnswer **bold** `code`\n<think>more</think>tail <b>x</b>\n";
+    static const char *const golden[3] = {
+        "\x1b[38;5;245mplan\nnotes\x1b[0m\n\nAnswer \x1b[1mbold\x1b[0m \x1b[36mcode\x1b[0m\n\x1b[38;5;245mmore\x1b[0m\n\ntail <b>x</b>\n\x1b[0m\n",
+        "\x1b[38;5;245mplan\nnotes\x1b[0m\n\nAnsw\x1b[0mer \x1b[1mbold\x1b[0m \x1b[36mcode\x1b[0m\n\x1b[38;5;245mmore\x1b[0m\n\ntail <b>x</b>\n\x1b[0m\n",
+        "\x1b[38;5;245mp\x1b[0m\x1b[38;5;245ml\x1b[0m\x1b[38;5;245ma\x1b[0m\x1b[38;5;245mn\x1b[0m\x1b[38;5;245m\n\x1b[0m\x1b[38;5;245mn\x1b[0m\x1b[38;5;245mo\x1b[0m\x1b[38;5;245mt\x1b[0m\x1b[38;5;245me\x1b[0m\x1b[38;5;245ms\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\n\n\x1b[0m\x1b[0m\x1b[0mA\x1b[0mn\x1b[0ms\x1b[0mw\x1b[0me\x1b[0mr\x1b[0m \x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[1mbold\x1b[0m \x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[36mcode\x1b[0m\n\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[38;5;245mm\x1b[0m\x1b[38;5;245mo\x1b[0m\x1b[38;5;245mr\x1b[0m\x1b[38;5;245me\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\n\n\x1b[0mt\x1b[0ma\x1b[0mi\x1b[0ml\x1b[0m \x1b[0m\x1b[0m<b\x1b[0m>\x1b[0mx\x1b[0m\x1b[0m\x1b[0m</b\x1b[0m>\x1b[0m\n\x1b[0m\x1b[0m\n"
+    };
+    for (int mode = 0; mode < 3; mode++) {
+        char *out = test_hint_capture(text, mode == 0 ? 7 : mode == 1 ? 31 : 1000, true, true, NULL);
+        AGENT_TEST_ASSERT(out && !strcmp(out, golden[mode]));
+        free(out);
+    }
+    /* "<function" in one think segment and "=" in the next is not a marker. */
+    agent_tail_capture capture = {.cap = 32768};
+    agent_token_renderer renderer = {.capture = &capture, .format_thinking = true,
+        .format_markdown = true, .last_output_newline = true};
+    agent_qwen_tool_parser parser = {.state = AGENT_QWEN_TOOL_SEARCH};
+    agent_stream_renderer stream = {.renderer = &renderer, .parser = &parser};
+    const char *t = "<think>a <function</think>ok<think>=b</think>done";
+    agent_stream_text(&stream, t, strlen(t), false);
+    agent_stream_text(&stream, NULL, 0, true);
+    renderer_finish(&renderer);
+    AGENT_TEST_ASSERT(!stream.qwen_tool_in_think);
+    free(agent_tail_capture_take(&capture, NULL));
+    agent_qwen_tool_parser_free(&parser);
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2091,6 +2120,7 @@ int main(int argc, char **argv) {
     test_agt_c_late_queue_drain_not_lost();
     test_agt_d_unexecuted_rounds_count();
     test_agt_d_resume_think_mode();
+    test_agt_g_think_marker_tails();
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();

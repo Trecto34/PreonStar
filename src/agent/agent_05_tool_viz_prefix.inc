@@ -645,6 +645,9 @@ static void agent_stream_text(agent_stream_renderer *sr, const char *text, size_
             sr->post_think_gap = false;
             sr->in_think = true;
             sr->renderer->in_think = true;
+            /* Marker tails must not bridge two think segments. */
+            memset(&sr->plain_qwen_tool, 0, sizeof(sr->plain_qwen_tool));
+            memset(&sr->think_qwen_tool, 0, sizeof(sr->think_qwen_tool));
             i += strlen(think_open);
             continue;
         }
@@ -653,6 +656,8 @@ static void agent_stream_text(agent_stream_renderer *sr, const char *text, size_
             renderer_hint_end(sr->renderer);
             sr->in_think = false;
             sr->renderer->in_think = false;
+            memset(&sr->plain_qwen_tool, 0, sizeof(sr->plain_qwen_tool));
+            memset(&sr->think_qwen_tool, 0, sizeof(sr->think_qwen_tool));
             renderer_reset_color(sr->renderer);
             if (!sr->renderer->last_output_newline)
                 renderer_write(sr->renderer, "\n", 1);
