@@ -437,6 +437,7 @@ static bool j_parse_call_args(jctx *ctx, const char **p, const char *end, bool a
         }
         jval val = j_eval_expr(ctx, p, end, active);
         if (ctx->failed) return false;
+        if (*p == save) (*p)++;   /* nothing parsed: skip the byte so the loop terminates */
         if (len == cap) {
             size_t ncap = cap * 2;
             jcall_arg *na = (jcall_arg *)ja_alloc(ctx->arena, ncap * sizeof(jcall_arg));
@@ -616,6 +617,10 @@ static jval j_call_function(jctx *ctx, const char *name, const jcall_arg *args, 
             ctx->cur_scope = &macro_scope;
             jbuf mbuf = {0};
             j_exec_block(ctx, &m->u.macro.body, &mbuf);
+            /* break/continue outside a loop inside the macro must not leak into
+             * the caller's enclosing loop. */
+            ctx->loop_break = false;
+            ctx->loop_continue = false;
             ctx->cur_scope = prev;
             jval res = jval_str_n(ctx->arena, mbuf.ptr ? mbuf.ptr : "", mbuf.len);
             free(mbuf.ptr);
@@ -641,7 +646,9 @@ static jval j_eval_primary(jctx *ctx, const char **p, const char *end, bool acti
         jval list = active ? jval_list_new(ctx->arena, 4) : jval_undef();
         j_skip_ws(p, end);
         while (*p < end && **p != ']') {
+            const char *item_start = *p;
             jval item = j_eval_expr(ctx, p, end, active);
+            if (*p == item_start) (*p)++;   /* nothing parsed: skip the byte so the loop terminates */
             if (active) jlist_push(ctx->arena, list.u.list, item);
             j_skip_ws(p, end);
             if (*p < end && **p == ',') (*p)++;

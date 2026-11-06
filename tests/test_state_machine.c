@@ -5,6 +5,7 @@
  *   make tests/test_state_machine && ./tests/test_state_machine */
 #define P36_DEBUG_ASSERT 1
 #include "../p36.c"
+#include <sys/wait.h>
 
 static int failures;
 #define CHECK(expr) do { if (!(expr)) { failures++; \
@@ -87,13 +88,41 @@ static void test_payload_load_clears_vision(void) {
     p36_tokens_free(&s.checkpoint);
 }
 
+/* Render in a child with an alarm so an infinite loop fails instead of hanging.
+ * expect==NULL accepts any output. */
+static bool jinja_ok(const char *tmpl, const char *expect) {
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(5);
+        p36_jinja_render_params params;
+        memset(&params, 0, sizeof(params));
+        char err[128] = {0};
+        char *out = p36_jinja_render(tmpl, &params, err, sizeof(err));
+        bool ok = out && (!expect || !strcmp(out, expect));
+        if (!ok) fprintf(stderr, "  jinja got '%s' (%s)\n", out ? out : "(null)", err);
+        _exit(ok ? 0 : 1);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
 
+static void test_jinja_state(void) {
+    /* break inside a macro that is not inside a loop must not end the caller's loop */
+    CHECK(jinja_ok("{% macro m() %}{% break %}{% endmacro %}"
+                   "{% for i in [1,2,3] %}{{ i }}{{ m() }}{% endfor %}", "123"));
+    /* malformed list / call arguments must terminate */
+    CHECK(jinja_ok("{{ [@] }}x", NULL));
+    CHECK(jinja_ok("{{ f(@) }}x", NULL));
+}
 
 
 int main(void) {
     test_rewrite_from_common();
     test_invariants();
     test_payload_load_clears_vision();
+    test_jinja_state();
     if (failures) {
         fprintf(stderr, "state-machine tests: %d failure(s)\n", failures);
         return 1;
