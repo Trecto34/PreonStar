@@ -470,6 +470,8 @@ static gguf gguf_open(const char *path, bool strip_nextn) {
         } else if (strip_nextn && (ends(key, ".block_count") || !strcmp(key, "block_count")) && type == GGUF_TYPE_UINT32) {
             size_t val_pos = p;
             uint32_t val = pull_u32(g.map, g.size, &p);
+            /* Qwen3.6-35B-A3B: 40 layers + 1 MTP/nextn block ("blk.40" below).
+             * Other layouts are deliberately left unpatched. */
             if (val == 41) {
                 patch_block_count = true;
                 block_count_rec_start = rec_start;
@@ -1158,9 +1160,29 @@ static void convert_tensor(FILE *fp, const tensor *src, const tensor *dst,
     free(synthetic);
 }
 
+/* Output is written to <out>.tmp and renamed over --out only after a clean
+ * fclose, so a failed or interrupted run never leaves a truncated GGUF at the
+ * final path.  die()/exit() paths remove the temp file via atexit. */
+static char *tmp_out_path;
+
+static void unlink_tmp_out(void) {
+    if (tmp_out_path) unlink(tmp_out_path);
+}
+
 static void write_gguf(const gguf *in, const plan *p, const imatrix *im, const params *pa) {
-    FILE *fp = fopen(pa->out, "wb");
-    if (!fp) die_errno("open output", pa->out);
+    struct stat st;
+    /* Non-regular targets (/dev/stdout, FIFOs) cannot be renamed over. */
+    bool atomic = stat(pa->out, &st) != 0 || S_ISREG(st.st_mode);
+    const char *open_path = pa->out;
+    if (atomic) {
+        size_t n = strlen(pa->out) + 5;
+        tmp_out_path = xmalloc(n);
+        snprintf(tmp_out_path, n, "%s.tmp", pa->out);
+        open_path = tmp_out_path;
+        atexit(unlink_tmp_out);
+    }
+    FILE *fp = fopen(open_path, "wb");
+    if (!fp) die_errno("open output", open_path);
     if (fwrite("GGUF", 1, 4, fp) != 4) die("write magic failed");
     put_u32(fp, in->version);
     put_u64(fp, in->n_tensors);
@@ -1194,7 +1216,12 @@ static void write_gguf(const gguf *in, const plan *p, const imatrix *im, const p
     long end = ftell(fp);
     if (end < 0 || (size_t)end != size_add(p->data_offset, p->tensor_bytes))
         die("output size mismatch");
-    fclose(fp);
+    if (fclose(fp) != 0) die_errno("close output", open_path);
+    if (atomic) {
+        if (rename(open_path, pa->out) != 0) die_errno("rename output", pa->out);
+        free(tmp_out_path);
+        tmp_out_path = NULL;
+    }
 }
 
 static void write_audit(const gguf *in, const plan *p, const params *pa, const char *path) {
@@ -1338,6 +1365,7 @@ static params parse_args(int argc, char **argv) {
     if (p.q4_last && p.q4_start >= 0) die("use either --q4-expert-last or --q4-expert-layers");
     if (!p.dry_run && !p.out) die("--out is required unless --dry-run is used");
     if (!p.imatrix && !p.synthetic_imatrix) die("--imatrix is required for iq2_xxs; or pass --allow-synthetic-imatrix");
+    if (p.strict_imatrix && !p.imatrix) die("--imatrix-strict requires --imatrix");
     if (p.out && exists(p.out) && !p.force) die("output exists; use --force");
     if (!p.n_inputs) add_input(&p, P36_DEFAULT_IN);
     return p;
