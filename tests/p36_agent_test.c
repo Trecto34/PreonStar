@@ -2066,6 +2066,22 @@ static void test_agt_k4_tool_error_classifier(void) {
     AGENT_TEST_ASSERT(!agent_tool_response_is_error("ok: wrote $ file\n"));
 }
 
+/* AGT-M: /new keeps the hints preference; a loaded session overrides old notes. */
+static void test_agt_m_hints_context_boundaries(void) {
+    agent_hints h = {.enabled = true, .instructed = true, .applied = AGENT_HINTS_ON};
+    agent_hints_new_context(&h);
+    AGENT_TEST_ASSERT(h.enabled && !h.instructed && h.applied == AGENT_HINTS_UNSET);
+    AGENT_TEST_ASSERT(agent_hints_note(&h) == agent_hints_prompt);
+    h = (agent_hints){.enabled = false, .applied = AGENT_HINTS_UNSET};
+    agent_hints_session_loaded(&h);
+    AGENT_TEST_ASSERT(!h.enabled && h.applied == AGENT_HINTS_UNKNOWN);
+    const char *note = agent_hints_note(&h);
+    AGENT_TEST_ASSERT(note && strstr(note, "disabled"));
+    h = (agent_hints){.enabled = true, .instructed = true, .applied = AGENT_HINTS_ON};
+    agent_hints_session_loaded(&h);
+    AGENT_TEST_ASSERT(h.enabled && agent_hints_note(&h) == agent_hints_prompt);
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2141,6 +2157,7 @@ int main(int argc, char **argv) {
     test_agt_d_resume_think_mode();
     test_agt_g_think_marker_tails();
     test_agt_k4_tool_error_classifier();
+    test_agt_m_hints_context_boundaries();
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();

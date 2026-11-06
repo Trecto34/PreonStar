@@ -452,6 +452,20 @@ static void agent_hints_compacted(agent_hints *h) {
     h->instructed = false;
 }
 
+/* /new: a fresh context keeps the user's on/off preference but has seen no
+ * hint instructions or notes. */
+static void agent_hints_new_context(agent_hints *h) {
+    h->instructed = false;
+    h->applied = AGENT_HINTS_UNSET;
+}
+
+/* A loaded session may contain old on/off notes: the next boundary must
+ * override them with the current preference (see agent_hints_note). */
+static void agent_hints_session_loaded(agent_hints *h) {
+    h->instructed = false;
+    h->applied = AGENT_HINTS_UNKNOWN;
+}
+
 static void agent_worker_append_hints_context(agent_worker *w) {
     pthread_mutex_lock(&w->mu);
     const char *note = agent_hints_note(&w->hints);

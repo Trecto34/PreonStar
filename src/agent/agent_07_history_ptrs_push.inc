@@ -869,6 +869,7 @@ static bool agent_worker_switch_session(agent_worker *w, const char *prefix,
         pthread_mutex_lock(&w->mu);
         w->user_activity = true;
         w->session_dirty = false;
+        agent_hints_session_loaded(&w->hints);
         w->status.state = AGENT_WORKER_IDLE;
         w->status.ctx_used = w->transcript.len;
         w->status.ctx_size = w->cfg->gen.ctx_size;

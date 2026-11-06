@@ -677,7 +677,7 @@ static bool agent_worker_reset_to_sysprompt(agent_worker *w, char *err, size_t e
     w->status.gen_tps = 0.0;
     w->status.greedy_sampling = false;
     w->status.error[0] = '\0';
-    if (w->initialized) w->hints = (agent_hints){0};
+    if (w->initialized) agent_hints_new_context(&w->hints);
     agent_wake_locked(w);
     pthread_mutex_unlock(&w->mu);
     w->datetime_context_injected = false;
