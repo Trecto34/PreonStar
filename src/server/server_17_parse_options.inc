@@ -2816,6 +2816,22 @@ static void test_thinking_checkpoint_canonicalization_gate(void) {
     request_free(&r);
 }
 
+static void test_tool_tracker_follows_think_gate(void) {
+    /* A tool call inside a stray <think> with think mode off is tracked (the
+     * marker scan is ungated); with think mode on it stays hidden until </think>. */
+    const char *raw = "<think>\n<tool_call><function=bash></function></tool_call>";
+    for (int gates = 0; gates < 2; gates++) {
+        bool start = false, end = false;
+        qwen_tool_decode_tracker tracker;
+        qwen_tool_decode_tracker_init(&tracker);
+        for (size_t n = 1; n <= strlen(raw); n++) {
+            qwen_tool_tracker_feed_piece(&tracker, raw, n, gates, true, n > 1);
+            observe_tool_markers(&tracker, raw, &start, &end, NULL);
+        }
+        TEST_ASSERT(gates ? (!start && !end) : (start && end));
+    }
+}
+
 static void test_tool_marker_state_ignores_orphan_end(void) {
     bool start = false, end = false, orphan = false;
     qwen_tool_decode_tracker tracker;
@@ -4678,6 +4694,7 @@ static void p36_server_unit_tests_run(void) {
     test_strip_assistant_reasoning_blocks();
     test_thinking_checkpoint_canonicalization_gate();
     test_tool_marker_state_ignores_orphan_end();
+    test_tool_tracker_follows_think_gate();
     test_canonical_rewrite_rebuilds_when_live_tail_changes();
     test_kv_cache_store_len_uses_configured_boundary();
     test_kv_cache_continued_uses_aligned_frontiers();

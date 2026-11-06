@@ -400,16 +400,9 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                             leak->tokens);
             }
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
-                if (thinking.inside) {
-                    qwen_tool_decode_tracker_init(&qwen_tool_tracker);
-                    qwen_tool_tracker.pos = text.len;
-                } else {
-                    if (was_thinking) {
-                        const char *end = find_tool_structural_text(text.ptr, "</think>", true);
-                        qwen_tool_tracker.pos = end ? (size_t)(end + 8 - text.ptr) : text.len;
-                    }
-                    qwen_tool_decode_tracker_update(&qwen_tool_tracker, text.ptr, text.len);
-                }
+                qwen_tool_tracker_feed_piece(&qwen_tool_tracker, text.ptr, text.len,
+                                             thinking_gates_tool_markers,
+                                             thinking.inside, was_thinking);
             }
 
             size_t stop_pos = 0, stop_len = 0;

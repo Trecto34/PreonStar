@@ -121,6 +121,26 @@ static void observe_tool_markers(const qwen_tool_decode_tracker *tracker,
         *orphan_end = true;
 }
 
+/* Per-token tracker step of generate_job.  With think mode on, text inside a
+ * think block is not tool syntax, so the tracker is held at its start and
+ * resumes after </think>.  With think mode off the marker scan is not gated, so
+ * a stray <think> the model emits must not blind the tracker either. */
+static void qwen_tool_tracker_feed_piece(qwen_tool_decode_tracker *tracker,
+                                         const char *text, size_t len,
+                                         bool think_gates, bool inside,
+                                         bool was_thinking) {
+    if (think_gates && inside) {
+        qwen_tool_decode_tracker_init(tracker);
+        tracker->pos = len;
+        return;
+    }
+    if (think_gates && was_thinking) {
+        const char *end = find_tool_structural_text(text, "</think>", true);
+        tracker->pos = end ? (size_t)(end + 8 - text) : len;
+    }
+    qwen_tool_decode_tracker_update(tracker, text, len);
+}
+
 static bool complete_tool_text(const char *text) {
     if (!text || !find_any_tool_end(text)) return false;
     char *content = NULL, *reasoning = NULL;
