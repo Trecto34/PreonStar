@@ -435,7 +435,7 @@ int main(int argc, char **argv) {
         g_listen_fd = -1;
     }
 
-    server_log(P36_LOG_DEFAULT, "p36-server: shutdown requested, draining requests");
+    server_log(P36_LOG_DEFAULT, "p36-server: shutdown requested, cancelling in-flight requests and stopping workers");
     pthread_mutex_lock(&s.mu);
     s.stopping = true;
     pthread_cond_broadcast(&s.cv);
@@ -4209,6 +4209,31 @@ static void test_batched_eval_stop_withdraws_pending_decode(void) {
     pthread_mutex_destroy(&s.model_mu);
 }
 
+/* SRV-13: a chunked POST has no Content-Length; it must be refused, not read
+ * as an empty body.  A plain Content-Length POST must still parse. */
+static void test_read_http_request_rejects_chunked_body(void) {
+    static const char chunked[] =
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    static const char plain[] =
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+        "Content-Length: 5\r\n\r\nhello";
+    int sv[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] < 0 || sv[1] < 0) return;
+    TEST_ASSERT(send_all(sv[0], chunked, sizeof(chunked) - 1));
+    http_request hr = {0};
+    TEST_ASSERT(!read_http_request(sv[1], &hr));
+    TEST_ASSERT(hr.chunked);
+    http_request_free(&hr);
+    TEST_ASSERT(send_all(sv[0], plain, sizeof(plain) - 1));
+    TEST_ASSERT(read_http_request(sv[1], &hr));
+    TEST_ASSERT(!hr.chunked && hr.body_len == 5 && !strcmp(hr.body, "hello"));
+    http_request_free(&hr);
+    close(sv[0]);
+    close(sv[1]);
+}
+
 static const char test_inline_png_base64[] =
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8DQwMDAwMAEIkAYABglAYOd/VRoAAAAAElFTkSuQmCC";
 
@@ -4522,6 +4547,7 @@ static void p36_server_unit_tests_run(void) {
     test_batched_slot_scoring();
     test_batched_decode_cancellation();
     test_batched_eval_stop_withdraws_pending_decode();
+    test_read_http_request_rejects_chunked_body();
     test_request_defaults_match_qwen_api();
     test_explicit_sampling_wins_in_thinking_mode();
     test_request_peek_model();
