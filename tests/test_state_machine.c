@@ -90,6 +90,28 @@ static void test_payload_load_clears_vision(void) {
 
 /* Render in a child with an alarm so an infinite loop fails instead of hanging.
  * expect==NULL accepts any output. */
+/* CORE-4: logits_stale (cheap speculative rollback to the tail start) must not
+ * be serialized: rt->logits is the verifier's, not this position's. */
+static void test_payload_refuses_stale_logits(void) {
+    p36_engine e;
+    p36_session s;
+    char err[128] = {0};
+    memset(&e, 0, sizeof(e));
+    e.backend = P36_BACKEND_CPU;
+    session_init(&s, 16, 2, true);
+    s.cancel = NULL;
+    s.engine = &e;
+    s.logits_stale = true;
+    FILE *fp = tmpfile();
+    CHECK(fp != NULL);
+    if (fp) {
+        CHECK(p36_session_save_payload(&s, fp, err, sizeof(err)) != 0);
+        CHECK(strstr(err, "stale") != NULL);
+        fclose(fp);
+    }
+    p36_tokens_free(&s.checkpoint);
+}
+
 static bool jinja_ok(const char *tmpl, const char *expect) {
     fflush(NULL);
     pid_t pid = fork();
@@ -145,6 +167,7 @@ int main(void) {
     test_rewrite_from_common();
     test_invariants();
     test_payload_load_clears_vision();
+    test_payload_refuses_stale_logits();
     test_jinja_state();
     test_hotlist_long_line();
     if (failures) {

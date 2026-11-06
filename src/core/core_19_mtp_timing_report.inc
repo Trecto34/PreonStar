@@ -916,6 +916,13 @@ int p36_session_save_payload(p36_session *s, FILE *fp, char *err, size_t errlen)
         p36_payload_set_err(err, errlen, "image-conditioned checkpoints are not persistent");
         return 1;
     }
+    /* A cheap rewind to the start of the verified tail restores the state but not
+     * the logits; rt->logits then holds the verifier's rows, and a payload that
+     * stored them would answer an identical prompt with the wrong next token. */
+    if (s->logits_stale) {
+        p36_payload_set_err(err, errlen, "checkpoint logits are stale after a speculative rollback");
+        return 1;
+    }
     uint32_t rows = (uint32_t)s->checkpoint.len;
     bool typed = s->engine &&
         (s->engine->cache_type_k != P36_KV_CACHE_F16 ||
