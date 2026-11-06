@@ -619,6 +619,12 @@ static bool p36_streaming_hotlist_load_file(const char *path,
         unsigned long layer, expert;
         unsigned long long hits;
         lineno++;
+        /* A line longer than the buffer arrives in pieces; drop the rest of it
+         * so a long trailing comment is not parsed as a second entry. */
+        if (!strchr(line, '\n') && !feof(fp)) {
+            int ch;
+            while ((ch = fgetc(fp)) != EOF && ch != '\n') {}
+        }
         while (*p && isspace((unsigned char)*p)) p++;
         if (*p == '\0' || *p == '#') continue;
 
@@ -761,7 +767,12 @@ static bool p36_engine_seed_streaming_expert_cache(p36_engine *e) {
     }
 
     if (loaded == 0) {
-        if (automatic || e->ssd_streaming_cold) return true;
+        if (automatic || e->ssd_streaming_cold) {
+            if (path && path[0])
+                fprintf(stderr, "p36: SSD streaming hotlist %s has no usable entries; "
+                                "cache left unseeded\n", path);
+            return true;
+        }
         if (!p36_engine_seed_streaming_expert_cache_blind(e, preload, &seeded)) return false;
     } else {
         if (bias_only) {
@@ -797,6 +808,9 @@ static bool p36_engine_seed_streaming_expert_cache(p36_engine *e) {
             else seeded += n;
         }
     }
+    if (loaded != 0 && biased == 0 && seeded == 0)
+        fprintf(stderr, "p36: SSD streaming hotlist loaded %u entries but no layer "
+                        "accepted them (mixed expert sizes or no expert table)\n", loaded);
     if (biased != 0) {
         fprintf(stderr,
                 "p36: SSD streaming biased eviction with %u hotlist experts without preload\n",

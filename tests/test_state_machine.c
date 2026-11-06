@@ -117,12 +117,36 @@ static void test_jinja_state(void) {
     CHECK(jinja_ok("{{ f(@) }}x", NULL));
 }
 
+static void test_hotlist_long_line(void) {
+    int32_t experts[P36_N_LAYER][P36_N_EXPERT];
+    uint32_t priorities[P36_N_LAYER][P36_N_EXPERT];
+    uint32_t counts[P36_N_LAYER];
+    bool seen[P36_N_LAYER][P36_N_EXPERT];
+    uint32_t loaded = 0;
+    memset(experts, 0, sizeof(experts));
+    memset(priorities, 0, sizeof(priorities));
+    memset(counts, 0, sizeof(counts));
+    memset(seen, 0, sizeof(seen));
+    char path[] = "/tmp/p36_hotlist_XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    if (fd < 0) return;
+    FILE *fp = fdopen(fd, "w");
+    fprintf(fp, "0 1 5 # ");
+    for (int i = 0; i < 400; i++) fputc('x', fp);   /* comment longer than the fgets buffer */
+    fprintf(fp, "\n0 2 7\n");
+    fclose(fp);
+    CHECK(p36_streaming_hotlist_load_file(path, 16, experts, priorities, counts, seen, &loaded));
+    CHECK(loaded == 2);
+    unlink(path);
+}
 
 int main(void) {
     test_rewrite_from_common();
     test_invariants();
     test_payload_load_clears_vision();
     test_jinja_state();
+    test_hotlist_long_line();
     if (failures) {
         fprintf(stderr, "state-machine tests: %d failure(s)\n", failures);
         return 1;
