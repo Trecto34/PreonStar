@@ -2047,6 +2047,25 @@ static void test_agt_g_think_marker_tails(void) {
     agent_qwen_tool_parser_free(&parser);
 }
 
+/* AGT-K4: the agent's own "Tool error" is an error whatever its body quotes
+ * ("$ ", "took ", def/import, or >= 600 bytes) and must not reset the counter. */
+static void test_agt_k4_tool_error_classifier(void) {
+    AGENT_TEST_ASSERT(agent_tool_response_is_error("Tool error: edit failed after $ make\n"));
+    AGENT_TEST_ASSERT(agent_tool_response_is_error("Tool error: command took 3s\n"));
+    AGENT_TEST_ASSERT(agent_tool_response_is_error("Tool error: def main(): import os\n"));
+    AGENT_TEST_ASSERT(agent_tool_response_is_error("Tool result 1 (bash):\nTool error: took 2s\n"));
+    char big[900];
+    memset(big, 'x', sizeof(big));
+    memcpy(big, "Tool error: ", 12);
+    big[sizeof(big) - 1] = '\0';
+    AGENT_TEST_ASSERT(agent_tool_response_is_error(big));
+    int failures = 0;
+    free(agent_tool_response_add_warning(xstrdup("Tool error: first\n"), &failures));
+    free(agent_tool_response_add_warning(xstrdup("Tool error: second $ x\n"), &failures));
+    AGENT_TEST_ASSERT(failures == 2);
+    AGENT_TEST_ASSERT(!agent_tool_response_is_error("ok: wrote $ file\n"));
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2121,6 +2140,7 @@ int main(int argc, char **argv) {
     test_agt_d_unexecuted_rounds_count();
     test_agt_d_resume_think_mode();
     test_agt_g_think_marker_tails();
+    test_agt_k4_tool_error_classifier();
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();

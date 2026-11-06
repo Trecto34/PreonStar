@@ -2,6 +2,16 @@ static bool agent_tool_response_is_error(const char *content) {
     char head[121];
     content = content ? content : "";
     size_t len = strlen(content);
+    /* The agent's own failures ("Tool error: ...", optionally under a
+     * "Tool result N (name):" header) are errors whatever their body quotes. */
+    {
+        const char *first = content;
+        if (!strncmp(first, "Tool result ", 12)) {
+            const char *nl = strchr(first, '\n');
+            if (nl) first = nl + 1;
+        }
+        if (!strncmp(first, "Tool error", 10)) return true;
+    }
     size_t head_len = len < sizeof(head) - 1 ? len : sizeof(head) - 1;
     for (size_t i = 0; i < head_len; i++)
         head[i] = (char)tolower((unsigned char)content[i]);
