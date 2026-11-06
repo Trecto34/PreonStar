@@ -1,5 +1,5 @@
-/* Tiny Vulkan state-machine regressions (VK-1).  No model: one 16-byte
- * copy dispatch.
+/* Tiny Vulkan state-machine regressions (VK-1, VK-6).  No model: one 16-byte
+ * copy dispatch, one 1 KiB embedding-table upload and one embed_row dispatch.
  * Skips itself (exit 0) when no Vulkan device can be opened.
  *
  * The test #includes p36_vulkan.c so it can read the static latches.  The
@@ -44,6 +44,27 @@ static void test_submit_failure_and_cleanup(void) {
     CHECK(p36_vk_fault_inject_lost == 0 && p36_vk_submit_calls == 0);
 }
 
+/* Cycle 2: embed_row must lock/unlock symmetrically, and cleanup must free the
+ * resident embedding table instead of leaving a dangling pointer. */
+static void test_embed_row_and_cleanup(void) {
+    enum { N_EMBD = 256, ROWS = 4 };
+    const uint64_t row_bytes = (N_EMBD / 32) * 34;       /* Q8_0 */
+    const uint64_t table_bytes = row_bytes * ROWS;
+    unsigned char *map = calloc(1, 1u << 20);
+    CHECK(p36_gpu_init());
+    p36_gpu_tensor *dst = p36_gpu_tensor_alloc(N_EMBD * sizeof(float));
+    CHECK(map && dst);
+    test_unlock_errors = 0;
+    CHECK(p36_gpu_embed_row_tensor(dst, map, 1u << 20, 0, table_bytes, N_EMBD, 8u, NULL, 1));
+    CHECK(test_unlock_errors == 0);      /* unlock without lock => EPERM counted */
+    CHECK(p36_vk_embed_table != NULL);
+    p36_gpu_tensor_free(dst);
+    p36_gpu_cleanup();
+    CHECK(p36_vk_embed_table == NULL);
+    CHECK(!p36_vk_embed_table_failed);
+    free(map);
+}
+
 int main(void) {
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -51,6 +72,7 @@ int main(void) {
     pthread_mutex_destroy(&p36_vk_mu);
     pthread_mutex_init(&p36_vk_mu, &attr);
     test_submit_failure_and_cleanup();
+    test_embed_row_and_cleanup();
     if (failures) {
         fprintf(stderr, "vk state tests: %d failure(s)\n", failures);
         return 1;

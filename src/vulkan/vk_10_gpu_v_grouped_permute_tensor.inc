@@ -468,10 +468,6 @@ int p36_gpu_copy_f32_tensor(p36_gpu_tensor *dst,
  * read on every decode token and would otherwise have to be dequantized by
  * the CPU, so it gets its own exact-size device allocation instead of
  * competing with the expert banks for arena blocks. */
-static p36_gpu_tensor *p36_vk_embed_table;
-static uint64_t p36_vk_embed_table_off;
-static bool p36_vk_embed_table_failed;
-
 static p36_gpu_tensor *p36_vk_embed_table_resident(const void *model_map,
                                                    uint64_t model_size,
                                                    uint64_t table_offset,
@@ -554,10 +550,14 @@ int p36_gpu_embed_row_tensor(p36_gpu_tensor *dst,
     weights = p36_vk_embed_table_resident(model_map, model_size, table_offset, table_bytes);
     if (weights) {
         const p36_gpu_tensor *bindings[3] = { weights, ids ? ids : dst, dst };
+        /* p36_vk_embed_table_resident drops the lock before returning, but
+         * p36_vk_run_unlocked requires it held (and the unlock below must pair
+         * with a lock). */
+        pthread_mutex_lock(&p36_vk_mu);
         ok = p36_vk_run_unlocked("embed_row", &p36_vk.embed_row, bindings,
                                  &push, sizeof(push), (n_embd + 255u) / 256u, 1, 1);
+        pthread_mutex_unlock(&p36_vk_mu);
     }
-    pthread_mutex_unlock(&p36_vk_mu);
     return ok;
 }
 int p36_gpu_extract_full_attn_q_tensor(p36_gpu_tensor *dst,

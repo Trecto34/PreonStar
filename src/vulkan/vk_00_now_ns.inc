@@ -464,6 +464,10 @@ enum {
 };
 static p36_gpu_tensor *p36_vk_pool[P36_VK_POOL_CAP];
 static p36_gpu_tensor *p36_vk_vision_weight;
+/* Resident embedding table (see vk_10); declared here so cleanup can reset it. */
+static p36_gpu_tensor *p36_vk_embed_table;
+static uint64_t p36_vk_embed_table_off;
+static bool p36_vk_embed_table_failed;
 static uint32_t p36_vk_pool_n;
 static p36_gpu_tensor *p36_vk_private_pool[P36_VK_PRIVATE_POOL_CAP];
 static uint32_t p36_vk_private_pool_n;
