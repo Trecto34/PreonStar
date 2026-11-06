@@ -82,6 +82,20 @@ static void editor_queue_bytes(agent_editor *ed, const char *buf, size_t len) {
         editor_track_bracketed_paste(ed, buf[i]);
         editor_filter_input_byte(ed, buf[i]);
     }
+    if (ed->paste_open || ed->paste_start_pending) ed->paste_last_byte = now_sec();
+}
+
+/* A terminal that never sends ESC[201~ (lost bytes, cancelled paste) would
+ * leave the feed paused forever.  Give up on the envelope after a quiet spell
+ * and let linenoise consume whatever was queued. */
+#define AGENT_PASTE_TIMEOUT_SEC 5.0
+static bool editor_expire_paste(agent_editor *ed, double now) {
+    if (!ed->paste_open && !ed->paste_start_pending) return false;
+    if (now - ed->paste_last_byte < AGENT_PASTE_TIMEOUT_SEC) return false;
+    ed->paste_open = false;
+    ed->paste_start_pending = false;
+    ed->paste_tail_len = 0;
+    return true;
 }
 
 /* Drain stdin in nonblocking mode.  The outer event loop decides when queued

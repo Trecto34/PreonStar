@@ -713,6 +713,7 @@ typedef struct {
     bool paste_start_pending;
     char paste_tail[6];
     size_t paste_tail_len;
+    double paste_last_byte;   /* when the open/pending paste envelope last saw input */
 } agent_editor;
 
 static void editor_queue_bytes(agent_editor *ed, const char *buf, size_t len);

@@ -415,6 +415,7 @@ static int run_agent(p36_engine *engine, agent_config *cfg) {
                             xstrdup(cfg->gen.prompt) : NULL;
 
     bool running = true;
+    int exit_rc = 0;
     bool exit_save_handled = false;
     bool show_welcome_after_restart = false;
     bool force_status_redraw_after_restart = false;
@@ -445,6 +446,7 @@ resume_editor:
         }
 
         if (rc > 0 && (pfd[0].revents & POLLIN)) editor_read_stdin(&editor);
+        editor_expire_paste(&editor, now_sec());
 
         /* Linenoise runs the terminal in raw mode, so Ctrl+C normally arrives
          * as byte 3 instead of SIGINT.  Handle it before worker output is
@@ -546,8 +548,13 @@ resume_editor:
             build_prompt_text(&st, prompt, sizeof(prompt));
             int restart_cols = editor.edit.cols > 0 ? (int)editor.edit.cols : 80;
             build_footer_text(&st, &queue, restart_cols, statusline, sizeof(statusline));
-            editor_start(&editor, prompt, statusline, saved_input);
+            bool restarted = editor_start(&editor, prompt, statusline, saved_input) == 0;
             free(saved_input);
+            if (!restarted) {
+                fprintf(stderr, "p36-agent: failed to restart line editor\n");
+                exit_rc = 1;
+                break;
+            }
             continue;
         }
 
@@ -813,7 +820,11 @@ resume_editor:
                     build_prompt_text(&st, prompt, sizeof(prompt));
                     int restart_cols = editor.edit.cols > 0 ? (int)editor.edit.cols : 80;
                     build_footer_text(&st, &queue, restart_cols, statusline, sizeof(statusline));
-                    editor_start(&editor, prompt, statusline, restore_line);
+                    if (editor_start(&editor, prompt, statusline, restore_line) != 0) {
+                        fprintf(stderr, "p36-agent: failed to restart line editor\n");
+                        exit_rc = 1;
+                        break;
+                    }
                     if (!editor.scroll_region && was_below_output) {
                         editor.output_line_open = had_output_line_open;
                         editor.prompt_below_output = was_below_output;
@@ -842,8 +853,10 @@ resume_editor:
         if (exit_save == AGENT_EXIT_NOW) exit(0);
         if (exit_save == AGENT_EXIT_CANCEL) {
             running = true;
-            editor_start(&editor, prompt, statusline, NULL);
-            goto resume_editor;
+            if (editor_start(&editor, prompt, statusline, NULL) == 0)
+                goto resume_editor;
+            fprintf(stderr, "p36-agent: failed to restart line editor\n");
+            exit_rc = 1;
         }
     }
     free(initial_pending);
@@ -852,7 +865,7 @@ resume_editor:
     linenoiseSetCompletionCallback(NULL);
     agent_completion_worker = NULL;
     agent_worker_free(&worker);
-    return 0;
+    return exit_rc;
 }
 
 #ifndef P36_AGENT_TEST_NO_MAIN

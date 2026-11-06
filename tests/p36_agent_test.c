@@ -2136,6 +2136,23 @@ static void test_agt_o_waitpid_error_finalizes(void) {
     test_worker_free(&w);
 }
 
+/* AGT-Q: a paste envelope that never closes must not pause the feed forever. */
+static void test_agt_q_paste_timeout(void) {
+    agent_editor ed = {0};
+    const char *open = "\x1b[200~abc";
+    editor_queue_bytes(&ed, open, strlen(open));
+    AGENT_TEST_ASSERT(ed.paste_open);
+    AGENT_TEST_ASSERT(!editor_expire_paste(&ed, ed.paste_last_byte + 1.0));
+    AGENT_TEST_ASSERT(ed.paste_open);
+    AGENT_TEST_ASSERT(editor_expire_paste(&ed, ed.paste_last_byte + AGENT_PASTE_TIMEOUT_SEC + 1.0));
+    AGENT_TEST_ASSERT(!ed.paste_open && !ed.paste_start_pending && ed.paste_tail_len == 0);
+    /* a normal closed paste is untouched */
+    const char *closed = "\x1b[200~x\x1b[201~";
+    editor_queue_bytes(&ed, closed, strlen(closed));
+    AGENT_TEST_ASSERT(!ed.paste_open && !editor_expire_paste(&ed, ed.paste_last_byte + 100.0));
+    free(ed.edit.queued_input);
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2211,6 +2228,7 @@ int main(int argc, char **argv) {
     test_agt_d_resume_think_mode();
     test_agt_g_think_marker_tails();
     test_agt_k4_tool_error_classifier();
+    test_agt_q_paste_timeout();
     test_agt_o_waitpid_error_finalizes();
     test_agt_n_nothink_clears_think_auto();
     test_agt_m_hints_context_boundaries();
