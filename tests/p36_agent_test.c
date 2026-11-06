@@ -2008,6 +2008,16 @@ static void test_agt_d_unexecuted_rounds_count(void) {
     test_worker_free(&w);
 }
 
+/* AGT-D: compaction resume keeps the configured think mode (not HIGH). */
+static void test_agt_d_resume_think_mode(void) {
+    agent_config cfg = {0};
+    cfg.gen.ctx_size = 1 << 22;
+    cfg.gen.think_mode = P36_THINK_MAX;
+    AGENT_TEST_ASSERT(agent_resume_think_mode(&cfg, true) == enabled_think_mode(&cfg));
+    AGENT_TEST_ASSERT(agent_resume_think_mode(&cfg, true) == P36_THINK_MAX);
+    AGENT_TEST_ASSERT(agent_resume_think_mode(&cfg, false) == P36_THINK_NONE);
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2080,6 +2090,7 @@ int main(int argc, char **argv) {
     test_agt_a_remote_clears_error();
     test_agt_c_late_queue_drain_not_lost();
     test_agt_d_unexecuted_rounds_count();
+    test_agt_d_resume_think_mode();
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();

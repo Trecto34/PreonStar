@@ -1,3 +1,9 @@
+/* The reopened assistant message must carry the same think prefix the turn
+ * started with (MAX adds an effort prefix), not a hard-coded HIGH. */
+static p36_think_mode agent_resume_think_mode(const agent_config *cfg, bool in_think) {
+    return in_think ? enabled_think_mode(cfg) : P36_THINK_NONE;
+}
+
 /* Stagnation accounting for a tool result: a "Tool error" identical to the
  * previous one counts, anything else resets.  Shared by executed calls and by
  * rounds that never reached execution (malformed / preflight-rejected). */
@@ -626,7 +632,7 @@ have_summary:
         }
         resumed_start = compacted.len;
         p36_chat_append_assistant_prefix(w->engine, &compacted,
-            in_think ? P36_THINK_HIGH : P36_THINK_NONE);
+            agent_resume_think_mode(w->cfg, in_think));
     } else if (tail_start < bottom &&
         w->transcript.v[tail_start] != agent_special_token_id(w->engine, "<|im_start|>")) {
         p36_chat_append_message(w->engine, &compacted, "user",
