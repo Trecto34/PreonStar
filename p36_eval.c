@@ -3801,8 +3801,60 @@ static int regrade_status_self_test_case(void) {
     return failed;
 }
 
+/* An errored case never reaches a terminal status; without this the final
+ * report shows it as PREFILL/RUNNING. */
+static void eval_mark_run_error(eval_ui *ui, int idx) {
+    if (eval_status_running(ui->status[idx])) ui->status[idx] = EVAL_STOPPED;
+}
+
+/* The --hard-limit-reply-budget check in parse_args only sees the global
+ * --tokens; cases without an explicit --tokens run on their own smaller
+ * tc->max_tokens, so re-check against the real per-case budget. */
+static int eval_hard_limit_conflict(const eval_config *cfg, const eval_case *cases,
+                                    int ncases) {
+    if (!p36_think_mode_enabled(cfg->think_mode)) return -1;
+    for (int i = 0; i < ncases; i++) {
+        if (eval_case_generation_budget(cfg, &cases[i], false) <=
+            cfg->hard_limit_reply_budget)
+            return i;
+    }
+    return -1;
+}
+
+static int run_state_self_tests(void) {
+    int failed = 0;
+    eval_status st[1] = {EVAL_THINKING};
+    eval_ui ui = {.status = st, .ncases = 1};
+    eval_mark_run_error(&ui, 0);
+    if (st[0] != EVAL_STOPPED) {
+        fprintf(stderr, "p36-eval: state self-test failed: errored case left running\n");
+        failed++;
+    }
+    st[0] = EVAL_PASSED;
+    eval_mark_run_error(&ui, 0);
+    if (st[0] != EVAL_PASSED) {
+        fprintf(stderr, "p36-eval: state self-test failed: terminal status overwritten\n");
+        failed++;
+    }
+
+    const eval_case small = {.source = "x", .max_tokens = 4096};
+    eval_config cfg = {.max_tokens = 16000, .hard_limit_reply_budget = 5000,
+                       .think_mode = P36_THINK_MAX};
+    if (eval_hard_limit_conflict(&cfg, &small, 1) != 0) {
+        fprintf(stderr, "p36-eval: state self-test failed: per-case budget ignored by hard limit check\n");
+        failed++;
+    }
+    cfg.max_tokens_set = true;
+    if (eval_hard_limit_conflict(&cfg, &small, 1) != -1) {
+        fprintf(stderr, "p36-eval: state self-test failed: explicit --tokens must win\n");
+        failed++;
+    }
+    return failed;
+}
+
 static int run_extractor_self_tests(void) {
     int failed = 0;
+    failed += run_state_self_tests();
 
     failed += trace_copy_self_test_case();
     failed += regrade_status_self_test_case();
@@ -4694,6 +4746,15 @@ int main(int argc, char **argv) {
         free(cases);
         return 0;
     }
+    int conflict = eval_hard_limit_conflict(&cfg, cases, ncases);
+    if (conflict >= 0) {
+        fprintf(stderr,
+                "p36-eval: --hard-limit-reply-budget (%d) must be smaller than the %s/%s budget (%d); pass --tokens or lower it\n",
+                cfg.hard_limit_reply_budget, cases[conflict].source, cases[conflict].id,
+                eval_case_generation_budget(&cfg, &cases[conflict], false));
+        free(cases);
+        return 2;
+    }
     int *case_sequence = NULL;
     int case_sequence_len = 0;
     if (cfg.case_sequence &&
@@ -4823,6 +4884,7 @@ int main(int argc, char **argv) {
                                   retry_budget, &rng);
         }
         if (result == EVAL_RUN_ERROR) {
+            eval_mark_run_error(&ui, next);
             rc = 1;
             break;
         }
