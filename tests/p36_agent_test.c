@@ -708,11 +708,11 @@ static int password_child(void) {
     int fd = open("/dev/tty", O_RDWR);
     if (fd < 0) { puts("NO_TERMINAL"); return 1; }
     struct termios saved, mode;
-    if (tcgetattr(fd, &saved) != 0) return 2;
+    if (tcgetattr(fd, &saved) != 0) { close(fd); return 2; }
     mode = saved;
     mode.c_lflag &= ~(ECHO | ECHONL);
     for (int attempt = 0; attempt < 3; attempt++) {
-        if (tcsetattr(fd, TCSAFLUSH, &mode) != 0) return 3;
+        if (tcsetattr(fd, TCSAFLUSH, &mode) != 0) { close(fd); return 3; }
         write_all(fd, "[sudo] password for test: ", 26);
         char buf[1024] = {0};
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
@@ -1721,6 +1721,10 @@ typedef struct { int fd; const char *reply; size_t reply_len; } fake_srv;
 static void *fake_srv_thread(void *arg) {
     fake_srv *f = arg;
     int c = accept(f->fd, NULL, NULL);
+    if (c < 0) {
+        close(f->fd);
+        return NULL;
+    }
     char buf[16384];
     ssize_t n = 0, total = 0;
     while (total < (ssize_t)sizeof(buf) - 1 && (n = recv(c, buf + total, sizeof(buf) - 1 - (size_t)total, 0)) > 0) {
