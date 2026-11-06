@@ -689,9 +689,10 @@ static int p36q_iq2_compare_func(const void *left, const void *right) {
  * list for the missing ones, matching the GGML search exactly.
  */
 static void p36q_iq2_xxs_init(void) {
-    if (p36q_iq2_xxs_data.grid) return;
+    /* Double-checked init: grid is published last with release, read with acquire. */
+    if (__atomic_load_n(&p36q_iq2_xxs_data.grid, __ATOMIC_ACQUIRE)) return;
     pthread_mutex_lock(&p36q_init_mutex);
-    if (p36q_iq2_xxs_data.grid) {
+    if (__atomic_load_n(&p36q_iq2_xxs_data.grid, __ATOMIC_RELAXED)) {
         pthread_mutex_unlock(&p36q_init_mutex);
         return;
     }
@@ -791,7 +792,7 @@ static void p36q_iq2_xxs_init(void) {
     free(dist2);
     p36q_iq2_xxs_data.map = map;
     p36q_iq2_xxs_data.neighbours = neighbours;
-    p36q_iq2_xxs_data.grid = grid;
+    __atomic_store_n(&p36q_iq2_xxs_data.grid, grid, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&p36q_init_mutex);
 }
 
