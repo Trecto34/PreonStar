@@ -23,11 +23,40 @@ static bool worker_is_idle(agent_worker *w);
 static void agent_set_status(agent_worker *w, agent_worker_state state) {
     pthread_mutex_lock(&w->mu);
     w->status.state = state;
+    /* IDLE ends the turn: a Ctrl+C that landed after the last poll point must
+     * not stay latched and abort deferred compaction or UI rendezvous waits. */
+    if (state == AGENT_WORKER_IDLE) w->interrupt = false;
     if (state != AGENT_WORKER_PREFILL)
         w->status.prefill_tps = 0.0;
     if (state != AGENT_WORKER_GENERATING)
         w->status.greedy_sampling = false;
     agent_wake_locked(w);
+    pthread_mutex_unlock(&w->mu);
+}
+
+/* Deferred save/compact end: IDLE, unless the turn that just ended left an
+ * ERROR the UI has not displayed yet (it must not be erased). */
+static void agent_end_deferred(agent_worker *w, bool had_error) {
+    if (had_error) {
+        pthread_mutex_lock(&w->mu);
+        w->status.state = AGENT_WORKER_ERROR;
+        agent_wake_locked(w);
+        pthread_mutex_unlock(&w->mu);
+    } else {
+        agent_set_status(w, AGENT_WORKER_IDLE);
+    }
+}
+
+/* UI acknowledges a displayed ERROR.  Compare-and-set under the mutex: the
+ * worker may have moved on to COMPACTING/SAVING since the UI took its copy. */
+static void agent_ack_error(agent_worker *w) {
+    pthread_mutex_lock(&w->mu);
+    if (w->status.state == AGENT_WORKER_ERROR) {
+        w->status.state = AGENT_WORKER_IDLE;
+        w->status.prefill_tps = 0.0;
+        w->status.greedy_sampling = false;
+        w->status.error[0] = '\0';
+    }
     pthread_mutex_unlock(&w->mu);
 }
 

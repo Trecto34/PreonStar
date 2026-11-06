@@ -1933,6 +1933,76 @@ static void test_observation_error_is_not_context_exhaustion(void) {
     p36_tokens_free(&worker.transcript);
 }
 
+/* AGT-A: worker state machine holes found by static reading. */
+static void test_agt_a_worker_state(void) {
+    agent_config cfg = {0};
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    w.initialized = true;
+
+    /* A Ctrl+C latched after the last poll point must not survive turn end. */
+    w.interrupt = true;
+    agent_set_status(&w, AGENT_WORKER_IDLE);
+    AGENT_TEST_ASSERT(!w.interrupt);
+    w.interrupt = true;
+    agent_turn_blocked(&w, "test");
+    AGENT_TEST_ASSERT(!w.interrupt);
+
+    /* A deferred save must not erase an ERROR the UI has not displayed. */
+    agent_set_error(&w, "boom");
+    w.save_requested = true;
+    worker_run_deferred_save(&w);
+    AGENT_TEST_ASSERT(w.status.state == AGENT_WORKER_ERROR);
+    AGENT_TEST_ASSERT(!strcmp(w.status.error, "boom"));
+
+    /* UI ack of ERROR is compare-and-set: a stale copy cannot clobber a
+     * COMPACTING/SAVING state the worker has since entered. */
+    agent_set_status(&w, AGENT_WORKER_COMPACTING);
+    agent_ack_error(&w);
+    AGENT_TEST_ASSERT(w.status.state == AGENT_WORKER_COMPACTING);
+    agent_set_error(&w, "boom");
+    agent_ack_error(&w);
+    AGENT_TEST_ASSERT(w.status.state == AGENT_WORKER_IDLE && !w.status.error[0]);
+    test_worker_free(&w);
+}
+
+static void *remote_status_srv(void *arg) {
+    fake_srv *f = arg;
+    return fake_srv_thread(f);
+}
+
+/* AGT-A: the remote backend must clear a previous turn's status.error. */
+static void test_agt_a_remote_clears_error(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t al = sizeof(a);
+    AGENT_TEST_ASSERT(bind(fd, (struct sockaddr *)&a, sizeof(a)) == 0);
+    AGENT_TEST_ASSERT(listen(fd, 1) == 0);
+    getsockname(fd, (struct sockaddr *)&a, &al);
+    const char *reply =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    fake_srv f = {fd, reply, strlen(reply)};
+    pthread_t th;
+    pthread_create(&th, NULL, remote_status_srv, &f);
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", ntohs(a.sin_port));
+    agent_config cfg = {0};
+    cfg.server_url = url;
+    cfg.server_timeout = 5;
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    w.initialized = true;
+    snprintf(w.status.error, sizeof(w.status.error), "%s", "stale error");
+    worker_run_turn_remote(&w, "hello");
+    AGENT_TEST_ASSERT(w.status.error[0] == '\0');
+    pthread_join(th, NULL);
+    for (int i = 0; i < w.nrmsg; i++) free(w.rmsg[i]);
+    free(w.rmsg);
+    test_worker_free(&w);
+}
+
 int main(int argc, char **argv) {
     p36_cli_expand_long_equals(&argc, &argv, "p36_agent_test");
     if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
@@ -1964,6 +2034,8 @@ int main(int argc, char **argv) {
     p36_agent_unit_tests_run();
     test_worker_ownership();
     test_worker_pause_ui_waits();
+    test_agt_a_worker_state();
+    test_agt_a_remote_clears_error();
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();

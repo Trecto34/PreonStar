@@ -67,6 +67,9 @@ static void worker_apply_pending_power(agent_worker *w) {
 
 static void worker_run_deferred_save(agent_worker *w) {
     if (!worker_take_save_requested(w)) return;
+    pthread_mutex_lock(&w->mu);
+    bool had_error = w->status.state == AGENT_WORKER_ERROR;
+    pthread_mutex_unlock(&w->mu);
     agent_set_status(w, AGENT_WORKER_SAVING);
     char err[160] = {0};
     char sha[41];
@@ -75,7 +78,7 @@ static void worker_run_deferred_save(agent_worker *w) {
         agent_publishf(w, "\nsaved session %.8s (%d tokens)\n", sha, tokens);
     else
         agent_publishf(w, "\nsave failed: %s\n", err[0] ? err : "unknown error");
-    agent_set_status(w, AGENT_WORKER_IDLE);
+    agent_end_deferred(w, had_error);
 }
 
 static void worker_run_deferred_compact(agent_worker *w) {
@@ -91,6 +94,9 @@ static void worker_run_deferred_compact(agent_worker *w) {
 
     int before = w->transcript.len;
     char err[160] = {0};
+    pthread_mutex_lock(&w->mu);
+    bool had_error = w->status.state == AGENT_WORKER_ERROR;
+    pthread_mutex_unlock(&w->mu);
     if (agent_worker_compact(w, "user requested compaction", err, sizeof(err))) {
         if (w->transcript.len != before) {
             pthread_mutex_lock(&w->mu);
@@ -100,11 +106,11 @@ static void worker_run_deferred_compact(agent_worker *w) {
         } else {
             agent_publishf(w, "\ncompact skipped: nothing to compact\n");
         }
-        agent_set_status(w, AGENT_WORKER_IDLE);
+        agent_end_deferred(w, had_error);
     } else {
         if (agent_err_is_interrupted(err)) {
             worker_clear_interrupt(w);
-            agent_set_status(w, AGENT_WORKER_IDLE);
+            agent_end_deferred(w, had_error);
             return;
         }
         agent_set_error(w, err[0] ? err : "context compaction failed");

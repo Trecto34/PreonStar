@@ -500,12 +500,7 @@ resume_editor:
             int n = snprintf(msg, sizeof(msg), "\np36-agent: %s\n", st.error);
             editor_write_async(&editor, msg, n > 0 ? (size_t)n : 0,
                                prompt, statusline, true);
-            pthread_mutex_lock(&worker.mu);
-            worker.status.state = AGENT_WORKER_IDLE;
-            worker.status.prefill_tps = 0.0;
-            worker.status.greedy_sampling = false;
-            worker.status.error[0] = '\0';
-            pthread_mutex_unlock(&worker.mu);
+            agent_ack_error(&worker);
         }
         free(out);
 

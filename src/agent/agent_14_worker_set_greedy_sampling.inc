@@ -281,6 +281,9 @@ static void agent_remote_compact(agent_worker *w, const char *reason) {
 
 static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
     agent_config *cfg = w->cfg;
+    pthread_mutex_lock(&w->mu);
+    w->status.error[0] = '\0';
+    pthread_mutex_unlock(&w->mu);
     p36_remote_cfg rc = {cfg->server_url, cfg->api_key, cfg->server_timeout};
     bool next_thinking = w->thinking_enabled;
     char *user_content = agent_chat_control_text(user_text, &next_thinking);
