@@ -700,6 +700,134 @@ static void test_anthropic_live_stream_sends_incremental_blocks(void) {
     close(sv[1]);
 }
 
+/* Print a mismatching capture as a C literal so a golden can be pasted back
+ * when the wire format is changed on purpose. */
+static bool golden_equal(const char *name, const char *got, const char *want) {
+    if (!strcmp(got, want)) return true;
+    fprintf(stderr, "golden %s differs; got:\n", name);
+    for (const char *p = got; *p; p++) {
+        if (*p == '\n') fputs("\\n\"\n\"", stderr);
+        else if (*p == '"' || *p == '\\') fprintf(stderr, "\\%c", *p);
+        else fputc(*p, stderr);
+    }
+    fputc('\n', stderr);
+    return false;
+}
+
+/* Golden: a normal (non-failing) thinking -> text -> tool_use stream must stay
+ * byte-identical.  Any SSE termination fix may only change the failure path. */
+static void test_anthropic_live_stream_normal_golden(void) {
+    int sv[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] < 0 || sv[1] < 0) return;
+    request r;
+    request_init(&r, REQ_CHAT, 128);
+    r.api = API_ANTHROPIC;
+    r.stream = true;
+    r.think_mode = P36_THINK_HIGH;
+    r.has_tools = true;
+    r.tool_orders = make_bash_order();
+
+    anthropic_stream st;
+    TEST_ASSERT(anthropic_sse_start_live(sv[0], &r, "msg_g", 10, &st));
+    const char *p1 = "need a";
+    const char *p2 = "need a tool</think>Hello.\n\n";
+    const char *p3 = "need a tool</think>Hello.\n\n" P36_TOOL_CALLS_START "\n";
+    TEST_ASSERT(anthropic_sse_stream_update(sv[0], &r, "msg_g", &st, p1, strlen(p1), false));
+    TEST_ASSERT(anthropic_sse_stream_update(sv[0], &r, "msg_g", &st, p2, strlen(p2), false));
+    TEST_ASSERT(anthropic_sse_stream_update(sv[0], &r, "msg_g", &st, p3, strlen(p3), false));
+    tool_calls calls = make_swapped_bash_call();
+    TEST_ASSERT(anthropic_sse_finish_live(sv[0], &r, "msg_g", &st, p3, strlen(p3),
+                                          &calls, "tool_calls", 8));
+    shutdown(sv[0], SHUT_WR);
+    char *out = read_socket_text(sv[1]);
+    static const char golden[] =
+    "event: message_start\n"
+    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_g\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"qwen3.6-35b-a3b\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0,\"cache_read_input_tokens\":0}}}\n"
+    "\n"
+    "event: content_block_start\n"
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n"
+    "\n"
+    "event: content_block_delta\n"
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"need a tool\"}}\n"
+    "\n"
+    "event: content_block_delta\n"
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"msg_g\"}}\n"
+    "\n"
+    "event: content_block_stop\n"
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n"
+    "\n"
+    "event: content_block_start\n"
+    "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n"
+    "\n"
+    "event: content_block_delta\n"
+    "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello.\"}}\n"
+    "\n"
+    "event: content_block_stop\n"
+    "data: {\"type\":\"content_block_stop\",\"index\":1}\n"
+    "\n"
+    "event: content_block_start\n"
+    "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_msg_g_0\",\"name\":\"bash\",\"input\":{}}}\n"
+    "\n"
+    "event: content_block_delta\n"
+    "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"description\\\":\\\"list files\\\",\\\"command\\\":\\\"ls -la\\\",\\\"timeout\\\":10}\"}}\n"
+    "\n"
+    "event: content_block_stop\n"
+    "data: {\"type\":\"content_block_stop\",\"index\":2}\n"
+    "\n"
+    "event: message_delta\n"
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":8}}\n"
+    "\n"
+    "event: message_stop\n"
+    "data: {\"type\":\"message_stop\"}\n"
+    "\n";
+    TEST_ASSERT(golden_equal("anthropic_normal", out, golden));
+    free(out);
+    tool_calls_free(&calls);
+    request_free(&r);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+/* SRV-1: a tool call that starts inside <think> and is cut before it is
+ * complete must still end the stream: close the thinking block, then send
+ * message_delta + message_stop (finish_live used to fail open_block(TEXT)). */
+static void test_anthropic_live_stream_incomplete_tool_in_thinking_terminates(void) {
+    int sv[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] < 0 || sv[1] < 0) return;
+    request r;
+    request_init(&r, REQ_CHAT, 128);
+    r.api = API_ANTHROPIC;
+    r.stream = true;
+    r.think_mode = P36_THINK_HIGH;
+    r.has_tools = true;
+    r.tool_orders = make_bash_order();
+
+    anthropic_stream st;
+    TEST_ASSERT(anthropic_sse_start_live(sv[0], &r, "msg_i", 10, &st));
+    const char *raw = "<think>plan it\n" P36_TOOL_CALLS_START "\n"
+                      P36_INVOKE_START "bash>\n";
+    TEST_ASSERT(anthropic_sse_stream_update(sv[0], &r, "msg_i", &st, raw, strlen(raw), false));
+    TEST_ASSERT(anthropic_sse_finish_live(sv[0], &r, "msg_i", &st, raw, strlen(raw),
+                                          NULL, "length", 7));
+    shutdown(sv[0], SHUT_WR);
+    char *out = read_socket_text(sv[1]);
+    const char *thinking = strstr(out, "\"thinking\":\"plan it\"");
+    const char *sig = strstr(out, "\"type\":\"signature_delta\"");
+    const char *stop = strstr(out, "event: message_stop");
+    TEST_ASSERT(thinking != NULL);
+    TEST_ASSERT(sig != NULL);
+    TEST_ASSERT(stop != NULL);
+    TEST_ASSERT(strstr(out, "event: message_delta") != NULL);
+    TEST_ASSERT(thinking && sig && stop && thinking < sig && sig < stop);
+    TEST_ASSERT(strstr(out, P36_TOOL_CALLS_START) == NULL);
+    free(out);
+    request_free(&r);
+    close(sv[0]);
+    close(sv[1]);
+}
+
 static void test_openai_tool_stream_sends_incremental_text(void) {
     int sv[2];
     TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
@@ -4359,6 +4487,8 @@ static void test_jinja_chat_template_and_json_tool_call(void) {
 }
 
 static void p36_server_unit_tests_run(void) {
+    test_anthropic_live_stream_normal_golden();
+    test_anthropic_live_stream_incomplete_tool_in_thinking_terminates();
     test_jinja_chat_template_and_json_tool_call();
     test_openai_inline_image_content();
     test_http_image_paths_and_urls_are_rejected();
