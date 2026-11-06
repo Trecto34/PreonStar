@@ -93,6 +93,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                req_flags[0] ? " " : "",
                req_flags);
     p36_session_set_progress(slot->session, server_progress_cb, &progress);
+    p36_session_set_cancel(slot->session, server_job_cancel_cb, &j->fd);
 
     /* System+tools checkpoint: prefill to the end of the system turn, store it,
      * then keep going (same forward-only pattern as the cold store below).  A
@@ -109,6 +110,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             p36_tokens_free(&prefix);
             p36_tokens_free(&effective_prompt);
             p36_session_set_progress(slot->session, NULL, NULL);
+    p36_session_set_cancel(slot->session, NULL, NULL);
             trace_event(s, trace_id, "prefill failed: %s", err);
             http_error(j->fd, 500, err);
             return;
@@ -143,6 +145,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             p36_tokens_free(&prefix);
             p36_tokens_free(&effective_prompt);
             p36_session_set_progress(slot->session, NULL, NULL);
+    p36_session_set_cancel(slot->session, NULL, NULL);
             trace_event(s, trace_id, "prefill failed: %s", err);
             http_error(j->fd, 500, err);
             return;
@@ -157,11 +160,13 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                                        j->req.images, j->req.image_count, err, sizeof(err)) != 0) {
         p36_tokens_free(&effective_prompt);
         p36_session_set_progress(slot->session, NULL, NULL);
+    p36_session_set_cancel(slot->session, NULL, NULL);
         trace_event(s, trace_id, "prefill failed: %s", err);
         http_error(j->fd, 500, err);
         return;
     }
     p36_session_set_progress(slot->session, NULL, NULL);
+    p36_session_set_cancel(slot->session, NULL, NULL);
     server_log(P36_LOG_PREFILL,
                "p36-server: %s ctx=%s%s%s prompt done %.3fs",
                j->req.kind == REQ_CHAT ? "chat" : "completion",
@@ -254,6 +259,12 @@ static void generate_job(server *s, server_slot *slot, job *j) {
     server_generation_enter(s);
     while (!g_stop_requested && completion < max_tokens &&
            p36_session_pos(slot->session) < p36_session_ctx(slot->session)) {
+        if (server_client_gone(j->fd)) {
+            finish = "error";
+            snprintf(err, sizeof(err), "client disconnected");
+            trace_event(s, trace_id, "client disconnected after %d generated tokens", completion);
+            break;
+        }
         qwen_tool_decode_state qwen_tool_state = j->req.kind == REQ_CHAT && j->req.has_tools ?
             qwen_tool_tracker.decode : QWEN_TOOL_DECODE_OUTSIDE;
         const bool in_tool_call = qwen_tool_decode_state_is_tool(qwen_tool_state);

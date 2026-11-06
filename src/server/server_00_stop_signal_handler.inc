@@ -1026,3 +1026,29 @@ static bool request_validate_ignore_eos(const request *r, char *err, size_t errl
     return false;
 }
 
+
+/* True once the client has closed (or reset) its end of the connection.  The request is already
+ * fully read, so any readable byte is a pipelined request and not a disconnect; only EOF or an
+ * error counts.  Polled between prefill chunks and every decode step so an aborted request stops
+ * burning the single GPU worker (prefill of a long agent prompt is minutes). */
+static bool server_client_gone(int fd) {
+    if (fd < 0) return true;
+    struct pollfd pfd = {.fd = fd, .events = POLLIN | POLLRDHUP};
+    int rc;
+    do {
+        rc = poll(&pfd, 1, 0);
+    } while (rc < 0 && errno == EINTR);
+    if (rc <= 0) return false;
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL | POLLRDHUP)) return true;
+    if (pfd.revents & POLLIN) {
+        char c;
+        ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+        return n == 0;
+    }
+    return false;
+}
+
+/* p36_session_cancel_fn for the prefill loop: shutdown or the job's client went away. */
+static bool server_job_cancel_cb(void *ud) {
+    return g_stop_requested || server_client_gone(*(const int *)ud);
+}
