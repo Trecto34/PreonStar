@@ -591,7 +591,10 @@ int p36_gpu_init(void) {
         goto fail;
     }
     p36_vk.have_storage16 = storage16_query.storageBuffer16BitAccess != 0;
-    p36_vk.have_storage8 = storage8_query.storageBuffer8BitAccess != 0;
+    /* The 8-bit storage feature is only chained into vkCreateDevice under
+     * have_storage16 (below), so it is only enabled, and only usable by
+     * kernels, when 16-bit storage is also present. */
+    p36_vk.have_storage8 = p36_vk.have_storage16 && storage8_query.storageBuffer8BitAccess != 0;
     p36_vk.have_f16 = p36_vk.have_storage16 && f16_query.shaderFloat16;
     p36_vk.have_int_dot = int_dot_query.shaderIntegerDotProduct != 0;
     p36_vk.subgroup_size_control = subgroup_size_query.subgroupSizeControl &&

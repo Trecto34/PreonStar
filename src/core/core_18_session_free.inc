@@ -355,7 +355,14 @@ p36_session_rewrite_result p36_session_rewrite_from_common(p36_session *s, const
         if (err && errlen) snprintf(err, errlen, "invalid rewrite arguments");
         return P36_SESSION_REWRITE_ERROR;
     }
-    if (p36_session_rewrite_requires_rebuild(s->checkpoint.len, prompt->len, common)) {
+    /* A live vision checkpoint cannot be extended or trimmed as text (the image
+     * spans and rope_delta describe it); the caller owns the vision rebuild. */
+    if (s->vision_state) return P36_SESSION_REWRITE_REBUILD_NEEDED;
+    /* A BROKEN session (valid=false after a failed forward, len>0) holds a
+     * half-written cache.  Never mark it valid again: always go through sync,
+     * which resets the runtime and rebuilds from token zero. */
+    if (p36_session_rewrite_requires_rebuild(s->checkpoint.len, prompt->len, common) ||
+        (!s->checkpoint_valid && s->checkpoint.len > 0)) {
         return p36_session_sync(s, prompt, err, errlen) == 0 ? P36_SESSION_REWRITE_OK : P36_SESSION_REWRITE_ERROR;
     }
     if (common == s->checkpoint.len && common == prompt->len) return P36_SESSION_REWRITE_OK;

@@ -550,12 +550,6 @@ int p36_gpu_copy_f32_tensor(p36_gpu_tensor *dst,
  * copy is disk-bound (~360 ms cold) and used to stall the first chunk.
  * The first decode-side use joins it.  The thread touches only the
  * mapped table memory, never p36_vk_mu or the command stream. */
-static p36_gpu_tensor *p36_vk_embed_table;
-static uint64_t p36_vk_embed_table_off;
-static bool p36_vk_embed_table_failed;
-static pthread_t p36_vk_embed_thread;
-static bool p36_vk_embed_pending;
-static uint64_t p36_vk_embed_t0;
 static p36_vk_weight_copy_ctx p36_vk_embed_copy;
 
 static void *p36_vk_embed_copy_main(void *arg) {
@@ -669,10 +663,14 @@ int p36_gpu_embed_row_tensor(p36_gpu_tensor *dst,
     weights = p36_vk_embed_table_resident(model_map, model_size, table_offset, table_bytes, false);
     if (weights) {
         const p36_gpu_tensor *bindings[3] = { weights, ids ? ids : dst, dst };
+        /* p36_vk_embed_table_resident drops the lock before returning, but
+         * p36_vk_run_unlocked requires it held (and the unlock below must pair
+         * with a lock). */
+        pthread_mutex_lock(&p36_vk_mu);
         ok = p36_vk_run_unlocked("embed_row", &p36_vk.embed_row, bindings,
                                  &push, sizeof(push), (n_embd + 255u) / 256u, 1, 1);
+        pthread_mutex_unlock(&p36_vk_mu);
     }
-    pthread_mutex_unlock(&p36_vk_mu);
     return ok;
 }
 int p36_gpu_extract_full_attn_q_tensor(p36_gpu_tensor *dst,

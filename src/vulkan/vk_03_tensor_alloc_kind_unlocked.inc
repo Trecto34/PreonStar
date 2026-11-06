@@ -378,6 +378,7 @@ static int p36_vk_submit_current_unlocked(bool host_read) {
             p36_vk_prof_op_add("vk_end_cb", 0, 0, 0, 0, p36_vk_now_ns() - e0, 0, 0);
         if (rc != VK_SUCCESS) {
             p36_vk_batch_recording = false;
+            p36_vk_batch_count = 0;   /* the dropped batch's dispatches no longer count */
             return p36_vk_ok(rc, "vkEndCommandBuffer");
         }
     }
@@ -397,6 +398,7 @@ static int p36_vk_submit_current_unlocked(bool host_read) {
         }
         if (rc != VK_SUCCESS) {
             p36_vk_batch_recording = false;
+            p36_vk_batch_count = 0;
             return p36_vk_ok(rc, "vkQueueSubmit");
         }
     }

@@ -80,6 +80,7 @@ static void p36_vk_prof_report(void) {
     }
 }
 
+static void p36_vk_embed_join_unlocked(void);
 void p36_gpu_cleanup(void) {
     pthread_mutex_lock(&p36_vk_mu);
     /* Teardown after device loss must not wait on a queue that will never
@@ -93,10 +94,28 @@ void p36_gpu_cleanup(void) {
     p36_vk_batch_dirty_all = false;
     p36_vk_submit_seq = 0;
     p36_vk_completed_seq = 0;
+    /* The device is destroyed below, so the latches that described the old one
+     * go with it: a later init must not inherit a half-consumed fault
+     * injection or profiler skip count, or a pool cursor.  (device_lost is
+     * cleared last, after every teardown call that checks it.) */
+    p36_vk_fault_inject_lost = 0;
+    p36_vk_submit_calls = 0;
+    p36_vk_prof_skip_left = 0;
+    p36_vk_pool_rr = 0;
+    p36_vk_private_pool_rr = 0;
     p36_vk_hazard_reset();
     p36_vk_b16_ring_destroy_unlocked();
     p36_vk_tensor_free_unlocked(p36_vk_vision_weight);
     p36_vk_vision_weight = NULL;
+    /* The resident embedding table belongs to the device being destroyed; leaving
+     * the pointer (and the failed/off flags) would hand a dangling tensor to the
+     * next init. */
+    /* An async upload may still be copying into the table: join before freeing. */
+    p36_vk_embed_join_unlocked();
+    p36_vk_tensor_free_unlocked(p36_vk_embed_table);
+    p36_vk_embed_table = NULL;
+    p36_vk_embed_table_off = 0;
+    p36_vk_embed_table_failed = false;
     while (p36_vk_retired_n) p36_vk_tensor_free_unlocked(p36_vk_retired[--p36_vk_retired_n]);
     while (p36_vk_pool_n) p36_vk_tensor_free_unlocked(p36_vk_pool[--p36_vk_pool_n]);
     while (p36_vk_private_pool_n)
@@ -307,6 +326,7 @@ void p36_gpu_cleanup(void) {
     p36_vk_private_bytes = 0;
     p36_vk_private_peak = 0;
     p36_vk_moe_bank_cache = true;
+    p36_vk_device_lost = false;
     pthread_mutex_unlock(&p36_vk_mu);
     p36_vk_host_threads_shutdown();
 }

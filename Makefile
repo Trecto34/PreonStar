@@ -565,7 +565,7 @@ SERVER_INCS := $(wildcard src/server/*.inc)
 AGENT_INCS := $(wildcard src/agent/*.inc)
 VK_INCS := $(wildcard src/vulkan/*.inc)
 
-.PHONY: test-quality test-cli all help cpu gpu vulkan vulkan-generic vulkan-bc250 metal p36-quality-score test test-metal test-metal-model test-qwen27b-metal-parity test-qwen27b-vulkan-parity test-qwen27b-llama-parity test-quick test-all test-unit test-vulkan test-streaming test-mtp test-model test-session-batch test-server-live test-server-live-metal test-server-live-metal-ssd test-server-batching test-server-batching-metal test-server-batching-metal-ssd test-release release-build-check release-build-check-metal benchmark-gate benchmark-session-batch benchmark-qwen27b benchmark-qwen27b-gate benchmark-qwen27b-metal-gate benchmark-qwen27b-vulkan benchmark-qwen27b-metal benchmark-qwen27b-llama test-reference test-reference-local test-vectors-local reference-openrouter test-llama test-llama-long test-llama-batch test-llama-all clean
+.PHONY: test-state-machine test-quality test-cli all help cpu gpu vulkan vulkan-generic vulkan-bc250 metal p36-quality-score test test-metal test-metal-model test-qwen27b-metal-parity test-qwen27b-vulkan-parity test-qwen27b-llama-parity test-quick test-all test-unit test-vulkan test-streaming test-mtp test-model test-session-batch test-server-live test-server-live-metal test-server-live-metal-ssd test-server-batching test-server-batching-metal test-server-batching-metal-ssd test-release release-build-check release-build-check-metal benchmark-gate benchmark-session-batch benchmark-qwen27b benchmark-qwen27b-gate benchmark-qwen27b-metal-gate benchmark-qwen27b-vulkan benchmark-qwen27b-metal benchmark-qwen27b-llama test-reference test-reference-local test-vectors-local reference-openrouter test-llama test-llama-long test-llama-batch test-llama-all clean
 
 all: p36 p36-server p36-bench p36-agent p36-eval p36_test
 
@@ -718,6 +718,23 @@ tests/test_dense_iq1m_mmq.o: tests/test_dense_iq1m_mmq.c p36_gpu.h p36_cli_args.
 
 $(IQ1M_MMQ_TEST): tests/test_dense_iq1m_mmq.o p36_ssd.o p36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ $^ $(GPU_LDLIBS)
+
+# Model-free state-machine regressions.  Both tests #include the engine source
+# (p36.c / p36_vulkan.c) so they can reach static state; they are therefore
+# linked without the matching CORE_OBJS member.
+STATE_MACHINE_TEST := tests/test_state_machine
+VK_STATE_TEST := tests/test_vk_state
+
+$(STATE_MACHINE_TEST): tests/test_state_machine.c p36.c p36.h p36_gpu.h $(CORE_INCS) p36_ssd.o p36_prompt_prefix.o p36_vulkan.o p36_image.o
+	$(CC) $(GPU_CFLAGS) -o $@ tests/test_state_machine.c p36_ssd.o p36_prompt_prefix.o p36_vulkan.o p36_image.o $(GPU_LDLIBS)
+
+# Opens a Vulkan device for one 16-byte dispatch; skips itself when none exists.
+$(VK_STATE_TEST): tests/test_vk_state.c p36_vulkan.c p36_gpu.h $(VK_INCS) p36_ssd.o p36_gpu_core.o p36_image.o
+	$(CC) $(GPU_CFLAGS) -o $@ tests/test_vk_state.c p36_ssd.o p36_gpu_core.o p36_image.o p36_prompt_prefix.o $(GPU_LDLIBS)
+
+test-state-machine: $(STATE_MACHINE_TEST) $(VK_STATE_TEST)
+	./$(STATE_MACHINE_TEST)
+	./$(VK_STATE_TEST)
 
 
 p36-quality-score: gguf-tools/quality-testing/score_openrouter
