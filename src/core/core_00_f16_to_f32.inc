@@ -861,6 +861,34 @@ enum {
 };
 
 static void p36_session_reset_runtime(p36_session *s);
+
+/* Debug-only session invariants (build with -DP36_DEBUG_ASSERT; the release
+ * build compiles the macro to nothing, so speed and behaviour are unchanged).
+ * check_invariants returns NULL when the state is coherent, else the broken
+ * rule.  BROKEN (valid=false, len>0 after a failed forward) is a tolerated
+ * transient state and is deliberately not flagged. */
+#ifdef P36_DEBUG_ASSERT
+static const char *p36_session_check_invariants(const p36_session *s) {
+    if (!s) return NULL;
+    if (s->checkpoint.len < 0 || s->checkpoint.len > s->ctx_size) return "checkpoint.len outside [0, ctx_size]";
+    if (s->mtp_draft_valid && s->mtp_draft_token < 0) return "mtp_draft_valid with token < 0";
+    if (!s->vision_state && (s->vision_count || s->vision_spans)) return "vision spans without vision_state";
+    if (!s->vision_state && s->rope_delta) return "rope_delta without vision_state";
+    if (s->vision_count && !s->vision_spans) return "vision_count without vision_spans";
+    return NULL;
+}
+static void p36_session_assert_invariants(const p36_session *s, const char *where) {
+    const char *bad = p36_session_check_invariants(s);
+    if (bad) {
+        fprintf(stderr, "p36: session invariant violated after %s: %s\n", where, bad);
+        abort();
+    }
+}
+#define P36_SESSION_ASSERT(s, where) p36_session_assert_invariants((s), (where))
+#else
+#define P36_SESSION_ASSERT(s, where) ((void)0)
+#endif
+
 static int sample_argmax(const float *logits, uint32_t n_vocab);
 #ifndef P36_NO_GPU
 static int sample_argmax_margin(const float *logits, uint32_t n_vocab, float *margin);

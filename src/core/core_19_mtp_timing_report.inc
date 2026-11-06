@@ -225,6 +225,7 @@ void p36_session_invalidate(p36_session *s) {
     s->vision_spans = NULL;
     s->vision_count = 0;
     s->rope_delta = 0;
+    P36_SESSION_ASSERT(s, "invalidate");
 }
 
 void p36_session_rewind(p36_session *s, int pos) {
