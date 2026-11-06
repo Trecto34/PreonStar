@@ -708,11 +708,11 @@ static int password_child(void) {
     int fd = open("/dev/tty", O_RDWR);
     if (fd < 0) { puts("NO_TERMINAL"); return 1; }
     struct termios saved, mode;
-    if (tcgetattr(fd, &saved) != 0) return 2;
+    if (tcgetattr(fd, &saved) != 0) { close(fd); return 2; }
     mode = saved;
     mode.c_lflag &= ~(ECHO | ECHONL);
     for (int attempt = 0; attempt < 3; attempt++) {
-        if (tcsetattr(fd, TCSAFLUSH, &mode) != 0) return 3;
+        if (tcsetattr(fd, TCSAFLUSH, &mode) != 0) { close(fd); return 3; }
         write_all(fd, "[sudo] password for test: ", 26);
         char buf[1024] = {0};
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
@@ -1721,6 +1721,10 @@ typedef struct { int fd; const char *reply; size_t reply_len; } fake_srv;
 static void *fake_srv_thread(void *arg) {
     fake_srv *f = arg;
     int c = accept(f->fd, NULL, NULL);
+    if (c < 0) {
+        close(f->fd);
+        return NULL;
+    }
     char buf[16384];
     ssize_t n = 0, total = 0;
     while (total < (ssize_t)sizeof(buf) - 1 && (n = recv(c, buf + total, sizeof(buf) - 1 - (size_t)total, 0)) > 0) {
@@ -1961,6 +1965,295 @@ static void test_observation_error_is_not_context_exhaustion(void) {
     p36_tokens_free(&worker.transcript);
 }
 
+/* AGT-A: worker state machine holes found by static reading. */
+static void test_agt_a_worker_state(void) {
+    agent_config cfg = {0};
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    w.initialized = true;
+
+    /* A Ctrl+C latched after the last poll point must not survive turn end. */
+    w.interrupt = true;
+    agent_set_status(&w, AGENT_WORKER_IDLE);
+    AGENT_TEST_ASSERT(!w.interrupt);
+    w.interrupt = true;
+    agent_turn_blocked(&w, "test");
+    AGENT_TEST_ASSERT(!w.interrupt);
+
+    /* A deferred save must not erase an ERROR the UI has not displayed. */
+    agent_set_error(&w, "boom");
+    w.save_requested = true;
+    worker_run_deferred_save(&w);
+    AGENT_TEST_ASSERT(w.status.state == AGENT_WORKER_ERROR);
+    AGENT_TEST_ASSERT(!strcmp(w.status.error, "boom"));
+
+    /* UI ack of ERROR is compare-and-set: a stale copy cannot clobber a
+     * COMPACTING/SAVING state the worker has since entered. */
+    agent_set_status(&w, AGENT_WORKER_COMPACTING);
+    agent_ack_error(&w);
+    AGENT_TEST_ASSERT(w.status.state == AGENT_WORKER_COMPACTING);
+    agent_set_error(&w, "boom");
+    agent_ack_error(&w);
+    AGENT_TEST_ASSERT(w.status.state == AGENT_WORKER_IDLE && !w.status.error[0]);
+    test_worker_free(&w);
+}
+
+/* AGT-C: queue text the UI answered after the worker gave up on the
+ * handshake (interrupt) must be delivered on the next drain, not dropped. */
+static void test_agt_c_late_queue_drain_not_lost(void) {
+    agent_config cfg = {0};
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    w.interrupt = true;
+    char *none = worker_request_queued_user_drain(&w);
+    AGENT_TEST_ASSERT(!none);
+    worker_answer_queued_user_drain(&w, strdup("late correction"));
+    char *got = worker_request_queued_user_drain(&w);
+    AGENT_TEST_ASSERT(got && !strcmp(got, "late correction"));
+    free(got);
+    test_worker_free(&w);
+}
+
+/* AGT-D: rounds that never reach the watchdog (malformed / preflight error /
+ * repetition rollback) must still advance the stagnation and recovery
+ * counters so such a model is eventually BLOCKED. */
+static void test_agt_d_unexecuted_rounds_count(void) {
+    agent_config cfg = {0};
+    cfg.gen.max_stagnant_turns = 3;
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    const char *bad = "Tool error: invalid Qwen tool call: parse error\n";
+    agent_wd_note_result(&w, bad);
+    AGENT_TEST_ASSERT(w.wd_stagnant == 0);       /* first occurrence counts 0, as for executed calls */
+    agent_wd_note_result(&w, bad);
+    agent_wd_note_result(&w, bad);
+    agent_wd_note_result(&w, bad);
+    AGENT_TEST_ASSERT(w.wd_stagnant >= cfg.gen.max_stagnant_turns);
+    agent_wd_note_result(&w, "ok\n");
+    AGENT_TEST_ASSERT(w.wd_stagnant == 0);
+
+    agent_recovery rec = {.max = 2};
+    int blocked_at = -1;
+    for (int i = 0; i < 20 && blocked_at < 0; i++)
+        if (!agent_wd_note_repetitive_round(&w, &rec)) blocked_at = i;
+    AGENT_TEST_ASSERT(blocked_at == 8);          /* 3 rounds per recovery, 3rd recovery blocks */
+    test_worker_free(&w);
+}
+
+/* AGT-D: compaction resume keeps the configured think mode (not HIGH). */
+static void test_agt_d_resume_think_mode(void) {
+    agent_config cfg = {0};
+    cfg.gen.ctx_size = 1 << 22;
+    cfg.gen.think_mode = P36_THINK_MAX;
+    AGENT_TEST_ASSERT(agent_resume_think_mode(&cfg, true) == enabled_think_mode(&cfg));
+    AGENT_TEST_ASSERT(agent_resume_think_mode(&cfg, true) == P36_THINK_MAX);
+    AGENT_TEST_ASSERT(agent_resume_think_mode(&cfg, false) == P36_THINK_NONE);
+}
+
+/* AGT-G: golden normal think/answer rendering (captured from the code before
+ * the marker-tail reset) plus the cross-segment marker false positive. */
+static void test_agt_g_think_marker_tails(void) {
+    const char *text = "<think>plan\nnotes</think>\n\nAnswer **bold** `code`\n<think>more</think>tail <b>x</b>\n";
+    static const char *const golden[3] = {
+        "\x1b[38;5;245mplan\nnotes\x1b[0m\n\nAnswer \x1b[1mbold\x1b[0m \x1b[36mcode\x1b[0m\n\x1b[38;5;245mmore\x1b[0m\n\ntail <b>x</b>\n\x1b[0m\n",
+        "\x1b[38;5;245mplan\nnotes\x1b[0m\n\nAnsw\x1b[0mer \x1b[1mbold\x1b[0m \x1b[36mcode\x1b[0m\n\x1b[38;5;245mmore\x1b[0m\n\ntail <b>x</b>\n\x1b[0m\n",
+        "\x1b[38;5;245mp\x1b[0m\x1b[38;5;245ml\x1b[0m\x1b[38;5;245ma\x1b[0m\x1b[38;5;245mn\x1b[0m\x1b[38;5;245m\n\x1b[0m\x1b[38;5;245mn\x1b[0m\x1b[38;5;245mo\x1b[0m\x1b[38;5;245mt\x1b[0m\x1b[38;5;245me\x1b[0m\x1b[38;5;245ms\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\n\n\x1b[0m\x1b[0m\x1b[0mA\x1b[0mn\x1b[0ms\x1b[0mw\x1b[0me\x1b[0mr\x1b[0m \x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[1mbold\x1b[0m \x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[36mcode\x1b[0m\n\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[0m\x1b[38;5;245mm\x1b[0m\x1b[38;5;245mo\x1b[0m\x1b[38;5;245mr\x1b[0m\x1b[38;5;245me\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\x1b[38;5;245m\x1b[0m\n\n\x1b[0mt\x1b[0ma\x1b[0mi\x1b[0ml\x1b[0m \x1b[0m\x1b[0m<b\x1b[0m>\x1b[0mx\x1b[0m\x1b[0m\x1b[0m</b\x1b[0m>\x1b[0m\n\x1b[0m\x1b[0m\n"
+    };
+    for (int mode = 0; mode < 3; mode++) {
+        char *out = test_hint_capture(text, mode == 0 ? 7 : mode == 1 ? 31 : 1000, true, true, NULL);
+        AGENT_TEST_ASSERT(out && !strcmp(out, golden[mode]));
+        free(out);
+    }
+    /* "<function" in one think segment and "=" in the next is not a marker. */
+    agent_tail_capture capture = {.cap = 32768};
+    agent_token_renderer renderer = {.capture = &capture, .format_thinking = true,
+        .format_markdown = true, .last_output_newline = true};
+    agent_qwen_tool_parser parser = {.state = AGENT_QWEN_TOOL_SEARCH};
+    agent_stream_renderer stream = {.renderer = &renderer, .parser = &parser};
+    const char *t = "<think>a <function</think>ok<think>=b</think>done";
+    agent_stream_text(&stream, t, strlen(t), false);
+    agent_stream_text(&stream, NULL, 0, true);
+    renderer_finish(&renderer);
+    AGENT_TEST_ASSERT(!stream.qwen_tool_in_think);
+    free(agent_tail_capture_take(&capture, NULL));
+    agent_qwen_tool_parser_free(&parser);
+}
+
+/* AGT-K4: the agent's own "Tool error" is an error whatever its body quotes
+ * ("$ ", "took ", def/import, or >= 600 bytes) and must not reset the counter. */
+static void test_agt_k4_tool_error_classifier(void) {
+    AGENT_TEST_ASSERT(agent_tool_response_is_error("Tool error: edit failed after $ make\n"));
+    AGENT_TEST_ASSERT(agent_tool_response_is_error("Tool error: command took 3s\n"));
+    AGENT_TEST_ASSERT(agent_tool_response_is_error("Tool error: def main(): import os\n"));
+    AGENT_TEST_ASSERT(agent_tool_response_is_error("Tool result 1 (bash):\nTool error: took 2s\n"));
+    char big[900];
+    memset(big, 'x', sizeof(big));
+    memcpy(big, "Tool error: ", 12);
+    big[sizeof(big) - 1] = '\0';
+    AGENT_TEST_ASSERT(agent_tool_response_is_error(big));
+    int failures = 0;
+    free(agent_tool_response_add_warning(xstrdup("Tool error: first\n"), &failures));
+    free(agent_tool_response_add_warning(xstrdup("Tool error: second $ x\n"), &failures));
+    AGENT_TEST_ASSERT(failures == 2);
+    AGENT_TEST_ASSERT(!agent_tool_response_is_error("ok: wrote $ file\n"));
+}
+
+/* AGT-M: /new keeps the hints preference; a loaded session overrides old notes. */
+static void test_agt_m_hints_context_boundaries(void) {
+    agent_hints h = {.enabled = true, .instructed = true, .applied = AGENT_HINTS_ON};
+    agent_hints_new_context(&h);
+    AGENT_TEST_ASSERT(h.enabled && !h.instructed && h.applied == AGENT_HINTS_UNSET);
+    AGENT_TEST_ASSERT(agent_hints_note(&h) == agent_hints_prompt);
+    h = (agent_hints){.enabled = false, .applied = AGENT_HINTS_UNSET};
+    agent_hints_session_loaded(&h);
+    AGENT_TEST_ASSERT(!h.enabled && h.applied == AGENT_HINTS_UNKNOWN);
+    const char *note = agent_hints_note(&h);
+    AGENT_TEST_ASSERT(note && strstr(note, "disabled"));
+    h = (agent_hints){.enabled = true, .instructed = true, .applied = AGENT_HINTS_ON};
+    agent_hints_session_loaded(&h);
+    AGENT_TEST_ASSERT(h.enabled && agent_hints_note(&h) == agent_hints_prompt);
+}
+
+/* AGT-N: a later explicit thinking option replaces --think auto. */
+static void test_agt_n_nothink_clears_think_auto(void) {
+    char *a1[] = {"p36-agent", "--think", "auto", "--nothink"};
+    agent_config c = parse_options(4, a1);
+    AGENT_TEST_ASSERT(!c.gen.think_auto && c.gen.think_mode == P36_THINK_NONE);
+    char *a2[] = {"p36-agent", "--think", "auto", "--think-max"};
+    c = parse_options(4, a2);
+    AGENT_TEST_ASSERT(!c.gen.think_auto && c.gen.think_mode == P36_THINK_MAX);
+    char *a3[] = {"p36-agent", "--nothink", "--think", "auto"};
+    c = parse_options(4, a3);
+    AGENT_TEST_ASSERT(c.gen.think_auto && c.gen.think_mode == P36_THINK_HIGH);
+}
+
+/* AGT-O: a waitpid error must finalize the job like any other end, including
+ * the final drain (agent_bash_drain is capped at 256 KiB per call). */
+static void test_agt_o_waitpid_error_finalizes(void) {
+    agent_config cfg = {0};
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    pid_t gone = fork();
+    if (gone == 0) _exit(0);
+    AGENT_TEST_ASSERT(gone > 0 && waitpid(gone, NULL, 0) == gone);   /* no longer our child: ECHILD */
+    int pfd[2];
+    AGENT_TEST_ASSERT(pipe(pfd) == 0);
+    fcntl(pfd[1], F_SETPIPE_SZ, 1 << 20);
+    set_nonblock(pfd[0], true, NULL);
+    char path[] = "/tmp/p36-agent-o-XXXXXX";
+    int tmp = mkstemp(path);
+    AGENT_TEST_ASSERT(tmp >= 0);
+    enum { TOTAL = 300000 };
+    char *data = xmalloc(TOTAL);
+    memset(data, 'x', TOTAL);
+    AGENT_TEST_ASSERT(write(pfd[1], data, TOTAL) == TOTAL);
+    free(data);
+    agent_bash_job job = {0};
+    pthread_mutex_init(&job.mu, NULL);
+    job.pid = gone;
+    job.pipe_fd = pfd[0];
+    job.tty_fd = -1;
+    job.tmp_fd = tmp;
+    job.running = true;
+    job.start_time = now_sec();
+    job.timeout_sec = 100;
+    job.worker = &w;
+    agent_bash_poll(&job);
+    AGENT_TEST_ASSERT(!job.running && job.exit_status == -1);
+    AGENT_TEST_ASSERT(job.pipe_fd == -1 && job.tmp_fd == -1);
+    AGENT_TEST_ASSERT(job.bytes == TOTAL);
+    close(pfd[1]);
+    unlink(path);
+    pthread_mutex_destroy(&job.mu);
+    test_worker_free(&w);
+}
+
+/* AGT-Q: a paste envelope that never closes must not pause the feed forever. */
+static void test_agt_q_paste_timeout(void) {
+    agent_editor ed = {0};
+    const char *open = "\x1b[200~abc";
+    editor_queue_bytes(&ed, open, strlen(open));
+    AGENT_TEST_ASSERT(ed.paste_open);
+    AGENT_TEST_ASSERT(!editor_expire_paste(&ed, ed.paste_last_byte + 1.0));
+    AGENT_TEST_ASSERT(ed.paste_open);
+    AGENT_TEST_ASSERT(editor_expire_paste(&ed, ed.paste_last_byte + AGENT_PASTE_TIMEOUT_SEC + 1.0));
+    AGENT_TEST_ASSERT(!ed.paste_open && !ed.paste_start_pending && ed.paste_tail_len == 0);
+    /* a normal closed paste is untouched */
+    const char *closed = "\x1b[200~x\x1b[201~";
+    editor_queue_bytes(&ed, closed, strlen(closed));
+    AGENT_TEST_ASSERT(!ed.paste_open && !editor_expire_paste(&ed, ed.paste_last_byte + 100.0));
+    free(ed.edit.queued_input);
+}
+
+static void *agt_r_late_newline(void *arg) {
+    int fd = *(int *)arg;
+    usleep(3000 * 1000);
+    if (write(fd, "\n", 1) < 0) {}
+    return NULL;
+}
+
+/* AGT-R: a partial line typed before the deadline must not defeat the
+ * auto-answer timeout (fgets would wait for the newline: 3 s here). */
+static void test_agt_r_partial_line_times_out(void) {
+    int pfd[2];
+    AGENT_TEST_ASSERT(pipe(pfd) == 0);
+    int saved_in = dup(STDIN_FILENO), saved_out = dup(STDOUT_FILENO);
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(pfd[0], STDIN_FILENO);
+    dup2(devnull, STDOUT_FILENO);
+    if (write(pfd[1], "y", 1) < 0) {}
+    pthread_t th;
+    pthread_create(&th, NULL, agt_r_late_newline, &pfd[1]);
+    agent_yes_no_options opts = {.timeout_sec = 1, .timeout_answer = AGENT_YES_NO_AUTO_NO};
+    bool timed_out = false;
+    double t0 = now_sec();
+    bool answer = agent_prompt_yes_no_ex("", &opts, &timed_out);
+    double took = now_sec() - t0;
+    pthread_join(th, NULL);
+    dup2(saved_in, STDIN_FILENO);
+    dup2(saved_out, STDOUT_FILENO);
+    close(saved_in); close(saved_out); close(devnull); close(pfd[0]); close(pfd[1]);
+    AGENT_TEST_ASSERT(timed_out && !answer);
+    AGENT_TEST_ASSERT(took < 2.5);
+}
+
+static void *remote_status_srv(void *arg) {
+    fake_srv *f = arg;
+    return fake_srv_thread(f);
+}
+
+/* AGT-A: the remote backend must clear a previous turn's status.error. */
+static void test_agt_a_remote_clears_error(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t al = sizeof(a);
+    AGENT_TEST_ASSERT(bind(fd, (struct sockaddr *)&a, sizeof(a)) == 0);
+    AGENT_TEST_ASSERT(listen(fd, 1) == 0);
+    getsockname(fd, (struct sockaddr *)&a, &al);
+    const char *reply =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    fake_srv f = {fd, reply, strlen(reply)};
+    pthread_t th;
+    pthread_create(&th, NULL, remote_status_srv, &f);
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", ntohs(a.sin_port));
+    agent_config cfg = {0};
+    cfg.server_url = url;
+    cfg.server_timeout = 5;
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    w.initialized = true;
+    snprintf(w.status.error, sizeof(w.status.error), "%s", "stale error");
+    worker_run_turn_remote(&w, "hello");
+    AGENT_TEST_ASSERT(w.status.error[0] == '\0');
+    pthread_join(th, NULL);
+    for (int i = 0; i < w.nrmsg; i++) free(w.rmsg[i]);
+    free(w.rmsg);
+    test_worker_free(&w);
+}
+
 int main(int argc, char **argv) {
     p36_cli_expand_long_equals(&argc, &argv, "p36_agent_test");
     if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
@@ -1992,6 +2285,18 @@ int main(int argc, char **argv) {
     p36_agent_unit_tests_run();
     test_worker_ownership();
     test_worker_pause_ui_waits();
+    test_agt_a_worker_state();
+    test_agt_a_remote_clears_error();
+    test_agt_c_late_queue_drain_not_lost();
+    test_agt_d_unexecuted_rounds_count();
+    test_agt_d_resume_think_mode();
+    test_agt_g_think_marker_tails();
+    test_agt_k4_tool_error_classifier();
+    test_agt_r_partial_line_times_out();
+    test_agt_q_paste_timeout();
+    test_agt_o_waitpid_error_finalizes();
+    test_agt_n_nothink_clears_think_auto();
+    test_agt_m_hints_context_boundaries();
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();

@@ -1,3 +1,33 @@
+/* The reopened assistant message must carry the same think prefix the turn
+ * started with (MAX adds an effort prefix), not a hard-coded HIGH. */
+static p36_think_mode agent_resume_think_mode(const agent_config *cfg, bool in_think) {
+    return in_think ? enabled_think_mode(cfg) : P36_THINK_NONE;
+}
+
+/* Stagnation accounting for a tool result: a "Tool error" identical to the
+ * previous one counts, anything else resets.  Shared by executed calls and by
+ * rounds that never reached execution (malformed / preflight-rejected). */
+static void agent_wd_note_result(agent_worker *w, const char *res) {
+    uint64_t eh = 0;
+    if (!strncmp(res, "Tool error", 10)) {
+        eh = agent_fnv1a(1469598103934665603ULL, res);
+        w->wd_stagnant = eh == w->wd_last_err ? w->wd_stagnant + 1 : 0;
+    } else {
+        w->wd_stagnant = 0;
+    }
+    w->wd_last_err = eh;
+}
+
+/* A repetition-aborted round is rolled back before execution, so the watchdog
+ * never sees it.  Count it toward the existing stagnation limit; false means
+ * recoveries are exhausted and the turn must end BLOCKED. */
+static bool agent_wd_note_repetitive_round(agent_worker *w, agent_recovery *rec) {
+    if (++w->wd_stagnant < w->cfg->gen.max_stagnant_turns) return true;
+    w->wd_stagnant = 0;
+    w->m.recoveries++;
+    return agent_recovery_next(rec);
+}
+
 static bool agent_vw_force_final(agent_worker *w) {
     if (!w->st.vw.finalize || w->st.vw.rejected < AGENT_VW_MAX_REJECTS) return false;
     char *text = agent_vw_final_text(&w->st);
@@ -64,14 +94,7 @@ static agent_tool_observation agent_execute_tool_observation(
             agent_vw_pre vwpre;
             agent_vw_before(&w->st, &calls->v[i], &vwpre);
             res = agent_execute_tool_call(w, &calls->v[i]);
-            uint64_t eh = 0;
-            if (!strncmp(res, "Tool error", 10)) {
-                eh = agent_fnv1a(1469598103934665603ULL, res);
-                w->wd_stagnant = eh == w->wd_last_err ? w->wd_stagnant + 1 : 0;
-            } else {
-                w->wd_stagnant = 0;
-            }
-            w->wd_last_err = eh;
+            agent_wd_note_result(w, res);
             agent_st_note_tool(&w->st, &calls->v[i], res);
             res = agent_vw_after(w, &calls->v[i], &vwpre, true, res);
         }
@@ -609,7 +632,7 @@ have_summary:
         }
         resumed_start = compacted.len;
         p36_chat_append_assistant_prefix(w->engine, &compacted,
-            in_think ? P36_THINK_HIGH : P36_THINK_NONE);
+            agent_resume_think_mode(w->cfg, in_think));
     } else if (tail_start < bottom &&
         w->transcript.v[tail_start] != agent_special_token_id(w->engine, "<|im_start|>")) {
         p36_chat_append_message(w->engine, &compacted, "user",

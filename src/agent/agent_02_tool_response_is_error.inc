@@ -2,6 +2,16 @@ static bool agent_tool_response_is_error(const char *content) {
     char head[121];
     content = content ? content : "";
     size_t len = strlen(content);
+    /* The agent's own failures ("Tool error: ...", optionally under a
+     * "Tool result N (name):" header) are errors whatever their body quotes. */
+    {
+        const char *first = content;
+        if (!strncmp(first, "Tool result ", 12)) {
+            const char *nl = strchr(first, '\n');
+            if (nl) first = nl + 1;
+        }
+        if (!strncmp(first, "Tool error", 10)) return true;
+    }
     size_t head_len = len < sizeof(head) - 1 ? len : sizeof(head) - 1;
     for (size_t i = 0; i < head_len; i++)
         head[i] = (char)tolower((unsigned char)content[i]);
@@ -440,6 +450,20 @@ static void agent_hints_compacted(agent_hints *h) {
     /* The retained tail may still contain an old on/off note. */
     if (h->applied != AGENT_HINTS_UNSET) h->applied = AGENT_HINTS_UNKNOWN;
     h->instructed = false;
+}
+
+/* /new: a fresh context keeps the user's on/off preference but has seen no
+ * hint instructions or notes. */
+static void agent_hints_new_context(agent_hints *h) {
+    h->instructed = false;
+    h->applied = AGENT_HINTS_UNSET;
+}
+
+/* A loaded session may contain old on/off notes: the next boundary must
+ * override them with the current preference (see agent_hints_note). */
+static void agent_hints_session_loaded(agent_hints *h) {
+    h->instructed = false;
+    h->applied = AGENT_HINTS_UNKNOWN;
 }
 
 static void agent_worker_append_hints_context(agent_worker *w) {
