@@ -505,7 +505,8 @@ static bool http_response(int fd, int code, const char *type, const char *body) 
     const char *reason = code == 200 ? "OK" :
                          code == 400 ? "Bad Request" :
                          code == 404 ? "Not Found" :
-                         code == 500 ? "Internal Server Error" : "Error";
+                         code == 500 ? "Internal Server Error" :
+                         code == 501 ? "Not Implemented" : "Error";
     buf h = {0};
     buf_printf(&h,
         "HTTP/1.1 %d %s\r\n"

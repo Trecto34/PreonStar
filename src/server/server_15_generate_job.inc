@@ -904,6 +904,7 @@ typedef struct {
     char path[256];
     char *body;
     size_t body_len;
+    bool chunked;   /* Transfer-Encoding: chunked seen; body left unread */
 } http_request;
 
 static void http_request_free(http_request *r) {
@@ -919,6 +920,23 @@ static ssize_t header_end(const char *p, size_t n) {
         if (p[i - 1] == '\n' && p[i] == '\n') return (ssize_t)(i + 1);
     }
     return -1;
+}
+
+/* Chunked request bodies are not decoded; a chunked POST has no
+ * Content-Length and would otherwise be read as an empty body. */
+static bool header_is_chunked(const char *h, size_t n) {
+    const char *p = h, *end = h + n;
+    while (p < end) {
+        const char *line = p;
+        while (p < end && *p != '\n') p++;
+        size_t len = (size_t)(p - line);
+        if (len >= 18 && strncasecmp(line, "Transfer-Encoding:", 18) == 0) {
+            for (size_t i = 18; i + 7 <= len; i++)
+                if (strncasecmp(line + i, "chunked", 7) == 0) return true;
+        }
+        if (p < end) p++;
+    }
+    return false;
 }
 
 static long content_length(const char *h, size_t n) {
