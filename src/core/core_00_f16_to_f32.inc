@@ -695,6 +695,14 @@ struct p36_session {
     int ctx_size;
     p36_tokens checkpoint;
     bool checkpoint_valid;
+    /* Tail of the last speculative step: set by p36_session_eval_lookup, cleared by any
+     * later forward.  While valid, the pre-verify recurrent snapshot and the verify rows'
+     * GDN inputs are still on the device, so a cut block can be rolled back to a kept
+     * prefix with p36_vulkan_spec_commit_partial instead of re-prefilling the context. */
+    bool spec_tail_valid;
+    uint32_t spec_tail_start;   /* position of the first verified token */
+    int spec_tail_commit;       /* verified tokens committed after it */
+    bool logits_stale;          /* state rolled back without recomputing logits */
     bool vision_state;
     p36_vision_span *vision_spans;
     size_t vision_count;

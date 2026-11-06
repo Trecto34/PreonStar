@@ -188,6 +188,7 @@ int p36_session_sync(p36_session *s, const p36_tokens *prompt, char *err, size_t
     }
     if (!s->vision_state && s->checkpoint_valid &&
         prompt->len >= s->checkpoint.len &&
+        !(s->logits_stale && prompt->len == s->checkpoint.len) &&
         p36_tokens_starts_with(prompt, &s->checkpoint))
     {
         return p36_session_prefill_range(s, prompt, s->checkpoint.len, err, errlen);

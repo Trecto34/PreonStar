@@ -1220,6 +1220,8 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
     p36_engine *e;
     p36_vulkan_runtime *rt;
     if (!s || !s->runtime || !tokens || n_tok == 0) return false;
+    s->spec_tail_valid = false;   /* any forward invalidates the rollback snapshot */
+    s->logits_stale = false;
     e = s->engine;
     rt = (p36_vulkan_runtime *)s->runtime;
     if (n_tok > rt->prefill_cap) return false;
@@ -2138,6 +2140,23 @@ static bool p36_vulkan_spec_commit_partial(p36_session *s, uint32_t commit_n) {
     s->gpu_top2[1] = ids[1];
     s->gpu_top2_valid = ids[0] >= 0 && ids[1] >= 0;
     s->logits_host_valid = false;
+    return true;
+}
+
+/* Roll the session back to the first keep_n (>= 1) tokens of the last speculative step by
+ * restoring the pre-verify snapshot and replaying only those rows' GDN state. */
+static bool p36_vulkan_spec_rewind(p36_session *s, uint32_t keep_n) {
+    p36_vulkan_runtime *rt;
+    if (!s) return false;
+    if (keep_n > 0) return p36_vulkan_spec_commit_partial(s, keep_n);
+    /* Nothing of the verified tail is kept: the snapshot is exactly the state after the
+     * last kept token.  Its logits are gone, so mark them stale (p36_session_sync then
+     * refuses to reuse the state for an identical prompt). */
+    rt = (p36_vulkan_runtime *)s->runtime;
+    if (!rt || !p36_vulkan_spec_frontier_restore(rt)) return false;
+    s->gpu_top2_valid = false;
+    s->logits_host_valid = false;
+    s->logits_stale = true;
     return true;
 }
 

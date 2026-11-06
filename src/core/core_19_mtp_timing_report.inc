@@ -211,6 +211,11 @@ static int p36_session_eval_lookup(p36_session *s, int first_token, int max_toke
     }
     rc = p36_spec_commit_tokens(s, verify, verify_n, start_pos, row_tops,
                                 eos_token, accepted, err, errlen);
+    if (rc > 1) {
+        s->spec_tail_valid = true;
+        s->spec_tail_start = start_pos;
+        s->spec_tail_commit = rc - 1;
+    }
     return rc < 0 ? -1 : rc;
 }
 #endif /* !P36_NO_GPU: speculative helpers need the Vulkan runtime */
@@ -507,6 +512,8 @@ const float *p36_session_logits(p36_session *s, int *n_vocab) {
 
 static void p36_session_reset_runtime(p36_session *s) {
     if (!s) return;
+    s->spec_tail_valid = false;
+    s->logits_stale = false;
     s->logits_host_valid = false;
     s->gpu_top2_valid = false;
     if (p36_engine_uses_vulkan_runtime(s->engine)) {
@@ -542,6 +549,23 @@ void p36_session_rewind(p36_session *s, int pos) {
     if (pos < 0) pos = 0;
     if (pos > s->checkpoint.len) pos = s->checkpoint.len;
     if (pos == s->checkpoint.len) return;
+#ifndef P36_NO_GPU
+    /* Cheap path: the cut is inside the verified tail of the last speculative step. */
+    if (s->spec_tail_valid && p36_engine_uses_vulkan_runtime(s->engine) &&
+        s->checkpoint.len == (int)s->spec_tail_start + s->spec_tail_commit &&
+        pos >= (int)s->spec_tail_start && pos < s->checkpoint.len) {
+        uint32_t keep_n = (uint32_t)(pos - (int)s->spec_tail_start);
+        s->spec_tail_valid = false;
+        if (p36_vulkan_spec_rewind(s, keep_n)) {
+            if (getenv("P36_LOOKUP_TIME")) fprintf(stderr, "rewind: cheap keep_n=%u\n", keep_n);
+            s->checkpoint.len = pos;
+            return;
+        }
+        /* partial replay failed: fall through to the full resync below */
+    }
+#endif
+    s->spec_tail_valid = false;
+    if (getenv("P36_LOOKUP_TIME")) fprintf(stderr, "rewind: FULL resync to pos=%d (len=%d tail_start=%u tail_commit=%d)\n", pos, s->checkpoint.len, s->spec_tail_start, s->spec_tail_commit);
     for (int i = 0; i < pos; i++) p36_tokens_push(&prefix, s->checkpoint.v[i]);
     p36_session_reset_runtime(s);
     s->mtp_draft_valid = false;
