@@ -551,7 +551,7 @@ void p36_session_rewind(p36_session *s, int pos) {
     if (pos == s->checkpoint.len) return;
 #ifndef P36_NO_GPU
     /* Cheap path: the cut is inside the verified tail of the last speculative step. */
-    if (s->spec_tail_valid && p36_engine_uses_vulkan_runtime(s->engine) &&
+    if (s->spec_tail_valid && !getenv("P36_REWIND_FULL") && p36_engine_uses_vulkan_runtime(s->engine) &&
         s->checkpoint.len == (int)s->spec_tail_start + s->spec_tail_commit &&
         pos >= (int)s->spec_tail_start && pos < s->checkpoint.len) {
         uint32_t keep_n = (uint32_t)(pos - (int)s->spec_tail_start);
