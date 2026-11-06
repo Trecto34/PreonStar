@@ -1161,6 +1161,21 @@ static int repl_chat_set_ctx(p36_engine *engine, repl_chat *chat, int ctx_size) 
     return repl_chat_create_session(engine, chat, ctx_size);
 }
 
+/* Undo a tentative turn: transcript length, image spans, the thinking toggle
+ * the user text may have flipped, and the Think Max prefix / system block that
+ * depended on it.  Shared by every path that abandons the turn before any
+ * assistant token was kept. */
+static void run_chat_turn_rollback(p36_engine *engine, cli_config *cfg,
+                                   repl_chat *chat, int rollback_len,
+                                   size_t rollback_images, bool old_thinking) {
+    chat->transcript.len = rollback_len;
+    repl_chat_trim_images(chat, rollback_images);
+    chat->thinking_enabled = old_thinking;
+    repl_chat_apply_max_prefix(engine, chat,
+                               repl_chat_think_mode(chat) == P36_THINK_MAX);
+    repl_chat_sync_system(engine, chat, cfg->gen.system);
+}
+
 /* Run one interactive turn.  The transcript is tentatively extended with user
  * and assistant markers, then p36_session_sync() decides whether this is a KV
  * continuation.  If prompt processing fails, the transcript rolls back before
@@ -1214,12 +1229,8 @@ static int run_chat_turn(p36_engine *engine, cli_config *cfg, repl_chat *chat,
         chat->session, &chat->transcript, err, sizeof(err));
     if (sync_rc != 0) {
         p36_session_set_progress(chat->session, NULL, NULL);
-        chat->transcript.len = rollback_len;
-        repl_chat_trim_images(chat, rollback_images);
-        chat->thinking_enabled = old_thinking;
-        repl_chat_apply_max_prefix(engine, chat,
-                                   repl_chat_think_mode(chat) == P36_THINK_MAX);
-        repl_chat_sync_system(engine, chat, cfg->gen.system);
+        run_chat_turn_rollback(engine, cfg, chat, rollback_len,
+                               rollback_images, old_thinking);
         fprintf(stderr, "p36: prompt processing failed: %s\n", err);
         return 1;
     }
@@ -1301,7 +1312,8 @@ static int run_chat_turn(p36_engine *engine, cli_config *cfg, repl_chat *chat,
 
     const bool interrupted = cli_interrupt_requested();
     if (interrupted && generated == 0) {
-        chat->transcript.len = rollback_len;
+        run_chat_turn_rollback(engine, cfg, chat, rollback_len,
+                               rollback_images, old_thinking);
         p36_session_invalidate(chat->session);
     } else {
         repl_chat_append_assistant_suffix(engine, &chat->transcript);
