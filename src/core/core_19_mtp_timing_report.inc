@@ -672,7 +672,7 @@ int p36_session_save_payload(p36_session *s, FILE *fp, char *err, size_t errlen)
 #endif
 }
 
-int p36_session_load_payload(p36_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
+static int p36_session_load_payload_impl(p36_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
     if (!s || !fp) {
         if (err && errlen) snprintf(err, errlen, "invalid payload load arguments");
         return 1;
@@ -760,9 +760,9 @@ int p36_session_load_payload(p36_session *s, FILE *fp, uint64_t payload_bytes, c
         return 1;
     }
 
-    p36_session_reset_runtime(s);
-    s->checkpoint.len = 0;
-    s->checkpoint_valid = false;
+    /* From here the live state is overwritten: drop vision spans, rope_delta and
+     * any pending MTP draft along with the checkpoint, not just the tokens. */
+    p36_session_invalidate(s);
     if (!p36_session_reserve_kv(s, n_tokens, 0)) {
         p36_payload_set_err(err, errlen, "failed to grow KV cache for checkpoint");
         return 1;
@@ -841,6 +841,15 @@ int p36_session_load_payload(p36_session *s, FILE *fp, uint64_t payload_bytes, c
     }
     s->checkpoint_valid = true;
     return 0;
+}
+
+int p36_session_load_payload(p36_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
+    int rc = p36_session_load_payload_impl(s, fp, payload_bytes, err, errlen);
+    /* A load that fails after pushing tokens leaves valid=false with len>0
+     * (BROKEN); make that an explicit empty session instead. */
+    if (rc != 0 && s && !s->checkpoint_valid && s->checkpoint.len > 0) p36_session_invalidate(s);
+    if (rc == 0) P36_SESSION_ASSERT(s, "load_payload");
+    return rc;
 }
 
 int p36_session_save_snapshot(p36_session *s, p36_session_snapshot *snap, char *err, size_t errlen) {
