@@ -8435,8 +8435,14 @@ int main(int argc, char **argv) {
             test_run_entry(&test_entries[i]);
         }
     } else {
+        bool any = false;
         for (size_t i = 0; i < sizeof(test_entries) / sizeof(test_entries[0]); i++) {
-            if (selected[i]) test_run_entry(&test_entries[i]);
+            if (selected[i]) { any = true; test_run_entry(&test_entries[i]); }
+        }
+        if (!any) {
+            /* --model/--case only modify selected tests; alone they ran nothing and reported ok. */
+            fprintf(stderr, "p36-test: no test selected (use --all or a test switch, see --help)\n");
+            return 2;
         }
     }
 

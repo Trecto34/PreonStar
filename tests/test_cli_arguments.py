@@ -170,6 +170,11 @@ def test_script_entrypoints() -> int:
         "missing value",
     )
     checks += 1
+    # --model/--case alone select no test: must fail, not print "ok".
+    for args in (("--model", "x"), ("--case", "x")):
+        require_failure("p36_test " + args[0] + " alone", run(("./p36_test",) + args),
+                        "no test selected")
+        checks += 1
     return checks
 
 
