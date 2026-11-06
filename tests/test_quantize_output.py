@@ -35,6 +35,20 @@ def tiny_gguf(path: str) -> None:
         f.write(head + data)
 
 
+def tiny_imatrix_gguf(path: str, count: float) -> None:
+    """GGUF imatrix with one in_sum2/counts pair for output_norm.weight."""
+    align = 32
+    info = b""
+    for name, n in (("output_norm.weight.in_sum2", 32), ("output_norm.weight.counts", 1)):
+        info += gstr(name) + struct.pack("<IQIQ", 1, n, 0, 0 if n == 32 else 128)
+    kv = gstr("general.architecture") + struct.pack("<I", 8) + gstr("imatrix")
+    head = b"GGUF" + struct.pack("<IQQ", 3, 2, 1) + kv + info
+    head += b"\0" * (-len(head) % align)
+    data = struct.pack("<32f", *[1.0] * 32) + struct.pack("<f", count) + b"\0" * 28
+    with open(path, "wb") as f:
+        f.write(head + data)
+
+
 def run(*args):
     return subprocess.run((QUANT,) + args, capture_output=True, text=True)
 
@@ -70,6 +84,15 @@ def main() -> int:
         assert r.returncode != 0
         assert open(out, "rb").read() == good, "failed run clobbered existing output"
         assert sorted(os.listdir(d)) == ["in.gguf", "out.gguf"], f"temp file left: {os.listdir(d)}"
+
+        # A zero-count imatrix row silently became weight 1.0; it must be logged.
+        for count, expect in ((0.0, True), (4.0, False)):
+            im = os.path.join(d, "im.gguf")
+            tiny_imatrix_gguf(im, count)
+            r = run("--in", src, "--out", os.path.join(d, "o4.gguf"), "--force",
+                    "--imatrix", im)
+            assert r.returncode == 0, r.stderr
+            assert ("zero-count" in r.stderr) == expect, (count, r.stderr)
 
         # --imatrix-strict without --imatrix used to be silently ignored.
         r = run("--in", src, "--out", os.path.join(d, "o3.gguf"),

@@ -690,6 +690,7 @@ static void imatrix_load_gguf(imatrix *im, const char *path) {
         const float *sdata = (const float *)sum->data;
         const float *cdata = (const float *)counts->data;
         int64_t ne0 = nval / ncounts;
+        int64_t zero_rows = 0;
         for (int64_t j = 0; j < ncounts; j++) {
             float count = cdata[j];
             if (count > 0.0f) {
@@ -700,8 +701,12 @@ static void imatrix_load_gguf(imatrix *im, const char *path) {
                 }
             } else {
                 for (int64_t k = 0; k < ne0; k++) v[j * ne0 + k] = 1.0f;
+                zero_rows++;
             }
         }
+        if (zero_rows)
+            fprintf(stderr, "warning: imatrix %s: %" PRId64 "/%" PRId64
+                    " zero-count rows use uniform weight 1.0\n", base, zero_rows, ncounts);
 
         im->entries[im->n_entries++] = (im_entry){ base, v, (int)nval };
     }
