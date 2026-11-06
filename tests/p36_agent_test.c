@@ -1982,6 +1982,32 @@ static void test_agt_c_late_queue_drain_not_lost(void) {
     test_worker_free(&w);
 }
 
+/* AGT-D: rounds that never reach the watchdog (malformed / preflight error /
+ * repetition rollback) must still advance the stagnation and recovery
+ * counters so such a model is eventually BLOCKED. */
+static void test_agt_d_unexecuted_rounds_count(void) {
+    agent_config cfg = {0};
+    cfg.gen.max_stagnant_turns = 3;
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    const char *bad = "Tool error: invalid Qwen tool call: parse error\n";
+    agent_wd_note_result(&w, bad);
+    AGENT_TEST_ASSERT(w.wd_stagnant == 0);       /* first occurrence counts 0, as for executed calls */
+    agent_wd_note_result(&w, bad);
+    agent_wd_note_result(&w, bad);
+    agent_wd_note_result(&w, bad);
+    AGENT_TEST_ASSERT(w.wd_stagnant >= cfg.gen.max_stagnant_turns);
+    agent_wd_note_result(&w, "ok\n");
+    AGENT_TEST_ASSERT(w.wd_stagnant == 0);
+
+    agent_recovery rec = {.max = 2};
+    int blocked_at = -1;
+    for (int i = 0; i < 20 && blocked_at < 0; i++)
+        if (!agent_wd_note_repetitive_round(&w, &rec)) blocked_at = i;
+    AGENT_TEST_ASSERT(blocked_at == 8);          /* 3 rounds per recovery, 3rd recovery blocks */
+    test_worker_free(&w);
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2053,6 +2079,7 @@ int main(int argc, char **argv) {
     test_agt_a_worker_state();
     test_agt_a_remote_clears_error();
     test_agt_c_late_queue_drain_not_lost();
+    test_agt_d_unexecuted_rounds_count();
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();

@@ -477,6 +477,10 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             continue;
         }
         if (repetitive_tool) {
+            if (!agent_wd_note_repetitive_round(w, &rec)) {
+                agent_qwen_tool_parser_free(&qwen_tool);
+                return agent_turn_blocked(w, "stagnation: repeated runaway tool output");
+            }
             agent_rollback_partial_tool(
                 w, assistant_start, "repetition_detected_tool rollback=1",
                 agent_tool_repetition_warning);
@@ -582,6 +586,8 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         agent_buf observed_text = {0};
         for (size_t i = 0; i < observation.part_count; i++)
             agent_buf_puts(&observed_text, observation.parts[i].text ? observation.parts[i].text : "");
+        if ((early_tool_error || malformed_tool) && observed_text.ptr)
+            agent_wd_note_result(w, observed_text.ptr);
         char *warning = agent_tool_response_add_warning(agent_buf_take(&observed_text),
                                                        &consecutive_failures);
         if (consecutive_failures > 0) {
