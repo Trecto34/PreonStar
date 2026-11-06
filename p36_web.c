@@ -1117,8 +1117,21 @@ static bool web_spawn_chrome(p36_web *web, char *err, size_t err_len) {
 static bool web_ensure_browser(p36_web *web, char *err, size_t err_len) {
     if (web_cdp_alive(web)) return true;
     if (web->chrome_pid > 0) {
+        /* CDP is dead.  Reap the child if it exited; if it is still alive it is
+         * a hung or half-started browser holding the profile, so stop it before
+         * spawning another on the same profile and port. */
         int status = 0;
-        waitpid(web->chrome_pid, &status, WNOHANG);
+        if (waitpid(web->chrome_pid, &status, WNOHANG) == 0) {
+            kill(web->chrome_pid, SIGTERM);
+            for (int i = 0; i < 40; i++) {
+                if (waitpid(web->chrome_pid, &status, WNOHANG) != 0) break;
+                usleep(50 * 1000);
+                if (i == 39) {
+                    kill(web->chrome_pid, SIGKILL);
+                    waitpid(web->chrome_pid, &status, 0);
+                }
+            }
+        }
         web->chrome_pid = 0;
     }
     if (!web->browser_allowed) {
