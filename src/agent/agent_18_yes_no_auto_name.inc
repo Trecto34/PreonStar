@@ -93,6 +93,31 @@ static int editor_prompt_password(agent_editor *editor, agent_worker *w,
     return rc;
 }
 
+/* Read one line from stdin, giving up at the deadline even if a partial line
+ * is pending (fgets would block until the newline).  1 line, 0 timed out,
+ * -1 EOF/error.  Reads byte-wise, so nothing is left behind in stdio. */
+static int agent_read_line_deadline(char *buf, size_t size, double deadline) {
+    size_t len = 0;
+    for (;;) {
+        double rem_sec = deadline - now_sec();
+        if (rem_sec <= 0.0) return 0;
+        struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
+        int rc = poll(&pfd, 1, (int)(rem_sec * 1000.0) + 1);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0) return -1;
+        if (rc == 0) return 0;
+        char c;
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (n <= 0) return -1;
+        if (len + 1 < size) buf[len++] = c;
+        if (c == '\n') {
+            buf[len] = '\0';
+            return 1;
+        }
+    }
+}
+
 /* Shared y/n prompt.  By default it blocks forever like the historical helper;
  * callers that cannot safely stall the agent can request an automatic answer
  * after timeout_sec seconds. */
@@ -116,36 +141,27 @@ static bool agent_prompt_yes_no_ex(const char *prompt,
         }
         fflush(stdout);
         if (use_timeout) {
-            double rem_sec = deadline - now_sec();
-            if (rem_sec <= 0.0) {
+            /* A partial line must not defeat the deadline. */
+            int got = agent_read_line_deadline(buf, sizeof(buf), deadline);
+            if (got == 0) {
                 if (timed_out) *timed_out = true;
                 printf("\n");
                 return auto_answer == AGENT_YES_NO_AUTO_YES;
             }
-            struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
-            int timeout_ms = (int)(rem_sec * 1000.0) + 1;
-            int rc;
-            do {
-                rc = poll(&pfd, 1, timeout_ms);
-            } while (rc < 0 && errno == EINTR);
-            if (rc == 0) {
-                if (timed_out) *timed_out = true;
-                printf("\n");
-                return auto_answer == AGENT_YES_NO_AUTO_YES;
+            if (got < 0) return false;
+        } else {
+            /* stdin may be in non-blocking mode (set by editor_start).
+             * Temporarily switch to blocking so fgets can wait for input. */
+            int saved_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+            if (saved_flags >= 0 && (saved_flags & O_NONBLOCK)) {
+                fcntl(STDIN_FILENO, F_SETFL, saved_flags & ~O_NONBLOCK);
             }
-            if (rc < 0) return false;
+            bool got_line = fgets(buf, sizeof(buf), stdin) != NULL;
+            if (saved_flags >= 0 && (saved_flags & O_NONBLOCK)) {
+                fcntl(STDIN_FILENO, F_SETFL, saved_flags);
+            }
+            if (!got_line) return false;
         }
-        /* stdin may be in non-blocking mode (set by editor_start).
-         * Temporarily switch to blocking so fgets can wait for input. */
-        int saved_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-        if (saved_flags >= 0 && (saved_flags & O_NONBLOCK)) {
-            fcntl(STDIN_FILENO, F_SETFL, saved_flags & ~O_NONBLOCK);
-        }
-        bool got_line = fgets(buf, sizeof(buf), stdin) != NULL;
-        if (saved_flags >= 0 && (saved_flags & O_NONBLOCK)) {
-            fcntl(STDIN_FILENO, F_SETFL, saved_flags);
-        }
-        if (!got_line) return false;
         char *p = buf;
         while (*p == ' ' || *p == '\t') p++;
         if (*p == 'y' || *p == 'Y') return true;

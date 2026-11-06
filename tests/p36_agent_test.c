@@ -2153,6 +2153,38 @@ static void test_agt_q_paste_timeout(void) {
     free(ed.edit.queued_input);
 }
 
+static void *agt_r_late_newline(void *arg) {
+    int fd = *(int *)arg;
+    usleep(3000 * 1000);
+    if (write(fd, "\n", 1) < 0) {}
+    return NULL;
+}
+
+/* AGT-R: a partial line typed before the deadline must not defeat the
+ * auto-answer timeout (fgets would wait for the newline: 3 s here). */
+static void test_agt_r_partial_line_times_out(void) {
+    int pfd[2];
+    AGENT_TEST_ASSERT(pipe(pfd) == 0);
+    int saved_in = dup(STDIN_FILENO), saved_out = dup(STDOUT_FILENO);
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(pfd[0], STDIN_FILENO);
+    dup2(devnull, STDOUT_FILENO);
+    if (write(pfd[1], "y", 1) < 0) {}
+    pthread_t th;
+    pthread_create(&th, NULL, agt_r_late_newline, &pfd[1]);
+    agent_yes_no_options opts = {.timeout_sec = 1, .timeout_answer = AGENT_YES_NO_AUTO_NO};
+    bool timed_out = false;
+    double t0 = now_sec();
+    bool answer = agent_prompt_yes_no_ex("", &opts, &timed_out);
+    double took = now_sec() - t0;
+    pthread_join(th, NULL);
+    dup2(saved_in, STDIN_FILENO);
+    dup2(saved_out, STDOUT_FILENO);
+    close(saved_in); close(saved_out); close(devnull); close(pfd[0]); close(pfd[1]);
+    AGENT_TEST_ASSERT(timed_out && !answer);
+    AGENT_TEST_ASSERT(took < 2.5);
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2228,6 +2260,7 @@ int main(int argc, char **argv) {
     test_agt_d_resume_think_mode();
     test_agt_g_think_marker_tails();
     test_agt_k4_tool_error_classifier();
+    test_agt_r_partial_line_times_out();
     test_agt_q_paste_timeout();
     test_agt_o_waitpid_error_finalizes();
     test_agt_n_nothink_clears_think_auto();
