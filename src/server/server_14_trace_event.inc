@@ -395,6 +395,11 @@ static int server_eval_token(server *s, server_slot *slot, int token,
     while (!slot->decode_done && !g_stop_requested) {
         pthread_cond_wait(&s->model_cv, &s->model_mu);
     }
+    if (!slot->decode_done && slot->decode_pending) {
+        /* Woken by shutdown before the decode thread took the request: withdraw it. */
+        slot->decode_pending = false;
+        if (s->decode_pending > 0) s->decode_pending--;
+    }
     int rc = slot->decode_done ? slot->decode_rc : 1;
     if (rc != 0 && err && errlen) {
         snprintf(err, errlen, "%s",

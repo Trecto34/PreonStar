@@ -4189,6 +4189,26 @@ static void test_batched_decode_cancellation(void) {
     pthread_cond_destroy(&s.model_cv);
 }
 
+/* SRV-11: an eval woken by shutdown must withdraw its pending decode, or the
+ * slot stays "pending" and the server counter stays incremented. */
+static void test_batched_eval_stop_withdraws_pending_decode(void) {
+    server s = {0};
+    server_slot slot = {0};
+    s.slots = &slot;
+    s.slot_count = 1;
+    s.batched_mode = true;
+    pthread_mutex_init(&s.model_mu, NULL);
+    pthread_cond_init(&s.model_cv, NULL);
+    char err[64];
+    g_stop_requested = 1;
+    TEST_ASSERT(server_eval_token(&s, &slot, 1, err, sizeof(err)) != 0);
+    g_stop_requested = 0;
+    TEST_ASSERT(!slot.decode_pending);
+    TEST_ASSERT(s.decode_pending == 0);
+    pthread_cond_destroy(&s.model_cv);
+    pthread_mutex_destroy(&s.model_mu);
+}
+
 static const char test_inline_png_base64[] =
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8DQwMDAwMAEIkAYABglAYOd/VRoAAAAAElFTkSuQmCC";
 
@@ -4501,6 +4521,7 @@ static void p36_server_unit_tests_run(void) {
     test_batched_prefill_round_robin();
     test_batched_slot_scoring();
     test_batched_decode_cancellation();
+    test_batched_eval_stop_withdraws_pending_decode();
     test_request_defaults_match_qwen_api();
     test_explicit_sampling_wins_in_thinking_mode();
     test_request_peek_model();
