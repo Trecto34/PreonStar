@@ -510,10 +510,18 @@ static void worker_answer_password(agent_worker *w, bool ok) {
  * the tool observation and the user's pending correction. */
 static char *worker_request_queued_user_drain(agent_worker *w) {
     pthread_mutex_lock(&w->mu);
+    /* An earlier request abandoned by interrupt can be answered late; the UI
+     * already took that text off its queue, so deliver it instead of dropping. */
+    if (w->queued_user_drain_text) {
+        char *late = w->queued_user_drain_text;
+        w->queued_user_drain_text = NULL;
+        w->queued_user_drain_pending = false;
+        w->queued_user_drain_answered = false;
+        pthread_mutex_unlock(&w->mu);
+        return late;
+    }
     w->queued_user_drain_pending = true;
     w->queued_user_drain_answered = false;
-    free(w->queued_user_drain_text);
-    w->queued_user_drain_text = NULL;
     agent_wake_locked(w);
     pthread_cond_signal(&w->cond);
     while (!w->stop && !w->interrupt && !w->queued_user_drain_answered)

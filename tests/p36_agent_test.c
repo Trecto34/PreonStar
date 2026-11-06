@@ -1966,6 +1966,22 @@ static void test_agt_a_worker_state(void) {
     test_worker_free(&w);
 }
 
+/* AGT-C: queue text the UI answered after the worker gave up on the
+ * handshake (interrupt) must be delivered on the next drain, not dropped. */
+static void test_agt_c_late_queue_drain_not_lost(void) {
+    agent_config cfg = {0};
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    w.interrupt = true;
+    char *none = worker_request_queued_user_drain(&w);
+    AGENT_TEST_ASSERT(!none);
+    worker_answer_queued_user_drain(&w, strdup("late correction"));
+    char *got = worker_request_queued_user_drain(&w);
+    AGENT_TEST_ASSERT(got && !strcmp(got, "late correction"));
+    free(got);
+    test_worker_free(&w);
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2036,6 +2052,7 @@ int main(int argc, char **argv) {
     test_worker_pause_ui_waits();
     test_agt_a_worker_state();
     test_agt_a_remote_clears_error();
+    test_agt_c_late_queue_drain_not_lost();
     test_compaction_boundaries();
     test_partial_tool_interrupt_rollback();
     test_repetitive_tool_aborted_before_execution();
