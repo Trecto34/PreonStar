@@ -983,6 +983,11 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
                                              P36_N_EMBD, n_tok, P36_RMS_EPS)) {
         return false;
     }
+    /* This standalone norm writes only f32, never inp_q8.  The flag can still be
+     * true from the previous pass (the n_tok == 1 shared-FFN decode path returns
+     * without consuming it, and a failed pass returns mid-layer), which would
+     * make layer 0's quantize-or-skip checks reuse a stale q8 activation. */
+    rt->inp_q8_valid = false;
     for (uint32_t il = 0; il < P36_N_LAYER; il++) {
         const p36_layer_weights *l = &e->weights.layer[il];
         if (l->kind == P36_LAYER_FULL_ATTN) {
@@ -1352,6 +1357,7 @@ static bool p36_sessions_eval_batch_vulkan(p36_decode_item *items, int count) {
                 P36_N_EMBD, rows, P36_RMS_EPS)) {
         return false;
     }
+    rt->inp_q8_valid = false;   /* layer 0's norm leaves no q8; see the single-session path */
 
     p36_gpu_set_micro_batch(true);
     for (uint32_t il = 0; il < P36_N_LAYER; il++) {
