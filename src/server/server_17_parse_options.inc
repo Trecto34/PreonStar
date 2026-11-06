@@ -4234,6 +4234,37 @@ static void test_read_http_request_rejects_chunked_body(void) {
     close(sv[1]);
 }
 
+/* SRV-9: opening the disk cache sweeps <sha>.kv.tmp.<pid> orphans of dead
+ * writers, but keeps a live writer's temp file and real checkpoints. */
+static void test_kv_cache_open_sweeps_dead_writer_tmp_files(void) {
+    char dir[] = "/tmp/p36-kvsweep-XXXXXX";
+    if (!mkdtemp(dir)) { TEST_ASSERT(false); return; }
+    pid_t child = fork();
+    if (child == 0) _exit(0);
+    int wst = 0;
+    TEST_ASSERT(waitpid(child, &wst, 0) == child);
+
+    const char *sha = "0123456789abcdef0123456789abcdef01234567";
+    char dead[256], live[256], keep[256];
+    snprintf(dead, sizeof(dead), "%s/%s.kv.tmp.%ld", dir, sha, (long)child);
+    snprintf(live, sizeof(live), "%s/%s.kv.tmp.%ld", dir, sha, (long)getpid());
+    snprintf(keep, sizeof(keep), "%s/%s.kv", dir, sha);
+    const char *paths[3] = {dead, live, keep};
+    for (int i = 0; i < 3; i++) {
+        FILE *fp = fopen(paths[i], "wb");
+        TEST_ASSERT(fp != NULL);
+        if (fp) { fputs("x", fp); fclose(fp); }
+    }
+    kv_disk_cache kc;
+    TEST_ASSERT(kv_cache_open(&kc, dir, 64, false, kv_cache_default_options()));
+    TEST_ASSERT(access(dead, F_OK) != 0);
+    TEST_ASSERT(access(live, F_OK) == 0);
+    TEST_ASSERT(access(keep, F_OK) == 0);
+    kv_cache_close(&kc);
+    for (int i = 0; i < 3; i++) unlink(paths[i]);
+    rmdir(dir);
+}
+
 static const char test_inline_png_base64[] =
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8DQwMDAwMAEIkAYABglAYOd/VRoAAAAAElFTkSuQmCC";
 
@@ -4548,6 +4579,7 @@ static void p36_server_unit_tests_run(void) {
     test_batched_decode_cancellation();
     test_batched_eval_stop_withdraws_pending_decode();
     test_read_http_request_rejects_chunked_body();
+    test_kv_cache_open_sweeps_dead_writer_tmp_files();
     test_request_defaults_match_qwen_api();
     test_explicit_sampling_wins_in_thinking_mode();
     test_request_peek_model();
