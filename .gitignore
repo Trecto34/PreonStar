@@ -118,3 +118,6 @@ __pycache__/
 /tests/test_dense_iq3xxs_nx
 /tests/test_dense_iq1m_mmq
 /tests/test_web_state
+/tests/test_state_machine
+/tests/test_vk_state
+/tests/test_web_state
