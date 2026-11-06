@@ -442,18 +442,10 @@ static void agent_bash_poll(agent_bash_job *job) {
         job->child_status = status;
     }
     if (rc < 0 && errno != EINTR) {
-        job->exit_status = -1;
-        job->running = false;
-        job->end_time = now_sec();
-        if (job->pipe_fd >= 0) {
-            close(job->pipe_fd);
-            job->pipe_fd = -1;
-        }
-        if (job->tmp_fd >= 0) {
-            close(job->tmp_fd);
-            job->tmp_fd = -1;
-        }
-        agent_worker_note_terminal_mode_may_have_changed(job->worker);
+        /* Lost the child: still drain what the pipe holds (the drain above is
+         * capped per call) and finish through the one finalizer; status -1
+         * reports exit_status=-1. */
+        agent_bash_finalize(job, -1);
         return;
     }
     if (job->reaped && job->pipe_eof) {

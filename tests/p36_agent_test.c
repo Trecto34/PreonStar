@@ -2095,6 +2095,47 @@ static void test_agt_n_nothink_clears_think_auto(void) {
     AGENT_TEST_ASSERT(c.gen.think_auto && c.gen.think_mode == P36_THINK_HIGH);
 }
 
+/* AGT-O: a waitpid error must finalize the job like any other end, including
+ * the final drain (agent_bash_drain is capped at 256 KiB per call). */
+static void test_agt_o_waitpid_error_finalizes(void) {
+    agent_config cfg = {0};
+    agent_worker w;
+    test_worker_init(&w, &cfg);
+    pid_t gone = fork();
+    if (gone == 0) _exit(0);
+    AGENT_TEST_ASSERT(gone > 0 && waitpid(gone, NULL, 0) == gone);   /* no longer our child: ECHILD */
+    int pfd[2];
+    AGENT_TEST_ASSERT(pipe(pfd) == 0);
+    fcntl(pfd[1], F_SETPIPE_SZ, 1 << 20);
+    set_nonblock(pfd[0], true, NULL);
+    char path[] = "/tmp/p36-agent-o-XXXXXX";
+    int tmp = mkstemp(path);
+    AGENT_TEST_ASSERT(tmp >= 0);
+    enum { TOTAL = 300000 };
+    char *data = xmalloc(TOTAL);
+    memset(data, 'x', TOTAL);
+    AGENT_TEST_ASSERT(write(pfd[1], data, TOTAL) == TOTAL);
+    free(data);
+    agent_bash_job job = {0};
+    pthread_mutex_init(&job.mu, NULL);
+    job.pid = gone;
+    job.pipe_fd = pfd[0];
+    job.tty_fd = -1;
+    job.tmp_fd = tmp;
+    job.running = true;
+    job.start_time = now_sec();
+    job.timeout_sec = 100;
+    job.worker = &w;
+    agent_bash_poll(&job);
+    AGENT_TEST_ASSERT(!job.running && job.exit_status == -1);
+    AGENT_TEST_ASSERT(job.pipe_fd == -1 && job.tmp_fd == -1);
+    AGENT_TEST_ASSERT(job.bytes == TOTAL);
+    close(pfd[1]);
+    unlink(path);
+    pthread_mutex_destroy(&job.mu);
+    test_worker_free(&w);
+}
+
 static void *remote_status_srv(void *arg) {
     fake_srv *f = arg;
     return fake_srv_thread(f);
@@ -2170,6 +2211,7 @@ int main(int argc, char **argv) {
     test_agt_d_resume_think_mode();
     test_agt_g_think_marker_tails();
     test_agt_k4_tool_error_classifier();
+    test_agt_o_waitpid_error_finalizes();
     test_agt_n_nothink_clears_think_auto();
     test_agt_m_hints_context_boundaries();
     test_compaction_boundaries();
