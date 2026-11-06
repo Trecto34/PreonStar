@@ -1,3 +1,31 @@
+/* A store writes <sha>.kv.tmp.<pid> and renames it into place.  A crash in
+ * between leaves a payload-sized orphan that refresh never counts against the
+ * budget.  Remove those whose writer pid is gone (a live pid may be another
+ * server sharing the directory). */
+static void kv_cache_sweep_orphans(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        char sha[41];
+        const char *n = de->d_name;
+        if (strlen(n) < 48 || strncmp(n + 40, ".kv.tmp.", 8) != 0) continue;
+        char head[44];
+        memcpy(head, n, 43);
+        head[43] = '\0';
+        if (!sha_hex_name(head, sha)) continue;
+        char *end = NULL;
+        long pid = strtol(n + 48, &end, 10);
+        if (pid <= 0 || !end || *end) continue;
+        if (kill((pid_t)pid, 0) == 0 || errno != ESRCH) continue;
+        char *path = path_join(dir, n);
+        if (unlink(path) == 0)
+            server_log(P36_LOG_KVCACHE, "p36-server: kv cache removed orphan temp file %s", path);
+        free(path);
+    }
+    closedir(d);
+}
+
 static bool kv_cache_open(kv_disk_cache *kc, const char *dir, uint64_t budget_mb,
                           bool reject_different_quant, kv_cache_options opt) {
     memset(kc, 0, sizeof(*kc));
@@ -6,6 +34,7 @@ static bool kv_cache_open(kv_disk_cache *kc, const char *dir, uint64_t budget_mb
         server_log(P36_LOG_DEFAULT, "p36-server: failed to create KV cache directory %s: %s", dir, strerror(errno));
         return false;
     }
+    kv_cache_sweep_orphans(dir);
     kc->enabled = true;
     kc->dir = xstrdup(dir);
     if (budget_mb == 0) budget_mb = KV_CACHE_DEFAULT_MB;

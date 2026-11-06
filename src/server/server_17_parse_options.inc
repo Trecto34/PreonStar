@@ -450,7 +450,7 @@ int main(int argc, char **argv) {
         g_listen_fd = -1;
     }
 
-    server_log(P36_LOG_DEFAULT, "p36-server: shutdown requested, draining requests");
+    server_log(P36_LOG_DEFAULT, "p36-server: shutdown requested, cancelling in-flight requests and stopping workers");
     pthread_mutex_lock(&s.mu);
     s.stopping = true;
     pthread_cond_broadcast(&s.cv);
@@ -710,6 +710,134 @@ static void test_anthropic_live_stream_sends_incremental_blocks(void) {
 
     free(out);
     tool_calls_free(&calls);
+    request_free(&r);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+/* Print a mismatching capture as a C literal so a golden can be pasted back
+ * when the wire format is changed on purpose. */
+static bool golden_equal(const char *name, const char *got, const char *want) {
+    if (!strcmp(got, want)) return true;
+    fprintf(stderr, "golden %s differs; got:\n", name);
+    for (const char *p = got; *p; p++) {
+        if (*p == '\n') fputs("\\n\"\n\"", stderr);
+        else if (*p == '"' || *p == '\\') fprintf(stderr, "\\%c", *p);
+        else fputc(*p, stderr);
+    }
+    fputc('\n', stderr);
+    return false;
+}
+
+/* Golden: a normal (non-failing) thinking -> text -> tool_use stream must stay
+ * byte-identical.  Any SSE termination fix may only change the failure path. */
+static void test_anthropic_live_stream_normal_golden(void) {
+    int sv[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] < 0 || sv[1] < 0) return;
+    request r;
+    request_init(&r, REQ_CHAT, 128);
+    r.api = API_ANTHROPIC;
+    r.stream = true;
+    r.think_mode = P36_THINK_HIGH;
+    r.has_tools = true;
+    r.tool_orders = make_bash_order();
+
+    anthropic_stream st;
+    TEST_ASSERT(anthropic_sse_start_live(sv[0], &r, "msg_g", 10, &st));
+    const char *p1 = "need a";
+    const char *p2 = "need a tool</think>Hello.\n\n";
+    const char *p3 = "need a tool</think>Hello.\n\n" P36_TOOL_CALLS_START "\n";
+    TEST_ASSERT(anthropic_sse_stream_update(sv[0], &r, "msg_g", &st, p1, strlen(p1), false));
+    TEST_ASSERT(anthropic_sse_stream_update(sv[0], &r, "msg_g", &st, p2, strlen(p2), false));
+    TEST_ASSERT(anthropic_sse_stream_update(sv[0], &r, "msg_g", &st, p3, strlen(p3), false));
+    tool_calls calls = make_swapped_bash_call();
+    TEST_ASSERT(anthropic_sse_finish_live(sv[0], &r, "msg_g", &st, p3, strlen(p3),
+                                          &calls, "tool_calls", 8));
+    shutdown(sv[0], SHUT_WR);
+    char *out = read_socket_text(sv[1]);
+    static const char golden[] =
+    "event: message_start\n"
+    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_g\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"qwen3.6-35b-a3b\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0,\"cache_read_input_tokens\":0}}}\n"
+    "\n"
+    "event: content_block_start\n"
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n"
+    "\n"
+    "event: content_block_delta\n"
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"need a tool\"}}\n"
+    "\n"
+    "event: content_block_delta\n"
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"msg_g\"}}\n"
+    "\n"
+    "event: content_block_stop\n"
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n"
+    "\n"
+    "event: content_block_start\n"
+    "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n"
+    "\n"
+    "event: content_block_delta\n"
+    "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello.\"}}\n"
+    "\n"
+    "event: content_block_stop\n"
+    "data: {\"type\":\"content_block_stop\",\"index\":1}\n"
+    "\n"
+    "event: content_block_start\n"
+    "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_msg_g_0\",\"name\":\"bash\",\"input\":{}}}\n"
+    "\n"
+    "event: content_block_delta\n"
+    "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"description\\\":\\\"list files\\\",\\\"command\\\":\\\"ls -la\\\",\\\"timeout\\\":10}\"}}\n"
+    "\n"
+    "event: content_block_stop\n"
+    "data: {\"type\":\"content_block_stop\",\"index\":2}\n"
+    "\n"
+    "event: message_delta\n"
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":8}}\n"
+    "\n"
+    "event: message_stop\n"
+    "data: {\"type\":\"message_stop\"}\n"
+    "\n";
+    TEST_ASSERT(golden_equal("anthropic_normal", out, golden));
+    free(out);
+    tool_calls_free(&calls);
+    request_free(&r);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+/* SRV-1: a tool call that starts inside <think> and is cut before it is
+ * complete must still end the stream: close the thinking block, then send
+ * message_delta + message_stop (finish_live used to fail open_block(TEXT)). */
+static void test_anthropic_live_stream_incomplete_tool_in_thinking_terminates(void) {
+    int sv[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] < 0 || sv[1] < 0) return;
+    request r;
+    request_init(&r, REQ_CHAT, 128);
+    r.api = API_ANTHROPIC;
+    r.stream = true;
+    r.think_mode = P36_THINK_HIGH;
+    r.has_tools = true;
+    r.tool_orders = make_bash_order();
+
+    anthropic_stream st;
+    TEST_ASSERT(anthropic_sse_start_live(sv[0], &r, "msg_i", 10, &st));
+    const char *raw = "<think>plan it\n" P36_TOOL_CALLS_START "\n"
+                      P36_INVOKE_START "bash>\n";
+    TEST_ASSERT(anthropic_sse_stream_update(sv[0], &r, "msg_i", &st, raw, strlen(raw), false));
+    TEST_ASSERT(anthropic_sse_finish_live(sv[0], &r, "msg_i", &st, raw, strlen(raw),
+                                          NULL, "length", 7));
+    shutdown(sv[0], SHUT_WR);
+    char *out = read_socket_text(sv[1]);
+    const char *thinking = strstr(out, "\"thinking\":\"plan it\"");
+    const char *sig = strstr(out, "\"type\":\"signature_delta\"");
+    const char *stop = strstr(out, "event: message_stop");
+    TEST_ASSERT(thinking != NULL);
+    TEST_ASSERT(sig != NULL);
+    TEST_ASSERT(stop != NULL);
+    TEST_ASSERT(strstr(out, "event: message_delta") != NULL);
+    TEST_ASSERT(thinking && sig && stop && thinking < sig && sig < stop);
+    TEST_ASSERT(strstr(out, P36_TOOL_CALLS_START) == NULL);
+    free(out);
     request_free(&r);
     close(sv[0]);
     close(sv[1]);
@@ -4076,6 +4204,82 @@ static void test_batched_decode_cancellation(void) {
     pthread_cond_destroy(&s.model_cv);
 }
 
+/* SRV-11: an eval woken by shutdown must withdraw its pending decode, or the
+ * slot stays "pending" and the server counter stays incremented. */
+static void test_batched_eval_stop_withdraws_pending_decode(void) {
+    server s = {0};
+    server_slot slot = {0};
+    s.slots = &slot;
+    s.slot_count = 1;
+    s.batched_mode = true;
+    pthread_mutex_init(&s.model_mu, NULL);
+    pthread_cond_init(&s.model_cv, NULL);
+    char err[64];
+    g_stop_requested = 1;
+    TEST_ASSERT(server_eval_token(&s, &slot, 1, err, sizeof(err)) != 0);
+    g_stop_requested = 0;
+    TEST_ASSERT(!slot.decode_pending);
+    TEST_ASSERT(s.decode_pending == 0);
+    pthread_cond_destroy(&s.model_cv);
+    pthread_mutex_destroy(&s.model_mu);
+}
+
+/* SRV-13: a chunked POST has no Content-Length; it must be refused, not read
+ * as an empty body.  A plain Content-Length POST must still parse. */
+static void test_read_http_request_rejects_chunked_body(void) {
+    static const char chunked[] =
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    static const char plain[] =
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+        "Content-Length: 5\r\n\r\nhello";
+    int sv[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] < 0 || sv[1] < 0) return;
+    TEST_ASSERT(send_all(sv[0], chunked, sizeof(chunked) - 1));
+    http_request hr = {0};
+    TEST_ASSERT(!read_http_request(sv[1], &hr));
+    TEST_ASSERT(hr.chunked);
+    http_request_free(&hr);
+    TEST_ASSERT(send_all(sv[0], plain, sizeof(plain) - 1));
+    TEST_ASSERT(read_http_request(sv[1], &hr));
+    TEST_ASSERT(!hr.chunked && hr.body_len == 5 && !strcmp(hr.body, "hello"));
+    http_request_free(&hr);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+/* SRV-9: opening the disk cache sweeps <sha>.kv.tmp.<pid> orphans of dead
+ * writers, but keeps a live writer's temp file and real checkpoints. */
+static void test_kv_cache_open_sweeps_dead_writer_tmp_files(void) {
+    char dir[] = "/tmp/p36-kvsweep-XXXXXX";
+    if (!mkdtemp(dir)) { TEST_ASSERT(false); return; }
+    pid_t child = fork();
+    if (child == 0) _exit(0);
+    int wst = 0;
+    TEST_ASSERT(waitpid(child, &wst, 0) == child);
+
+    const char *sha = "0123456789abcdef0123456789abcdef01234567";
+    char dead[256], live[256], keep[256];
+    snprintf(dead, sizeof(dead), "%s/%s.kv.tmp.%ld", dir, sha, (long)child);
+    snprintf(live, sizeof(live), "%s/%s.kv.tmp.%ld", dir, sha, (long)getpid());
+    snprintf(keep, sizeof(keep), "%s/%s.kv", dir, sha);
+    const char *paths[3] = {dead, live, keep};
+    for (int i = 0; i < 3; i++) {
+        FILE *fp = fopen(paths[i], "wb");
+        TEST_ASSERT(fp != NULL);
+        if (fp) { fputs("x", fp); fclose(fp); }
+    }
+    kv_disk_cache kc;
+    TEST_ASSERT(kv_cache_open(&kc, dir, 64, false, kv_cache_default_options()));
+    TEST_ASSERT(access(dead, F_OK) != 0);
+    TEST_ASSERT(access(live, F_OK) == 0);
+    TEST_ASSERT(access(keep, F_OK) == 0);
+    kv_cache_close(&kc);
+    for (int i = 0; i < 3; i++) unlink(paths[i]);
+    rmdir(dir);
+}
+
 static const char test_inline_png_base64[] =
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8DQwMDAwMAEIkAYABglAYOd/VRoAAAAAElFTkSuQmCC";
 
@@ -4374,6 +4578,8 @@ static void test_jinja_chat_template_and_json_tool_call(void) {
 }
 
 static void p36_server_unit_tests_run(void) {
+    test_anthropic_live_stream_normal_golden();
+    test_anthropic_live_stream_incomplete_tool_in_thinking_terminates();
     test_jinja_chat_template_and_json_tool_call();
     test_openai_inline_image_content();
     test_http_image_paths_and_urls_are_rejected();
@@ -4386,6 +4592,9 @@ static void p36_server_unit_tests_run(void) {
     test_batched_prefill_round_robin();
     test_batched_slot_scoring();
     test_batched_decode_cancellation();
+    test_batched_eval_stop_withdraws_pending_decode();
+    test_read_http_request_rejects_chunked_body();
+    test_kv_cache_open_sweeps_dead_writer_tmp_files();
     test_request_defaults_match_qwen_api();
     test_explicit_sampling_wins_in_thinking_mode();
     test_request_peek_model();

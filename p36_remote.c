@@ -291,7 +291,7 @@ typedef struct {
     bool chunked;
     bool sse;
     /* chunk decoder */
-    int cstate;            /* 0 size line, 1 data, 2 CRLF */
+    int cstate;            /* 0 size line, 1 data, 2 CRLF, 3 end (trailers ignored) */
     size_t cleft;
     char csize[24];
     int csz_len;
@@ -300,13 +300,14 @@ typedef struct {
 static void body_feed(http_state *st, const char *d, size_t n, sink_fn sink, void *ud) {
     if (!st->chunked) { sink(ud, d, n); return; }
     for (size_t i = 0; i < n;) {
+        if (st->cstate == 3) return;
         if (st->cstate == 0) {
             char c = d[i++];
             if (c == '\n') {
                 st->csize[st->csz_len] = 0;
                 st->cleft = strtoul(st->csize, NULL, 16);
                 st->csz_len = 0;
-                st->cstate = st->cleft ? 1 : 2;
+                st->cstate = st->cleft ? 1 : 3;
             } else if (c != '\r' && st->csz_len < (int)sizeof(st->csize) - 1) {
                 st->csize[st->csz_len++] = c;
             }
@@ -438,7 +439,7 @@ typedef struct {
 } chat_sink;
 
 static p36_remote_call *call_slot(p36_remote_result *r, int idx) {
-    if (idx < 0 || idx > 63) idx = 0;
+    if (idx < 0 || idx > 63) return NULL;   /* never fold a distinct call into call 0 */
     if (idx >= r->ncalls) {
         r->calls = realloc(r->calls, (size_t)(idx + 1) * sizeof(*r->calls));
         if (!r->calls) abort();
@@ -491,6 +492,10 @@ static void take_chunk(chat_sink *c, const p36_jv *j) {
     for (int i = 0; i < p36_jv_count(tcs); i++) {
         const p36_jv *tc = p36_jv_at(tcs, i);
         p36_remote_call *slot = call_slot(r, (int)jnum(p36_jv_get(tc, "index"), i));
+        if (!slot) {
+            if (!r->err[0]) snprintf(r->err, sizeof(r->err), "server sent too many tool calls");
+            continue;
+        }
         const p36_jv *id = p36_jv_get(tc, "id");
         if (id && id->type == 's') { free(slot->id); slot->id = strdup(id->s); }
         const p36_jv *fn = p36_jv_get(tc, "function");

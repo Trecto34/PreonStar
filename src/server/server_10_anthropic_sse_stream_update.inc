@@ -47,7 +47,9 @@ static bool anthropic_sse_stream_update(int fd, const request *r, const char *id
         }
 
         if (tool_before_close) {
-            if (complete_tool) {
+            /* On final an incomplete call will never complete: close the
+             * thinking block anyway so finish_live can end the message. */
+            if (complete_tool || final) {
                 if (!anthropic_sse_close_block_live(fd, id, st)) return false;
                 st->emit_pos = (size_t)(tool - raw);
                 st->mode = ANTH_STREAM_SUPPRESS;

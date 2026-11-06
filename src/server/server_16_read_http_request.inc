@@ -25,6 +25,10 @@ static bool read_http_request(int fd, http_request *r) {
     char *q = strchr(r->path, '?');
     if (q) *q = '\0';
 
+    if (header_is_chunked(b.ptr, (size_t)hend)) {
+        r->chunked = true;
+        goto fail;
+    }
     long clen = content_length(b.ptr, (size_t)hend);
     if (clen < 0 || (size_t)clen > max_body) goto fail;
     while (b.len < (size_t)hend + (size_t)clen) {
@@ -474,7 +478,8 @@ static void *client_main(void *arg) {
 
     http_request hr = {0};
     if (!read_http_request(fd, &hr)) {
-        http_error(fd, 400, "bad HTTP request");
+        if (hr.chunked) http_error(fd, 501, "chunked request bodies are not supported; send Content-Length");
+        else http_error(fd, 400, "bad HTTP request");
         goto done;
     }
 

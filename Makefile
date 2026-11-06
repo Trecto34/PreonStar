@@ -27,6 +27,7 @@ QWEN27B_GATE_GEN ?= 32
 QWEN27B_LLAMA_PROMPT ?= 64
 QWEN27B_LLAMA_BENCH ?= $(LLAMA_CPP_DIR)/build-vulkan/bin/llama-bench
 SAMPLING_TEST := tests/test_sampling
+WEB_STATE_TEST := tests/test_web_state
 OPENROUTER_MODEL ?= qwen/qwen3.6-35b-a3b
 OPENROUTER_OUT ?= gguf-tools/quality-testing/local/openrouter
 OPENROUTER_COUNT ?= 100
@@ -874,6 +875,9 @@ tests/test_sampling.o: tests/test_sampling.c p36.h p36_cli_args.h
 $(SAMPLING_TEST): tests/test_sampling.o p36_sampling_test_core.o p36_ssd_cpu.o p36_prompt_prefix.o p36_image.o
 	$(CC) $(LDFLAGS) $(DARWIN_MIN_FLAG) -o $@ $^ $(LDLIBS)
 
+$(WEB_STATE_TEST): tests/test_web_state.c p36_web.c p36_web.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -D_GNU_SOURCE -I. -o $@ $< $(LDLIBS)
+
 linenoise_cpu.o: linenoise.c linenoise.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ linenoise.c
 
@@ -884,7 +888,8 @@ test-cli: all p36_agent_test p36-quality-score $(SAMPLING_TEST) $(TOPK8_TEST) te
 	$(MAKE) -C gguf-tools qwen36-quantize
 	python3 tests/test_cli_arguments.py
 
-test: all p36_agent_test $(SAMPLING_TEST) $(TOPK8_TEST) test-quality test-cli
+test: all p36_agent_test $(WEB_STATE_TEST) $(SAMPLING_TEST) $(TOPK8_TEST) test-quality test-cli
+	./$(WEB_STATE_TEST)
 	./p36-eval --self-test-extractors
 	./p36_agent_test
 	python3 tests/test_agent_password.py ./p36_agent_test
@@ -903,7 +908,8 @@ test-unit: test
 # model nor a Vulkan device, so a red run means the tree is broken rather than
 # the machine is bare.  This is what .github/workflows/ci.yml runs; the
 # model-backed suites in "test" stay on a workstation.
-check: all
+check: all $(WEB_STATE_TEST)
+	./$(WEB_STATE_TEST)
 	./p36_test --quant-primitives
 	./p36_test --ssd-cache-shrink
 	./p36_test --qwen-tool-call-format
