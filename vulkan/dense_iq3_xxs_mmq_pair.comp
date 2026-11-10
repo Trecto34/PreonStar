@@ -72,6 +72,30 @@ vec4 unpack_i8(uint v) {
                 float(bitfieldExtract(int(v), 24, 8)));
 }
 
+#define P36_FMA_SLICE(NTP) \
+[[unroll]] for (uint k = 0u; k < BK / 2u; k++) { \
+                f16vec2 bv[4]; \
+                [[unroll]] for (uint st = 0u; st < (NTP); st++) \
+                    [[unroll]] for (uint t = 0u; t < 2u; t++) \
+                        bv[st * 2u + t] = buf_b[(warp_tok * 32u + st * 16u + \
+                            thread_tok * 2u + t) * STRIDE + k]; \
+                [[unroll]] for (uint m = 0u; m < 2u; m++) { \
+                    f16vec2 av[8]; \
+                    [[unroll]] for (uint sr = 0u; sr < 2u; sr++) \
+                        [[unroll]] for (uint r = 0u; r < 4u; r++) \
+                            av[sr * 4u + r] = buf_a[m * BM * STRIDE + \
+                                (sr * 16u + thread_row * 4u + r) * STRIDE + k]; \
+                    [[unroll]] for (uint tp = 0u; tp < (NTP); tp++) \
+                        [[unroll]] for (uint rr = 0u; rr < 8u; rr++) \
+                            sum[m * 16u + tp * 8u + rr] = \
+                                fma(f16vec2(av[rr].x), \
+                                    f16vec2(bv[2u * tp].x, bv[2u * tp + 1u].x), \
+                                    fma(f16vec2(av[rr].y), \
+                                        f16vec2(bv[2u * tp].y, bv[2u * tp + 1u].y), \
+                                        sum[m * 16u + tp * 8u + rr])); \
+                } \
+            }
+
 void main(void) {
     uint lid = gl_LocalInvocationID.x;
     uint row0 = gl_WorkGroupID.x * BM;
@@ -81,6 +105,8 @@ void main(void) {
     uint warp_tok = wave;
     uint thread_row = lane & 3u;
     uint thread_tok = lane >> 2u;
+    bool wave_live = tok0 + warp_tok * 32u < pc.n_tok;
+    bool hi_live = tok0 + warp_tok * 32u + 16u < pc.n_tok;
     f16vec2 sum[32];
     [[unroll]] for (uint i = 0u; i < 32u; i++) sum[i] = f16vec2(0.0);
     for (uint i = lid; i < 256u; i += 128u)
@@ -157,27 +183,17 @@ void main(void) {
             }
             barrier();
 
-            [[unroll]] for (uint k = 0u; k < BK / 2u; k++) {
-                f16vec2 bv[4];
-                [[unroll]] for (uint st = 0u; st < 2u; st++)
-                    [[unroll]] for (uint t = 0u; t < 2u; t++)
-                        bv[st * 2u + t] = buf_b[(warp_tok * 32u + st * 16u +
-                            thread_tok * 2u + t) * STRIDE + k];
-                [[unroll]] for (uint m = 0u; m < 2u; m++) {
-                    f16vec2 av[8];
-                    [[unroll]] for (uint sr = 0u; sr < 2u; sr++)
-                        [[unroll]] for (uint r = 0u; r < 4u; r++)
-                            av[sr * 4u + r] = buf_a[m * BM * STRIDE +
-                                (sr * 16u + thread_row * 4u + r) * STRIDE + k];
-                    [[unroll]] for (uint tp = 0u; tp < 2u; tp++)
-                        [[unroll]] for (uint rr = 0u; rr < 8u; rr++)
-                            sum[m * 16u + tp * 8u + rr] =
-                                fma(f16vec2(av[rr].x),
-                                    f16vec2(bv[2u * tp].x, bv[2u * tp + 1u].x),
-                                    fma(f16vec2(av[rr].y),
-                                        f16vec2(bv[2u * tp].y, bv[2u * tp + 1u].y),
-                                        sum[m * 16u + tp * 8u + rr]));
-                }
+            /* A wave whose 32-token slice lies past n_tok (a short batch in
+             * the 128-token tile) only multiplies zero padding and stores
+             * nothing: skip its FMAs.  Each lane owns two tokens in each
+             * 16-token half of the slice, so when only the first half is live
+             * the second token pair is skipped too.  Both tests are
+             * wave-uniform and every wave still joins every barrier; the
+             * live outputs keep their FMA chain, so they are bit-identical. */
+            if (hi_live) {
+                P36_FMA_SLICE(2u)
+            } else if (wave_live) {
+                P36_FMA_SLICE(1u)
             }
             barrier();
         }

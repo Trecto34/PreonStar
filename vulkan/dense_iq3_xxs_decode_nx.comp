@@ -40,7 +40,10 @@ layout(push_constant) uniform Push {
 } pc;
 
 const uint ROWS = 4u;
-const uint NTOK = 2u;
+#ifndef P36_NX_NTOK
+#define P36_NX_NTOK 2u
+#endif
+const uint NTOK = P36_NX_NTOK;
 const uint Q8K_WORDS = 74u;
 const uint TAB_IQ3XXS_GRID = 3104u;
 
@@ -79,7 +82,14 @@ void main(void) {
      * guards every row-indexed loop so a partial chunk neither reads a q8 row
      * past the end of the activation buffer nor stores one. */
     for (uint t0 = 0u; t0 < pc.n_tok; t0 += NTOK) {
+#ifdef P36_NX_FIXED
+        /* n_tok == NTOK build (the usual MTP draft-1 verify): a constant row
+         * count keeps the per-row loops free of the uniform branches the
+         * guarded form leaves inside the weight loop.  Same chains. */
+        const uint tn = NTOK;
+#else
         const uint tn = min(NTOK, pc.n_tok - t0);
+#endif
         float acc[ROWS][NTOK];
         for (uint r = 0u; r < ROWS; r++)
             for (uint t = 0u; t < NTOK; t++) acc[r][t] = 0.0;

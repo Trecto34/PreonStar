@@ -301,8 +301,17 @@ static int p36_vk_matmul_dense(p36_vk_kernel *kernel,
                                       kernel == &p36_vk.matmul_f32_fast_w256)
                  : "dense_f32";
     }
+    /* A prefill batch takes the 8-token build of the fast f32 kernel: same
+     * per-token arithmetic, one weight-row load per 8 tokens.
+     * P36_VK_F32_FAST_T8=0 keeps one workgroup per (row, token). */
+    uint32_t grid_y = (uint32_t)n_tok;
+    if (kernel == &p36_vk.matmul_f32_fast && n_tok >= 8u &&
+        p36_vk_env_default_on("P36_VK_F32_FAST_T8")) {
+        kernel = &p36_vk.matmul_f32_fast_t8;
+        grid_y = ((uint32_t)n_tok + 7u) / 8u;
+    }
     int ok = p36_vk_run_unlocked(op, kernel, bindings, &push, sizeof(push),
-                                 (uint32_t)out_dim, (uint32_t)n_tok, 1);
+                                 (uint32_t)out_dim, grid_y, 1);
     pthread_mutex_unlock(&p36_vk_mu);
     return ok;
 }

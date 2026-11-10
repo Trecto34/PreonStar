@@ -52,6 +52,53 @@ layout(push_constant) uniform Push {
  * wrote past the array. */
 shared float sh_sum[P36_MFF_LOCAL / 32u];
 
+#ifdef P36_MFF_TOK
+/* Prefill build: one workgroup serves P36_MFF_TOK tokens of a row, so the
+ * weight row is loaded once for all of them and the grid is that many times
+ * smaller (the router ran 131k 64-thread workgroups per 512-token chunk).
+ * Each token keeps exactly the one-token kernel's arithmetic: the same lane
+ * partial sums in the same order, then the same subgroup reduction and
+ * subgroup combine, so every output is bit-identical and expert routing
+ * cannot move. */
+const uint TOK = uint(P36_MFF_TOK);
+shared float sh_sum_t[TOK * (P36_MFF_LOCAL / 32u)];
+
+void main(void) {
+    uint out_row = gl_WorkGroupID.x;
+    uint tok0 = gl_WorkGroupID.y * TOK;
+    uint lid = gl_LocalInvocationID.x;
+    if (out_row >= pc.out_dim || tok0 >= pc.n_tok) return;
+
+    uint n4 = pc.in_dim >> 2u;
+    uint wbase = out_row * n4;
+    uint last = pc.n_tok - 1u;
+    float acc[TOK];
+    for (uint t = 0u; t < TOK; t++) acc[t] = 0.0;
+    for (uint i = lid; i < n4; i += uint(P36_MFF_LOCAL)) {
+        vec4 wv = w[wbase + i];
+        /* A token slot past n_tok re-reads the last token; it is not stored. */
+        for (uint t = 0u; t < TOK; t++)
+            acc[t] += dot(wv, x[min(tok0 + t, last) * n4 + i]);
+    }
+    for (uint t = 0u; t < TOK; t++) acc[t] = subgroupAdd(acc[t]);
+    if (gl_NumSubgroups > 1u) {
+        if (subgroupElect())
+            for (uint t = 0u; t < TOK; t++)
+                sh_sum_t[t * (P36_MFF_LOCAL / 32u) + gl_SubgroupID] = acc[t];
+        barrier();
+        if (lid == 0u) {
+            for (uint t = 0u; t < TOK; t++)
+                for (uint i = 1u; i < gl_NumSubgroups; i++)
+                    acc[t] += sh_sum_t[t * (P36_MFF_LOCAL / 32u) + i];
+        }
+    }
+    if (lid == 0u) {
+        for (uint t = 0u; t < TOK; t++)
+            if (tok0 + t < pc.n_tok)
+                y[(tok0 + t) * pc.out_dim + out_row] = acc[t] * pc.scale;
+    }
+}
+#else
 void main(void) {
     uint out_row = gl_WorkGroupID.x;
     uint tok = gl_WorkGroupID.y;
@@ -75,3 +122,4 @@ void main(void) {
     }
     if (lid == 0u) y[tok * pc.out_dim + out_row] = acc * pc.scale;
 }
+#endif

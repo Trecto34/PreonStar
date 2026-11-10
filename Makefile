@@ -58,6 +58,7 @@ VULKAN_SHADERS := \
 	vulkan/vision_attention.spv \
 	vulkan/matmul_f32.spv \
 	vulkan/matmul_f32_fast.spv \
+	vulkan/matmul_f32_fast_t8.spv \
 	vulkan/matmul_f32_fast_w256.spv \
 	vulkan/add.spv \
 	vulkan/hadamard_prepare.spv \
@@ -124,6 +125,8 @@ VULKAN_SHADERS := \
 	vulkan/attn_prefill_qtile2_gqa6.spv \
 	vulkan/attn_prefill_fa_gqa6.spv \
 	vulkan/attn_prefill_fa_gqa8.spv \
+	vulkan/attn_decode_fa_gqa6.spv \
+	vulkan/attn_decode_fa_gqa8.spv \
 	vulkan/attn_combine.spv \
 	vulkan/moe_gate_up.spv \
 	vulkan/moe_gate_up_iq2s.spv \
@@ -167,6 +170,9 @@ VULKAN_SHADERS := \
 	vulkan/dense_iq3_xxs_decode.spv \
 	vulkan/dense_iq3_xxs_decode_r4.spv \
 	vulkan/dense_iq3_xxs_decode_nx.spv \
+	vulkan/dense_iq3_xxs_decode_nx2.spv \
+	vulkan/dense_iq3_xxs_decode_nx3.spv \
+	vulkan/dense_iq3_xxs_decode_nx4.spv \
 	vulkan/dense_iq3_xxs_mmq.spv \
 	vulkan/dense_iq3_xxs_mmq_pair.spv \
 	vulkan/dense_iq3_s_decode.spv \
@@ -179,6 +185,8 @@ VULKAN_SHADERS := \
 	vulkan/dense_iq4_xs.spv \
 	vulkan/dense_iq4_xs_decode.spv \
 	vulkan/dense_iq4_xs_rows.spv \
+	vulkan/dense_iq4_xs_rows2.spv \
+	vulkan/dense_iq4_xs_rows3.spv \
 	vulkan/dense_iq4_xs_mmq.spv \
 	vulkan/dense_iq1_m.spv \
 	vulkan/dense_extra_decode.spv \
@@ -208,9 +216,13 @@ VULKAN_SHADERS := \
 	vulkan/dense_q5k_rows.spv \
 	vulkan/dense_q6k_rows.spv \
 	vulkan/dense_q3k_rows2.spv \
+	vulkan/dense_q3k_rows3.spv \
 	vulkan/dense_q4k_rows2.spv \
+	vulkan/dense_q4k_rows3.spv \
 	vulkan/dense_q5k_rows2.spv \
+	vulkan/dense_q5k_rows3.spv \
 	vulkan/dense_q6k_rows2.spv \
+	vulkan/dense_q6k_rows3.spv \
 	vulkan/moe_reduce.spv \
 	vulkan/moe_gate_up_gemm_t16.spv \
 	vulkan/moe_gate_up_gemm_iq2s_t16.spv \
@@ -261,6 +273,15 @@ vulkan/dense_iq3_xxs_decode_r4.spv: vulkan/dense_iq3_xxs_decode.comp
 vulkan/dense_iq3_xxs_decode_nx.spv: vulkan/dense_iq3_xxs_decode_nx.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
+vulkan/dense_iq3_xxs_decode_nx2.spv: vulkan/dense_iq3_xxs_decode_nx.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_NX_FIXED=1 -o $@ $<
+
+vulkan/dense_iq3_xxs_decode_nx3.spv: vulkan/dense_iq3_xxs_decode_nx.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_NX_FIXED=1 -DP36_NX_NTOK=3u -o $@ $<
+
+vulkan/dense_iq3_xxs_decode_nx4.spv: vulkan/dense_iq3_xxs_decode_nx.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_NX_FIXED=1 -DP36_NX_NTOK=4u -o $@ $<
+
 vulkan/dense_iq3_xxs_mmq.spv: vulkan/dense_iq3_xxs_mmq.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
@@ -296,6 +317,12 @@ vulkan/dense_iq4_xs_decode.spv: vulkan/dense_iq4_xs_decode.comp
 
 vulkan/dense_iq4_xs_rows.spv: vulkan/dense_iq4_xs_rows.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_TOK=4 -DP36_BOUNDS=0 -o $@ $<
+
+vulkan/dense_iq4_xs_rows2.spv: vulkan/dense_iq4_xs_rows.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_TOK=2 -DP36_BOUNDS=0 -o $@ $<
+
+vulkan/dense_iq4_xs_rows3.spv: vulkan/dense_iq4_xs_rows.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_TOK=3 -DP36_BOUNDS=0 -o $@ $<
 
 vulkan/dense_iq4_xs_mmq.spv: vulkan/dense_iq4_xs_mmq.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
@@ -375,11 +402,17 @@ vulkan/dense_q3k_rows.spv: vulkan/dense_kquant_decode.comp
 vulkan/dense_q3k_rows2.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q3K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=2 -o $@ $<
 
+vulkan/dense_q3k_rows3.spv: vulkan/dense_kquant_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q3K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=3 -o $@ $<
+
 vulkan/dense_q4k_rows.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q4K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=4 -o $@ $<
 
 vulkan/dense_q4k_rows2.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q4K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=2 -o $@ $<
+
+vulkan/dense_q4k_rows3.spv: vulkan/dense_kquant_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q4K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=3 -o $@ $<
 
 vulkan/dense_q5k_rows.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q5K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=4 -o $@ $<
@@ -387,11 +420,17 @@ vulkan/dense_q5k_rows.spv: vulkan/dense_kquant_decode.comp
 vulkan/dense_q5k_rows2.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q5K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=2 -o $@ $<
 
+vulkan/dense_q5k_rows3.spv: vulkan/dense_kquant_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q5K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=3 -o $@ $<
+
 vulkan/dense_q6k_rows.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q6K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=4 -o $@ $<
 
 vulkan/dense_q6k_rows2.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q6K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=2 -o $@ $<
+
+vulkan/dense_q6k_rows3.spv: vulkan/dense_kquant_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q6K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS_TOK=3 -o $@ $<
 
 vulkan/dense_q5k_decode.spv: vulkan/dense_kquant_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q5K_ONLY=1 -DP36_BOUNDS=0 -o $@ $<
@@ -549,6 +588,12 @@ vulkan/attn_prefill_fa_gqa6.spv: vulkan/attn_prefill_fa.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=6 -o $@ $<
 
 vulkan/attn_prefill_fa_gqa8.spv: vulkan/attn_prefill_fa.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=8 -o $@ $<
+
+vulkan/attn_decode_fa_gqa6.spv: vulkan/attn_decode_fa.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=6 -o $@ $<
+
+vulkan/attn_decode_fa_gqa8.spv: vulkan/attn_decode_fa.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=8 -o $@ $<
 
 # Vulkan is the default backend. CORE_OBJS holds the GPU engine; CPU_CORE_OBJS
@@ -818,11 +863,20 @@ rax.o: rax.c rax.h rax_malloc.h
 vulkan/%.spv: vulkan/%.comp
 	$(GLSLC) -O -o $@ $<
 
+vulkan/hadamard_prepare.spv: vulkan/hadamard_prepare.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/router_topk.spv: vulkan/router_topk.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
 vulkan/gdn_front.spv: vulkan/gdn_front.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/matmul_f32_fast.spv: vulkan/matmul_f32_fast.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/matmul_f32_fast_t8.spv: vulkan/matmul_f32_fast.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MFF_TOK=8 -o $@ $<
 
 # Wide variant: faster but not bit-exact (router gate). Opt-in at runtime.
 vulkan/matmul_f32_fast_w256.spv: vulkan/matmul_f32_fast.comp

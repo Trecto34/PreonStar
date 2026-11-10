@@ -94,7 +94,13 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
         head_dim <= 256 && (head_dim & 1u) == 0u) {
         /* GQA-tiled prefill: one workgroup reuses K/V across the query heads
          * sharing a KV head and folds eight spans into each partial. */
-        if (n_tok >= 2u && n_head / n_head_kv <= 8u &&
+        /* A 2..4 row micro-batch (the MTP verify) stays on the decode
+         * kernels below: the prefill tile costs ~4x a decode row there, and
+         * the decode path gives each row exactly its one-token result.
+         * P36_VK_ATTN_ROWS_DECODE=0 restores the tile. */
+        bool rows_decode = n_tok <= 4u && !p36_vk_attn_bidir &&
+                           p36_vk_env_default_on("P36_VK_ATTN_ROWS_DECODE");
+        if (n_tok >= 2u && !rows_decode && n_head / n_head_kv <= 8u &&
             p36_vk_use_attn_qtile()) {
             uint32_t sinks_pack = (has_sinks ? 1u : 0u) | (p36_vk_attn_bidir ? (kv_max << 1u) : 0u);
             uint32_t n_spans = (kv_max + 511u) / 512u;
@@ -200,6 +206,74 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
          * bit-identical to the fused kernel (span 0 seeds its max with the
          * sink), so gating on kv_max keeps per-token n_tok-invariance. */
         uint32_t sinks_pack = (has_sinks ? 1u : 0u) | (p36_vk_attn_bidir ? (kv_max << 1u) : 0u);
+
+        /* Long context: the decode FA tile (vulkan/attn_decode_fa.comp).  Its
+         * partials are per 1024/STREAMS-key span, folded by attn_combine. */
+        uint32_t fa_ratio = n_head / n_head_kv;
+        uint32_t fa_min = p36_vk_attn_decode_fa_min();
+        if (fa_min != 0u && kv_max >= fa_min && n_tok <= 4u && !p36_vk_attn_bidir &&
+            head_dim == 256u && (fa_ratio == 8u || fa_ratio == 6u) &&
+            k_cache_type == 1u && v_cache_type == 2u && p36_vk_have_subgroups(true)) {
+            uint32_t fa_group = P36_VK_ATTN_DECODE_FA_GROUP;
+            uint32_t spank = fa_group / (fa_ratio == 8u ? 4u : 8u);
+            uint32_t fa_spans = (kv_max + spank - 1u) / spank;
+            uint64_t part_bytes = (uint64_t)n_tok * n_head * fa_spans * (head_dim + 2u) * sizeof(float);
+            struct {
+                uint32_t pos0;
+                uint32_t n_head;
+                uint32_t n_head_kv;
+                uint32_t head_dim;
+                uint32_t n_spans;
+                uint32_t n_tok;
+                uint32_t has_sinks;
+                uint32_t k_type;
+                uint32_t v_type;
+                uint32_t k_row_bytes;
+                uint32_t v_row_bytes;
+                uint32_t tok0;
+            } qpush = { pos0, n_head, n_head_kv, head_dim, fa_spans, n_tok, sinks_pack,
+                        k_cache_type, v_cache_type, k_cache_row_bytes, v_cache_row_bytes, 0 };
+            struct {
+                uint32_t pos0;
+                uint32_t n_head;
+                uint32_t head_dim;
+                uint32_t n_spans;
+                uint32_t qg_stride;
+                uint32_t has_sinks;
+                uint32_t span_keys;
+                uint32_t tok0;
+            } cpush = { pos0, n_head, head_dim, fa_spans,
+                        (uint32_t)qg_stride, sinks_pack, spank, 0 };
+            pthread_mutex_lock(&p36_vk_mu);
+            p36_gpu_tensor *part = p36_vk.attn_part;
+            if (!part || p36_vk.attn_part_bytes < part_bytes) {
+                p36_vk_tensor_release_unlocked(p36_vk.attn_part);
+                part = p36_vk_tensor_alloc_scratch_unlocked(part_bytes);
+                p36_vk.attn_part = part;
+                p36_vk.attn_part_bytes = part ? part_bytes : 0;
+            }
+            p36_gpu_tensor *sinks_t = sinks ?
+                p36_vk_weight_get_unlocked(sinks, (uint64_t)n_head * sizeof(float)) :
+                (p36_gpu_tensor *)qg;
+            ok = part != NULL && sinks_t != NULL;
+            if (ok) {
+                const p36_gpu_tensor *qbind[5] = { q, k_cache, v_cache, sinks_t, part };
+                ok = p36_vk_run_unlocked("attn_decode_fa",
+                                         fa_ratio == 6u ? &p36_vk.attn_decode_fa_gqa6
+                                                        : &p36_vk.attn_decode_fa_gqa8,
+                                         qbind, &qpush, sizeof(qpush),
+                                         n_head_kv, n_tok, (kv_max + fa_group - 1u) / fa_group);
+            }
+            if (ok) {
+                const p36_gpu_tensor *cbind[4] = { part, qg, sinks_t, out };
+                ok = p36_vk_run_unlocked("attn_combine", &p36_vk.attn_combine,
+                                         cbind, &cpush, sizeof(cpush),
+                                         n_head, n_tok, 1);
+            }
+            pthread_mutex_unlock(&p36_vk_mu);
+            return ok;
+        }
+
         uint32_t span_keys = p36_vk_attn_span();
         uint32_t n_spans = (kv_max + span_keys - 1u) / span_keys;
         if (n_spans > 1u && head_dim <= 256u && p36_vk_use_attn_splitk()) {

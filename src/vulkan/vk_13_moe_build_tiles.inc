@@ -616,8 +616,14 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                     (uint32_t)out_dim, (uint32_t)n_tok,
                     (uint32_t)blocks, (uint32_t)row_bytes, scale,
                 };
+                /* The 4-row build stages and multiplies all four token
+                 * slots whatever n_tok is; a 2-row verify (the usual MTP
+                 * draft-1 cycle) takes the 2-row build, same per-row math. */
                 ok = p36_vk_run_unlocked(
-                    "dense_iq4_xs_rows", &p36_vk.dense_iq4_xs_rows,
+                    "dense_iq4_xs_rows",
+                    n_tok == 2u ? &p36_vk.dense_iq4_xs_rows2 :
+                    n_tok == 3u ? &p36_vk.dense_iq4_xs_rows3 :
+                                  &p36_vk.dense_iq4_xs_rows,
                     bindings, &push, sizeof(push),
                     ((uint32_t)out_dim + 3u) / 4u, 1, 1);
             } else {
@@ -754,7 +760,13 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                     fprintf(stderr, "IQ3F n_tok=%u in=%u out=%u nx\n",
                             (uint32_t)n_tok, (uint32_t)in_dim, (uint32_t)out_dim);
                 ok = p36_vk_run_unlocked(
-                    op, &p36_vk.dense_iq3_xxs_decode_nx,
+                    op, n_tok == 2u && p36_vk_env_default_on("P36_VK_DENSE_IQ3_NX2") ?
+                                      &p36_vk.dense_iq3_xxs_decode_nx2 :
+                        n_tok == 3u && p36_vk_env_default_on("P36_VK_DENSE_IQ3_NX3") ?
+                                      &p36_vk.dense_iq3_xxs_decode_nx3 :
+                        n_tok == 4u && p36_vk_env_default_on("P36_VK_DENSE_IQ3_NX4") ?
+                                      &p36_vk.dense_iq3_xxs_decode_nx4 :
+                                      &p36_vk.dense_iq3_xxs_decode_nx,
                     bindings, &push, sizeof(push),
                     ((uint32_t)out_dim + 3u) / 4u,
                     1, 1);

@@ -163,6 +163,8 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.dense_extra_decode_iq2xs);
     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_mmq);
     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_rows);
+    p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_rows2);
+    p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_rows3);
     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs_decode);
     p36_vk_kernel_destroy(&p36_vk.dense_iq4_xs);
     p36_vk_kernel_destroy(&p36_vk.dense_kquant_mmq);
@@ -177,9 +179,13 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.dense_q5k_rows);
     p36_vk_kernel_destroy(&p36_vk.dense_q6k_rows);
     p36_vk_kernel_destroy(&p36_vk.dense_q3k_rows2);
+    p36_vk_kernel_destroy(&p36_vk.dense_q3k_rows3);
     p36_vk_kernel_destroy(&p36_vk.dense_q4k_rows2);
+    p36_vk_kernel_destroy(&p36_vk.dense_q4k_rows3);
     p36_vk_kernel_destroy(&p36_vk.dense_q5k_rows2);
+    p36_vk_kernel_destroy(&p36_vk.dense_q5k_rows3);
     p36_vk_kernel_destroy(&p36_vk.dense_q6k_rows2);
+    p36_vk_kernel_destroy(&p36_vk.dense_q6k_rows3);
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_s_decode_r4);
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_s_decode_r1);
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_s_decode_full);
@@ -189,6 +195,9 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_xxs_mmq_pair);
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_xxs_decode_r4);
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_xxs_decode_nx);
+    p36_vk_kernel_destroy(&p36_vk.dense_iq3_xxs_decode_nx2);
+    p36_vk_kernel_destroy(&p36_vk.dense_iq3_xxs_decode_nx3);
+    p36_vk_kernel_destroy(&p36_vk.dense_iq3_xxs_decode_nx4);
     p36_vk_kernel_destroy(&p36_vk.dense_iq3_xxs_decode);
     p36_vk_kernel_destroy(&p36_vk.moe_matvec_fast);
     p36_vk_kernel_destroy(&p36_vk.moe_matvec);
@@ -246,6 +255,8 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.attn_prefill_qtile2_gqa6);
     p36_vk_kernel_destroy(&p36_vk.attn_prefill_fa_gqa6);
     p36_vk_kernel_destroy(&p36_vk.attn_prefill_fa_gqa8);
+    p36_vk_kernel_destroy(&p36_vk.attn_decode_fa_gqa6);
+    p36_vk_kernel_destroy(&p36_vk.attn_decode_fa_gqa8);
     p36_vk_kernel_destroy(&p36_vk.attn_combine);
     p36_vk_kernel_destroy(&p36_vk.attn_reduce);
     p36_vk_kernel_destroy(&p36_vk.attn_post);
@@ -302,6 +313,7 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.hadamard_prepare);
     p36_vk_kernel_destroy(&p36_vk.matmul_f32);
     p36_vk_kernel_destroy(&p36_vk.matmul_f32_fast);
+    p36_vk_kernel_destroy(&p36_vk.matmul_f32_fast_t8);
     p36_vk_kernel_destroy(&p36_vk.matmul_f32_fast_w256);
     p36_vk_kernel_destroy(&p36_vk.matmul_f16);
     p36_vk_kernel_destroy(&p36_vk.matmul_bf16);

@@ -156,6 +156,7 @@ typedef struct {
     p36_vk_kernel vision_attention;
     p36_vk_kernel matmul_f32;
     p36_vk_kernel matmul_f32_fast;
+    p36_vk_kernel matmul_f32_fast_t8;
     p36_vk_kernel matmul_f32_fast_w256;
     p36_vk_kernel add;
     p36_vk_kernel directional_steering;
@@ -215,6 +216,8 @@ typedef struct {
     p36_vk_kernel attn_prefill_qtile2_gqa6;
     p36_vk_kernel attn_prefill_fa_gqa6;
     p36_vk_kernel attn_prefill_fa_gqa8;
+    p36_vk_kernel attn_decode_fa_gqa6;
+    p36_vk_kernel attn_decode_fa_gqa8;
     p36_vk_kernel attn_combine;
     p36_vk_kernel moe_gate_up;
     p36_vk_kernel moe_gate_up_iq2s;
@@ -272,6 +275,9 @@ typedef struct {
     p36_vk_kernel dense_iq3_xxs_decode;
     p36_vk_kernel dense_iq3_xxs_decode_r4;
     p36_vk_kernel dense_iq3_xxs_decode_nx;
+    p36_vk_kernel dense_iq3_xxs_decode_nx2;
+    p36_vk_kernel dense_iq3_xxs_decode_nx3;
+    p36_vk_kernel dense_iq3_xxs_decode_nx4;
     p36_vk_kernel dense_iq3_xxs_mmq;
     p36_vk_kernel dense_iq3_xxs_mmq_pair;
     p36_vk_kernel dense_iq3_s_decode;
@@ -284,6 +290,8 @@ typedef struct {
     p36_vk_kernel dense_iq4_xs;
     p36_vk_kernel dense_iq4_xs_decode;
     p36_vk_kernel dense_iq4_xs_rows;
+    p36_vk_kernel dense_iq4_xs_rows2;
+    p36_vk_kernel dense_iq4_xs_rows3;
     p36_vk_kernel dense_iq4_xs_mmq;
     p36_vk_kernel dense_iq1_m;
     p36_vk_kernel dense_extra_decode;
@@ -314,9 +322,13 @@ typedef struct {
     p36_vk_kernel dense_q5k_rows;
     p36_vk_kernel dense_q6k_rows;
     p36_vk_kernel dense_q3k_rows2;
+    p36_vk_kernel dense_q3k_rows3;
     p36_vk_kernel dense_q4k_rows2;
+    p36_vk_kernel dense_q4k_rows3;
     p36_vk_kernel dense_q5k_rows2;
+    p36_vk_kernel dense_q5k_rows3;
     p36_vk_kernel dense_q6k_rows2;
+    p36_vk_kernel dense_q6k_rows3;
     p36_vk_kernel moe_reduce;
     p36_vk_kernel moe_down_route_reduce;
     p36_vk_kernel ffn_tail;

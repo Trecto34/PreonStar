@@ -1,0 +1,7 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    3     205.58         0.170     23.03          0.040     /tmp/claude-1000/-home-server-q36/4480367a-996c-45c3-8624-5ab6a182687b/scratchpad/base/p36-bench
+B    3     207.11         0.050     23.08          0.030     ./p36-bench
+
+B vs A prefill: +0.74%   decode: +0.22%   (gate: +1.50%)
+verdict: FAIL (prefill)

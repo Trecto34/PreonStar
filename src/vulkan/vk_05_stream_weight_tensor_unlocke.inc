@@ -228,6 +228,7 @@ int p36_gpu_init(void) {
     p36_vk.vision_attention = P36_VK_KERNEL("vulkan/vision_attention.spv", 2, 4, 1u << 1);
     p36_vk.matmul_f32 = P36_VK_KERNEL("vulkan/matmul_f32.spv", 3, 16, 1u << 2);
     p36_vk.matmul_f32_fast = P36_VK_KERNEL("vulkan/matmul_f32_fast.spv", 3, 16, 1u << 2);
+    p36_vk.matmul_f32_fast_t8 = P36_VK_KERNEL("vulkan/matmul_f32_fast_t8.spv", 3, 16, 1u << 2);
     p36_vk.matmul_f32_fast_w256 = P36_VK_KERNEL("vulkan/matmul_f32_fast_w256.spv", 3, 16, 1u << 2);
     p36_vk.add = P36_VK_KERNEL("vulkan/add.spv", 3, 4, 1u << 2);
     p36_vk.fwht = P36_VK_KERNEL("vulkan/fwht.spv", 2, 8, 1u << 1);
@@ -303,6 +304,8 @@ int p36_gpu_init(void) {
     p36_vk.attn_prefill_qtile2_gqa6 = P36_VK_KERNEL("vulkan/attn_prefill_qtile2_gqa6.spv", 5, 48, 1u << 4);
     p36_vk.attn_prefill_fa_gqa6 = P36_VK_KERNEL("vulkan/attn_prefill_fa_gqa6.spv", 5, 48, 1u << 4);
     p36_vk.attn_prefill_fa_gqa8 = P36_VK_KERNEL("vulkan/attn_prefill_fa_gqa8.spv", 5, 48, 1u << 4);
+    p36_vk.attn_decode_fa_gqa6 = P36_VK_KERNEL("vulkan/attn_decode_fa_gqa6.spv", 5, 48, 1u << 4);
+    p36_vk.attn_decode_fa_gqa8 = P36_VK_KERNEL("vulkan/attn_decode_fa_gqa8.spv", 5, 48, 1u << 4);
     p36_vk.attn_combine = P36_VK_KERNEL("vulkan/attn_combine.spv", 4, 32, 1u << 3);
     p36_vk.moe_gate_up = P36_VK_KERNEL("vulkan/moe_gate_up.spv", 8, 28, 1u << 6);
     p36_vk.moe_gate_up_iq2s = P36_VK_KERNEL("vulkan/moe_gate_up_iq2s.spv", 8, 28, 1u << 6);
@@ -356,6 +359,9 @@ int p36_gpu_init(void) {
     p36_vk.dense_iq3_xxs_decode = P36_VK_KERNEL("vulkan/dense_iq3_xxs_decode.spv", 4, 16, 1u << 2);
     p36_vk.dense_iq3_xxs_decode_r4 = P36_VK_KERNEL("vulkan/dense_iq3_xxs_decode_r4.spv", 4, 16, 1u << 2);
     p36_vk.dense_iq3_xxs_decode_nx = P36_VK_KERNEL("vulkan/dense_iq3_xxs_decode_nx.spv", 4, 20, 1u << 2);
+    p36_vk.dense_iq3_xxs_decode_nx2 = P36_VK_KERNEL("vulkan/dense_iq3_xxs_decode_nx2.spv", 4, 20, 1u << 2);
+    p36_vk.dense_iq3_xxs_decode_nx3 = P36_VK_KERNEL("vulkan/dense_iq3_xxs_decode_nx3.spv", 4, 20, 1u << 2);
+    p36_vk.dense_iq3_xxs_decode_nx4 = P36_VK_KERNEL("vulkan/dense_iq3_xxs_decode_nx4.spv", 4, 20, 1u << 2);
     p36_vk.dense_iq3_xxs_mmq = P36_VK_KERNEL("vulkan/dense_iq3_xxs_mmq.spv", 5, 20, 1u << 2);
     /* Bindings: gate weights, up weights, gate out, up out, tables, b16. */
     p36_vk.dense_iq3_xxs_mmq_pair = P36_VK_KERNEL("vulkan/dense_iq3_xxs_mmq_pair.spv", 6, 20,
@@ -370,6 +376,8 @@ int p36_gpu_init(void) {
     p36_vk.dense_iq4_xs = P36_VK_KERNEL("vulkan/dense_iq4_xs.spv", 3, 20, 1u << 2);
     p36_vk.dense_iq4_xs_decode = P36_VK_KERNEL("vulkan/dense_iq4_xs_decode.spv", 3, 16, 1u << 2);
     p36_vk.dense_iq4_xs_rows = P36_VK_KERNEL("vulkan/dense_iq4_xs_rows.spv", 3, 20, 1u << 2);
+    p36_vk.dense_iq4_xs_rows2 = P36_VK_KERNEL("vulkan/dense_iq4_xs_rows2.spv", 3, 20, 1u << 2);
+    p36_vk.dense_iq4_xs_rows3 = P36_VK_KERNEL("vulkan/dense_iq4_xs_rows3.spv", 3, 20, 1u << 2);
     p36_vk.dense_iq4_xs_mmq = P36_VK_KERNEL("vulkan/dense_iq4_xs_mmq.spv", 3, 20, 1u << 2);
     p36_vk.dense_iq1_m = P36_VK_KERNEL("vulkan/dense_iq1_m.spv", 4, 20, 1u << 2);
     p36_vk.dense_extra_decode = P36_VK_KERNEL("vulkan/dense_extra_decode.spv", 4, 20, 1u << 2);
@@ -401,9 +409,13 @@ int p36_gpu_init(void) {
     p36_vk.dense_q5k_rows = P36_VK_KERNEL("vulkan/dense_q5k_rows.spv", 3, 28, 1u << 2);
     p36_vk.dense_q6k_rows = P36_VK_KERNEL("vulkan/dense_q6k_rows.spv", 3, 28, 1u << 2);
     p36_vk.dense_q3k_rows2 = P36_VK_KERNEL("vulkan/dense_q3k_rows2.spv", 3, 28, 1u << 2);
+    p36_vk.dense_q3k_rows3 = P36_VK_KERNEL("vulkan/dense_q3k_rows3.spv", 3, 28, 1u << 2);
     p36_vk.dense_q4k_rows2 = P36_VK_KERNEL("vulkan/dense_q4k_rows2.spv", 3, 28, 1u << 2);
+    p36_vk.dense_q4k_rows3 = P36_VK_KERNEL("vulkan/dense_q4k_rows3.spv", 3, 28, 1u << 2);
     p36_vk.dense_q5k_rows2 = P36_VK_KERNEL("vulkan/dense_q5k_rows2.spv", 3, 28, 1u << 2);
+    p36_vk.dense_q5k_rows3 = P36_VK_KERNEL("vulkan/dense_q5k_rows3.spv", 3, 28, 1u << 2);
     p36_vk.dense_q6k_rows2 = P36_VK_KERNEL("vulkan/dense_q6k_rows2.spv", 3, 28, 1u << 2);
+    p36_vk.dense_q6k_rows3 = P36_VK_KERNEL("vulkan/dense_q6k_rows3.spv", 3, 28, 1u << 2);
     p36_vk.moe_reduce = P36_VK_KERNEL("vulkan/moe_reduce.spv", 3, 8, 1u << 2);
     p36_vk.moe_down_route_reduce = P36_VK_KERNEL("vulkan/moe_down_route_reduce.spv", 3, 8, 1u << 2);
     p36_vk.ffn_tail = P36_VK_KERNEL("vulkan/ffn_tail.spv", 3, 8, 1u << 0);

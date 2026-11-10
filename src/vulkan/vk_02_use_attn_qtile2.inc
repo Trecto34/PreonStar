@@ -99,6 +99,24 @@ static bool p36_vk_use_attn_splitk(void) {
  * Swift, ~2-3% on the guard, both single-rep, on top of the drift above.
  * 512 stays until someone pays for an interleaved A/B plus the NLL check.
  * Evidence: karpathy/evidence/raw/r5-longctx-attn/. */
+/* Context length (keys) from which decode attention uses attn_decode_fa:
+ * one workgroup per KV head shares the K/V dequant across its query heads,
+ * where attn_decode_split redoes it per head.  Below the threshold the span
+ * kernels keep their bit-exact decode order and the tile's fixed staging
+ * cost is not yet repaid.  P36_VK_ATTN_DECODE_FA_MIN=0 disables it. */
+#ifndef P36_VK_ATTN_DECODE_FA_GROUP
+#define P36_VK_ATTN_DECODE_FA_GROUP 256u /* must match P36_FA_GROUP in the shader build */
+#endif
+static uint32_t p36_vk_attn_decode_fa_min(void) {
+    static long cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("P36_VK_ATTN_DECODE_FA_MIN");
+        long v = env && env[0] ? strtol(env, NULL, 10) : 4096;
+        cached = v < 0 ? 0 : v;
+    }
+    return (uint32_t)cached;
+}
+
 static uint32_t p36_vk_attn_span(void) {
     static int cached = -1;
     if (cached < 0) {

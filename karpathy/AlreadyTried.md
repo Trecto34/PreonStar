@@ -3626,3 +3626,126 @@ in rows: 1 row 12.2, 2 rows ~16, 4 rows ~25, 8 rows ~48 ms (~5 ms/row).
   the Clover step (`p36_gpu_set_wide_rows`); other models keep the 4-row cap.
   Greedy md5 identical to HEAD on CyberTiel (plain, MTP 3, MTP 7), Occamy
   (plain, MTP 7), dense 27B (plain, MTP 7); speed within noise.
+
+## 2026-11-10 Dense 27B (Qwen3.8 APEX-I-NanoPlus-V3): short batches, 2-row verify, and a stopped GPU governor
+
+Model `Huihui-Qwen3.8-27B-Coder390-EfficientThink-abliterated.VAL-APEX-I-NanoPlus-V3.gguf`.
+Evidence: `evidence/raw/w-shortbatch-20261110/`.
+
+* **Environment, not code: `cyan-skillfish-governor-smu.service` was stopped**
+  (a pacman update on 2026-11-09 stopped it and nothing restarted it). With it
+  down: 162 t/s prefill / 18.8 t/s decode at ctx 1024 chunk 256, and `0bb9448`
+  measured the same 18.3, so no code regression. Restarted: **207 / 23.2**.
+  Check `systemctl is-active cyan-skillfish-governor-smu` before any benchmark.
+* **ACCEPTED: dead-wave and half-slice FMA skip in `dense_iq3_xxs_mmq`,
+  `dense_iq3_xxs_mmq_pair`, `dense_iq4_xs_mmq`** (the skip `dense_kquant_mmq`
+  got in `4f0ab41`, plus skipping the second token pair when a wave has <= 16
+  live tokens). Prefill per batch size, base -> new: 16 tokens 31.3 -> 46.0
+  t/s (+47%), 32 tokens 60.9 -> 77.2 (+27%), 40 tokens -> 90.9, 64 tokens
+  112 -> 139 (+24%), 100 tokens unchanged. Frontier logits byte-identical at
+  batch 16/40/100 here and batch 40 on Axion-35B. Full chunk, 3 interleaved
+  reps ctx 1024: prefill +0.15%, decode +0.09% (inert, as intended).
+* **ACCEPTED: `dense_iq4_xs_rows2`** (`-DP36_TOK=2` build for n_tok == 2; the
+  4-row build staged and multiplied four token slots for a 2-row verify).
+  2-row MTP verify 63.8 -> 61.5 ms. Same per-row math.
+* **ACCEPTED: 2..4-row attention on the decode kernels** instead of the
+  prefill FA tile (0.44 ms vs ~0.1 ms/row per dispatch). 2-row verify 61.5 ->
+  57.5 ms. `P36_VK_ATTN_ROWS_DECODE=0` restores the tile and is byte-identical
+  to base. Not bit-identical when on: 3-token batches move 1.2-2.5 logits
+  (top-1 kept on the dense model, one flip at a 6-token context on Axion),
+  the same size as base's own 3-token-batch vs token-by-token drift
+  (1.5-2.7). `p36_test --vulkan-kernels` OK.
+* End to end, code prompt, `--mtp-draft 3 --mtp-margin 2`, 200 tokens, 2
+  interleaved reps: 27.48/27.46 -> 28.87/28.82 t/s (+5.0%); plain 23.55.
+* Measured, not built: the remaining 2-row cost is `dense_iq3_xxs_decode_nx`
+  (0.161 vs 0.106 ms per dispatch, +9.4 of the +14.5 ms a second row costs);
+  a 3-row verify reads the IQ3_XXS weights twice (NTOK 2) and costs 96 ms.
+  A rotated 128-row x 32-token tile for short batches is not a lever: a
+  32-token batch is already FMA-bound (staging ~49 ms of 156 ms on gate/up).
+* Build: `hadamard_prepare.spv` and `router_topk.spv` had no vulkan1.1 rule
+  and failed a clean rebuild; rules added.
+
+### Same session, round 2: fixed-row verify kernels (MTP)
+
+Governor running. Code prompt, 200 tokens, ctx 1024; plain decode 23.55 t/s.
+
+* **ACCEPTED: `dense_iq3_xxs_decode_nx2/nx3/nx4`** - fixed-row builds of the
+  nx kernel (`-DP36_NX_FIXED`, `-DP36_NX_NTOK=3u/4u`). The generic build's
+  runtime `tn` left 20 uniform branches inside the weight loop (ISA: 1325 ->
+  1214 instructions at 2 rows) and read the weights twice for 3-4 rows.
+  2-row verify 57.5 -> 52.9 ms, 3-row 94.1 -> 72.2, 4-row 96 -> ~81.
+  `P36_VK_DENSE_IQ3_NX2/NX3/NX4=0` fall back to the generic kernel. The
+  earlier "4-token variants measured slower" note was the branchy form.
+* **ACCEPTED: `dense_q{3,4,5,6}k_rows3`, `dense_iq4_xs_rows3`** (TOK=3; the
+  4-slot builds computed four token slots for three rows). 3-row verify
+  72.2 -> ~65 ms.
+* Bit-identical: frontier logits at 2-, 3- and 4-token batches equal the
+  pre-session binary on the dense model with `P36_VK_ATTN_ROWS_DECODE=0`,
+  3-token batches equal on Axion-35B, nx2 on vs off equal.
+  `p36_test --vulkan-kernels` OK. Plain path, 3 interleaved reps ctx 1024:
+  prefill +0.74%, decode +0.22% (inert).
+* MTP decode, code prompt, pre-session -> now: draft 3 margin 2
+  27.47 -> 30.33; draft 4 margin 2 26.37 (nx3 off) -> 31.74; draft 5 margin 2
+  29.96 -> 32.00; **draft 4 margin 0.5 = 34.06**, margin 1 = 33.41.
+  Story prompt (bench, ctx 512, 128 tokens): plain 23.11, d4 m0.5 24.41,
+  d4 m2 25.50, d3 m2 25.44. Technical prose: plain 23.65, d4 m0.5 28.01.
+* Verify cost by rows now: 43 / 53 / 65 / 81 ms. Draft head 4.4 ms per draft
+  (2.6 ms of it the Q5_K 248320-row output projection).
+* ISA notes for the next reader (`logs/bc250-sustained-20260918/shader_isa.c`,
+  `RADV_PERFTEST=cswave32` for the mmq kernels): `dense_iq3_xxs_mmq_pair`
+  FMA region is 1.33 instructions per `v_pk_fma_f16`, operands via op_sel,
+  no shuffles - full-chunk prefill is instruction-bound, not a staging
+  problem. `dense_iq3_xxs_decode_r4` spends ~232 of 914 instructions on sign
+  selects (`v_cmp_class` + `v_cndmask`); the integer sign-mask form is the
+  2026-09-17 rejection.
+
+## 2026-11-10 Long-context attention: decode FA tile, router matmul, and what prefill attention costs
+
+Model `Axion-1.0-35B.APEX-I-NanoPlus-V2.1.gguf` (MoE, GQA 16/2), chunk 512,
+governor running. Evidence: `evidence/raw/w-moe-attn-20261110/`.
+
+* **Measured first.** Prefill by depth: 812 t/s to 2k, 814 at 2-4k, 738 at
+  4-8k, 621 at 8-16k, 471 at 16-32k. Decode: 81.0 at 2k, 75.6 at 8k, 68.0 at
+  16k, 49.9 at 32k. Both slopes are attention.
+* **ACCEPTED: `attn_decode_fa` (`vulkan/attn_decode_fa.comp`, HQ=6 and HQ=8
+  builds).** The prefill FA tile turned to serve one query token: one
+  workgroup per (KV head, token, 256-key group) dequantizes K/V once for all
+  HQ heads; the rowsets the prefill tile spends on more tokens become 4 (HQ 8)
+  or 8 (HQ 6) contiguous key streams, each with its own partial, folded by the
+  unchanged `attn_combine`. Used for n_tok <= 4 from 4096 keys
+  (`P36_VK_ATTN_DECODE_FA_MIN`, 0 disables). Per call at 32k: ~0.8 ms
+  (`attn_decode_split`) -> 0.24 ms. MoE decode, on vs off: 8k 75.4 -> 81.3,
+  16k 67.2 -> 74.2 (+10.4%), 32k 48.5 -> 58.8 (+21%); dense 27B at 8k
+  21.50 -> 21.81. At 2k it loses (80.3 -> 78.0 with 256-key groups, 70-73
+  with 512/1024), hence the threshold. Group 1024 and 512 were tried: 256 is
+  best at 8k and equal at 32k.
+  Numerics: f32, staged-tile order, not bit-identical to the span kernel.
+  `p36_test --vulkan-kernels` passes with the kernel forced on from 64 keys
+  (batch-vs-decode drift 7.5e-9..7.9e-9 at pos0 2100). Whole-model
+  single-token steps at 8190..8193: logits move 1.4 / 1.7 / 7.1 with top-1
+  kept; the control (old kernel, `P36_VK_ATTN_SPAN=256` vs 512) moves
+  2.2 / 1.5 / 7.8 with a top-1 flip at 8193, so that is the model's
+  sensitivity at that position, not the kernel.
+* **ACCEPTED: `matmul_f32_fast_t8`** - 8 tokens of a row per workgroup for
+  prefill batches (router 256x2048 ran 131k 64-thread workgroups per chunk).
+  Same per-token lane partials, subgroup reduction and combine: frontier
+  logits byte-identical on vs off and vs the pre-change binary (MoE and
+  dense). `dense_f32f_p_256x2048` 96.5 -> 44.1 ms per 2048 tokens (~2% of MoE
+  prefill; whole-run A/B is inside the 3.4% MoE noise).
+  `P36_VK_F32_FAST_T8=0` disables.
+* **Prefill attention, measured, not changed.** 8k->16k segment (12.96 s):
+  no attention loop 8.64 s, so attention is 33%; without PV 11.10 s (PV 14%),
+  without QK FMAs 10.41 s (QK 20%). `attn_prefill_fa_gqa8` runs ~2.7e12
+  MAC/s = ~54% of the f32 instruction peak.
+* **REJECTED: PV skip for negligible weights** (wave-uniform, all p of an
+  8-key step below eps): no speedup at eps 1e-9 (logits bit-identical, so it
+  never fires usefully) or 1e-6 (626 vs 632 t/s, logits move).
+* Dense 27B prefill, same session: FMA loops are 80% of prefill at ~85% of
+  the instruction peak, weight dequant 14%, rest 6% (ablations).
+  **REJECTED: 256-token gate/up tile** (one dequant per chunk): 191 vs 201
+  t/s, also with the dequant split over all 8 waves. **REJECTED: token-pair
+  staged B operand** (no cross-token shuffles in the FMA loop, ISA 1365 ->
+  1315 per 1024 FMAs): 123-127 vs 200 t/s.
+* Open: packed-f16 attention (QK and/or PV). Estimate from the ablation:
+  PV only ~+6% prefill at 8-16k, both ~+15%; changes numerics, needs the
+  frontier-NLL protocol before it can be default.
