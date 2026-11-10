@@ -184,6 +184,12 @@ with `--mtp-draft 4 --mtp-margin 0.5` (30.3 t/s with `--mtp-draft 3 --mtp-margin
 a 16-token batch prefills at 46 t/s (was 31), 32 tokens at 77 t/s (was 61), 64
 tokens at 139 t/s (was 112).
 
+**Recommended models:** [IsValorum](https://huggingface.co/IsValorum) on Hugging
+Face. PreonStar is built to run these quants well: the APEX-I NanoPlus files
+measured above (Axion 35B-A3B and the dense Qwen3.8-27B) load as-is and land on
+the engine's tuned Vulkan kernels for prefill, decode and MTP, with no
+conversion step. If you are choosing weights for a 16 GB board, start there.
+
 These numbers need the BC-250 GPU governor running
 (`systemctl is-active cyan-skillfish-governor-smu`): with it stopped the same
 build reads about 162 t/s prefill / 18.8 t/s decode on the dense model.
