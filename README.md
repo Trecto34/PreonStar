@@ -160,6 +160,34 @@ The server matches the CLI within noise at the same depth (68.1-68.7 t/s at
 the slow one at depth: **49.2 t/s at 10.8k** with `P36_VK_MOE_PAIR_DECODE=0`,
 which is the +40% the fused pair buys.
 
+Long context, measured 2026-11-10 on the current build (`p36-bench`, greedy,
+n=64, `--prefill-chunk 512`, Axion-1.0 35B-A3B APEX-I-NanoPlus-V2.1). Prefill is
+the speed of the segment that ends at that context. From 4096 keys decode
+attention runs on `attn_decode_fa` (one K/V dequant per KV head instead of one
+per query head); `P36_VK_ATTN_DECODE_FA_MIN=0` restores the span kernel, which
+is the "before" column:
+
+| Context | Axion prefill | Axion decode | decode before |
+|---:|---:|---:|---:|
+| 1k | 811 t/s | 83.2 t/s | same path |
+| 2k | 883 t/s | 83.4 t/s | same path |
+| 4k | 833 t/s | 84.8 t/s | same path |
+| 8k | 753 t/s | **82.0 t/s** | 75.4 t/s |
+| 16k | 632 t/s | **75.4 t/s** | 67.2 t/s |
+| 32k | 477 t/s | **60.5 t/s** | 48.5 t/s |
+
+Dense Qwen3.8-27B (Huihui Coder390 APEX-I-NanoPlus-V3, `--prefill-chunk 256`):
+**207 t/s prefill / 23.2 t/s decode** at 1k, prefill 187 t/s at 4-8k and 133 t/s
+at 16-32k. Its in-file MTP head lifts decode on a coding prompt to **34.1 t/s**
+with `--mtp-draft 4 --mtp-margin 0.5` (30.3 t/s with `--mtp-draft 3 --mtp-margin
+2`, 23.6 t/s plain). Short prompt batches are no longer charged a full tile:
+a 16-token batch prefills at 46 t/s (was 31), 32 tokens at 77 t/s (was 61), 64
+tokens at 139 t/s (was 112).
+
+These numbers need the BC-250 GPU governor running
+(`systemctl is-active cyan-skillfish-governor-smu`): with it stopped the same
+build reads about 162 t/s prefill / 18.8 t/s decode on the dense model.
+
 Rotation is what governs, not context: dense Swift 27B does 21-22 t/s with 160-166
 t/s prefill because it reads 12.18 GB per token (267 GB/s effective, the GDDR6
 bus, not the scheduler), and it gains nothing from the pair route.
