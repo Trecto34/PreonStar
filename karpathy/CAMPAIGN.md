@@ -129,8 +129,13 @@ must be rebuilt from a pinned commit in their own worktree (§5).
 
 ## 4. The rules that decide a verdict
 
-1. **Gate: prefill median gain ≥ 1.5%** (`P36_AB_MIN_GAIN`), 7 interleaved reps,
-   ctx 1024, `--gen-tokens 16`, `--prefill-chunk 256` on Swift.
+1. **Gate: prefill median gain ≥ 1.25% AND clean separation** (every B rep
+   faster than every A rep; `bench_ab.sh` checks both, `P36_AB_MIN_GAIN`),
+   interleaved reps, `--gen-tokens 16`, `--prefill-chunk 256`; a kernel
+   change also needs a kernel-level win on record. Was median ≥ 1.5% alone
+   until 2026-11-17 (owner decision): 1.25% is still ~2x the dense noise
+   floor, and on MoE the median gate sits inside the noise either way, so
+   separation is what actually discriminates there.
 2. **Noise floors — know them before you claim anything:**
    - dense 27B prefill: **0.7%** within a session
    - **MoE prefill: 3.4%** (identical code produced 713.98 → 738.81 t/s)
@@ -140,7 +145,8 @@ must be rebuilt from a pinned commit in their own worktree (§5).
      from the same binary. The cause is I/O, not thermals (see §6 item 0). Three
      reps cannot resolve anything here; treat sub-10% deltas as unmeasured.
    ⇒ a MoE prefill delta under ~3% is noise, and the guard's real acceptance
-   band is 3.4%, not 1.5%.
+   band is 3.4% on the median alone; the separation check is what lets a
+   smaller MoE gain pass.
 3. **Interleave A and B rep by rep.** Never run A completely then B: drift lands
    on the second binary and looks like a regression. That is what `bench_ab.sh`
    exists for. Report **median + MAD**, never means.

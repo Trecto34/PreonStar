@@ -27,7 +27,7 @@ reps="${4:-${P36_AB_REPS:-3}}"
 ctx="${P36_AB_CTX:-1024}"
 gen="${P36_AB_GEN:-16}"
 chunk="${P36_AB_CHUNK:-256}"
-min_gain="${P36_AB_MIN_GAIN:-1.5}"
+min_gain="${P36_AB_MIN_GAIN:-1.25}"
 
 for pair in "reps=$reps" "ctx=$ctx" "gen=$gen" "chunk=$chunk"; do
     name="${pair%%=*}"
@@ -135,7 +135,16 @@ END {
         printf "\nfailed runs: A=%d B=%d\n", fails["A"] + 0, fails["B"] + 0 > "/dev/stderr"
     printf "\nB vs A prefill: %+.2f%%   decode: %+.2f%%   (gate: %+.2f%%)\n", \
         gain_p, gain_d, min_gain > "/dev/stderr"
-    verdict = (gain_p >= min_gain ? "PASS (prefill)" : "FAIL (prefill)")
+    # Gate (2026-11-17): median gain >= min_gain AND every B rep beats every A
+    # rep.  The separation check is what makes a ~1% gate meaningful on MoE,
+    # whose median-to-median noise floor (3.4%) is above the gate itself.
+    pmin_b = 1e30; pmax_a = -1
+    for (k = 1; k <= np["B"]; k++) if (p["B", k] < pmin_b) pmin_b = p["B", k]
+    for (k = 1; k <= np["A"]; k++) if (p["A", k] > pmax_a) pmax_a = p["A", k]
+    sep = (np["A"] > 0 && np["B"] > 0 && pmin_b > pmax_a)
+    printf "separation: min B %.2f vs max A %.2f -> %s\n", pmin_b, pmax_a, \
+        (sep ? "clean" : "overlap") > "/dev/stderr"
+    verdict = (gain_p >= min_gain && sep ? "PASS (prefill)" : "FAIL (prefill)")
     printf "verdict: %s\n", verdict > "/dev/stderr"
 }
 ' "$out_file" >&2
