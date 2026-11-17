@@ -3924,3 +3924,19 @@ Evidence: `evidence/raw/moe-prefill-16k-20261117/`.
   18.7% -> 13.6% of GPU time; total GPU 30833.9 -> 29039.9 ms, -5.8%).
   `0..32k`: `attn_prefill_fa` 22288.1 -> 15429.6 ms (**-30.8%**, share 30.5% ->
   23.2% of GPU time; `16k..32k` slice share 39.1% -> 30.7%, total GPU -9.2%).
+
+## 2026-11-17 Frontier-NLL check across other FA-path models
+
+Checked 3 additional GQA 8 (`head_dim 256`, Q8_0 K / Q4_0 V) MoE models beyond
+Axion and Huihui Coder390 under the P3 protocol (`ctx 8192..16384` step 256,
+`n=33`; `ref` = `P36_VK_ATTN_FA_F16=0`, `f16` = `1`, `ctl` = `P36_VK_ATTN_FA=0`
+qtile2 f32 reorder control). Evidence: `evidence/raw/fa-f16-nll-models-20261117/`.
+
+* `Apex-35B-V1.0`: `f16` dNLL med -0.0000 MAD 0.0004 mean|d| 1.337 12/15
+  top1_same 33/33 (ctl med -0.0000 MAD 0.0004 mean|d| 1.217 top1_same 31/33).
+* `Ornith-1.5-35B-A3B`: `f16` dNLL med -0.0000 MAD 0.0003 mean|d| 0.847 15/18
+  top1 32/33 top1_same 30/33 (ctl MAD 0.0010 mean|d| 0.258 top1 29/33).
+* `Qwen3.6-35B-A3B`: `f16` dNLL med +0.0001 MAD 0.0015 mean|d| 1.736 21/12
+  top1 23/33 top1_same 29/33 (ctl MAD 0.0008 mean|d| 1.346 top1 23/33).
+* Zero non-finite logits across all 99 frontier dumps (`max|logit| <= 31.3`);
+  drift comparable to the f32 reorder control across all 5 checked models.

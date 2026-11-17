@@ -75,9 +75,12 @@ MoE 8-16k ablation: QK FMAs 20%, PV FMAs 14% of prefill time.
    **+12.87%** (392.34 → 442.82 t/s, clean separation); profiled kernel GPU
    time −31.2% at 16k and −30.8% at 32k. Evidence
    `karpathy/evidence/raw/moe-prefill-16k-20261117/`.
-6. **Quality on other FA-path models.** Every GQA 6/8, head_dim 256,
-   Q8_0 K / Q4_0 V model now runs f16 staging; only Axion and Huihui
-   Coder390 were NLL-checked. `P36_VK_ATTN_FA_F16=0` is the rollback.
+6. **Quality on other FA-path models — done (2026-11-17).** Checked `Apex-35B`,
+   `Ornith-1.5-35B-A3B` and `Qwen3.6-35B-A3B` alongside `Axion` and `Huihui`
+   (`ctx 8192..16384` step 256, `n=33`): zero non-finite logits, median dNLL
+   `-0.0000..+0.0001`, `MAD <= 0.0015`, drift on the order of the `qtile2` f32
+   reorder control (`top1_same` 29–33/33). `P36_VK_ATTN_FA_F16=0` remains the
+   rollback. Evidence `karpathy/evidence/raw/fa-f16-nll-models-20261117/`.
 
 ## Loose ends
 

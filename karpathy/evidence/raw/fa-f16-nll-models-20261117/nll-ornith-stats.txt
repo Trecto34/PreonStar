@@ -1,0 +1,5 @@
+/home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_models/ornith/ref: n=33 mean_nll=1.0602 top1=29/33
+/home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_models/ornith/f16: n=33 mean_nll=0.2233 top1=32/33
+   vs /home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_models/ornith/ref: dNLL mean=-0.8369 med=-0.0000 MAD=0.0003 mean|d|=0.8473 worse=15 better=18 top1_same=30/33
+/home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_models/ornith/ctl: n=33 mean_nll=1.2400 top1=29/33
+   vs /home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_models/ornith/ref: dNLL mean=+0.1797 med=+0.0000 MAD=0.0010 mean|d|=0.2579 worse=18 better=15 top1_same=33/33
