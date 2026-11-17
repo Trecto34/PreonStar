@@ -26,7 +26,8 @@ Long-context shares that bound the remaining work (2026-11-10 data):
 | MoE attention share of prefill | — | ~42% |
 
 Update 2026-11-17 (after steps A/B, profiled): dense attention is 13.1% of GPU
-time for a 0..16k prefill (average over positions, not the 16-32k slice).
+time for a 0..16k prefill; MoE attention is 13.6% over 0..16k (was 18.7%),
+23.2% over 0..32k (was 30.5%), and 30.7% on the 16..32k slice (was 39.1%).
 
 MoE 8-16k ablation: QK FMAs 20%, PV FMAs 14% of prefill time.
 
@@ -67,8 +68,13 @@ MoE 8-16k ablation: QK FMAs 20%, PV FMAs 14% of prefill time.
    NLL inside the f32 reorder control. Default on under `P36_VK_ATTN_FA_F16`
    (`P36_VK_ATTN_DECODE_FA_F16` overrides decode alone). Ledger 2026-11-17,
    evidence `karpathy/evidence/raw/decode-fa-f16-20261117/`.
-5. **Whole-model numbers at 16k+.** Dense only cleared +0.78% at 8k; the
-   kernel gain should show at 16k+. One short run, not a sweep.
+5. **Whole-model numbers at 16k+ — done (2026-11-17).** Dense 0..16k only
+   cleared +0.41% (step C.1; attention is 13.1% of GPU time there). MoE Axion
+   (`P36_VK_ATTN_FA_F16=0` vs `1`, chunk 256, 3 interleaved reps): `0..16k`
+   **+6.33%** (539.26 → 573.40 t/s, clean separation), `16k..32k` slice
+   **+12.87%** (392.34 → 442.82 t/s, clean separation); profiled kernel GPU
+   time −31.2% at 16k and −30.8% at 32k. Evidence
+   `karpathy/evidence/raw/moe-prefill-16k-20261117/`.
 6. **Quality on other FA-path models.** Every GQA 6/8, head_dim 256,
    Q8_0 K / Q4_0 V model now runs f16 staging; only Axion and Huihui
    Coder390 were NLL-checked. `P36_VK_ATTN_FA_F16=0` is the rollback.

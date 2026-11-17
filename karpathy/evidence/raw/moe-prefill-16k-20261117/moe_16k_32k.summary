@@ -1,0 +1,2 @@
+ctx 16384 (0..16k  ): prefill A 539.26 (MAD 0.77) -> B 573.40 (MAD 0.06)  +6.33% [clean: minB 572.78 vs maxA 540.57]
+ctx 32768 (16k..32k): prefill A 392.34 (MAD 0.07) -> B 442.82 (MAD 0.59)  +12.87% [clean: minB 442.23 vs maxA 392.55]

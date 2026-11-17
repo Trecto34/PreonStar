@@ -3906,3 +3906,21 @@ Evidence: `evidence/raw/decode-fa-f16-20261117/`.
   mean|d| 0.0011 top1_same 32/32 (ctl mean|d| 0.0015, top1_same 32/32).
 * **Status: ACCEPTED, default on** (gated under `P36_VK_ATTN_FA_F16`, with
   `P36_VK_ATTN_DECODE_FA_F16` for decode-only A/B).
+
+## 2026-11-17 MoE prefill FA at 16k and 16k..32k (steps A+B whole-model check)
+
+Measured `P36_VK_ATTN_FA_F16=0` (f32 FA tile) vs `1` (shipped f16 K/V +
+packed-f16 PV tile) on `Axion-1.0-35B.APEX-I-NanoPlus-V2.1.gguf`, chunk 256,
+`gen=0`, 3 interleaved reps plus `P36_VK_PROF_KERNEL=1` GPU timestamp profiles.
+Evidence: `evidence/raw/moe-prefill-16k-20261117/`.
+
+* **Whole-model prefill (3 interleaved reps):**
+  `0..16k`: **539.26 -> 573.40 t/s (+6.33%**, MAD 0.77 / 0.06, clean separation:
+  min B 572.78 > max A 540.57).
+  `16k..32k` slice: **392.34 -> 442.82 t/s (+12.87%**, MAD 0.07 / 0.59, clean
+  separation: min B 442.23 > max A 392.55).
+* **In-model GPU timestamps (`P36_VK_PROF_KERNEL=1`):**
+  `0..16k`: `attn_prefill_fa` 5754.0 -> 3960.9 ms (**-31.2%**, attention share
+  18.7% -> 13.6% of GPU time; total GPU 30833.9 -> 29039.9 ms, -5.8%).
+  `0..32k`: `attn_prefill_fa` 22288.1 -> 15429.6 ms (**-30.8%**, share 30.5% ->
+  23.2% of GPU time; `16k..32k` slice share 39.1% -> 30.7%, total GPU -9.2%).
