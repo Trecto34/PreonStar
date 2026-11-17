@@ -4015,3 +4015,33 @@ that any buffer `SHADER_WRITE` source adds, and keeps `CS_PARTIAL_FLUSH` +
   flush fix; `p36_test --vulkan-kernels` OK.
 * reconsider_if: a Mesa upgrade (re-run parity with `P36_VK_BARRIER_SRC=1` vs
   default), an image or render pass enters the engine, or an ACE queue appears.
+
+## 2026-11-17 After the barrier masks: UNIFORM_READ dst, submit size, and the sync ceiling
+
+Measured on `main` at `4deffd1` (dst-only hazard barrier). Evidence:
+`evidence/raw/batch-flush-sweep-20261117/`.
+
+* **dst `UNIFORM_READ` instead of `SHADER_READ` — REJECTED, no gain.** RADV
+  would skip the `GLM_WB|GLM_INV` metadata flush every global barrier carries;
+  probe (`bprobe-v5.c`) measured it identical to the dst-only form (3.01 vs
+  3.01 us device-local, 3.53 vs 3.53 host-cached). Barrier-mask space is spent.
+* **Eager-submit size `P36_VK_BATCH_FLUSH_AT` 12..64 — REJECTED, flat.** Env
+  override, one binary, forward + reverse pass on Axion (ctx 1024, gen 64):
+  decode 12: 86.59/87.65, 16: 87.40/87.98, 24: 86.97/87.36, 32: 87.41/87.16,
+  48: 87.83/87.35, 64: 87.98/87.19 t/s — all inside 87.1-87.7 means. Code
+  reverted; 32 stays.
+* **Sync ceiling now (`P36_VK_SKIP_BARRIERS=1`, wrong numerics, timing only):**
+  Axion decode **87.6 -> 117.0 t/s (+33%)**, ~2.9 ms of an 11.4 ms token;
+  its prefill 600 -> ~1200 is confounded (garbage routing can concentrate
+  experts). Dense 27B decode **23.34 -> 26.56 (+13.8%)**, prefill 207.8 ->
+  216.4 (+4.1%, no routing confound).
+* **Where the MoE barriers are** (host-side `P36_VK_PROF=1`, gen 65 minus gen 1,
+  per decode token: 960 dispatches, 647 barriers): `dense_q4k_decode` 110,
+  `add_rms_norm_q8_k` 79 (1 WG), `q8_k_quant` 52 (~5 WG), then 40 each of
+  router matvec, `router_topk` (1 WG), `swiglu` (2 WG), `moe_down_route_reduce`
+  (8 WG), `moe_tail` (8 WG); 36+4 `moe_*_down_sum_decode`; 30 each for the
+  recurrent chain. About 400 of the 647 barriers sit in front of dispatches of
+  16 workgroups or fewer, so ~4.5 us per barrier end to end is tail + launch
+  latency of tiny dependent kernels, not barrier packets.
+* reconsider_if: a fusion or last-workgroup ticket removes per-layer links
+  (route_reduce -> tail -> next norm, router matvec -> topk); see ROADMAP.

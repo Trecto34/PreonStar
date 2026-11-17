@@ -27,3 +27,4 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 
 - [x] Hazard barrier carries TRANSFER masks only when a copy is pending (`6c5f966`; +3.98% MoE / +1.35% dense decode)
 - [x] Dst-only barrier form (`234b660`; 1.90 vs 2.25 us/barrier; +1.55% MoE decode) — relies on GFX10 L2 coherence, re-check after Mesa upgrades
+- [ ] Last-workgroup ticket: let the final workgroup of `moe_*_down_sum_decode` run route_reduce + tail + next norm, and of the router matvec run top-k (~160 of 647 barriers/token on Axion; sync ceiling +33% MoE / +14% dense decode)

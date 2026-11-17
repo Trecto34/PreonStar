@@ -1,0 +1,14 @@
+./bprobe chain.spv   (bprobe-v5.c: adds E = src access 0, dst UNIFORM_READ|SHADER_WRITE)
+memory type 5 flags 0x0e, 400 links x 32 WGs, 15 reps
+  A engine        median   2.667 ms  min   2.286  max   3.180  =   6.67 us/link  barrier   5.89 us  wrong 0/15
+  B compute-only  median   1.928 ms  min   1.650  max   2.305  =   4.82 us/link  barrier   4.03 us  wrong 0/15
+  C dst-only      median   1.726 ms  min   1.466  max   2.071  =   4.31 us/link  barrier   3.53 us  wrong 0/15
+  E dst-uniform   median   1.726 ms  min   1.468  max   2.073  =   4.31 us/link  barrier   3.53 us  wrong 0/15
+  D none          median   0.319 ms  min   0.272  max   0.383  =   0.80 us/link  barrier   0.00 us  wrong 15/15
+memory type 3 flags 0x07, 400 links x 32 WGs, 15 reps
+  A engine        median   2.286 ms  min   2.285  max   2.288  =   5.71 us/link  barrier   5.05 us  wrong 0/15
+  B compute-only  median   1.658 ms  min   1.650  max   1.663  =   4.15 us/link  barrier   3.47 us  wrong 0/15
+  C dst-only      median   1.472 ms  min   1.464  max   1.476  =   3.68 us/link  barrier   3.01 us  wrong 0/15
+  E dst-uniform   median   1.471 ms  min   1.464  max   1.476  =   3.68 us/link  barrier   3.01 us  wrong 0/15
+  D none          median   0.272 ms  min   0.272  max   0.272  =   0.68 us/link  barrier   0.00 us  wrong 15/15
+(absolute times ~1.6x the first run's: GPU clock lower right after idle; ratios C/B match)
