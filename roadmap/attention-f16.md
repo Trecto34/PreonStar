@@ -1,8 +1,7 @@
 # f16 attention
 
-**Status:** step A landed (`670febe`, default on); step B done (`96a78f5`, default on,
-inside the same f16 build); step C delayed; C.1 (`78bb5d6`, dense VGPR relief) done;
-decode FA f16 staging done (`4328c72`, default on); the rest open.
+**Status:** active items complete (`670febe`, `96a78f5`, `78bb5d6`, `4328c72`,
+`724f250`, `a343f1a`); step C delayed; only low-priority loose ends remain.
 
 ## Background
 
@@ -84,7 +83,6 @@ MoE 8-16k ablation: QK FMAs 20%, PV FMAs 14% of prefill time.
 
 ## Loose ends
 
-- README long-context table predates f16 staging.
 - `v_fma_mix_f32` emission is inferred from timing; the ISA dump through
   `VK_KHR_pipeline_executable_properties` crashes this RADV build.
 - Double buffering is now possible at the same occupancy (16 KiB freed);

@@ -1,0 +1,6 @@
+ctx  1024: prefill med  757.5 (runs [767.77, 732.08, 757.46]) | decode med  82.7 (runs [82.64, 82.86, 82.71])
+ctx  2048: prefill med  900.1 (runs [901.34, 900.07, 896.66]) | decode med  83.3 (runs [83.31, 83.3, 82.92])
+ctx  4096: prefill med  863.2 (runs [863.97, 863.25, 862.76]) | decode med  85.0 (runs [85.17, 85.04, 84.99])
+ctx  8192: prefill med  802.9 (runs [803.21, 802.88, 801.85]) | decode med  82.6 (runs [82.63, 82.57, 82.45])
+ctx 16384: prefill med  690.4 (runs [702.27, 690.39, 688.08]) | decode med  76.6 (runs [77.08, 76.6, 76.63])
+ctx 32768: prefill med  537.4 (runs [543.0, 537.17, 537.37]) | decode med  64.9 (runs [64.91, 61.94, 64.86])

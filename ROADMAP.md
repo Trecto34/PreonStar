@@ -11,8 +11,8 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 - [x] Step C.1 (`78bb5d6`): dense gqa6 VGPR relief — 2 rows/lane: 256→128 VGPRs, kernel −11..−14%, bit-identical; whole model +0.4% at 16k
 - [x] f16 K/V staging in `attn_decode_fa` (`4328c72`, default on; kernel −19% MoE 32k / −33% dense 16k, MoE 16k decode +2.13%)
 - [x] Whole-model prefill at 16k+ (`724f250`; dense 0..16k attention 13.1% of GPU; MoE Axion `0..16k` +6.33%, `16k..32k` +12.87%)
-- [x] NLL check on the other FA-path models (`Apex`, `Ornith`, `Qwen3.6-35B-A3B`: 0 non-finite, drift in line with f32 reorder control)
-- [ ] Update README long-context table
+- [x] NLL check on the other FA-path models (`a343f1a`; `Apex`, `Ornith`, `Qwen3.6-35B-A3B`: 0 non-finite, drift in line with f32 reorder control)
+- [x] Update README long-context table (Axion 8k/16k/32k prefill 803/690/537 t/s, decode 82.6/76.6/64.9 t/s)
 - [ ] Confirm `v_fma_mix_f32` in the ISA
 - [ ] Double buffering (low value; revisit if load time grows)
 
