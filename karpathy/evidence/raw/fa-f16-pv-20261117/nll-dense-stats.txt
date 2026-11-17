@@ -1,0 +1,5 @@
+nll/dense/ref: n=33 mean_nll=0.1047 top1=32/33
+nll/dense/h16: n=33 mean_nll=0.1032 top1=32/33
+   vs nll/dense/ref: dNLL mean=-0.0015 med=-0.0001 MAD=0.0002 mean|d|=0.0025 worse=14 better=19 top1_same=33/33
+nll/dense/pv: n=33 mean_nll=0.1097 top1=32/33
+   vs nll/dense/ref: dNLL mean=+0.0050 med=-0.0000 MAD=0.0002 mean|d|=0.0056 worse=13 better=20 top1_same=33/33

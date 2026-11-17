@@ -1,0 +1,5 @@
+nll/moe/ref: n=33 mean_nll=1.7363 top1=26/33
+nll/moe/h16: n=33 mean_nll=0.8210 top1=29/33
+   vs nll/moe/ref: dNLL mean=-0.9154 med=-0.0000 MAD=0.0002 mean|d|=1.0869 worse=15 better=17 top1_same=30/33
+nll/moe/pv: n=33 mean_nll=0.8779 top1=30/33
+   vs nll/moe/ref: dNLL mean=-0.8584 med=-0.0000 MAD=0.0002 mean|d|=0.8767 worse=16 better=17 top1_same=29/33

@@ -6,7 +6,7 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 ## f16 attention — [roadmap/attention-f16.md](roadmap/attention-f16.md)
 
 - [x] Step A: f16 K/V staging in prefill FA LDS (`670febe`, default on)
-- [ ] Step B: packed-f16 PV math (~+6% MoE prefill at 8-16k, estimate)
+- [x] Step B: packed-f16 PV math (kernel -10%, MoE +1.45% at 8k)
 - [ ] Step C: packed-f16 QK math (riskier; only after B)
 - [ ] Dense gqa6 VGPR relief via f16 Q/accumulators
 - [ ] f16 K/V staging in `attn_decode_fa` (~15% of a 32k MoE decode token)

@@ -304,7 +304,8 @@ int p36_gpu_init(void) {
     p36_vk.attn_prefill_qtile2_gqa6 = P36_VK_KERNEL("vulkan/attn_prefill_qtile2_gqa6.spv", 5, 48, 1u << 4);
     /* Prefill FA stages K/V in LDS as f16 (f32 math): the tile was partly LDS
      * bound, kernel time -22% (MoE) / -10% (dense), ~1e-3 output drift with
-     * frontier NLL inside the f32 reorder control.  P36_VK_ATTN_FA_F16=0
+     * frontier NLL inside the f32 reorder control; PV also runs in packed f16
+     * (another -10% kernel).  P36_VK_ATTN_FA_F16=0
      * restores the f32-staged kernel. */
     bool fa_f16 = p36_vk_env_default_on("P36_VK_ATTN_FA_F16");
     p36_vk.attn_prefill_fa_gqa6 = P36_VK_KERNEL(fa_f16 ? "vulkan/attn_prefill_fa_f16_gqa6.spv"

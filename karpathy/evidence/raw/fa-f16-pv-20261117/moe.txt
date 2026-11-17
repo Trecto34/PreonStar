@@ -1,0 +1,14 @@
+label,rep,start_temp_c,end_temp_c,prefill_tps,decode_tps
+A,1,46,62,611.86,78.55
+B,1,62,64,621.34,80.66
+B,2,64,63,621.33,79.62
+A,2,62,64,612.46,80.81
+A,3,63,63,614.93,79.69
+B,3,63,65,620.00,80.52
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    3     612.46         0.600     79.69          1.120     ab/A/p36-bench
+B    3     621.33         0.010     80.52          0.140     ab/B/p36-bench
+
+B vs A prefill: +1.45%   decode: +1.04%   (gate: +1.50%)
+verdict: FAIL (prefill)

@@ -1,6 +1,7 @@
 # f16 attention
 
-**Status:** step A landed (`670febe`, default on); the rest open.
+**Status:** step A landed (`670febe`, default on); step B done (default on,
+inside the same f16 build); the rest open.
 
 ## Background
 
@@ -27,11 +28,12 @@ MoE 8-16k ablation: QK FMAs 20%, PV FMAs 14% of prefill time.
 
 ## Open items
 
-1. **Step B: packed-f16 PV.** Accumulate ~8 keys (one SUB step) in
-   `f16vec2` with `v_pk_fma_f16`, flush into the f32 `acc`. Softmax weights
-   are in [0,1], so this is the low-risk half. Ledger estimate ~+6% MoE
-   prefill at 8-16k. Gate: `tests/test_attn_fa` (2e-3), `p36_test
-   --vulkan-kernels`, frontier NLL vs the f32 control, 3-rep A/B.
+1. **Step B: packed-f16 PV — done (2026-11-17).** 8-key f16 partials via
+   `v_pk_fma_f16`, flushed into f32 `acc`. Kernel −10% (both shapes); ctx 8192
+   MoE +1.45% (clean separation), dense +0.52% (neutral); NLL drift inside the
+   f32 reorder control. Smaller than the ~+6% estimate because the 0..8k
+   average carries little attention; 16k+ unmeasured. Ledger 2026-11-17,
+   evidence `karpathy/evidence/raw/fa-f16-pv-20261117/`.
 2. **Step C: packed-f16 QK.** Riskier: score error goes straight into
    `exp()`. Only after B holds. Together ~+15% at 8-16k (ledger estimate).
 3. **Dense VGPR relief.** gqa6 sits at 256 VGPRs. f16 Q and accumulators

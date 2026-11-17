@@ -7,8 +7,13 @@
 /* FA_F16_K / FA_F16_V stage K / V in LDS as f16: halves LDS bytes per key
  * (the tile was partly LDS-read bound), math stays f32 (ACO folds the f16
  * operand into v_fma_mix_f32).  The dequantized value rounds to f16 (2^-11
- * relative, ~100x below the Q8_0/Q4_0 cache step).  The release build
- * (attn_prefill_fa_f16_gqa*.spv) sets both; without them it is the f32 tile. */
+ * relative, ~100x below the Q8_0/Q4_0 cache step).  FA_F16_PV (needs
+ * FA_F16_V) also does the PV math in packed f16, 8 keys at a time.  The
+ * release build (attn_prefill_fa_f16_gqa*.spv) sets all three; without them
+ * it is the f32 tile. */
+#if defined(FA_F16_PV) && !defined(FA_F16_V)
+#error "FA_F16_PV needs FA_F16_V (f16 V in LDS)"
+#endif
 #if defined(FA_F16_K) || defined(FA_F16_V)
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #endif
@@ -228,6 +233,29 @@ void main(void) {
                 l[rr] = l[rr] * r + ps;
                 [[unroll]] for (uint i = 0u; i < 4u; i++) acc[rr][i] *= r;
             }
+#ifdef FA_F16_PV
+            /* Packed-f16 PV: one SUB step (8 keys) accumulates in f16 with
+             * v_pk_fma_f16 (2 FMAs/lane/op), then flushes into the f32 acc.
+             * p is in [0,1] after the max subtraction and the partial spans
+             * only 8 keys, so the f16 sum carries ~8 x 2^-11 relative error of
+             * one step's contribution, not of the whole row. */
+            f16vec4 pa[RS][4];
+            [[unroll]] for (uint rr = 0u; rr < RS; rr++)
+                [[unroll]] for (uint i = 0u; i < 4u; i++) pa[rr][i] = f16vec4(0.0);
+            [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                uint vr = (sub + kk) * (HD / 4u) + j;
+                f16vec4 v0 = sh_v[vr], v1 = sh_v[vr + 16u], v2 = sh_v[vr + 32u], v3 = sh_v[vr + 48u];
+                [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+                    f16vec4 p = f16vec4(float16_t(s[rr][kk]));
+                    pa[rr][0] = fma(p, v0, pa[rr][0]);
+                    pa[rr][1] = fma(p, v1, pa[rr][1]);
+                    pa[rr][2] = fma(p, v2, pa[rr][2]);
+                    pa[rr][3] = fma(p, v3, pa[rr][3]);
+                }
+            }
+            [[unroll]] for (uint rr = 0u; rr < RS; rr++)
+                [[unroll]] for (uint i = 0u; i < 4u; i++) acc[rr][i] += vec4(pa[rr][i]);
+#else
             [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
                 uint vr = (sub + kk) * (HD / 4u) + j;
                 vec4 v0 = vec4(sh_v[vr]), v1 = vec4(sh_v[vr + 16u]), v2 = vec4(sh_v[vr + 32u]), v3 = vec4(sh_v[vr + 48u]);
@@ -239,6 +267,7 @@ void main(void) {
                     acc[rr][3] += p * v3;
                 }
             }
+#endif
         }
         barrier();
     }

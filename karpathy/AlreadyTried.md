@@ -3784,3 +3784,32 @@ byte-identical to the shipped SPIR-V. Evidence: `evidence/raw/fa-f16-lds-2026111
 * **Status: DEFAULT ON** (owner decision, both GQA 6 and 8; dense is +0.78% at 8k,
   neutral-positive). `P36_VK_ATTN_FA_F16=0` restores the f32-staged kernel.
   Next: step B (packed-f16 PV math) on top.
+
+## 2026-11-17 Prefill FA: packed-f16 PV math (step B of packed-f16 attention)
+
+On top of step A (f16 K/V in LDS). `-DFA_F16_PV`: each 8-key SUB step
+accumulates p*v in `f16vec4` via `fma` (v_pk_fma_f16), then flushes into the
+f32 `acc` after the step's rescale. p is in [0,1]; `l` stays f32. VGPRs/LDS/
+occupancy unchanged (gqa6 256/0 spilled/4 waves, gqa8 128/8). Independent
+review: no correctness issues. Evidence: `evidence/raw/fa-f16-pv-20261117/`.
+
+* **Kernel (`tests/test_attn_fa`, 2 interleaved runs, best-of):** -10..-12% on
+  both shapes at every size >= 16 tokens, e.g. MoE gqa8 256@16128 13.88 -> 12.46,
+  1024@7936 29.03 -> 26.07; dense gqa6 256@16128 25.08 -> 22.48, 1024@7936
+  53.34 -> 47.52. max_abs vs f32 qtile2 unchanged (<= 1.24e-3, bound 2e-3);
+  at P36_TEST_QSCALE=6 h16 and pv give identical max_abs (the excess there is
+  step A's K rounding, not PV).
+* **Whole model, ctx 8192, chunk 256, 3 interleaved reps (same binary, only the
+  two spv differ):** MoE Axion prefill 612.46 -> 621.33 (**+1.45%**, clean
+  separation: min B 620.00 > max A 614.93; **PASS** under the new 1.25% +
+  separation gate), decode 79.69 -> 80.52. Dense Huihui 185.19 -> 186.16
+  (**+0.52%**, overlap, **FAIL**), decode flat: neutral at 8k, as with step A.
+* **Frontier NLL (P3, ctx 8192..16384 step 256, n=33, ref = f32-staged):**
+  MoE pv med -0.0000 MAD 0.0002 mean|d| 0.877 (h16: 1.087) top1 29/33;
+  dense pv med -0.0000 mean|d| 0.0056 (h16 0.0025; f32 reorder control
+  0.0238) top1 33/33. No non-finite logits.
+* **Status: DEFAULT ON** inside the existing f16 build (both GQA 6 and 8, one
+  kernel source; dense is neutral at 8k and the kernel is -10%).
+  `P36_VK_ATTN_FA_F16=0` still restores the f32 tile. Next: step C (QK).
+* Gate change same day (owner decision): `bench_ab.sh` default 1.5% -> 1.25%
+  and now also requires clean rep separation; see CAMPAIGN.md section 4.
