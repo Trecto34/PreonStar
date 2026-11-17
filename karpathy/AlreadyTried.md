@@ -4100,3 +4100,25 @@ device-local memory, every arm checked for the exact result.
   work can merge without cross-workgroup sync (same-workgroup fusion) can.
 * reconsider_if: a GPU/driver with cheaper GL2 atomics or an ACE queue, or a
   fusion that needs no cross-workgroup communication.
+
+## 2026-11-17 MoE prefill chunk 1024 vs 512: +18%, and the README's "1024 fails" no longer reproduces
+
+Measurement only, no code change. Axion-1.0-35B, `p36-bench` on `main` at
+`dc215de`, one run per arm. Evidence: `evidence/raw/chunk1024-20261117/`.
+
+* ctx 2048: prefill **734.92 -> 865.85 t/s (+17.8%)** at chunk 512 -> 1024,
+  decode 86.69 / 86.58. ctx 16384: **759.30 -> 895.64 t/s (+18.0%)**. ctx
+  32768 at chunk 1024: 742.46 t/s, no failure. Scratch grows 111 -> 221 MiB
+  (ctx 2400), 127 -> 253 MiB (16k), 285 MiB at 32k.
+* Mechanism: 1024 tokens x top-8 / 256 experts = 32 slots per expert, i.e.
+  full 32-slot GEMM tiles; 512 averages half-empty ones.
+* The engine default is already 1024 (`auto` resolves to it for a resident
+  GPU); only README's server advice (512, "1024 trips a RADV 64 MB scratch
+  failure") and local start scripts choose less. That failure did not
+  reproduce up to 32k in p36-bench; the server path with `--kv-disk-dir` was
+  not re-run. 512 still caches more of a short system prompt (checkpoints
+  land on chunk multiples).
+* Dense 27B: every recorded run uses chunk 256, and a local start script pins
+  256 citing a GQA-6 GPU lockup; not tested here (risk of a GPU hang).
+* `sensors` reports sclk 500 MHz throughout load, like `pp_dpm_sclk`: the GPU
+  clock is not observable from software on this board.
