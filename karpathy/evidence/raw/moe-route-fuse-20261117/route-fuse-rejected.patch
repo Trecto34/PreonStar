@@ -1,0 +1,286 @@
+diff --git a/p36_gpu.h b/p36_gpu.h
+index be63df5..9999621 100644
+--- a/p36_gpu.h
++++ b/p36_gpu.h
+@@ -946,4 +946,11 @@ int p36_gpu_moe_ffn_f32_tensor(
+         uint32_t                out_dim,
+         uint32_t                n_expert);
+ 
++/* Hand the next p36_gpu_moe_ffn_f32_tensor call the shared-expert output and
++ * gate scalar (n_tok rows each).  When its decode down sum can apply
++ * out = fma(shared, sigmoid(g), routed) itself it returns 2 and the caller
++ * skips p36_gpu_ffn_tail_tensor; otherwise it returns 1 and the tail is the
++ * caller's.  Consumed by that one call. */
++void p36_gpu_moe_ffn_set_tail(const p36_gpu_tensor *shared, const p36_gpu_tensor *scalar);
++
+ #endif
+diff --git a/src/core/core_15_forward_tokens_cpu.inc b/src/core/core_15_forward_tokens_cpu.inc
+index fadf22f..8ddfba4 100644
+--- a/src/core/core_15_forward_tokens_cpu.inc
++++ b/src/core/core_15_forward_tokens_cpu.inc
+@@ -516,12 +516,16 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
+      * built and consumed on GPU. When it runs, the q8_K input staging is
+      * only needed for k-quant shared-expert projections, which this model
+      * does not have. */
+-    bool routed_done =
++    /* With the shared expert already recorded, its tail can ride the routed
++     * down sum (returns 2): see p36_gpu_moe_ffn_set_tail. */
++    if (shared_first) p36_gpu_moe_ffn_set_tail(rt->ffn_shared_out, rt->ffn_scalar);
++    const int routed_rc =
+         p36_gpu_moe_ffn_f32_tensor(out, m->map, m->size,
+                                           &gate, &up, &down,
+                                           rt->ffn_selected, rt->ffn_weights,
+                                           il, P36_N_EXPERT_USED, inp, n_tok,
+-                                          P36_N_EMBD, P36_N_FF_EXP, P36_N_EMBD, P36_N_EXPERT) != 0;
++                                          P36_N_EMBD, P36_N_FF_EXP, P36_N_EMBD, P36_N_EXPERT);
++    bool routed_done = routed_rc != 0;
+     /* Diagnostic only: why a layer left the fused f32 expert path. */
+     if (!routed_done && getenv("P36_VK_MOE_ROUTE_DEBUG")) {
+         fprintf(stderr, "p36: moe f32 route miss il=%u n_tok=%u gate=%u up=%u down=%u\n",
+@@ -624,6 +628,7 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
+     (void)shared;
+     (void)scalar;
+     (void)outp;
++    if (routed_rc == 2) return true;   /* tail already applied by the down sum */
+     return p36_gpu_ffn_tail_tensor(out, rt->ffn_shared_out, rt->ffn_scalar, P36_N_EMBD, n_tok) != 0;
+ }
+ 
+diff --git a/src/vulkan/vk_00_now_ns.inc b/src/vulkan/vk_00_now_ns.inc
+index 27a8334..417ca4b 100644
+--- a/src/vulkan/vk_00_now_ns.inc
++++ b/src/vulkan/vk_00_now_ns.inc
+@@ -508,6 +508,8 @@ enum {
+ };
+ static p36_gpu_tensor *p36_vk_pool[P36_VK_POOL_CAP];
+ static p36_gpu_tensor *p36_vk_vision_weight;
++/* Per-(token, row) last-arrival tickets of the MoE down sum-decode (vk_13). */
++static p36_gpu_tensor *p36_vk_moe_ticket;
+ /* Resident embedding table (see vk_10); declared here so cleanup can reset it. */
+ static p36_gpu_tensor *p36_vk_embed_table;
+ static uint64_t p36_vk_embed_table_off;
+diff --git a/src/vulkan/vk_05_stream_weight_tensor_unlocke.inc b/src/vulkan/vk_05_stream_weight_tensor_unlocke.inc
+index 1a1f78a..836fd95 100644
+--- a/src/vulkan/vk_05_stream_weight_tensor_unlocke.inc
++++ b/src/vulkan/vk_05_stream_weight_tensor_unlocke.inc
+@@ -343,11 +343,11 @@ int p36_gpu_init(void) {
+     p36_vk.moe_gate_up_decode_iq2s_iq2xxs = P36_VK_KERNEL("vulkan/moe_gate_up_decode_iq2s_iq2xxs.spv", 8, 24, 1u << 6);
+     p36_vk.moe_down_q2k_f32b = P36_VK_KERNEL("vulkan/moe_down_q2k_f32b.spv", 5, 24, 1u << 4);
+     p36_vk.moe_down_q2k_f32b_iq2s = P36_VK_KERNEL("vulkan/moe_down_q2k_f32b_iq2s.spv", 6, 24, 1u << 4);
+-    p36_vk.moe_down_q2k_sum_decode = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode.spv", 6, 24, 1u << 5);
+-    p36_vk.moe_down_q2k_sum_decode_iq2s = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq2s.spv", 7, 24, 1u << 5);
+-    p36_vk.moe_down_q2k_sum_decode_iq3s = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq3s.spv", 7, 24, 1u << 5);
+-    p36_vk.moe_down_q2k_sum_decode_iq3xxs = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq3xxs.spv", 7, 24, 1u << 5);
+-    p36_vk.moe_down_q2k_sum_decode_q3k = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_q3k.spv", 6, 24, 1u << 5);
++    p36_vk.moe_down_q2k_sum_decode = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode.spv", 11, 28, (1u << 5) | (1u << 7) | (1u << 8));
++    p36_vk.moe_down_q2k_sum_decode_iq2s = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq2s.spv", 11, 28, (1u << 5) | (1u << 7) | (1u << 8));
++    p36_vk.moe_down_q2k_sum_decode_iq3s = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq3s.spv", 11, 28, (1u << 5) | (1u << 7) | (1u << 8));
++    p36_vk.moe_down_q2k_sum_decode_iq3xxs = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq3xxs.spv", 11, 28, (1u << 5) | (1u << 7) | (1u << 8));
++    p36_vk.moe_down_q2k_sum_decode_q3k = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_q3k.spv", 11, 28, (1u << 5) | (1u << 7) | (1u << 8));
+     p36_vk.moe_gate_up_q4k_f32b = P36_VK_KERNEL("vulkan/moe_gate_up_q4k_f32b.spv", 7, 24, 1u << 6);
+     p36_vk.moe_down_q4k_sum_decode = P36_VK_KERNEL("vulkan/moe_down_q4k_sum_decode.spv", 6, 24, 1u << 5);
+     p36_vk.moe_gate_up_gemm = P36_VK_KERNEL("vulkan/moe_gate_up_gemm.spv", 8, 24, 1u << 6);
+diff --git a/src/vulkan/vk_06_prof_report.inc b/src/vulkan/vk_06_prof_report.inc
+index 5bfbcc7..c2562b5 100644
+--- a/src/vulkan/vk_06_prof_report.inc
++++ b/src/vulkan/vk_06_prof_report.inc
+@@ -107,6 +107,8 @@ void p36_gpu_cleanup(void) {
+     p36_vk_b16_ring_destroy_unlocked();
+     p36_vk_tensor_free_unlocked(p36_vk_vision_weight);
+     p36_vk_vision_weight = NULL;
++    p36_vk_tensor_free_unlocked(p36_vk_moe_ticket);
++    p36_vk_moe_ticket = NULL;
+     /* The resident embedding table belongs to the device being destroyed; leaving
+      * the pointer (and the failed/off flags) would hand a dangling tensor to the
+      * next init. */
+diff --git a/src/vulkan/vk_13_moe_build_tiles.inc b/src/vulkan/vk_13_moe_build_tiles.inc
+index c34bac8..7899f14 100644
+--- a/src/vulkan/vk_13_moe_build_tiles.inc
++++ b/src/vulkan/vk_13_moe_build_tiles.inc
+@@ -1269,6 +1269,16 @@ int p36_gpu_moe_ffn_q8_tensor(p36_gpu_tensor *out,
+  * reduce.  Besides the native IQ2_XXS/Q2_K recipe this covers APEX's
+  * IQ3_XXS/Q3_K, IQ2_S/IQ3_XXS and mixed IQ2_S+IQ2_XXS/IQ3_XXS recipes.
+  * No q8_K stage anywhere, no host read of the selection. */
++/* Shared-expert tail handed to the next routed pass; consumed on entry so
++ * the per-row recursion below never applies it. */
++static const p36_gpu_tensor *p36_vk_moe_tail_shared;
++static const p36_gpu_tensor *p36_vk_moe_tail_scalar;
++
++void p36_gpu_moe_ffn_set_tail(const p36_gpu_tensor *shared, const p36_gpu_tensor *scalar) {
++    p36_vk_moe_tail_shared = shared;
++    p36_vk_moe_tail_scalar = scalar;
++}
++
+ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
+                                       const void *model_map,
+                                       uint64_t model_size,
+@@ -1285,6 +1295,10 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
+                                       uint32_t mid_dim,
+                                       uint32_t out_dim,
+                                       uint32_t n_expert) {
++    const p36_gpu_tensor *tail_shared = p36_vk_moe_tail_shared;
++    const p36_gpu_tensor *tail_scalar = p36_vk_moe_tail_scalar;
++    p36_vk_moe_tail_shared = p36_vk_moe_tail_scalar = NULL;
++    bool tail_done = false;
+     bool q4k = gate->type == P36_VK_TENSOR_Q4_K && up->type == P36_VK_TENSOR_Q4_K &&
+                down->type == P36_VK_TENSOR_Q4_K;
+     /* IQ2_S experts (Qwen3.8-35B-A3B-IQ2_M): the fused f32 expert path carries
+@@ -1655,10 +1669,32 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
+                         identity ? (uint32_t)n_tok : 0u };  /* down-sum: token count */
+             const p36_gpu_tensor *schedule = identity ? (sel_slots ? sel_slots : selected) : wave_tiles;
+             if (down_sum_decode) {
+-                const p36_gpu_tensor *db[7] = {
++                /* Last-arrival reduce: the down sum's last slot workgroup per
++                 * (token, row) applies route[] (and the shared-expert tail
++                 * when handed one) instead of moe_down_route_reduce and
++                 * ffn_tail -- two fewer dispatches and drains per layer, same
++                 * fma order.  Tickets are zeroed once and reset by the
++                 * kernel.  P36_VK_MOE_ROUTE_FUSE=0 restores the dispatches. */
++                const uint64_t tick_bytes = (uint64_t)n_tok * out_dim * sizeof(uint32_t);
++                bool fuse = down_split && p36_vk_env_default_on("P36_VK_MOE_ROUTE_FUSE");
++                if (fuse && !p36_vk_moe_ticket)
++                    p36_vk_moe_ticket = p36_vk_tensor_alloc_kind_unlocked(
++                        (uint64_t)8u * out_dim * sizeof(uint32_t) > tick_bytes
++                            ? (uint64_t)8u * out_dim * sizeof(uint32_t) : tick_bytes, true, true);
++                fuse = fuse && p36_vk_moe_ticket && p36_vk_moe_ticket->bytes >= tick_bytes;
++                const bool tail = fuse && tail_shared && tail_scalar && p36_vk_use_gpu_ffn_tail();
++                struct {
++                    uint32_t out_dim, in_dim, blocks, n_used, has_scales, identity, mode;
++                } spush = { dpush.out_dim, dpush.in_dim, dpush.blocks, dpush.n_used,
++                            dpush.has_scales, dpush.identity, tail ? 2u : fuse ? 1u : 0u };
++                /* Unused fused bindings alias down8 (already written here),
++                 * so the off path adds no hazard roots. */
++                const p36_gpu_tensor *db[11] = {
+                     down_bank, mid8, schedule,
+                     down_scales ? down_scales : down_bank,
+                     weights, down_split ? down8 : out, tables,
++                    fuse ? p36_vk_moe_ticket : down8, fuse ? out : down8,
++                    tail ? tail_shared : down8, tail ? tail_scalar : down8,
+                 };
+                 const char *dname = q4k ? "moe_q4k_down_sum_decode" :
+                                     down_q3k ? "moe_q3k_down_sum_decode" :
+@@ -1671,10 +1707,14 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
+                                           down_iq3s ? &p36_vk.moe_down_q2k_sum_decode_iq3s :
+                                           down_iq2s ? &p36_vk.moe_down_q2k_sum_decode_iq2s :
+                                                        &p36_vk.moe_down_q2k_sum_decode;
+-                ok = p36_vk_run_unlocked(dname, dkernel,
+-                                         db, &dpush, sizeof(dpush),
+-                                         out_dim, down_split ? (uint32_t)n_slot : 1u, 1);
+-                if (ok && down_split) {
++                ok = q4k ? p36_vk_run_unlocked(dname, dkernel,
++                                               db, &dpush, sizeof(dpush),
++                                               out_dim, 1u, 1)
++                         : p36_vk_run_unlocked(dname, dkernel,
++                                               db, &spush, sizeof(spush),
++                                               out_dim, (uint32_t)n_slot, 1);
++                tail_done = ok && tail;
++                if (ok && down_split && !fuse) {
+                     struct {
+                         uint32_t out_dim;
+                         uint32_t n_used;
+@@ -1734,7 +1774,7 @@ done:
+     p36_gpu_tensor_free(mid8);
+     p36_gpu_tensor_free(tiles);
+     p36_gpu_tensor_free(sel_slots);
+-    return ok;
++    return ok ? (tail_done ? 2 : 1) : 0;
+ }
+ 
+ int p36_gpu_moe_ffn_tensor(p36_gpu_tensor *out,
+diff --git a/vulkan/moe_down_q2k_sum_decode.comp b/vulkan/moe_down_q2k_sum_decode.comp
+index 6c43fdc..637ab85 100644
+--- a/vulkan/moe_down_q2k_sum_decode.comp
++++ b/vulkan/moe_down_q2k_sum_decode.comp
+@@ -4,6 +4,7 @@
+ #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+ #extension GL_KHR_shader_subgroup_basic : require
+ #extension GL_KHR_shader_subgroup_arithmetic : require
++#extension GL_ARB_gpu_shader_int64 : require
+ 
+ /* Decode-only Q2_K down projection and routing-weighted sum. One
+  * workgroup owns one output row and visits the eight experts in order. */
+@@ -15,10 +16,15 @@ layout(set = 0, binding = 1) readonly buffer Mid { vec2 mid[]; };
+ layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
+ layout(set = 0, binding = 3) readonly buffer Scales { float scales[]; };
+ layout(set = 0, binding = 4) readonly buffer RouteWeights { float route[]; };  /* used by the reduce */
+-layout(set = 0, binding = 5) writeonly buffer Output { float y[]; };
++layout(set = 0, binding = 5) coherent buffer Output { float y[]; };   /* per-slot partials */
+ #if defined(P36_MOE_IQ2S) || defined(P36_MOE_IQ3S) || defined(P36_MOE_IQ3XXS)
+ layout(set = 0, binding = 6) readonly buffer Tables { uint tables[]; };
+ #endif
++/* Last-arrival reduce (pc.mode != 0): bindings 7..10 below. */
++layout(set = 0, binding = 7) coherent buffer Ticket { uint ticket[]; };
++layout(set = 0, binding = 8) writeonly buffer Final { float yout[]; };
++layout(set = 0, binding = 9) readonly buffer SharedOut { float sharedv[]; };
++layout(set = 0, binding = 10) readonly buffer Scalar { float scalarv[]; };
+ 
+ layout(push_constant) uniform Push {
+     uint out_dim;
+@@ -27,8 +33,60 @@ layout(push_constant) uniform Push {
+     uint n_used;
+     uint has_scales;
+     uint n_tok;     /* identity tokens (MTP verify rows); host-side only */
++    uint mode;      /* 0 partials only, 1 + route reduce, 2 + shared-expert tail */
+ } pc;
+ 
++/* moe_down_route_reduce.comp's fma32, verbatim: the reduce below must round
++ * exactly like the dispatch it replaces. */
++float fma32(float a, float b, float c) {
++    double p = double(a) * double(b);
++    double s = p + double(c);
++    double bv = s - p;
++    double e = (p - (s - bv)) + (double(c) - bv);
++    if (e != 0.0LF) {
++        uint64_t bits = doubleBitsToUint64(s);
++        if ((bits & 1UL) == 0UL) {
++            if (s > 0.0LF) bits += (e > 0.0LF) ? 1UL : -1UL;
++            else if (s < 0.0LF) bits += (e < 0.0LF) ? 1UL : -1UL;
++            s = uint64BitsToDouble(bits);
++        }
++    }
++    return float(s);
++}
++
++/* ffn_tail.comp's sigmoid, verbatim. */
++float sigmoid_stable(float x) {
++    if (x >= 0.0f) {
++        float z = exp(-x);
++        return 1.0f / (1.0f + z);
++    }
++    float z = exp(x);
++    return z / (1.0f + z);
++}
++
++/* The last of a (token, row)'s n_used slot workgroups to finish does what
++ * moe_down_route_reduce and then ffn_tail did for that row: the same fma32
++ * chain in expert order, then out = fma(shared, sigmoid(g), sum).  Saves two
++ * dispatches and two pipeline drains per MoE layer; nothing serializes, each
++ * row has its own ticket.  The partial store is released before the ticket
++ * increment and the last arriver acquires before reading the others; it
++ * resets the ticket for the next layer. */
++void route_tail(uint slot, uint row) {
++    uint tok = slot / pc.n_used;
++    uint idx = tok * pc.out_dim + row;
++    memoryBarrierBuffer();
++    if (atomicAdd(ticket[idx], 1u) != pc.n_used - 1u) return;
++    memoryBarrierBuffer();
++    float sum = 0.0;
++    for (uint u = 0u; u < pc.n_used; u++) {
++        uint s = tok * pc.n_used + u;
++        sum = fma32(y[s * pc.out_dim + row], route[s], sum);
++    }
++    if (pc.mode == 2u) sum = fma(sharedv[idx], sigmoid_stable(scalarv[tok]), sum);
++    yout[idx] = sum;
++    ticket[idx] = 0u;
++}
++
+ const uint Q2K_U16 = 42u;
+ #if defined(P36_MOE_IQ2S) || defined(P36_MOE_IQ3S) || defined(P36_MOE_IQ3XXS) || defined(P36_MOE_Q3K)
+ uint wb_u8(uint off) {
+@@ -277,6 +335,7 @@ void main(void) {
+         if (tid == 0u) {
+             float sc = pc.has_scales != 0u ? scales[expert] : 1.0;
+             y[slot * pc.out_dim + row] = acc * sc;
++            if (pc.mode != 0u) route_tail(slot, row);
+         }
+     }
+ }

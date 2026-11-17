@@ -4045,3 +4045,32 @@ Measured on `main` at `4deffd1` (dst-only hazard barrier). Evidence:
   latency of tiny dependent kernels, not barrier packets.
 * reconsider_if: a fusion or last-workgroup ticket removes per-layer links
   (route_reduce -> tail -> next norm, router matvec -> topk); see ROADMAP.
+
+## 2026-11-17 MoE down sum: last-arrival ticket replaces route_reduce + ffn_tail — REJECTED, -2.14% decode
+
+The roadmap's "last-workgroup ticket" (previous entry's census: route_reduce
+and moe_tail are 80 of 647 barriers per Axion decode token). Built and
+measured; patch kept as `evidence/raw/moe-route-fuse-20261117/route-fuse-rejected.patch`.
+
+* **Change.** `moe_down_q2k_sum_decode.comp` (all 5 builds) gained a push
+  `mode`: lane 0 of each (row, slot) workgroup stores its partial,
+  `memoryBarrierBuffer()`, `atomicAdd` on a per-(token, row) ticket; the last
+  arriver runs `moe_down_route_reduce`'s fma32 chain in slot order, then
+  `ffn_tail`'s `fma(shared, sigmoid(g), sum)`, writes the row and resets the
+  ticket. Host handed the shared-expert output over via a set-tail hand-off and
+  skipped both dispatches (`P36_VK_MOE_ROUTE_FUSE=0` off switch).
+* **Live and exact.** Decode per token 960 -> 880 dispatches, 647 -> 567
+  barriers, route_reduce and moe_tail 0. Greedy output byte-identical on Axion,
+  Qwen3.6-35B-A3B and Qwen3.6 + MTP head (same md5 as before).
+* **Slower.** `bench_ab.sh` 3 interleaved reps, ctx 1024, gen 64, same binary:
+  Axion decode **87.48 -> 85.61 t/s (-2.14%**, MAD 0.02 / 0.01, every fused rep
+  below every unfused rep); prefill -1.67% inside MoE noise. Rejected on the
+  first clear regression per the smart A/B rule; not debugged further.
+* **Why (likely, not profiled).** The ticket puts a release wait plus an
+  atomic L2 round trip on the exit path of all 16384 workgroups per layer;
+  that stretches the down sum by more than two ~4.5 us links. Fewer barriers
+  is not a win when the replacement sync sits on every workgroup.
+* reconsider_if: the per-workgroup cost drops (one atomic per row instead of
+  per slot, e.g. a row-major down sum with all slots in one workgroup that
+  keeps the split kernel's bandwidth), or a ticket is used on a kernel with
+  hundreds, not tens of thousands, of workgroups (router matvec -> top-k).

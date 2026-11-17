@@ -1,0 +1,11 @@
+Here's a C function that reverses a singly linked list:
+
+```c
+struct Node {
+    int data;
+    struct Node* next;
+};
+
+struct Node* reverseList(struct Node* head) {
+    struct Node* prev = NULL;
+    struct Node* current = head;

@@ -1,0 +1,10 @@
+p36: timestamps period_ns=10.000000 computeAndGraphics=1 valid_bits=64 queue_family=0 (graphics fallback) ace=0
+p36: Vulkan device AMD BC-250 (RADV GFX1013), 15.34 GiB UMA
+p36: Vulkan generic backend, BC-250 fast path, subgroup 64
+p36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+p36: MTP support model loaded: /mnt/external/models/llm/Qwen3.6-35B-A3B-APEX-I-MTP-Q4K.gguf (draft=3)
+p36: memory: KV 0.07 GiB (raw 0.01 + compressed 0.06) + buffers 0.22 GiB = 0.29 GiB context
+p36: memory detail: ctx=1024 prefill_cap=1024 raw_kv_rows=1024 compressed_kv_rows=0 backend=vulkan
+processing 39 input tokens: 39/39 (100.0%)
+p36: embedding table 272.8 MiB resident on device (1059 ms, async)
+p36: prefill: 43.47 t/s, generation: 57.91 t/s
