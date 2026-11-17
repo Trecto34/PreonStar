@@ -4122,3 +4122,16 @@ Measurement only, no code change. Axion-1.0-35B, `p36-bench` on `main` at
   256 citing a GQA-6 GPU lockup; not tested here (risk of a GPU hang).
 * `sensors` reports sclk 500 MHz throughout load, like `pp_dpm_sclk`: the GPU
   clock is not observable from software on this board.
+* **Server check (same day).** `p36-server` with `--kv-disk-dir`, ctx 32768,
+  a cold 20,451-token chat prompt (`longreq.py`): chunk 1024 **25.2 s / ~811
+  t/s** end to end vs chunk 512 **28.8 s / ~709 t/s** (+14%); per-chunk log
+  rates 890-1100 t/s at 1024. No error in either log. A repeat with the same
+  prefix resumed at token 18432 in both and re-prefilled the 2015-token tail at
+  565 vs 598 t/s (a ragged second chunk gains nothing); whole-request 6.0 vs
+  4.1 s, one sample, the gap outside prefill. README now recommends the
+  default (1024 on MoE) instead of 512.
+* **Dense 27B, chunk past the GFX1013 clamp** (`P36_VK_PREFILL_CHUNK_UNSAFE=1`,
+  ctx 2048, one run each): 256 **207.70**, 512 **214.44 (+3.2%)**, 1024
+  **211.70** t/s; scratch 93 / 186 / 371 MiB. No watchdog trip (default KV
+  types route GQA 6 to `attn_prefill_fa_gqa6`, not the `attn_prefill_qtile`
+  fallback the clamp was written for). Clamp kept at 256: +93 MiB for +3%.

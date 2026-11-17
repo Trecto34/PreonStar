@@ -207,11 +207,17 @@ calls.
 
 ### 16 GB UMA: what actually fits
 
-- `--prefill-chunk 512` with `--kv-disk-dir DIR` is the working envelope.
-  Chunk 1024 trips a RADV 64 MB scratch-buffer allocation failure.
-- Chunk 512 was validated to **22,361 live context tokens** under an agentic
-  workload; a 31k-token agentic session (15.5k prefill + 15.5k decode) ran
-  without a decode stall.
+- Leave `--prefill-chunk` at its default with `--kv-disk-dir DIR`: on MoE it
+  resolves to 1024, which fills the 32-slot expert tiles and prefills **~18%
+  faster than 512** (Axion: 759 -> 896 t/s at 16k in `p36-bench`; a cold
+  20.4k-token server prompt 709 -> 811 t/s end to end) for ~+125 MiB scratch.
+  Measured 2026-11-17 to 32k (`p36-bench`) and 20.4k (`p36-server` with
+  `--kv-disk-dir`) with no failure; the RADV 64 MB scratch-buffer failure
+  earlier builds hit at 1024 no longer reproduces. Dense (GQA 6) models stay
+  clamped to 256 on this board: 512 measured +3% prefill for +93 MiB scratch.
+- Chunk 512 was validated earlier to **22,361 live context tokens** under an
+  agentic workload; a 31k-token agentic session (15.5k prefill + 15.5k decode)
+  ran without a decode stall.
 - **`--kv-disk-dir` is free and worth it.** Decode is unchanged (68.08 vs 68.68
   t/s at 10.8k), and a repeated 10.8k prompt drops **ttft from 15.88 s to 1.98 s**.
   KV at 10.8k is only ~0.15 GiB thanks to hybrid attention — the ceiling is the

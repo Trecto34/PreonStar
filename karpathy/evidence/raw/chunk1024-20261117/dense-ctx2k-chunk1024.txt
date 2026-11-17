@@ -1,0 +1,7 @@
+p36: timestamps period_ns=10.000000 computeAndGraphics=1 valid_bits=64 queue_family=0 (graphics fallback) ace=0
+p36: Vulkan device AMD BC-250 (RADV GFX1013), 15.34 GiB UMA
+p36: Vulkan generic backend, BC-250 fast path, subgroup 64
+p36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+p36-bench: context buffers 581.50 MiB (scratch=370.94 MiB, raw=60.94 MiB, compressed=149.62 MiB, ctx=2400, backend=vulkan, prefill_chunk=1024, raw_kv_rows=2400, compressed_kv_rows=0)
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes
+2048,2048,211.70,16,22.97,8204

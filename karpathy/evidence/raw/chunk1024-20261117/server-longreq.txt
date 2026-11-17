@@ -1,0 +1,2 @@
+cold: 25.2 s  prompt_tokens=20451  prefill_tps~811  reply=''
+reuse: 6.0 s  prompt_tokens=20447  prefill_tps~3380  reply=''
