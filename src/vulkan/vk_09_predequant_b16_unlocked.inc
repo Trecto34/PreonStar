@@ -150,14 +150,27 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
             bool q2_full = weight_type == P36_VK_TENSOR_Q2_K &&
                            out_dim % 4u == 0u &&
                            p36_vk_env_default_on("P36_VK_DENSE_Q2K_DECODE");
-            p36_vk_kernel *kernel = q4_full ? &p36_vk.dense_q4k_decode :
+            /* Q4_K decode runs one row per workgroup: the 35B MoE trunk is
+             * K=2048 (8 blocks per row), so a 4-row group moved ~4.6 KB and
+             * the kernel ran at ~221 GB/s; 1 row is -8% kernel time and +1.37%
+             * Axion decode, neutral on the K=5120 dense trunk.  Same per-row
+             * lane order, so bit-identical.  P36_VK_Q4K_DECODE_ROWS=4 restores
+             * the 4-row build. */
+            static int q4_rows = -1;
+            if (q4_rows < 0) {
+                const char *e = getenv("P36_VK_Q4K_DECODE_ROWS");
+                q4_rows = e && e[0] == '4' ? 4 : 1;
+            }
+            const uint32_t rows = q4_full ? (uint32_t)q4_rows : 4u;
+            p36_vk_kernel *kernel = q4_full ? (rows == 1u ? &p36_vk.dense_q4k_decode_r1
+                                                          : &p36_vk.dense_q4k_decode) :
                                    q5_full ? &p36_vk.dense_q5k_decode :
                                    q3_full ? &p36_vk.dense_q3k_decode :
                                    q2_full ? &p36_vk.dense_q2k_decode :
                                              &p36_vk.dense_kquant_decode;
             ok = p36_vk_run_unlocked(op, kernel,
                                      bindings, &push, sizeof(push),
-                                     ((uint32_t)out_dim + 3u) / 4u, 1, 1);
+                                     ((uint32_t)out_dim + rows - 1u) / rows, 1, 1);
         }
         pthread_mutex_unlock(&p36_vk_mu);
         return ok;

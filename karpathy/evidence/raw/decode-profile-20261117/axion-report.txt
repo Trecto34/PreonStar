@@ -1,0 +1,20 @@
+dispatches: 6264
+device span 95.5 ms   sum of dispatch durations 80.8 ms   busy 84.7%
+total gap 14.6 ms  (15.3% of span)
+largest gaps (us, after -> before):
+     873.7 us  top2.spv -> embed_row.spv
+     816.0 us  top2.spv -> embed_row.spv
+     809.8 us  top2.spv -> embed_row.spv
+     797.4 us  top2.spv -> embed_row.spv
+     695.5 us  top2.spv -> embed_row.spv
+     692.6 us  top2.spv -> embed_row.spv
+
+GPU ms by kernel, top:
+    21.76 ms   26.9%  dense_q4k_decode.spv
+    10.77 ms   13.3%  dense_kquant_decode.spv
+    10.75 ms   13.3%  moe_down_q2k_sum_decode_iq3xxs.spv
+     5.45 ms    6.7%  moe_gate_up_decode_iq2s_iq2xxs.spv
+     5.30 ms    6.6%  matmul_q8_0_f32b.spv
+     5.10 ms    6.3%  matmul_f32_fast.spv
+     4.55 ms    5.6%  add_rms_norm_q8_k.spv
+     3.49 ms    4.3%  moe_gate_up_decode_iq2s.spv

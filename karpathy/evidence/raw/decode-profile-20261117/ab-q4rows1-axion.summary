@@ -1,0 +1,8 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    3     584.98         6.970     87.38          0.090     /home/server/p36-wt/barrier-masks/ab-r4.sh
+B    3     573.10         2.690     88.58          0.110     /home/server/p36-wt/barrier-masks/ab-r1.sh
+
+B vs A prefill: -2.03%   decode: +1.37%   (gate: +1.25%)
+separation: min B 570.41 vs max A 591.95 -> overlap
+verdict: FAIL (prefill)

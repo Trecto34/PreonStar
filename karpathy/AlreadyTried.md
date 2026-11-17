@@ -4135,3 +4135,31 @@ Measurement only, no code change. Axion-1.0-35B, `p36-bench` on `main` at
   **211.70** t/s; scratch 93 / 186 / 371 MiB. No watchdog trip (default KV
   types route GQA 6 to `attn_prefill_fa_gqa6`, not the `attn_prefill_qtile`
   fallback the clamp was written for). Clamp kept at 256: +93 MiB for +3%.
+
+## 2026-11-17 Q4_K decode at one row per workgroup — ACCEPTED, +1.37% MoE decode, bit-identical
+
+Answers the `reconsider_if` of "dense_q4k_decode — 8 rows per workgroup —
+REJECTED" ("the answer is more parallelism, not fewer workgroups"). Evidence:
+`evidence/raw/decode-profile-20261117/` (timelines xz-compressed).
+
+* **Profile first.** Fresh Axion decode window (`P36_VK_PROF_KERNEL=1`):
+  `dense_q4k_decode` 26.9% of GPU time, `dense_kquant_decode` 13.3%,
+  `moe_down_q2k_sum_decode_iq3xxs` 13.3%. Per token the Q4_K trunk is ~602 MB
+  (`P36_VK_PROF_SHAPE=1`: 2048x8192, 4096x2048, 2048x512, 512x2048, 2048x32)
+  in ~2.7 ms = **~221 GB/s, half the roofline**: the MoE trunk is K=2048, 8
+  Q4_K blocks per row, so a 4-row workgroup moves ~4.6 KB.
+* **Change.** `dense_q4k_decode_r1.spv` = the same `dense_kquant_decode.comp`
+  Q4_K build at `P36_ROWS=1`; host launches `out_dim` workgroups. Per-row lane
+  order is unchanged, so output is bit-identical. Default on;
+  `P36_VK_Q4K_DECODE_ROWS=4` restores the 4-row build.
+* **Kernel** (63-token window, timestamps): 4 rows 3.025 / 3.025 ms/token,
+  2 rows 2.973 / 2.976, **1 row 2.776 (-8.2%)**; token span 13.17 -> 12.87.
+* **A/B** (`bench_ab.sh`, same binary, ctx 1024, gen 64, 3 interleaved reps):
+  Axion decode **87.38 -> 88.58 t/s (+1.37%**, clean separation 88.47 >
+  87.62); prefill -2.03% is noise (one A rep at 519, the kernel is decode-only).
+* **Dense 27B** (K=5120): 4 rows 6.578 / 6.584 ms/token vs 1 row 6.544 /
+  6.585 — neutral, so one default serves both.
+* **Parity.** Greedy md5 identical 4 vs 1 rows on Axion (`2279363d`), dense
+  27B (`a184c524`), Qwen3.6-35B-A3B (`908fbd7d`); `--vulkan-kernels` OK.
+* reconsider_if: a trunk with much wider rows (K >= 8192) shows the 1-row
+  kernel losing; then pick rows by `blocks`.

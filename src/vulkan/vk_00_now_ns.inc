@@ -314,6 +314,7 @@ typedef struct {
     p36_vk_kernel predequant_b16;
     p36_vk_kernel dense_kquant_decode;
     p36_vk_kernel dense_q4k_decode;
+    p36_vk_kernel dense_q4k_decode_r1;
     p36_vk_kernel dense_q5k_decode;
     p36_vk_kernel dense_q3k_decode;
     p36_vk_kernel dense_q2k_decode;
