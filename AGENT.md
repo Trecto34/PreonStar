@@ -30,6 +30,12 @@ GGUF runner. The goal is a small, readable, high-performance C codebase.
 - Do not add permanent semantic variants behind flags. Diagnostic switches are
   fine when they validate the one release path.
 - Do not introduce C++.
+- Every kept change MUST be committed. When a change is kept (accepted by
+  the gate, default on, or kept by owner decision), commit it before
+  starting the next item: one commit per change, with its ledger entry,
+  evidence and roadmap update in the same commit. A delayed or rejected
+  experiment gets its own commit for the ledger/roadmap record. Never leave
+  kept work as "uncommitted" in the tree or the roadmap.
 
 ## Safety
 
