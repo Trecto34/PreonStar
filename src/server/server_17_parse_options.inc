@@ -3426,6 +3426,50 @@ static void test_kv_cache_eviction_keeps_aligned_continued_frontiers(void) {
     rmdir(dir);
 }
 
+/* One request stores a continued frontier and then a slot snapshot.  Under
+ * budget pressure the fresh frontier (hits=0) must survive: it is where the
+ * next request restarts when it diverges after it. */
+static void test_kv_cache_eviction_keeps_newest_continued_frontier(void) {
+    char tmpl[] = "/tmp/p36-kv-frontier-test.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    TEST_ASSERT(dir != NULL);
+    if (!dir) return;
+
+    const char *shas[3] = {
+        "1111111111111111111111111111111111111111",  /* older session, reused often */
+        "2222222222222222222222222222222222222222",  /* this request's continued frontier */
+        "3333333333333333333333333333333333333333",  /* this request's slot snapshot */
+    };
+    test_kv_stub_file(dir, shas[0], KV_REASON_CONTINUED, 1024, 9, 100, 2048);
+    test_kv_stub_file(dir, shas[1], KV_REASON_CONTINUED, 1024, 0, 300, 2048);
+    test_kv_stub_file(dir, shas[2], KV_REASON_EVICT, 1100, 0, 301, 2048);
+
+    char *paths[3];
+    for (int i = 0; i < 3; i++) {
+        char name[44];
+        snprintf(name, sizeof(name), "%.40s.kv", shas[i]);
+        paths[i] = path_join(dir, name);
+    }
+
+    kv_disk_cache kc = {0};
+    kc.enabled = true;
+    kc.dir = xstrdup(dir);
+    kc.opt = kv_cache_default_options();
+    kc.budget_bytes = 2u * (KV_CACHE_FIXED_HEADER + 4u + 2048u) + 16u;
+    kv_cache_evict(&kc, NULL);
+
+    TEST_ASSERT(access(paths[0], F_OK) != 0);
+    TEST_ASSERT(access(paths[1], F_OK) == 0);
+    TEST_ASSERT(access(paths[2], F_OK) == 0);
+
+    kv_cache_close(&kc);
+    for (int i = 0; i < 3; i++) {
+        unlink(paths[i]);
+        free(paths[i]);
+    }
+    rmdir(dir);
+}
+
 static void test_thinking_checkpoint_canonical_matches_future_prompt(void) {
     /* Simulate: user sends a single message, thinking mode on, no tools.
      * Model generates reasoning + content.  The next request will drop the
@@ -4793,6 +4837,7 @@ static void p36_server_unit_tests_run(void) {
     test_kv_cache_entry_can_be_touched_twice();
     test_kv_cache_eviction_values_fresh_snapshots();
     test_kv_cache_eviction_keeps_aligned_continued_frontiers();
+    test_kv_cache_eviction_keeps_newest_continued_frontier();
 }
 
 #ifndef P36_SERVER_TEST_NO_MAIN

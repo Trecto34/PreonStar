@@ -492,22 +492,32 @@ static void kv_cache_evict(kv_disk_cache *kc, const p36_tokens *live) {
     while (total > kc->budget_bytes && kc->len > 1) {
         /* Never evict the entry written last: a fresh checkpoint has no hits,
          * so by score alone it loses to stale entries from older sessions and
-         * is deleted the moment it is stored, leaving nothing to restore. */
-        int newest = 0;
-        for (int i = 1; i < kc->len; i++)
-            if (kc->entry[i].last_used >= kc->entry[newest].last_used) newest = i;
-        int victim = newest == 0 ? 1 : 0;
-        double victim_score = kv_entry_eviction_score(&kc->entry[victim], live);
+         * is deleted the moment it is stored, leaving nothing to restore.
+         * Keep the newest continued checkpoint too: one request writes both a
+         * continued frontier (mid-prefill) and a slot snapshot, so "newest"
+         * alone protected only the snapshot and the frontier the next request
+         * restarts from -- when it diverges after that frontier -- was evicted
+         * with hits=0, pushing restarts back to an older, shorter checkpoint. */
+        int newest = 0, newest_cont = -1;
         for (int i = 0; i < kc->len; i++) {
-            if (i == newest || i == victim) continue;
+            if (kc->entry[i].last_used >= kc->entry[newest].last_used) newest = i;
+            if (kc->entry[i].reason == KV_REASON_CONTINUED &&
+                (newest_cont < 0 || kc->entry[i].last_used >= kc->entry[newest_cont].last_used))
+                newest_cont = i;
+        }
+        int victim = -1;
+        double victim_score = 0.0;
+        for (int i = 0; i < kc->len; i++) {
+            if (i == newest || i == newest_cont) continue;
             double score = kv_entry_eviction_score(&kc->entry[i], live);
-            if (score < victim_score ||
+            if (victim < 0 || score < victim_score ||
                 (score == victim_score && kc->entry[i].last_used < kc->entry[victim].last_used))
             {
                 victim = i;
                 victim_score = score;
             }
         }
+        if (victim < 0) break;  /* only protected entries left */
         kv_entry e = kc->entry[victim];
         if (unlink(e.path) == 0) {
             server_log(P36_LOG_KVCACHE,
