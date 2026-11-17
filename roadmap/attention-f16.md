@@ -1,7 +1,7 @@
 # f16 attention
 
 **Status:** step A landed (`670febe`, default on); step B done (default on,
-inside the same f16 build); the rest open.
+inside the same f16 build); step C delayed; the rest open.
 
 ## Background
 
@@ -34,10 +34,22 @@ MoE 8-16k ablation: QK FMAs 20%, PV FMAs 14% of prefill time.
    f32 reorder control. Smaller than the ~+6% estimate because the 0..8k
    average carries little attention; 16k+ unmeasured. Ledger 2026-11-17,
    evidence `karpathy/evidence/raw/fa-f16-pv-20261117/`.
-2. **Step C: packed-f16 QK.** Riskier: score error goes straight into
-   `exp()`. Only after B holds. Together ~+15% at 8-16k (ledger estimate).
-3. **Dense VGPR relief.** gqa6 sits at 256 VGPRs. f16 Q and accumulators
-   (part of B/C) free registers; check `mmq_info` for an occupancy step.
+2. **Step C: packed-f16 QK — delayed (2026-11-17).** Tried and measured:
+   kernel only −6..−8% vs step B, output error 1.4–2.7e-3, over the 2e-3
+   gate (2–3× step B under peaked softmax). The error is the f16
+   products/accumulation itself — f16 Q with f32 math adds none — so it
+   cannot be traded away while partials accumulate in f16. *Why delayed, not
+   dropped:* an instruction that multiplies f16 pairs but accumulates in f32
+   (`v_dot2_f32_f16`) would keep the throughput without the error; whether
+   gfx1013 has it and RADV emits it is unverified (ISA dump crashes). Also
+   the ceiling is small (~+1% whole model at 8k, ~+3% at 32k), so it ranks
+   below C.1 and the decode item. Revisit when: the dot2 question is
+   answered, or C.1 changes the tile shape (re-measure then). Ledger
+   2026-11-17, evidence `karpathy/evidence/raw/fa-f16-qk-20261117/`.
+3. **Step C.1: dense VGPR relief** (side finding of C). gqa6 sits at 256 VGPRs. Checked 2026-11-17: f16 Q
+   alone (f32 math) and step B's f16 PV partials both still compile to 256
+   VGPRs / 4 waves — the compiler re-spends freed registers. An occupancy
+   step needs a structural change (fewer rows per lane), not narrower types.
 4. **f16 K/V staging in `attn_decode_fa`.** Same LDS staging as the prefill
    tile. At 32k MoE the kernel is ~15% of a decode token (0.24 ms × 10
    layers) and reads K/V at ~114 GB/s, a third of matvec bandwidth. Bigger

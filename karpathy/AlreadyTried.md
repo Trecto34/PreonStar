@@ -3813,3 +3813,31 @@ review: no correctness issues. Evidence: `evidence/raw/fa-f16-pv-20261117/`.
   `P36_VK_ATTN_FA_F16=0` still restores the f32 tile. Next: step C (QK).
 * Gate change same day (owner decision): `bench_ab.sh` default 1.5% -> 1.25%
   and now also requires clean rep separation; see CAMPAIGN.md section 4.
+
+## 2026-11-17 Prefill FA: packed-f16 QK math (step C) — DELAYED (rejected in this shape)
+
+On top of step B. Q held as `f16vec4`; per lane, per key, the 16-dim partial
+is `q0*k0` + 3 `fma` in `f16vec4` (4 products per f16 component), widened to
+f32 before the 16-lane clustered add. VGPRs/occupancy unchanged. Evidence:
+`evidence/raw/fa-f16-qk-20261117/`.
+
+* **Kernel (`tests/test_attn_fa`, 2 interleaved runs, best-of, vs step B):**
+  only -6..-8% (gqa8 1024@7936 26.25 -> 24.05, gqa6 47.92 -> 45.08).
+* **Numerics: FAIL.** max_abs vs f32 rises from ~1e-3 to 1.4-2.7e-3, over the
+  2e-3 bound on most long cases (gqa6 256@7936 2.65e-3); at
+  P36_TEST_QSCALE=6 2-3x step B (up to 1.5e-2).
+* **Where the error comes from:** f16 Q with f32 dot gives max_abs identical
+  to step B, so it is the f16 products/accumulation, i.e. exactly the part
+  that buys the packed throughput. Shortening the f16 chain (2 products per
+  component) brings the op count back to the f32 path's. Not fixable inside
+  this shape. Whole-model at 8k would be ~+1% MoE, below the noise floor;
+  no NLL run (fails the kernel gate first).
+* **Side finding for "dense VGPR relief":** f16 Q alone (f32 math) still
+  compiles to 256 VGPRs / 4 waves on gqa6 and is no faster; the compiler
+  re-spends the freed registers. f16 Q is not the lever for that item.
+* Code removed from the shader; a comment there points here. Do not retry
+  packed-f16 QK in this tile without a different accumulation scheme
+  (e.g. a real f32-accumulating dot2 instruction, which this path does not emit).
+* Owner decision: status **delayed**, not closed. Reopen if `v_dot2_f32_f16`
+  is confirmed on gfx1013/RADV, or after step C.1 changes the tile shape.
+  Ranked below C.1 (dense VGPR relief) and decode f16 staging.

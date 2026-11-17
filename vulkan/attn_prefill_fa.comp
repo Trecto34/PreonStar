@@ -8,8 +8,11 @@
  * (the tile was partly LDS-read bound), math stays f32 (ACO folds the f16
  * operand into v_fma_mix_f32).  The dequantized value rounds to f16 (2^-11
  * relative, ~100x below the Q8_0/Q4_0 cache step).  FA_F16_PV (needs
- * FA_F16_V) also does the PV math in packed f16, 8 keys at a time.  The
- * release build (attn_prefill_fa_f16_gqa*.spv) sets all three; without them
+ * FA_F16_V) also does the PV math in packed f16, 8 keys at a time.  QK stays
+ * f32: packed-f16 QK products/partials pushed output error past 2e-3 for a
+ * -7% kernel (step C, delayed 2026-11-17 pending an f32-accumulating dot2;
+ * see AlreadyTried.md).  The release build
+ * (attn_prefill_fa_f16_gqa*.spv) sets all three; without them
  * it is the f32 tile. */
 #if defined(FA_F16_PV) && !defined(FA_F16_V)
 #error "FA_F16_PV needs FA_F16_V (f16 V in LDS)"

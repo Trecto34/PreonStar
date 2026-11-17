@@ -1,0 +1,312 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_control_flow_attributes : enable
+/* FA_F16_K / FA_F16_V stage K / V in LDS as f16: halves LDS bytes per key
+ * (the tile was partly LDS-read bound), math stays f32 (ACO folds the f16
+ * operand into v_fma_mix_f32).  The dequantized value rounds to f16 (2^-11
+ * relative, ~100x below the Q8_0/Q4_0 cache step).  FA_F16_PV (needs
+ * FA_F16_V) also does the PV math in packed f16, 8 keys at a time; FA_F16_QK
+ * (needs FA_F16_K) does the per-lane QK partials in packed f16.  The
+ * release build (attn_prefill_fa_f16_gqa*.spv) sets K/V/PV; without them
+ * it is the f32 tile. */
+#if defined(FA_F16_PV) && !defined(FA_F16_V)
+#error "FA_F16_PV needs FA_F16_V (f16 V in LDS)"
+#endif
+#if defined(FA_F16_QK) && !defined(FA_F16_K)
+#error "FA_F16_QK needs FA_F16_K (f16 K in LDS)"
+#endif
+#ifdef FA_F16_QK
+#define QV f16vec4
+#else
+#define QV vec4
+#endif
+#if defined(FA_F16_K) || defined(FA_F16_V)
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+#ifdef FA_F16_K
+#define SHK f16vec4
+#else
+#define SHK vec4
+#endif
+#ifdef FA_F16_V
+#define SHV f16vec4
+#else
+#define SHV vec4
+#endif
+
+/* Flash-attention prefill, head_dim 256, Q8_0 K cache / Q4_0 V cache.  Built
+ * twice: HQ=6 (dense Qwen3.8 GQA 24/4, 8 tokens x 3 rows per rowset) replaces
+ * attn_prefill_qtile2_gqa6, HQ=8 (Qwen3.6/3.8 35B-A3B MoE GQA 16/2, 4 tokens x
+ * 2 rows) replaces attn_prefill_qtile2, when P36_VK_ATTN_FA is on.  Both write
+ * the same per-4096-key-group (acc, m, l) partials, so attn_combine is
+ * unchanged.  The HQ=6 shape already sits at the 256-VGPR ceiling, which is
+ * why HQ=8 trades tokens per workgroup for fewer rows per lane.
+ *
+ * Why a new shape: qtile2 serves 2 tokens per workgroup and re-reads six Q rows
+ * from LDS for every K vector (~1 FMA per LDS float), so every 2-token
+ * workgroup re-dequantizes the whole causal K/V prefix and the kernel ran at
+ * ~4% of the chip's f32 rate (~0.8 TFLOP/s at ctx 8192).  Here one workgroup
+ * serves QT tokens x HQ heads (48 or 32 rows):
+ *
+ *  - K/V are dequantized once per BK-key tile into LDS as f32.  Q8_0/Q4_0
+ *    dequant (f16 scale x small int) is exact in f32, so only summation order
+ *    differs from qtile2.
+ *  - Q lives in registers.  A 16-lane "rowset" owns RS rows of one token;
+ *    lane j holds dims {64i + 4j .. +3 : i < 4}, so for a given i the 16 lanes
+ *    read 256 contiguous bytes (conflict-free) and the 16 rowsets of the
+ *    workgroup read the same K/V address (LDS broadcast).  QK partial dots are
+ *    finished with a 16-lane clustered add, which leaves the full score on
+ *    every lane of the rowset -- exactly where PV needs it.
+ *  - The output accumulator uses the same lane/dim mapping, so PV is
+ *    16*RS FMAs per key per lane from 4 vec4 LDS reads.
+ *
+ * The score order for a row depends only on absolute key index (tiles are
+ * aligned to the group start), so results stay invariant to n_tok/chunking
+ * like the kernel it replaces.  It is NOT bit-identical to the decode kernels
+ * (attn_decode_split/fused), which was the property qtile2 happened to have:
+ * the LDS-staged tile order puts ~1e-8 of f32 reassociation into a batch row
+ * (tests/p36_test.c, `fa_batch` drift print), below the f64 CPU reference's
+ * own 1.2e-8 spread and 4 orders inside the test's 2e-3 quality bound. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Qbuf { float q[]; };
+layout(set = 0, binding = 1) readonly buffer Kcache { uint kc[]; };
+layout(set = 0, binding = 2) readonly buffer Vcache { uint vc[]; };
+layout(set = 0, binding = 3) readonly buffer Sinks { float sinks[]; };
+layout(set = 0, binding = 4) buffer Partials { float part[]; };
+
+layout(push_constant) uniform Push {
+    uint pos0;
+    uint n_head;
+    uint n_head_kv;
+    uint head_dim;
+    uint n_spans;       /* number of 4096-key groups (partials per row) */
+    uint n_tok;
+    uint has_sinks;
+    uint k_type;
+    uint v_type;
+    uint k_row_bytes;
+    uint v_row_bytes;
+    uint tok_base;
+} pc;
+
+#ifndef HQ
+#define HQ 6                /* query heads per KV head (plain int: used in #if) */
+#endif
+#if HQ == 6
+#define RS 3u               /* rows (heads) per 16-lane rowset */
+#else
+#define RS 2u
+#endif
+#define RPT (HQ / RS)       /* rowsets per token */
+#define QT (16u / RPT)      /* tokens per workgroup: 16 rowsets */
+#define HD 256u
+#define BK 16u              /* keys staged in LDS per tile */
+#define SUB 8u              /* keys per online-softmax step */
+#define GROUP_KEYS 4096u    /* SPAN(512) x SPAN_GROUP(8): the partial layout attn_combine folds */
+#define K_HEAD_BYTES 272u   /* 8 x Q8_0 block (2 B f16 + 32 x i8) */
+#define V_HEAD_BYTES 144u   /* 8 x Q4_0 block (2 B f16 + 16 B nibbles) */
+#define NEG_BIG -3.402823466e38
+
+shared SHK sh_k[BK * (HD / 4u)];
+shared SHV sh_v[BK * (HD / 4u)];
+
+/* Four dwords starting at an even (2-byte aligned) byte offset. */
+uvec4 load16_k(uint off) {
+    uint w = off >> 2u;
+    uint a = kc[w], b = kc[w + 1u], c = kc[w + 2u], d = kc[w + 3u];
+    if ((off & 2u) == 0u) return uvec4(a, b, c, d);
+    uint e = kc[w + 4u];
+    return uvec4((a >> 16u) | (b << 16u), (b >> 16u) | (c << 16u),
+                 (c >> 16u) | (d << 16u), (d >> 16u) | (e << 16u));
+}
+
+uvec4 load16_v(uint off) {
+    uint w = off >> 2u;
+    uint a = vc[w], b = vc[w + 1u], c = vc[w + 2u], d = vc[w + 3u];
+    if ((off & 2u) == 0u) return uvec4(a, b, c, d);
+    uint e = vc[w + 4u];
+    return uvec4((a >> 16u) | (b << 16u), (b >> 16u) | (c << 16u),
+                 (c >> 16u) | (d << 16u), (d >> 16u) | (e << 16u));
+}
+
+float half_k(uint off) { return unpackHalf2x16(kc[off >> 2u] >> ((off & 2u) * 8u)).x; }
+float half_v(uint off) { return unpackHalf2x16(vc[off >> 2u] >> ((off & 2u) * 8u)).x; }
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint j = tid & 15u;                 /* lane within rowset */
+    uint rowset = tid >> 4u;            /* 0..15 */
+    uint t = rowset / RPT;              /* token within tile */
+    uint hbase = gl_WorkGroupID.x * HQ + (rowset % RPT) * RS;
+    uint kvh = gl_WorkGroupID.x;
+    uint local0 = gl_WorkGroupID.y * QT;
+    uint tok0 = pc.tok_base + local0;
+    uint tn = min(QT, pc.n_tok - local0);
+    uint group = gl_WorkGroupID.z;
+    uint g0 = group * GROUP_KEYS;
+    uint bidir_n_kv = pc.has_sinks >> 1u;
+    uint g_end = min(g0 + GROUP_KEYS, bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + tok0 + tn));
+    if (g0 >= g_end) return;            /* uniform: before any barrier */
+
+    bool tok_live = t < tn;
+    uint tok = tok0 + t;
+    uint n_kv_row = bidir_n_kv != 0u ? bidir_n_kv : (pc.pos0 + tok + 1u);
+
+    /* 1/sqrt(256) = 1/16 is a power of two, so pre-scaling Q is exact. */
+    QV qr[RS][4];
+    [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+        uint qb = ((tok * pc.n_head) + hbase + rr) * HD;
+        [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            uint d = 64u * i + 4u * j;
+            qr[rr][i] = QV(tok_live ?
+                vec4(q[qb + d], q[qb + d + 1u], q[qb + d + 2u], q[qb + d + 3u]) * 0.0625 :
+                vec4(0.0));
+        }
+    }
+
+    float m[RS];
+    float l[RS];
+    vec4 acc[RS][4];
+    [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+        m[rr] = group == 0u && (pc.has_sinks & 1u) != 0u ? sinks[hbase + rr] : NEG_BIG;
+        l[rr] = 0.0;
+        [[unroll]] for (uint i = 0u; i < 4u; i++) acc[rr][i] = vec4(0.0);
+    }
+
+    /* Staging assignment: thread -> (key, 16-dim segment).  Segment s covers
+     * block s/2; for K it is bytes [16*(s&1), +16) of that block's int8 codes,
+     * for V it is the low (s even) or high (s odd) nibbles of the block's 16
+     * bytes, matching Q4_0's j<16 low / j>=16 high layout. */
+    uint st_key = tid >> 4u;
+    uint st_seg = tid & 15u;
+    uint st_blk = st_seg >> 1u;
+    uint st_half = st_seg & 1u;
+
+    for (uint base = g0; base < g_end; base += BK) {
+        uint key = base + st_key;
+        uint sidx = st_key * (HD / 4u) + st_seg * 4u;
+        if (key < g_end) {
+            uint kb = key * pc.k_row_bytes + kvh * K_HEAD_BYTES + st_blk * 34u;
+            float kd = half_k(kb);
+            uvec4 kw = load16_k(kb + 2u + st_half * 16u);
+            [[unroll]] for (uint c = 0u; c < 4u; c++)
+                sh_k[sidx + c] = SHK(vec4(unpack8(int(kw[c]))) * kd);
+
+            uint vb = key * pc.v_row_bytes + kvh * V_HEAD_BYTES + st_blk * 18u;
+            float vd = half_v(vb);
+            uvec4 vw = load16_v(vb + 2u);
+            [[unroll]] for (uint c = 0u; c < 4u; c++) {
+                uint nib = st_half != 0u ? (vw[c] >> 4u) & 0x0f0f0f0fu : vw[c] & 0x0f0f0f0fu;
+                sh_v[sidx + c] = SHV((vec4(unpack8(int(nib))) - 8.0) * vd);
+            }
+        } else {
+            [[unroll]] for (uint c = 0u; c < 4u; c++) {
+                sh_k[sidx + c] = SHK(0.0);
+                sh_v[sidx + c] = SHV(0.0);
+            }
+        }
+        barrier();
+
+        [[unroll]] for (uint sub = 0u; sub < BK; sub += SUB) {
+            float s[RS][SUB];
+            [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                uint kr = (sub + kk) * (HD / 4u) + j;
+#ifdef FA_F16_QK
+                /* Packed-f16 QK: each f16 component sums only 4 products (one
+                 * per vec4 slice), then widens to f32 before the cross-lane
+                 * add, so f16 rounding sees ~1/64 of the score, not all of it. */
+                f16vec4 k0 = sh_k[kr], k1 = sh_k[kr + 16u], k2 = sh_k[kr + 32u], k3 = sh_k[kr + 48u];
+                [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+                    s[rr][kk] = dot(vec4(qr[rr][0]), vec4(k0)) + dot(vec4(qr[rr][1]), vec4(k1)) +
+                                dot(vec4(qr[rr][2]), vec4(k2)) + dot(vec4(qr[rr][3]), vec4(k3));
+                }
+#else
+                vec4 k0 = vec4(sh_k[kr]), k1 = vec4(sh_k[kr + 16u]), k2 = vec4(sh_k[kr + 32u]), k3 = vec4(sh_k[kr + 48u]);
+                [[unroll]] for (uint rr = 0u; rr < RS; rr++)
+                    s[rr][kk] = dot(qr[rr][0], k0) + dot(qr[rr][1], k1) +
+                                dot(qr[rr][2], k2) + dot(qr[rr][3], k3);
+#endif
+            }
+            [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                bool valid = base + sub + kk < n_kv_row;
+                [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+                    float v = subgroupClusteredAdd(s[rr][kk], 16u);
+                    s[rr][kk] = valid ? v : NEG_BIG;
+                }
+            }
+            [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+                float tmax = s[rr][0];
+                [[unroll]] for (uint kk = 1u; kk < SUB; kk++) tmax = max(tmax, s[rr][kk]);
+                float n = max(m[rr], tmax);
+                float r = exp(m[rr] - n);
+                m[rr] = n;
+                float ps = 0.0;
+                [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                    s[rr][kk] = exp(s[rr][kk] - n);
+                    ps += s[rr][kk];
+                }
+                l[rr] = l[rr] * r + ps;
+                [[unroll]] for (uint i = 0u; i < 4u; i++) acc[rr][i] *= r;
+            }
+#ifdef FA_F16_PV
+            /* Packed-f16 PV: one SUB step (8 keys) accumulates in f16 with
+             * v_pk_fma_f16 (2 FMAs/lane/op), then flushes into the f32 acc.
+             * p is in [0,1] after the max subtraction and the partial spans
+             * only 8 keys, so the f16 sum carries ~8 x 2^-11 relative error of
+             * one step's contribution, not of the whole row. */
+            f16vec4 pa[RS][4];
+            [[unroll]] for (uint rr = 0u; rr < RS; rr++)
+                [[unroll]] for (uint i = 0u; i < 4u; i++) pa[rr][i] = f16vec4(0.0);
+            [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                uint vr = (sub + kk) * (HD / 4u) + j;
+                f16vec4 v0 = sh_v[vr], v1 = sh_v[vr + 16u], v2 = sh_v[vr + 32u], v3 = sh_v[vr + 48u];
+                [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+                    f16vec4 p = f16vec4(float16_t(s[rr][kk]));
+                    pa[rr][0] = fma(p, v0, pa[rr][0]);
+                    pa[rr][1] = fma(p, v1, pa[rr][1]);
+                    pa[rr][2] = fma(p, v2, pa[rr][2]);
+                    pa[rr][3] = fma(p, v3, pa[rr][3]);
+                }
+            }
+            [[unroll]] for (uint rr = 0u; rr < RS; rr++)
+                [[unroll]] for (uint i = 0u; i < 4u; i++) acc[rr][i] += vec4(pa[rr][i]);
+#else
+            [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
+                uint vr = (sub + kk) * (HD / 4u) + j;
+                vec4 v0 = vec4(sh_v[vr]), v1 = vec4(sh_v[vr + 16u]), v2 = vec4(sh_v[vr + 32u]), v3 = vec4(sh_v[vr + 48u]);
+                [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+                    float p = s[rr][kk];
+                    acc[rr][0] += p * v0;
+                    acc[rr][1] += p * v1;
+                    acc[rr][2] += p * v2;
+                    acc[rr][3] += p * v3;
+                }
+            }
+#endif
+        }
+        barrier();
+    }
+
+    /* A row whose causal range ends before this group has no partial; the
+     * combine only folds groups < ceil(n_kv / 4096). */
+    if (!tok_live || g0 >= n_kv_row) return;
+    [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
+        uint pbase = (((local0 + t) * pc.n_head + hbase + rr) * pc.n_spans + group) * (HD + 2u);
+        [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            uint d = pbase + 64u * i + 4u * j;
+            part[d] = acc[rr][i].x;
+            part[d + 1u] = acc[rr][i].y;
+            part[d + 2u] = acc[rr][i].z;
+            part[d + 3u] = acc[rr][i].w;
+        }
+        if (j == 0u) {
+            part[pbase + HD] = m[rr];
+            part[pbase + HD + 1u] = l[rr];
+        }
+    }
+}

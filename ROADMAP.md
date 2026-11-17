@@ -7,8 +7,8 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 
 - [x] Step A: f16 K/V staging in prefill FA LDS (`670febe`, default on)
 - [x] Step B: packed-f16 PV math (kernel -10%, MoE +1.45% at 8k)
-- [ ] Step C: packed-f16 QK math (riskier; only after B)
-- [ ] Dense gqa6 VGPR relief via f16 Q/accumulators
+- [ ] Step C: packed-f16 QK math — **delayed**: f16 products push error > 2e-3 for a -7% kernel; needs an f32-accumulating dot2
+- [ ] Step C.1: dense gqa6 VGPR relief (256 VGPRs / 4 waves; narrower types don't help, needs a shape change)
 - [ ] f16 K/V staging in `attn_decode_fa` (~15% of a 32k MoE decode token)
 - [ ] Whole-model prefill at 16k+ (dense and MoE, one short run)
 - [ ] NLL check on the other FA-path models

@@ -1,0 +1,24 @@
+== pv_gqa6
+  stat VGPRs                    = 256   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat Subgroups per SIMD       = 4   (The maximum number of subgroups in flight on a SIMD unit)
+== qk_gqa6
+  stat VGPRs                    = 256   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat Subgroups per SIMD       = 4   (The maximum number of subgroups in flight on a SIMD unit)
+== qonly_gqa6
+  stat VGPRs                    = 256   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat Subgroups per SIMD       = 4   (The maximum number of subgroups in flight on a SIMD unit)
+== pv_gqa8
+  stat VGPRs                    = 128   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat Subgroups per SIMD       = 8   (The maximum number of subgroups in flight on a SIMD unit)
+== qk_gqa8
+  stat VGPRs                    = 128   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat Subgroups per SIMD       = 8   (The maximum number of subgroups in flight on a SIMD unit)
+== qonly_gqa8
+  stat VGPRs                    = 128   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat Subgroups per SIMD       = 8   (The maximum number of subgroups in flight on a SIMD unit)

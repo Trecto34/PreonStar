@@ -1,0 +1,23 @@
+p36: timestamps period_ns=10.000000 computeAndGraphics=1 valid_bits=64 queue_family=0 (graphics fallback) ace=0
+p36: Vulkan device AMD BC-250 (RADV GFX1013), 15.34 GiB UMA
+p36: Vulkan generic backend, BC-250 fast path, subgroup 64
+p36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+gqa6 n_tok=   2 pos0=    0 sinks=0  qtile2     0.06 ms  fa     0.06 ms  (0.99x)  max_abs=0 max_ref=0.999 ok
+gqa6 n_tok=   7 pos0= 1024 sinks=1  qtile2     1.43 ms  fa     0.47 ms  (3.01x)  max_abs=0.00102 max_ref=0.782 ok
+gqa6 n_tok= 256 pos0=    0 sinks=0  qtile2     1.28 ms  fa     0.81 ms  (1.58x)  max_abs=0.00229 max_ref=1.04 FAIL
+gqa6 n_tok= 256 pos0= 3968 sinks=1  qtile2    21.86 ms  fa     6.88 ms  (3.18x)  max_abs=0.00238 max_ref=1 FAIL
+gqa6 n_tok= 256 pos0= 7936 sinks=0  qtile2    37.51 ms  fa    11.62 ms  (3.23x)  max_abs=0.00265 max_ref=0.988 FAIL
+gqa6 n_tok= 256 pos0=16128 sinks=1  qtile2    73.34 ms  fa    21.18 ms  (3.46x)  max_abs=0.00216 max_ref=0.959 FAIL
+gqa6 n_tok=1024 pos0= 7936 sinks=1  qtile2   150.80 ms  fa    45.16 ms  (3.34x)  max_abs=0.00211 max_ref=1.02 FAIL
+gqa6 n_tok=   2 pos0= 8190 sinks=0  qtile2     0.38 ms  fa     0.38 ms  (1.00x)  max_abs=0 max_ref=0.807 ok
+gqa6 n_tok=  16 pos0= 8176 sinks=0  qtile2     5.23 ms  fa     1.67 ms  (3.13x)  max_abs=0.00117 max_ref=0.953 ok
+gqa8 n_tok=   2 pos0=    0 sinks=0  qtile2     0.04 ms  fa     0.04 ms  (1.00x)  max_abs=0 max_ref=0.915 ok
+gqa8 n_tok=   7 pos0= 1024 sinks=1  qtile2     1.60 ms  fa     0.36 ms  (4.48x)  max_abs=0.00135 max_ref=0.876 ok
+gqa8 n_tok= 256 pos0=    0 sinks=0  qtile2     0.99 ms  fa     0.51 ms  (1.95x)  max_abs=0.00229 max_ref=1.03 FAIL
+gqa8 n_tok= 256 pos0= 3968 sinks=1  qtile2    18.69 ms  fa     3.89 ms  (4.80x)  max_abs=0.00172 max_ref=0.953 ok
+gqa8 n_tok= 256 pos0= 7936 sinks=0  qtile2    30.53 ms  fa     6.33 ms  (4.82x)  max_abs=0.00154 max_ref=0.951 ok
+gqa8 n_tok= 256 pos0=16128 sinks=1  qtile2    55.52 ms  fa    11.58 ms  (4.79x)  max_abs=0.00143 max_ref=0.944 ok
+gqa8 n_tok=1024 pos0= 7936 sinks=1  qtile2   113.06 ms  fa    24.14 ms  (4.68x)  max_abs=0.00213 max_ref=1.02 FAIL
+gqa8 n_tok=   2 pos0= 8190 sinks=0  qtile2     0.22 ms  fa     0.22 ms  (1.01x)  max_abs=0 max_ref=0.718 ok
+gqa8 n_tok=  16 pos0= 8176 sinks=0  qtile2     6.02 ms  fa     1.28 ms  (4.70x)  max_abs=0.00107 max_ref=0.883 ok
+FAIL
