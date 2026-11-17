@@ -4074,3 +4074,29 @@ measured; patch kept as `evidence/raw/moe-route-fuse-20261117/route-fuse-rejecte
   per slot, e.g. a row-major down sum with all slots in one workgroup that
   keeps the split kernel's bandwidth), or a ticket is used on a kernel with
   hundreds, not tens of thousands, of workgroups (router matvec -> top-k).
+
+## 2026-11-17 Software sync instead of barriers: counter chaining, persistent kernel, router ticket — all REJECTED by probe
+
+The three levers left after the barrier masks, each priced on its mechanism
+before any engine work. Evidence: `evidence/raw/sync-mechanisms-20261117/`
+(`bprobe2.c`, `bprobe3.c`, shaders, `results.txt`). Same-run, rotated reps,
+device-local memory, every arm checked for the exact result.
+
+* **Counter-chained dispatches (no Vulkan barrier; each workgroup spins on a
+  counter the previous link's workgroups bump after a release):** **25-28
+  us/link** vs **3.7-4.3 us/link** for dispatch + dst-only barrier, 32-WG links.
+  Polling with atomics or with `coherent volatile` loads makes no difference.
+  Waves of later dispatches spin on the CUs and starve the link they wait for.
+* **Persistent kernel (one dispatch, software grid barrier, all WGs resident):**
+  **6.5 us/link**, 1.5x the hardware barrier, both polling forms. A per-layer
+  "megakernel" therefore cannot beat today's chain on this GPU: the atomic
+  round trip through GL2 costs more than CS_PARTIAL_FLUSH + relaunch.
+* **Router-shaped ticket (256-WG producer whose last workgroup does a 1-WG
+  consumer's work, vs two dispatches + two barriers):** **27.72 vs 27.57
+  us/link** — the saved link is paid back exactly by the ticket. Same lesson
+  as the MoE down-sum ticket above.
+* So the +33% (MoE) / +14% (dense) no-barrier ceiling is not reachable by
+  moving synchronisation into shaders; only removing dependent links whose
+  work can merge without cross-workgroup sync (same-workgroup fusion) can.
+* reconsider_if: a GPU/driver with cheaper GL2 atomics or an ACE queue, or a
+  fusion that needs no cross-workgroup communication.

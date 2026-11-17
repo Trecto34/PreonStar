@@ -1,0 +1,37 @@
+#version 450
+// Router-shaped producer: 256 workgroups, each reduces a spread of x to one
+// "logit".  With pc.fuse != 0 the last workgroup to finish (ticket) also does
+// the consumer's work (rcons.comp) so the chain loses one dispatch + barrier.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) coherent buffer X { uint x[]; };
+layout(std430, binding = 1) coherent buffer L { uint logit[]; };
+layout(std430, binding = 2) coherent buffer T { uint ticket[]; };
+layout(push_constant) uniform P { uint n; uint fuse; } pc;
+shared uint red[64];
+shared bool last;
+void consume() {   // = rcons.comp with 64 lanes: max over 256 logits, broadcast to x
+    uint t = gl_LocalInvocationIndex;
+    red[t] = max(max(logit[t], logit[t + 64u]), max(logit[t + 128u], logit[t + 192u]));
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) { if (t < s) red[t] = max(red[t], red[t + s]); barrier(); }
+    uint m = red[0];
+    for (uint i = t; i < pc.n; i += 64u) x[i] = m;
+}
+void main() {
+    uint w = gl_WorkGroupID.x, t = gl_LocalInvocationIndex;
+    uint s = 0u;
+    for (uint j = t; j < 2048u; j += 64u) s += x[(w * 61u + j) % pc.n] >> 31;
+    red[t] = s;
+    barrier();
+    for (uint k = 32u; k > 0u; k >>= 1) { if (t < k) red[t] += red[t + k]; barrier(); }
+    if (t == 0u) logit[w] = x[w] + 1u + red[0];
+    if (pc.fuse == 0u) return;
+    memoryBarrierBuffer();
+    barrier();
+    if (t == 0u) last = atomicAdd(ticket[0], 1u) == gl_NumWorkGroups.x - 1u;
+    barrier();
+    if (!last) return;
+    memoryBarrierBuffer();
+    consume();
+    if (t == 0u) ticket[0] = 0u;
+}

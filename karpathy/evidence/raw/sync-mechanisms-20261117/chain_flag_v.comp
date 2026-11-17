@@ -1,0 +1,23 @@
+#version 450
+// Link k of a chain with NO Vulkan barrier: every workgroup waits until all
+// workgroups of link k-1 bumped cnt[k-1] (release after their stores), then
+// does the same work as chain.comp and bumps cnt[k].
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) coherent buffer S { uint src[]; };
+layout(std430, binding = 1) coherent buffer D { uint dst[]; };
+layout(std430, binding = 2) coherent volatile buffer C { uint cnt[]; };
+layout(push_constant) uniform P { uint n; uint k; uint groups; } pc;
+void main() {
+    if (pc.k > 0u) {
+        if (gl_LocalInvocationIndex == 0u) { uint guard = 0u; while (cnt[pc.k - 1u] < pc.groups && ++guard < 4000000u) {} }
+        barrier();
+        memoryBarrierBuffer();
+    }
+    uint i = gl_GlobalInvocationID.x;
+    uint s = 0u;
+    for (uint j = 0u; j < 32u; j++) s += src[(i * 7u + j * 64u) % pc.n];
+    dst[i] = src[i] + 1u + (s >> 31);
+    memoryBarrierBuffer();
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) atomicAdd(cnt[pc.k], 1u);
+}

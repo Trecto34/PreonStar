@@ -1,0 +1,15 @@
+#version 450
+// Router-top-k-shaped consumer: one workgroup, max over 256 logits -> x.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer X { uint x[]; };
+layout(std430, binding = 1) readonly buffer L { uint logit[]; };
+layout(push_constant) uniform P { uint n; } pc;
+shared uint red[64];
+void main() {
+    uint t = gl_LocalInvocationIndex;
+    red[t] = max(max(logit[t], logit[t + 64u]), max(logit[t + 128u], logit[t + 192u]));
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) { if (t < s) red[t] = max(red[t], red[t + s]); barrier(); }
+    uint m = red[0];
+    for (uint i = t; i < pc.n; i += 64u) x[i] = m;
+}

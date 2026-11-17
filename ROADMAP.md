@@ -28,3 +28,4 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 - [x] Hazard barrier carries TRANSFER masks only when a copy is pending (`6c5f966`; +3.98% MoE / +1.35% dense decode)
 - [x] Dst-only barrier form (`234b660`; 1.90 vs 2.25 us/barrier; +1.55% MoE decode) — relies on GFX10 L2 coherence, re-check after Mesa upgrades
 - [x] Last-workgroup ticket on the MoE down sum — **rejected**, -2.14% decode (per-workgroup atomic costs more than the 80 barriers it removes); router matvec -> top-k ticket untried
+- [x] Counter-chained dispatches / persistent per-layer kernel / router ticket — **rejected by probe** (25 / 6.5 / 27.7 us per link vs 3.7-4.3 for dispatch + barrier)

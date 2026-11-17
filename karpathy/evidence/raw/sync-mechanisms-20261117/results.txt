@@ -1,0 +1,13 @@
+bprobe2 (atomic polling), memory type 3 flags 0x07, 400 links x 32 WGs, 15 reps
+  C dst-only bar   median   1.721 ms  min   1.284  max   2.074  =   4.30 us/link  wrong 0/15
+  F counter-chain  median  11.023 ms  min   8.682  max  14.058  =  27.56 us/link  wrong 0/15
+  G persistent     median   2.612 ms  min   2.249  max   3.659  =   6.53 us/link  wrong 0/15
+  D none           median   0.319 ms  min   0.237  max   0.383  =   0.80 us/link  wrong 15/15
+bprobe2 (volatile-load polling: chain_flag_v / chain_persist_v)
+  C dst-only bar   median   1.473 ms  min   1.285  max   2.073  =   3.68 us/link  wrong 0/15
+  F counter-chain  median  10.154 ms  min   8.576  max  14.025  =  25.39 us/link  wrong 0/15
+  G persistent     median   2.607 ms  min   2.272  max   3.649  =   6.52 us/link  wrong 0/15
+  D none           median   0.272 ms  min   0.238  max   0.383  =   0.68 us/link  wrong 15/15
+bprobe3 router-shaped chain: 200 links, producer 256 WGs -> consumer 1 WG, 15 reps
+  split 2 disp   median   5.514 ms  min   4.705  max   6.635  =  27.57 us/link  wrong 0/15
+  ticket 1 disp  median   5.545 ms  min   4.729  max   6.662  =  27.72 us/link  wrong 0/15
