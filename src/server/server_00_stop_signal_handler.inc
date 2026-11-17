@@ -835,6 +835,8 @@ typedef struct {
     bool kat_coder;
     bool qwen38;
     const char *chat_template;
+    p36_jinja_kwarg *tmpl_kwargs;  /* unrecognized chat_template_kwargs, owned */
+    size_t tmpl_kwarg_count;
     bool preserve_thinking;
     bool prompt_preserves_reasoning;
     tool_replay_stats tool_replay;

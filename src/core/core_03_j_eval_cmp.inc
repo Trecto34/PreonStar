@@ -289,6 +289,25 @@ char *p36_jinja_render(const char *template_src,
         .vars = jval_map_new(&arena, 16).u.map,
     };
 
+    /* Request-supplied kwargs go in first: every global set below overrides a
+     * same-named kwarg, so a client cannot replace messages or tools. */
+    for (size_t i = 0; i < params->extra_kwarg_count; i++) {
+        const p36_jinja_kwarg *kw = &params->extra_kwargs[i];
+        if (!kw->name) continue;
+        const char *v = kw->value ? kw->value : "";
+        jval jv = jval_none();
+        if (kw->kind == P36_JKW_BOOL) jv = jval_bool(!strcmp(v, "true"));
+        else if (kw->kind == P36_JKW_INT) jv = jval_int(strtoll(v, NULL, 10));
+        else if (kw->kind == P36_JKW_STR) jv = jval_str(&arena, v);
+        else if (kw->kind == P36_JKW_RAW) {
+            /* ponytail: arrays/objects are opaque raw JSON (print/tojson/truthiness
+             * only, no indexing); parse into jvals if a template ever needs to iterate one. */
+            jv = jval_map_new(&arena, 1);
+            jv.u.map->raw_json = ja_strdup(&arena, v);
+        }
+        jmap_set(&arena, root_scope.vars, kw->name, jv);
+    }
+
     jval msgs_val = jval_list_new(&arena, params->message_count ? params->message_count : 4);
     for (size_t i = 0; i < params->message_count; i++) {
         const p36_jinja_message *m = &params->messages[i];

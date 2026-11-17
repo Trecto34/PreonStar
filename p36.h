@@ -187,6 +187,17 @@ typedef struct {
     size_t tool_call_count;
 } p36_jinja_message;
 
+/* Extra request chat_template_kwargs forwarded verbatim as template globals
+ * (e.g. a model's {"verification": true} switch). value holds "true"/"false"
+ * for BOOL, the decimal literal for INT, the decoded text for STR (floats too,
+ * as their literal), and the JSON text for RAW (arrays/objects; use |tojson). */
+typedef enum { P36_JKW_NONE, P36_JKW_BOOL, P36_JKW_INT, P36_JKW_STR, P36_JKW_RAW } p36_jinja_kwarg_kind;
+typedef struct {
+    const char *name;
+    p36_jinja_kwarg_kind kind;
+    const char *value;
+} p36_jinja_kwarg;
+
 typedef struct {
     const p36_jinja_message *messages;
     size_t message_count;
@@ -197,6 +208,8 @@ typedef struct {
     bool preserve_thinking_set;
     bool preserve_thinking;
     const char *reasoning_effort;
+    const p36_jinja_kwarg *extra_kwargs;
+    size_t extra_kwarg_count;
 } p36_jinja_render_params;
 
 bool p36_engine_is_qwen38(p36_engine *e);

@@ -119,6 +119,15 @@ strip reasoning before the latest user query. System and user messages may also
 contain `<|think_on|>` or `<|think_off|>`; P36 removes the control marker before
 rendering and applies it to subsequent turns.
 
+With `--chat-template FILE`, any other `chat_template_kwargs` key is passed to
+the template as a global, e.g. `{"verification": true}` for a template that
+gates a model's verification protocol on it. Bools, ints, strings and null keep
+their type; floats arrive as their literal text; arrays and objects are opaque
+(use `| tojson`). Built-in globals (`messages`, `tools`, `enable_thinking`,
+...) cannot be overridden. If a request sends such keys and the template fails
+(e.g. its own `raise_exception` rejects a value), the request gets HTTP 400
+with the template's message instead of the built-in fallback prompt.
+
 When omitted by the client, Qwen uses `temperature=1`, `top_p=1`, no top-k cap,
 and `min_p=0.05`. CLI, agent, and server use the loaded model's defaults. Eval
 stays fixed at the Qwen sampling defaults for comparable runs. Explicit values

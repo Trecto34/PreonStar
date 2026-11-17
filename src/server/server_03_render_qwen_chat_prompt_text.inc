@@ -126,7 +126,10 @@ static char *render_jinja_chat_prompt_text(const char *chat_template,
                                            const chat_msgs *msgs,
                                            const char *tool_schemas,
                                            p36_think_mode think_mode,
-                                           bool preserve_thinking) {
+                                           bool preserve_thinking,
+                                           const p36_jinja_kwarg *kwargs,
+                                           size_t kwarg_count,
+                                           char *err, size_t errlen) {
     bool thinking = p36_think_mode_enabled(think_mode);
     int last_query = last_chat_query(msgs);
     int failures = 0;
@@ -224,14 +227,24 @@ static char *render_jinja_chat_prompt_text(const char *chat_template,
         .preserve_thinking_set = true,
         .preserve_thinking = preserve_thinking,
         .reasoning_effort = thinking ? p36_jinja_effort_name(think_mode) : NULL,
+        .extra_kwargs = kwargs,
+        .extra_kwarg_count = kwarg_count,
     };
-    char *rendered = p36_jinja_render(chat_template, &jp, NULL, 0);
+    char jerr[256] = {0};
+    char *rendered = p36_jinja_render(chat_template, &jp, jerr, sizeof(jerr));
 
     for (size_t i = 0; i < n_jmsgs; i++) free((void *)jmsgs[i].tool_calls);
     free(jmsgs);
     for (size_t i = 0; i < n_owned; i++) free(owned_strs[i]);
     free(owned_strs);
 
+    if (!rendered && kwarg_count) {
+        /* The client sent template kwargs, so a template error (often a
+         * raise_exception validating them) must reach it: falling back to the
+         * built-in prompt would silently drop the switch it asked for. */
+        if (err && errlen) snprintf(err, errlen, "chat template error: %s", jerr[0] ? jerr : "render failed");
+        return NULL;
+    }
     if (!rendered) {
         return render_qwen_chat_prompt_text(msgs, tool_schemas, NULL, think_mode,
                                             preserve_thinking, NULL);
@@ -264,12 +277,17 @@ static char *render_chat_prompt_text_model(const chat_msgs *msgs,
         p36_qwen38_effort_instruction(think_mode));
 }
 
+/* NULL (with err set) only when a --chat-template render fails on a request
+ * that supplied extra chat_template_kwargs. */
 static char *render_request_chat_prompt_text(const request *r,
                                              const chat_msgs *msgs,
-                                             const char *tool_schemas) {
+                                             const char *tool_schemas,
+                                             char *err, size_t errlen) {
     if (r->chat_template) {
         return render_jinja_chat_prompt_text(r->chat_template, msgs, tool_schemas,
-                                             r->think_mode, r->preserve_thinking);
+                                             r->think_mode, r->preserve_thinking,
+                                             r->tmpl_kwargs, r->tmpl_kwarg_count,
+                                             err, errlen);
     }
     return render_chat_prompt_text_model(msgs, tool_schemas, &r->tool_orders,
                                          r->think_mode, r->kat_coder, r->qwen38,

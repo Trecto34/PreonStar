@@ -4553,7 +4553,7 @@ static void test_jinja_chat_template_and_json_tool_call(void) {
         "{%- endif %}";
 
     const char *tools_json = "{\"type\":\"function\",\"function\":{\"name\":\"bash\",\"parameters\":{\"type\":\"object\"}}}";
-    char *prompt_high = render_jinja_chat_prompt_text(sample_jinja, &msgs, tools_json, P36_THINK_HIGH, true);
+    char *prompt_high = render_jinja_chat_prompt_text(sample_jinja, &msgs, tools_json, P36_THINK_HIGH, true, NULL, 0, NULL, 0);
     TEST_ASSERT(strstr(prompt_high, "<|im_start|>system\nBe helpful.<|im_end|>\n") != NULL);
     TEST_ASSERT(strstr(prompt_high, "<tool_call>\n{\"name\": \"bash\", \"arguments\": {\"command\":\"ls\"}}\n</tool_call>") != NULL);
     const char *tail_high = "<|im_start|>assistant\n<think>\n";
@@ -4561,11 +4561,37 @@ static void test_jinja_chat_template_and_json_tool_call(void) {
                 strcmp(prompt_high + strlen(prompt_high) - strlen(tail_high), tail_high) == 0);
     free(prompt_high);
 
-    char *prompt_none = render_jinja_chat_prompt_text(sample_jinja, &msgs, NULL, P36_THINK_NONE, true);
+    char *prompt_none = render_jinja_chat_prompt_text(sample_jinja, &msgs, NULL, P36_THINK_NONE, true, NULL, 0, NULL, 0);
     const char *tail_none = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
     TEST_ASSERT(strlen(prompt_none) >= strlen(tail_none) &&
                 strcmp(prompt_none + strlen(prompt_none) - strlen(tail_none), tail_none) == 0);
     free(prompt_none);
+
+    /* Unknown chat_template_kwargs reach the template as typed globals; a kwarg
+     * cannot replace a built-in global such as messages. */
+    request kr;
+    request_init(&kr, REQ_CHAT, 128);
+    const char *kp = "{\"verification\":true,\"mode\":\"str\\u0069ct\",\"n\":-3,"
+                     "\"x\":1.5,\"o\":{\"a\":[1]},\"z\":null,\"messages\":0,\"enable_thinking\":true}";
+    bool kthink = false, kgot = false, kpres = false;
+    p36_think_mode keff = P36_THINK_NONE;
+    TEST_ASSERT(parse_chat_template_kwargs_ex(&kp, &kthink, &kgot, &kpres, &keff, &kr));
+    TEST_ASSERT(kthink && kgot && kr.tmpl_kwarg_count == 7);
+    const char *kw_jinja =
+        "{%- if verification %}V{% endif %}|{{ mode }}|{{ n + 1 }}|{{ x }}|{{ o | tojson }}|"
+        "{{ z is none }}|{{ messages | length }}|{{ missing is defined }}";
+    char *kw_out = render_jinja_chat_prompt_text(kw_jinja, &msgs, NULL, P36_THINK_HIGH, true,
+                                                 kr.tmpl_kwargs, kr.tmpl_kwarg_count, NULL, 0);
+    TEST_ASSERT(kw_out && !strcmp(kw_out, "V|strict|-2|1.5|{\"a\":[1]}|True|5|False"));
+    free(kw_out);
+    /* With kwargs present a template error is reported, not replaced by the
+     * built-in prompt (which would silently drop the requested switch). */
+    char kerr[128] = {0};
+    TEST_ASSERT(!render_jinja_chat_prompt_text("{{ raise_exception('bad kwarg') }}", &msgs, NULL,
+                                               P36_THINK_HIGH, true, kr.tmpl_kwargs,
+                                               kr.tmpl_kwarg_count, kerr, sizeof(kerr)));
+    TEST_ASSERT(strstr(kerr, "bad kwarg") != NULL);
+    request_free(&kr);
     chat_msgs_free(&msgs);
 
     char *content = NULL;

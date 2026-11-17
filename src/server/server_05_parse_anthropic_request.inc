@@ -176,7 +176,7 @@ static bool parse_anthropic_request(p36_engine *e, server *s, const char *body, 
             got_thinking = true;
         } else if (!strcmp(key, "chat_template_kwargs")) {
             if (!parse_chat_template_kwargs_ex(&p, &thinking_enabled, &got_thinking,
-                                                &r->preserve_thinking, &reasoning_effort)) {
+                                                &r->preserve_thinking, &reasoning_effort, r)) {
                 free(key);
                 goto bad;
             }
@@ -241,7 +241,8 @@ static bool parse_anthropic_request(p36_engine *e, server *s, const char *body, 
     r->prompt_preserves_reasoning =
         chat_prompt_preserves_reasoning(&msgs, r->preserve_thinking);
     r->prompt_text = render_request_chat_prompt_text(
-        r, &msgs, active_tool_schemas);
+        r, &msgs, active_tool_schemas, err, errlen);
+    if (!r->prompt_text) goto image_error;
     request_note_tool_continuation(r, &msgs, active_tool_schemas);
     if (!request_tokenize_multimodal_prompt(e, s, r, &msgs, err, errlen)) goto image_error;
     chat_msgs_free(&msgs);
@@ -408,7 +409,7 @@ static bool parse_completion_request(p36_engine *e, server *s, const char *body,
             }
         } else if (!strcmp(key, "chat_template_kwargs")) {
             if (!parse_chat_template_kwargs_ex(&p, &thinking_enabled, &got_thinking,
-                                                &r->preserve_thinking, &reasoning_effort)) {
+                                                &r->preserve_thinking, &reasoning_effort, r)) {
                 free(key);
                 goto bad;
             }
@@ -471,7 +472,12 @@ static bool parse_completion_request(p36_engine *e, server *s, const char *body,
     r->think_mode = p36_think_mode_for_context(
         think_mode_from_enabled(thinking_enabled,
             think_mode_from_budget(r, reasoning_effort)), ctx_size);
-    r->prompt_text = render_request_chat_prompt_text(r, &msgs, NULL);
+    r->prompt_text = render_request_chat_prompt_text(r, &msgs, NULL, err, errlen);
+    if (!r->prompt_text) {
+        chat_msgs_free(&msgs);
+        request_free(r);
+        return false;
+    }
     p36_tokenize_rendered_chat(e, r->prompt_text, &r->prompt);
     chat_msgs_free(&msgs);
     return true;

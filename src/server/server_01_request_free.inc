@@ -15,6 +15,11 @@ static void request_free(request *r) {
     free(r->bias_vals);
     free(r->tool_schema_key);
     tool_schema_orders_free(&r->tool_orders);
+    for (size_t i = 0; i < r->tmpl_kwarg_count; i++) {
+        free((char *)r->tmpl_kwargs[i].name);
+        free((char *)r->tmpl_kwargs[i].value);
+    }
+    free(r->tmpl_kwargs);
     memset(r, 0, sizeof(*r));
 }
 
@@ -125,9 +130,43 @@ static bool parse_thinking_control_value(const char **p, bool *thinking_enabled,
     return true;
 }
 
+/* Keep an unrecognized chat_template_kwargs entry so --chat-template templates
+ * see it as a global (model-specific switches such as "verification"). Takes
+ * ownership of key on success. */
+static bool request_add_template_kwarg(const char **p, char *key, request *r) {
+    char *raw = NULL;
+    if (!json_raw_value(p, &raw)) return false;
+    p36_jinja_kwarg kw = {.name = key, .kind = P36_JKW_RAW, .value = raw};
+    const char *digits = raw + (raw[0] == '-');
+    if (raw[0] == '"') {
+        const char *q = raw;
+        char *text = NULL;
+        if (!json_string(&q, &text)) {
+            free(raw);
+            return false;
+        }
+        free(raw);
+        kw.kind = P36_JKW_STR;
+        kw.value = text;
+    } else if (!strcmp(raw, "true") || !strcmp(raw, "false")) {
+        kw.kind = P36_JKW_BOOL;
+    } else if (!strcmp(raw, "null")) {
+        kw.kind = P36_JKW_NONE;
+    } else if (digits[0] && strlen(digits) <= 18 && strspn(digits, "0123456789") == strlen(digits)) {
+        kw.kind = P36_JKW_INT;
+    } else if (raw[0] != '{' && raw[0] != '[') {
+        /* ponytail: the template engine has no float type; a float renders as its
+         * literal text but compares as a string. */
+        kw.kind = P36_JKW_STR;
+    }
+    r->tmpl_kwargs = xrealloc(r->tmpl_kwargs, (r->tmpl_kwarg_count + 1) * sizeof(*r->tmpl_kwargs));
+    r->tmpl_kwargs[r->tmpl_kwarg_count++] = kw;
+    return true;
+}
+
 static bool parse_chat_template_kwargs_ex(const char **p, bool *thinking_enabled,
                                           bool *got_thinking, bool *preserve_thinking,
-                                          p36_think_mode *reasoning_effort) {
+                                          p36_think_mode *reasoning_effort, request *extra) {
     json_ws(p);
     if (json_lit(p, "null")) return true;
     if (**p != '{') return false;
@@ -158,6 +197,12 @@ static bool parse_chat_template_kwargs_ex(const char **p, bool *thinking_enabled
                 free(key);
                 return false;
             }
+        } else if (extra) {
+            if (!request_add_template_kwarg(p, key, extra)) {
+                free(key);
+                return false;
+            }
+            key = NULL;
         } else if (!json_skip_value(p)) {
             free(key);
             return false;
@@ -176,7 +221,7 @@ static bool parse_chat_template_kwargs_ex(const char **p, bool *thinking_enabled
 static bool parse_chat_template_kwargs(const char **p, bool *thinking_enabled,
                                        bool *got_thinking, bool *preserve_thinking) {
     return parse_chat_template_kwargs_ex(p, thinking_enabled, got_thinking,
-                                         preserve_thinking, NULL);
+                                         preserve_thinking, NULL, NULL);
 }
 #endif
 
