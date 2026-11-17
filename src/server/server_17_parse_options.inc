@@ -4619,10 +4619,68 @@ static void test_jinja_chat_template_and_json_tool_call(void) {
     tool_calls_free(&parsed_calls);
 }
 
+/* With --chat-template the tool checkpoint must be a byte prefix of the next
+ * request's prompt whatever tool-call syntax the template uses (here XML
+ * <function=...>, which no built-in builder emits); otherwise every tool step
+ * misses the live slot and replays from an older disk checkpoint. */
+static void test_jinja_tool_checkpoint_is_prefix_of_next_request(void) {
+    const char *xml_jinja =
+        "{%- for m in messages %}{%- if m.role == 'system' or m.role == 'user' %}"
+        "{{- '<|im_start|>' + m.role + '\n' + m.content + '<|im_end|>\n' }}"
+        "{%- elif m.role == 'assistant' %}"
+        "{{- '<|im_start|>assistant\n<think>\n' + (m.reasoning_content or '')|trim + '\n</think>\n\n' + m.content|trim }}"
+        "{%- for tc in m.tool_calls %}{{- '<tool_call>\n<function=' + tc.name + '>\n' }}"
+        "{%- for k, v in tc.arguments|items %}{{- '<parameter=' + k + '>\n' + (v if v is string else v|tojson) + '\n</parameter>\n' }}{%- endfor %}"
+        "{{- '</function>\n</tool_call>' }}{%- endfor %}{{- '<|im_end|>\n' }}"
+        "{%- elif m.role == 'tool' %}{{- '<|im_start|>user\n<tool_response>\n' + m.content + '\n</tool_response><|im_end|>\n' }}"
+        "{%- endif %}{%- endfor %}"
+        "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n<think>\n' }}{%- endif %}";
+
+    chat_msgs msgs = {0};
+    chat_msgs_push(&msgs, (chat_msg){.role = xstrdup("system"), .content = xstrdup("Be helpful.")});
+    chat_msgs_push(&msgs, (chat_msg){.role = xstrdup("user"), .content = xstrdup("Check files")});
+    request r1;
+    request_init(&r1, REQ_CHAT, 128);
+    r1.chat_template = xml_jinja;
+    r1.think_mode = P36_THINK_HIGH;
+    r1.prompt_text = render_request_chat_prompt_text(&r1, &msgs, NULL, NULL, 0);
+    TEST_ASSERT(r1.prompt_text && r1.tmpl_conv.v);
+
+    tool_calls calls = {0};
+    tool_calls_push(&calls, (tool_call){.id = xstrdup("c1"), .name = xstrdup("bash"),
+                                        .arguments = xstrdup("{\"command\":\"ls\",\"n\":2}")});
+    char *checkpoint = render_template_tool_turn(&r1, "", "Need a listing.", &calls);
+    TEST_ASSERT(checkpoint && strstr(checkpoint, "<function=bash>\n<parameter=command>\nls\n</parameter>\n"
+                                                 "<parameter=n>\n2\n</parameter>") != NULL);
+    TEST_ASSERT(!strncmp(checkpoint, r1.prompt_text, strlen(r1.prompt_text)));
+
+    chat_msg a1 = {.role = xstrdup("assistant"), .content = xstrdup(""), .reasoning = xstrdup("Need a listing.")};
+    tool_calls_push(&a1.calls, (tool_call){.id = xstrdup("c1"), .name = xstrdup("bash"),
+                                           .arguments = xstrdup("{\"command\":\"ls\",\"n\":2}")});
+    chat_msgs_push(&msgs, a1);
+    chat_msgs_push(&msgs, (chat_msg){.role = xstrdup("tool"), .content = xstrdup("README.md"),
+                                     .tool_call_id = xstrdup("c1")});
+    request r2;
+    request_init(&r2, REQ_CHAT, 128);
+    r2.chat_template = xml_jinja;
+    r2.think_mode = P36_THINK_HIGH;
+    r2.prompt_text = render_request_chat_prompt_text(&r2, &msgs, NULL, NULL, 0);
+    TEST_ASSERT(r2.prompt_text && strlen(r2.prompt_text) > strlen(checkpoint) &&
+                !strncmp(r2.prompt_text, checkpoint, strlen(checkpoint)));
+
+    free(checkpoint);
+    tool_calls_free(&calls);
+    chat_msgs_free(&msgs);
+    r1.chat_template = r2.chat_template = NULL;
+    request_free(&r1);
+    request_free(&r2);
+}
+
 static void p36_server_unit_tests_run(void) {
     test_anthropic_live_stream_normal_golden();
     test_anthropic_live_stream_incomplete_tool_in_thinking_terminates();
     test_jinja_chat_template_and_json_tool_call();
+    test_jinja_tool_checkpoint_is_prefix_of_next_request();
     test_openai_inline_image_content();
     test_http_image_paths_and_urls_are_rejected();
     test_anthropic_inline_image_content();

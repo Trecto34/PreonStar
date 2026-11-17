@@ -122,14 +122,12 @@ static void append_json_tool_calls_text(buf *b, const tool_calls *calls,
     }
 }
 
-static char *render_jinja_chat_prompt_text(const char *chat_template,
-                                           const chat_msgs *msgs,
-                                           const char *tool_schemas,
-                                           p36_think_mode think_mode,
-                                           bool preserve_thinking,
-                                           const p36_jinja_kwarg *kwargs,
-                                           size_t kwarg_count,
-                                           char *err, size_t errlen) {
+/* Convert chat messages into the template's message list.  Owned strings stay
+ * in c->owned; c->thinking carries any in-band /think switch the messages set. */
+static void jinja_conv_build(jinja_conv *c, const chat_msgs *msgs,
+                             const char *tool_schemas, p36_think_mode think_mode,
+                             bool preserve_thinking) {
+    memset(c, 0, sizeof(*c));
     bool thinking = p36_think_mode_enabled(think_mode);
     int last_query = last_chat_query(msgs);
     int failures = 0;
@@ -138,38 +136,36 @@ static char *render_jinja_chat_prompt_text(const char *chat_template,
     char *first_content = leading_system_content(msgs, &system_head, &thinking);
     bool has_first_sys = text_has_trimmed_content(first_content);
 
-    size_t max_msgs = (size_t)msgs->len + 1;
-    p36_jinja_message *jmsgs = calloc(max_msgs, sizeof(*jmsgs));
-    char **owned_strs = calloc(max_msgs * 3 + 1, sizeof(*owned_strs));
-    if (!jmsgs || !owned_strs) die("out of memory");
-    size_t n_owned = 0;
-    size_t n_jmsgs = 0;
+    c->cap = (size_t)msgs->len + 2;
+    c->v = calloc(c->cap, sizeof(*c->v));
+    c->owned = calloc((size_t)msgs->len * 3 + 2, sizeof(*c->owned));
+    if (!c->v || !c->owned) die("out of memory");
+    c->tools = tool_schemas ? xstrdup(tool_schemas) : NULL;
 
     if (has_first_sys) {
-        jmsgs[n_jmsgs].role = "system";
-        jmsgs[n_jmsgs].content = first_content;
-        owned_strs[n_owned++] = first_content;
-        n_jmsgs++;
+        c->v[c->len].role = "system";
+        c->v[c->len].content = first_content;
+        c->owned[c->n_owned++] = first_content;
+        c->len++;
     } else {
         free(first_content);
     }
 
     for (int i = 0; i < msgs->len; i++) {
         const chat_msg *m = &msgs->v[i];
+        p36_jinja_message *jm = &c->v[c->len];
         if (role_is_system(m->role)) {
             if (i < system_head) continue;
             char *content = chat_content_text(m->content, true, &thinking);
-            owned_strs[n_owned++] = content;
-            jmsgs[n_jmsgs].role = "system";
-            jmsgs[n_jmsgs].content = content;
-            n_jmsgs++;
+            c->owned[c->n_owned++] = content;
+            jm->role = "system";
+            jm->content = content;
         } else if (!strcmp(m->role, "user")) {
             char *content = chat_content_text(m->content, true, &thinking);
-            owned_strs[n_owned++] = content;
+            c->owned[c->n_owned++] = content;
             failures = 0;
-            jmsgs[n_jmsgs].role = "user";
-            jmsgs[n_jmsgs].content = content;
-            n_jmsgs++;
+            jm->role = "user";
+            jm->content = content;
         } else if (!strcmp(m->role, "tool") || !strcmp(m->role, "function")) {
             char *raw_content = chat_content_text(m->content, false, NULL);
             failures = tool_response_is_error(raw_content) ? failures + 1 : 0;
@@ -178,20 +174,19 @@ static char *render_jinja_chat_prompt_text(const char *chat_template,
             append_tool_error_warning(&tb, failures);
             free(raw_content);
             char *content = buf_take(&tb);
-            owned_strs[n_owned++] = content;
-            jmsgs[n_jmsgs].role = "tool";
-            jmsgs[n_jmsgs].content = content;
-            n_jmsgs++;
+            c->owned[c->n_owned++] = content;
+            jm->role = "tool";
+            jm->content = content;
         } else if (!strcmp(m->role, "assistant")) {
             char *reasoning = NULL;
             char *content = assistant_message_parts(m, &reasoning);
-            owned_strs[n_owned++] = content;
-            owned_strs[n_owned++] = reasoning;
+            c->owned[c->n_owned++] = content;
+            c->owned[c->n_owned++] = reasoning;
             bool keep_reasoning = (preserve_thinking || i > last_query) &&
                                   text_has_trimmed_content(reasoning);
-            jmsgs[n_jmsgs].role = "assistant";
-            jmsgs[n_jmsgs].content = content;
-            jmsgs[n_jmsgs].reasoning_content = keep_reasoning ? reasoning : NULL;
+            jm->role = "assistant";
+            jm->content = content;
+            jm->reasoning_content = keep_reasoning ? reasoning : NULL;
             if (m->calls.len > 0) {
                 p36_jinja_tool_call *tcs = calloc((size_t)m->calls.len, sizeof(*tcs));
                 if (!tcs) die("out of memory");
@@ -200,43 +195,63 @@ static char *render_jinja_chat_prompt_text(const char *chat_template,
                     tcs[tc_i].arguments_json = m->calls.v[tc_i].arguments && m->calls.v[tc_i].arguments[0]
                         ? m->calls.v[tc_i].arguments : "{}";
                 }
-                jmsgs[n_jmsgs].tool_calls = tcs;
-                jmsgs[n_jmsgs].tool_call_count = (size_t)m->calls.len;
+                jm->tool_calls = tcs;
+                jm->tool_call_count = (size_t)m->calls.len;
             }
-            n_jmsgs++;
         } else {
             char *raw_content = chat_content_text(m->content, false, NULL);
             buf ub = {0};
             buf_printf(&ub, "[%s]: %s", m->role, raw_content);
             free(raw_content);
             char *content = buf_take(&ub);
-            owned_strs[n_owned++] = content;
-            jmsgs[n_jmsgs].role = "user";
-            jmsgs[n_jmsgs].content = content;
-            n_jmsgs++;
+            c->owned[c->n_owned++] = content;
+            jm->role = "user";
+            jm->content = content;
         }
+        c->len++;
     }
+    c->thinking = thinking;
+}
 
+static char *jinja_conv_render(const char *chat_template, const jinja_conv *c,
+                               const p36_jinja_message *msgs, size_t n_msgs,
+                               bool add_generation_prompt, p36_think_mode think_mode,
+                               bool preserve_thinking, const p36_jinja_kwarg *kwargs,
+                               size_t kwarg_count, char *jerr, size_t jerrlen) {
     p36_jinja_render_params jp = {
-        .messages = jmsgs,
-        .message_count = n_jmsgs,
-        .tools_json_lines = tool_schemas,
-        .add_generation_prompt = true,
+        .messages = msgs,
+        .message_count = n_msgs,
+        .tools_json_lines = c->tools,
+        .add_generation_prompt = add_generation_prompt,
         .enable_thinking_set = true,
-        .enable_thinking = thinking,
+        .enable_thinking = c->thinking,
         .preserve_thinking_set = true,
         .preserve_thinking = preserve_thinking,
-        .reasoning_effort = thinking ? p36_jinja_effort_name(think_mode) : NULL,
+        .reasoning_effort = c->thinking ? p36_jinja_effort_name(think_mode) : NULL,
         .extra_kwargs = kwargs,
         .extra_kwarg_count = kwarg_count,
     };
-    char jerr[256] = {0};
-    char *rendered = p36_jinja_render(chat_template, &jp, jerr, sizeof(jerr));
+    return p36_jinja_render(chat_template, &jp, jerr, jerrlen);
+}
 
-    for (size_t i = 0; i < n_jmsgs; i++) free((void *)jmsgs[i].tool_calls);
-    free(jmsgs);
-    for (size_t i = 0; i < n_owned; i++) free(owned_strs[i]);
-    free(owned_strs);
+/* keep (optional) receives the converted conversation on success. */
+static char *render_jinja_chat_prompt_text_keep(const char *chat_template,
+                                                const chat_msgs *msgs,
+                                                const char *tool_schemas,
+                                                p36_think_mode think_mode,
+                                                bool preserve_thinking,
+                                                const p36_jinja_kwarg *kwargs,
+                                                size_t kwarg_count,
+                                                jinja_conv *keep,
+                                                char *err, size_t errlen) {
+    jinja_conv c;
+    jinja_conv_build(&c, msgs, tool_schemas, think_mode, preserve_thinking);
+    char jerr[256] = {0};
+    char *rendered = jinja_conv_render(chat_template, &c, c.v, c.len, true, think_mode,
+                                       preserve_thinking, kwargs, kwarg_count,
+                                       jerr, sizeof(jerr));
+    if (rendered && keep) *keep = c;
+    else jinja_conv_free(&c);
 
     if (!rendered && kwarg_count) {
         /* The client sent template kwargs, so a template error (often a
@@ -250,6 +265,19 @@ static char *render_jinja_chat_prompt_text(const char *chat_template,
                                             preserve_thinking, NULL);
     }
     return rendered;
+}
+
+static char *render_jinja_chat_prompt_text(const char *chat_template,
+                                           const chat_msgs *msgs,
+                                           const char *tool_schemas,
+                                           p36_think_mode think_mode,
+                                           bool preserve_thinking,
+                                           const p36_jinja_kwarg *kwargs,
+                                           size_t kwarg_count,
+                                           char *err, size_t errlen) {
+    return render_jinja_chat_prompt_text_keep(chat_template, msgs, tool_schemas, think_mode,
+                                              preserve_thinking, kwargs, kwarg_count,
+                                              NULL, err, errlen);
 }
 
 static char *render_chat_prompt_text_profile(const chat_msgs *msgs,
@@ -279,15 +307,16 @@ static char *render_chat_prompt_text_model(const chat_msgs *msgs,
 
 /* NULL (with err set) only when a --chat-template render fails on a request
  * that supplied extra chat_template_kwargs. */
-static char *render_request_chat_prompt_text(const request *r,
+static char *render_request_chat_prompt_text(request *r,
                                              const chat_msgs *msgs,
                                              const char *tool_schemas,
                                              char *err, size_t errlen) {
     if (r->chat_template) {
-        return render_jinja_chat_prompt_text(r->chat_template, msgs, tool_schemas,
-                                             r->think_mode, r->preserve_thinking,
-                                             r->tmpl_kwargs, r->tmpl_kwarg_count,
-                                             err, errlen);
+        jinja_conv_free(&r->tmpl_conv);
+        return render_jinja_chat_prompt_text_keep(r->chat_template, msgs, tool_schemas,
+                                                  r->think_mode, r->preserve_thinking,
+                                                  r->tmpl_kwargs, r->tmpl_kwarg_count,
+                                                  &r->tmpl_conv, err, errlen);
     }
     return render_chat_prompt_text_model(msgs, tool_schemas, &r->tool_orders,
                                          r->think_mode, r->kat_coder, r->qwen38,

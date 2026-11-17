@@ -115,6 +115,17 @@ static jval j_eval_expr(jctx *ctx, const char **p, const char *end, bool active)
     return val;
 }
 
+/* `for a in xs` binds a; `for a, b in pairs` unpacks two-item lists (dict.items()). */
+static void j_bind_loop_vars(jinja_arena *a, jmap *vars, const jstmt *s, jval item) {
+    if (!s->u.for_stmt.var2) {
+        jmap_set(a, vars, s->u.for_stmt.var1, item);
+        return;
+    }
+    bool pair = item.kind == JVAL_LIST && item.u.list->len >= 2;
+    jmap_set(a, vars, s->u.for_stmt.var1, pair ? item.u.list->items[0] : jval_undef());
+    jmap_set(a, vars, s->u.for_stmt.var2, pair ? item.u.list->items[1] : jval_undef());
+}
+
 static bool j_exec_block(jctx *ctx, const jstmt_list *block, jbuf *out) {
     for (size_t i = 0; i < block->len; i++) {
         if (ctx->failed || ctx->loop_break || ctx->loop_continue) return !ctx->failed;
@@ -166,6 +177,7 @@ static bool j_exec_block(jctx *ctx, const jstmt_list *block, jbuf *out) {
             const char *p = s->u.for_stmt.iter_ptr;
             jval iter = j_eval_expr(ctx, &p, s->u.for_stmt.iter_ptr + s->u.for_stmt.iter_len, true);
             if (ctx->failed) return false;
+            if (iter.kind == JVAL_MAP) iter = jval_map_view(ctx->arena, iter.u.map, 1);  /* dicts iterate keys */
             if (iter.kind != JVAL_LIST || iter.u.list->len == 0) {
                 if (!j_exec_block(ctx, &s->u.for_stmt.else_body, out)) return false;
                 break;
@@ -180,7 +192,7 @@ static bool j_exec_block(jctx *ctx, const jstmt_list *block, jbuf *out) {
             if (s->u.for_stmt.cond_ptr) {
                 jval filtered = jval_list_new(ctx->arena, items->len);
                 for (size_t idx = 0; idx < items->len; idx++) {
-                    jmap_set(ctx->arena, loop_scope.vars, s->u.for_stmt.var1, items->items[idx]);
+                    j_bind_loop_vars(ctx->arena, loop_scope.vars, s, items->items[idx]);
                     const char *cp = s->u.for_stmt.cond_ptr;
                     jval cv = j_eval_expr(ctx, &cp, s->u.for_stmt.cond_ptr + s->u.for_stmt.cond_len, true);
                     if (ctx->failed) { ctx->cur_scope = prev_scope; return false; }
@@ -196,7 +208,7 @@ static bool j_exec_block(jctx *ctx, const jstmt_list *block, jbuf *out) {
             jval loop_obj = jval_map_new(ctx->arena, 8);
             jmap_set(ctx->arena, loop_scope.vars, "loop", loop_obj);
             for (size_t idx = 0; idx < items->len; idx++) {
-                jmap_set(ctx->arena, loop_scope.vars, s->u.for_stmt.var1, items->items[idx]);
+                j_bind_loop_vars(ctx->arena, loop_scope.vars, s, items->items[idx]);
                 jmap_set(ctx->arena, loop_obj.u.map, "index0", jval_int((int64_t)idx));
                 jmap_set(ctx->arena, loop_obj.u.map, "index", jval_int((int64_t)(idx + 1)));
                 jmap_set(ctx->arena, loop_obj.u.map, "revindex0", jval_int((int64_t)(items->len - 1 - idx)));
@@ -299,12 +311,7 @@ char *p36_jinja_render(const char *template_src,
         if (kw->kind == P36_JKW_BOOL) jv = jval_bool(!strcmp(v, "true"));
         else if (kw->kind == P36_JKW_INT) jv = jval_int(strtoll(v, NULL, 10));
         else if (kw->kind == P36_JKW_STR) jv = jval_str(&arena, v);
-        else if (kw->kind == P36_JKW_RAW) {
-            /* ponytail: arrays/objects are opaque raw JSON (print/tojson/truthiness
-             * only, no indexing); parse into jvals if a template ever needs to iterate one. */
-            jv = jval_map_new(&arena, 1);
-            jv.u.map->raw_json = ja_strdup(&arena, v);
-        }
+        else if (kw->kind == P36_JKW_RAW) jv = jval_from_json(&arena, v);
         jmap_set(&arena, root_scope.vars, kw->name, jv);
     }
 
@@ -343,8 +350,9 @@ char *p36_jinja_render(const char *template_src,
                 const p36_jinja_tool_call *tc = &m->tool_calls[k];
                 jval tcv = jval_map_new(&arena, 4);
                 jval fnv = jval_map_new(&arena, 4);
-                jval arg_map = jval_map_new(&arena, 2);
-                arg_map.u.map->raw_json = ja_strdup(&arena, tc->arguments_json && tc->arguments_json[0] ? tc->arguments_json : "{}");
+                /* Parsed so templates can iterate arguments (`args|items`, as the
+                 * Qwen XML <parameter=...> formats do); tojson stays byte-exact. */
+                jval arg_map = jval_from_json(&arena, tc->arguments_json && tc->arguments_json[0] ? tc->arguments_json : "{}");
                 jmap_set(&arena, fnv.u.map, "name", jval_str(&arena, tc->name ? tc->name : ""));
                 jmap_set(&arena, fnv.u.map, "arguments", arg_map);
                 jmap_set(&arena, tcv.u.map, "name", jval_str(&arena, tc->name ? tc->name : ""));
@@ -386,20 +394,14 @@ char *p36_jinja_render(const char *template_src,
                     p++;
                 }
                 size_t len = (size_t)(p - start);
-                if (len > 0) {
-                    jval tv = jval_map_new(&arena, 2);
-                    tv.u.map->raw_json = ja_strndup(&arena, start, len);
-                    jlist_push(&arena, tlist.u.list, tv);
-                }
+                if (len > 0)
+                    jlist_push(&arena, tlist.u.list, jval_from_json(&arena, ja_strndup(&arena, start, len)));
             } else {
                 const char *nl = strchr(p, '\n');
                 size_t len = nl ? (size_t)(nl - p) : strlen(p);
                 while (len > 0 && (p[len - 1] == '\r' || p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
-                if (len > 0) {
-                    jval tv = jval_map_new(&arena, 2);
-                    tv.u.map->raw_json = ja_strndup(&arena, p, len);
-                    jlist_push(&arena, tlist.u.list, tv);
-                }
+                if (len > 0)
+                    jlist_push(&arena, tlist.u.list, jval_from_json(&arena, ja_strndup(&arena, p, len)));
                 if (!nl) break;
                 p = nl + 1;
             }

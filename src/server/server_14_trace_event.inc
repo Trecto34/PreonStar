@@ -709,6 +709,47 @@ done:
     buf_free(&rendered);
 }
 
+/* The full text the next request renders through --chat-template: this
+ * request's conversation plus the finished assistant turn, without a
+ * generation prompt.  NULL when no template rendered the prompt or the render
+ * fails; the caller then uses the fixed builders. */
+static char *render_template_tool_turn(const request *r, const char *content,
+                                       const char *reasoning, const tool_calls *calls) {
+    const jinja_conv *c = &r->tmpl_conv;
+    if (!r->chat_template || !c->v || c->len >= c->cap || !calls || calls->len == 0)
+        return NULL;
+    p36_jinja_tool_call *tcs = calloc((size_t)calls->len, sizeof(*tcs));
+    p36_jinja_message *msgs = calloc(c->len + 1, sizeof(*msgs));
+    if (!tcs || !msgs) die("out of memory");
+    for (int i = 0; i < calls->len; i++) {
+        tcs[i].name = calls->v[i].name ? calls->v[i].name : "";
+        tcs[i].arguments_json = calls->v[i].arguments && calls->v[i].arguments[0]
+            ? calls->v[i].arguments : "{}";
+    }
+    memcpy(msgs, c->v, c->len * sizeof(*msgs));
+    /* Normalize the turn exactly as jinja_conv_build() will when the client
+     * sends it back; it follows the last user query, so reasoning is kept. */
+    chat_msg turn = {.content = (char *)(content ? content : ""), .reasoning = (char *)reasoning};
+    char *turn_reasoning = NULL;
+    char *turn_content = assistant_message_parts(&turn, &turn_reasoning);
+    msgs[c->len] = (p36_jinja_message){
+        .role = "assistant",
+        .content = turn_content,
+        .reasoning_content = text_has_trimmed_content(turn_reasoning) ? turn_reasoning : NULL,
+        .tool_calls = tcs,
+        .tool_call_count = (size_t)calls->len,
+    };
+    char jerr[256] = {0};
+    char *out = jinja_conv_render(r->chat_template, c, msgs, c->len + 1, false,
+                                  r->think_mode, r->preserve_thinking,
+                                  r->tmpl_kwargs, r->tmpl_kwarg_count, jerr, sizeof(jerr));
+    free(msgs);
+    free(tcs);
+    free(turn_content);
+    free(turn_reasoning);
+    return out;
+}
+
 /* After a successful tool-call finish, make the live checkpoint match what the
  * next request will render.  Usually that is just the exact tool block remembered by
  * tool id.  If a client sends a tool call without an id we know, the fallback
@@ -724,20 +765,30 @@ static void canonicalize_tool_checkpoint(server *s, server_slot *slot,
 
     if (!calls || calls->len == 0 || !j->req.prompt_text) return;
 
-    char *suffix_text = build_tool_checkpoint_suffix(&j->req, content, reasoning, calls);
+    /* A --chat-template owns the tool-call syntax (JSON, XML <function=...>,
+     * anything), so the template itself renders the finished turn; the fixed
+     * builders only know the built-in formats. */
+    char *template_text = render_template_tool_turn(&j->req, content, reasoning, calls);
+    char *suffix_text = template_text ? NULL
+        : build_tool_checkpoint_suffix(&j->req, content, reasoning, calls);
 
     buf rendered = {0};
     size_t prefix_len = strlen(j->req.prompt_text);
     const char *empty_think = "<think>\n\n</think>\n\n";
     size_t empty_len = strlen(empty_think);
-    bool strip_empty = !calls->replay_empty_think && !j->req.kat_coder &&
+    bool strip_empty = !template_text && !calls->replay_empty_think && !j->req.kat_coder &&
                        !p36_think_mode_enabled(j->req.think_mode) &&
                        prefix_len >= empty_len &&
                        !memcmp(j->req.prompt_text + prefix_len - empty_len,
                                empty_think, empty_len);
     if (strip_empty) prefix_len -= empty_len;
-    buf_append(&rendered, j->req.prompt_text, prefix_len);
-    buf_puts(&rendered, suffix_text);
+    if (template_text) {
+        buf_puts(&rendered, template_text);
+        free(template_text);
+    } else {
+        buf_append(&rendered, j->req.prompt_text, prefix_len);
+        buf_puts(&rendered, suffix_text);
+    }
 
     p36_tokens canonical = {0};
     p36_tokenize_rendered_chat(s->engine, rendered.ptr ? rendered.ptr : "", &canonical);

@@ -20,6 +20,7 @@ static void request_free(request *r) {
         free((char *)r->tmpl_kwargs[i].value);
     }
     free(r->tmpl_kwargs);
+    jinja_conv_free(&r->tmpl_conv);
     memset(r, 0, sizeof(*r));
 }
 

@@ -628,6 +628,22 @@ static bool jmap_has(const jmap *m, const char *key) {
     return false;
 }
 
+/* dict.items() / keys() / values() as lists; items are [key, value] pairs. */
+static jval jval_map_view(jinja_arena *a, const jmap *m, int which /* 0 items, 1 keys, 2 values */) {
+    jval out = jval_list_new(a, m ? m->len : 0);
+    for (size_t i = 0; m && i < m->len; i++) {
+        if (m->entries[i].val.kind == JVAL_UNDEFINED) continue;
+        jval key = jval_str(a, m->entries[i].key);
+        if (which == 1) { jlist_push(a, out.u.list, key); continue; }
+        if (which == 2) { jlist_push(a, out.u.list, m->entries[i].val); continue; }
+        jval pair = jval_list_new(a, 2);
+        jlist_push(a, pair.u.list, key);
+        jlist_push(a, pair.u.list, m->entries[i].val);
+        jlist_push(a, out.u.list, pair);
+    }
+    return out;
+}
+
 static bool jval_truthy(jval v) {
     switch (v.kind) {
     case JVAL_UNDEFINED:
@@ -741,6 +757,191 @@ static void jval_write_json(jbuf *b, jval v) {
         jbuf_putc(b, '}');
         break;
     }
+}
+
+/* Minimal JSON reader so templates can index and iterate the JSON the server
+ * hands them (tool-call arguments, tool schemas, RAW kwargs) the way HF/minja
+ * templates expect: `args|items`, `tool.function.name`, `'k' in args`.
+ * There is no float kind: non-integer numbers stay raw literals (an opaque
+ * map with raw_json), so they print and tojson verbatim. */
+static void jbuf_put_utf8(jinja_arena *a, char **out, size_t *len, size_t *cap, uint32_t cp) {
+    char tmp[4];
+    size_t n;
+    if (cp < 0x80) { tmp[0] = (char)cp; n = 1; }
+    else if (cp < 0x800) { tmp[0] = (char)(0xC0 | (cp >> 6)); tmp[1] = (char)(0x80 | (cp & 0x3F)); n = 2; }
+    else if (cp < 0x10000) {
+        tmp[0] = (char)(0xE0 | (cp >> 12)); tmp[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        tmp[2] = (char)(0x80 | (cp & 0x3F)); n = 3;
+    } else {
+        tmp[0] = (char)(0xF0 | (cp >> 18)); tmp[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        tmp[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); tmp[3] = (char)(0x80 | (cp & 0x3F)); n = 4;
+    }
+    if (*len + n > *cap) {
+        size_t ncap = (*cap + n) * 2;
+        char *nb = (char *)ja_alloc(a, ncap);
+        if (*len) memcpy(nb, *out, *len);
+        *out = nb;
+        *cap = ncap;
+    }
+    memcpy(*out + *len, tmp, n);
+    *len += n;
+}
+
+static void json_skip_ws(const char **p) {
+    while (**p == ' ' || **p == '\n' || **p == '\r' || **p == '\t') (*p)++;
+}
+
+static bool json_hex4(const char *p, uint32_t *out) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) {
+        char c = p[i];
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') v |= (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v |= (uint32_t)(c - 'A' + 10);
+        else return false;
+    }
+    *out = v;
+    return true;
+}
+
+/* *p at the opening quote; returns false on malformed input. */
+static bool json_read_string(jinja_arena *a, const char **p, const char **s, size_t *slen) {
+    const char *q = *p + 1;
+    size_t cap = 16, len = 0;
+    char *out = (char *)ja_alloc(a, cap);
+    while (*q && *q != '"') {
+        uint32_t cp;
+        if (*q != '\\') {
+            /* Unescaped bytes (UTF-8 included) copy through untouched. */
+            const char *run = q;
+            while (*q && *q != '"' && *q != '\\') q++;
+            size_t n = (size_t)(q - run);
+            if (len + n > cap) {
+                size_t ncap = (len + n) * 2;
+                char *nb = (char *)ja_alloc(a, ncap);
+                if (len) memcpy(nb, out, len);
+                out = nb;
+                cap = ncap;
+            }
+            memcpy(out + len, run, n);
+            len += n;
+            continue;
+        } else {
+            q++;
+            switch (*q) {
+            case '"': cp = '"'; break;
+            case '\\': cp = '\\'; break;
+            case '/': cp = '/'; break;
+            case 'b': cp = '\b'; break;
+            case 'f': cp = '\f'; break;
+            case 'n': cp = '\n'; break;
+            case 'r': cp = '\r'; break;
+            case 't': cp = '\t'; break;
+            case 'u': {
+                if (!json_hex4(q + 1, &cp)) return false;
+                q += 4;
+                uint32_t lo;
+                if (cp >= 0xD800 && cp < 0xDC00 && q[1] == '\\' && q[2] == 'u' &&
+                    json_hex4(q + 3, &lo) && lo >= 0xDC00 && lo < 0xE000) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    q += 6;
+                }
+                break;
+            }
+            default: return false;
+            }
+            q++;
+        }
+        jbuf_put_utf8(a, &out, &len, &cap, cp);
+    }
+    if (*q != '"') return false;
+    *p = q + 1;
+    *s = ja_strndup(a, out, len);  /* NUL-terminated for callers that use C strings */
+    *slen = len;
+    return true;
+}
+
+static jval json_parse_value(jinja_arena *a, const char **p, int depth) {
+    json_skip_ws(p);
+    if (depth > 64) return jval_undef();
+    const char *q = *p;
+    if (*q == '{') {
+        jval m = jval_map_new(a, 4);
+        *p = q + 1;
+        json_skip_ws(p);
+        if (**p == '}') { (*p)++; return m; }
+        for (;;) {
+            json_skip_ws(p);
+            const char *k; size_t kl;
+            if (**p != '"' || !json_read_string(a, p, &k, &kl)) return jval_undef();
+            json_skip_ws(p);
+            if (**p != ':') return jval_undef();
+            (*p)++;
+            jval v = json_parse_value(a, p, depth + 1);
+            if (v.kind == JVAL_UNDEFINED) return v;
+            jmap_set(a, m.u.map, k, v);
+            json_skip_ws(p);
+            if (**p == ',') { (*p)++; continue; }
+            if (**p == '}') { (*p)++; return m; }
+            return jval_undef();
+        }
+    }
+    if (*q == '[') {
+        jval l = jval_list_new(a, 4);
+        *p = q + 1;
+        json_skip_ws(p);
+        if (**p == ']') { (*p)++; return l; }
+        for (;;) {
+            jval v = json_parse_value(a, p, depth + 1);
+            if (v.kind == JVAL_UNDEFINED) return v;
+            jlist_push(a, l.u.list, v);
+            json_skip_ws(p);
+            if (**p == ',') { (*p)++; continue; }
+            if (**p == ']') { (*p)++; return l; }
+            return jval_undef();
+        }
+    }
+    if (*q == '"') {
+        const char *s; size_t sl;
+        if (!json_read_string(a, p, &s, &sl)) return jval_undef();
+        return (jval){.kind = JVAL_STR, .u.s = {s, sl}};
+    }
+    if (!strncmp(q, "true", 4)) { *p = q + 4; return jval_bool(true); }
+    if (!strncmp(q, "false", 5)) { *p = q + 5; return jval_bool(false); }
+    if (!strncmp(q, "null", 4)) { *p = q + 4; return jval_none(); }
+    if (*q == '-' || (*q >= '0' && *q <= '9')) {
+        const char *e = q + (*q == '-');
+        bool integral = true;
+        while ((*e >= '0' && *e <= '9') || *e == '.' || *e == 'e' || *e == 'E' ||
+               *e == '+' || *e == '-') {
+            if (*e == '.' || *e == 'e' || *e == 'E') integral = false;
+            e++;
+        }
+        if (e == q || (e == q + 1 && *q == '-')) return jval_undef();
+        *p = e;
+        if (integral && e - q < 19) return jval_int(strtoll(q, NULL, 10));
+        jval raw = jval_map_new(a, 1);
+        raw.u.map->raw_json = ja_strndup(a, q, (size_t)(e - q));
+        return raw;
+    }
+    return jval_undef();
+}
+
+/* Parsed value for a JSON text; a top-level object also keeps its exact
+ * source bytes in raw_json so `|tojson` reproduces what the client sent.
+ * Malformed JSON stays an opaque raw value (print/tojson/truthiness only). */
+static jval jval_from_json(jinja_arena *a, const char *text) {
+    const char *p = text ? text : "";
+    jval v = json_parse_value(a, &p, 0);
+    json_skip_ws(&p);
+    if (v.kind == JVAL_UNDEFINED || *p) {
+        v = jval_map_new(a, 1);
+        v.u.map->raw_json = ja_strdup(a, text ? text : "");
+        return v;
+    }
+    if (v.kind == JVAL_MAP) v.u.map->raw_json = ja_strdup(a, text);
+    return v;
 }
 
 typedef enum {

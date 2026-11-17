@@ -774,6 +774,29 @@ typedef struct {
     int cap;
 } chat_msgs;
 
+/* A conversation already converted for a --chat-template render.  A request
+ * keeps it so that, after a tool call, the checkpoint can be rendered by the
+ * same template that will render the next request (see
+ * canonicalize_tool_checkpoint).  cap reserves one slot for that turn. */
+typedef struct {
+    p36_jinja_message *v;
+    size_t len;
+    size_t cap;
+    char **owned;
+    size_t n_owned;
+    char *tools;
+    bool thinking;
+} jinja_conv;
+
+static void jinja_conv_free(jinja_conv *c) {
+    for (size_t i = 0; i < c->len; i++) free((void *)c->v[i].tool_calls);
+    free(c->v);
+    for (size_t i = 0; i < c->n_owned; i++) free(c->owned[i]);
+    free(c->owned);
+    free(c->tools);
+    memset(c, 0, sizeof(*c));
+}
+
 static void tool_memory_attach_to_messages(server *s, chat_msgs *msgs,
                                            tool_replay_stats *stats);
 static bool tool_memory_has_id(server *s, const char *id);
@@ -837,6 +860,7 @@ typedef struct {
     const char *chat_template;
     p36_jinja_kwarg *tmpl_kwargs;  /* unrecognized chat_template_kwargs, owned */
     size_t tmpl_kwarg_count;
+    jinja_conv tmpl_conv;          /* set only when chat_template rendered the prompt */
     bool preserve_thinking;
     bool prompt_preserves_reasoning;
     tool_replay_stats tool_replay;

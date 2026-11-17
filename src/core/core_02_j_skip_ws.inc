@@ -794,6 +794,9 @@ static jval j_eval_postfix(jctx *ctx, const char **p, const char *end, bool acti
                     v = jval_undef();
                 } else if (v.kind == JVAL_STR) {
                     v = j_call_str_method(ctx, v, attr, args, argc);
+                } else if (v.kind == JVAL_MAP && (!strcmp(attr, "items") || !strcmp(attr, "keys") ||
+                                                  !strcmp(attr, "values"))) {
+                    v = jval_map_view(ctx->arena, v.u.map, attr[0] == 'i' ? 0 : attr[0] == 'k' ? 1 : 2);
                 } else if (v.kind == JVAL_MAP && !strcmp(attr, "get")) {
                     if (argc >= 1 && args[0].val.kind == JVAL_STR && jmap_has(v.u.map, args[0].val.u.s.ptr))
                         v = jmap_get(v.u.map, args[0].val.u.s.ptr);
@@ -846,6 +849,8 @@ static jval j_eval_filter(jctx *ctx, const char **p, const char *end, bool activ
             else if (v.kind == JVAL_STR) v = jval_int((int64_t)v.u.s.len);
             else if (v.kind == JVAL_MAP) v = jval_int((int64_t)v.u.map->len);
             else v = jval_int(0);
+        } else if (!strcmp(fname, "items")) {
+            v = v.kind == JVAL_MAP ? jval_map_view(ctx->arena, v.u.map, 0) : jval_list_new(ctx->arena, 0);
         } else if (!strcmp(fname, "tojson")) {
             jbuf b = {0};
             jval_write_json(&b, v);
