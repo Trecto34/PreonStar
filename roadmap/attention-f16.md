@@ -1,7 +1,8 @@
 # f16 attention
 
 **Status:** step A landed (`670febe`, default on); step B done (default on,
-inside the same f16 build); step C delayed; C.1 (dense VGPR relief) done; the rest open.
+inside the same f16 build); step C delayed; C.1 (dense VGPR relief) done;
+decode FA f16 staging done (default on); the rest open.
 
 ## Background
 
@@ -56,10 +57,16 @@ MoE 8-16k ablation: QK FMAs 20%, PV FMAs 14% of prefill time.
    untouched. Whole model only +0.04% (8k) / +0.41% (16k): profiled, dense
    attention is just 13% of GPU time averaged over 0..16k after steps A/B.
    Ledger 2026-11-17, evidence `karpathy/evidence/raw/fa-gqa6-rs2-20261117/`.
-4. **f16 K/V staging in `attn_decode_fa`.** Same LDS staging as the prefill
-   tile. At 32k MoE the kernel is ~15% of a decode token (0.24 ms × 10
-   layers) and reads K/V at ~114 GB/s, a third of matvec bandwidth. Bigger
-   key groups were already tried (equal at 32k). Cheap first experiment.
+4. **f16 K/V staging in `attn_decode_fa` — done (2026-11-17).** Halves LDS
+   (32 → 16 KiB, WGP workgroup residency 4 → 8) and on dense `gqa6` also drops
+   VGPRs 256 → 128 (4 → 8 waves); math stays f32 (`FA_F16_PV` omitted: pushes
+   `gqa6` back to 256 VGPRs and saves only ~2% on `gqa8`). In-model kernel GPU
+   time: MoE 32k −18.7% (75.47 → 61.34 ms over 32 tokens), dense 16k −33.1%
+   (140.34 → 93.87 ms); `n_tok=4` MTP verify −19% (MoE) / −34% (dense). Whole
+   model MoE 16k decode +2.13% (75.00 → 76.60 t/s, clean separation); single-step
+   NLL inside the f32 reorder control. Default on under `P36_VK_ATTN_FA_F16`
+   (`P36_VK_ATTN_DECODE_FA_F16` overrides decode alone). Ledger 2026-11-17,
+   evidence `karpathy/evidence/raw/decode-fa-f16-20261117/`.
 5. **Whole-model numbers at 16k+.** Dense only cleared +0.78% at 8k; the
    kernel gain should show at 16k+. One short run, not a sweep.
 6. **Quality on other FA-path models.** Every GQA 6/8, head_dim 256,

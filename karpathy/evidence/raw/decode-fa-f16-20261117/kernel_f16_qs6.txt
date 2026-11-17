@@ -1,0 +1,21 @@
+p36: timestamps period_ns=10.000000 computeAndGraphics=1 valid_bits=64 queue_family=0 (graphics fallback) ace=0
+p36: Vulkan device AMD BC-250 (RADV GFX1013), 15.34 GiB UMA
+p36: Vulkan generic backend, BC-250 fast path, subgroup 64
+p36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+gqa6 n_tok=1 pos0= 1023 sinks=1  split    91.7 us  fa    51.6 us  (1.78x)  max_abs=0.00275 max_ref=0.936 FAIL
+gqa6 n_tok=1 pos0= 4095 sinks=0  split   155.9 us  fa    99.5 us  (1.57x)  max_abs=0.00258 max_ref=1.05 FAIL
+gqa6 n_tok=1 pos0= 4110 sinks=1  split   154.6 us  fa    99.8 us  (1.55x)  max_abs=0.00143 max_ref=1 ok
+gqa6 n_tok=1 pos0= 8191 sinks=0  split   273.8 us  fa   188.4 us  (1.45x)  max_abs=0.00175 max_ref=0.989 ok
+gqa6 n_tok=1 pos0=16383 sinks=1  split   504.2 us  fa   338.2 us  (1.49x)  max_abs=0.00245 max_ref=1.02 FAIL
+gqa6 n_tok=1 pos0=32767 sinks=1  split   949.8 us  fa   636.2 us  (1.49x)  max_abs=0.00255 max_ref=0.982 FAIL
+gqa6 n_tok=4 pos0= 8188 sinks=0  split   907.8 us  fa   396.6 us  (2.29x)  max_abs=0.00231 max_ref=1.01 FAIL
+gqa6 n_tok=4 pos0=16380 sinks=1  split  1757.5 us  fa   763.2 us  (2.30x)  max_abs=0.00253 max_ref=0.987 FAIL
+gqa8 n_tok=1 pos0= 1023 sinks=1  split    85.4 us  fa    48.1 us  (1.78x)  max_abs=0.00172 max_ref=0.926 ok
+gqa8 n_tok=1 pos0= 4095 sinks=0  split   125.9 us  fa    66.4 us  (1.90x)  max_abs=0.00141 max_ref=0.921 ok
+gqa8 n_tok=1 pos0= 4110 sinks=1  split   126.6 us  fa    66.4 us  (1.90x)  max_abs=0.00191 max_ref=0.959 ok
+gqa8 n_tok=1 pos0= 8191 sinks=0  split   204.1 us  fa   103.2 us  (1.98x)  max_abs=0.00215 max_ref=1.03 FAIL
+gqa8 n_tok=1 pos0=16383 sinks=1  split   346.6 us  fa   193.8 us  (1.79x)  max_abs=0.0024 max_ref=0.939 FAIL
+gqa8 n_tok=1 pos0=32767 sinks=1  split   649.8 us  fa   345.4 us  (1.88x)  max_abs=0.002 max_ref=0.863 ok
+gqa8 n_tok=4 pos0= 8188 sinks=0  split   615.7 us  fa   231.4 us  (2.66x)  max_abs=0.0021 max_ref=1.03 FAIL
+gqa8 n_tok=4 pos0=16380 sinks=1  split  1196.2 us  fa   416.7 us  (2.87x)  max_abs=0.0028 max_ref=1.03 FAIL
+FAIL

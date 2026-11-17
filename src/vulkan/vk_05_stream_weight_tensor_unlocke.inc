@@ -302,18 +302,21 @@ int p36_gpu_init(void) {
     p36_vk.attn_prefill_qtile = P36_VK_KERNEL("vulkan/attn_prefill_qtile.spv", 5, 48, 1u << 4);
     p36_vk.attn_prefill_qtile2 = P36_VK_KERNEL("vulkan/attn_prefill_qtile2.spv", 5, 48, 1u << 4);
     p36_vk.attn_prefill_qtile2_gqa6 = P36_VK_KERNEL("vulkan/attn_prefill_qtile2_gqa6.spv", 5, 48, 1u << 4);
-    /* Prefill FA stages K/V in LDS as f16 (f32 math): the tile was partly LDS
-     * bound, kernel time -22% (MoE) / -10% (dense), ~1e-3 output drift with
-     * frontier NLL inside the f32 reorder control; PV also runs in packed f16
-     * (another -10% kernel).  P36_VK_ATTN_FA_F16=0
-     * restores the f32-staged kernel. */
+    /* Prefill and decode FA stage K/V in LDS as f16 (f32 math via v_fma_mix_f32;
+     * prefill PV also runs in packed f16).  P36_VK_ATTN_FA_F16=0 restores the
+     * f32-staged kernels; P36_VK_ATTN_DECODE_FA_F16 overrides decode FA alone. */
     bool fa_f16 = p36_vk_env_default_on("P36_VK_ATTN_FA_F16");
+    bool decode_fa_f16 = getenv("P36_VK_ATTN_DECODE_FA_F16")
+                             ? p36_vk_env_default_on("P36_VK_ATTN_DECODE_FA_F16")
+                             : fa_f16;
     p36_vk.attn_prefill_fa_gqa6 = P36_VK_KERNEL(fa_f16 ? "vulkan/attn_prefill_fa_f16_gqa6.spv"
                                                        : "vulkan/attn_prefill_fa_gqa6.spv", 5, 48, 1u << 4);
     p36_vk.attn_prefill_fa_gqa8 = P36_VK_KERNEL(fa_f16 ? "vulkan/attn_prefill_fa_f16_gqa8.spv"
                                                        : "vulkan/attn_prefill_fa_gqa8.spv", 5, 48, 1u << 4);
-    p36_vk.attn_decode_fa_gqa6 = P36_VK_KERNEL("vulkan/attn_decode_fa_gqa6.spv", 5, 48, 1u << 4);
-    p36_vk.attn_decode_fa_gqa8 = P36_VK_KERNEL("vulkan/attn_decode_fa_gqa8.spv", 5, 48, 1u << 4);
+    p36_vk.attn_decode_fa_gqa6 = P36_VK_KERNEL(decode_fa_f16 ? "vulkan/attn_decode_fa_f16_gqa6.spv"
+                                                             : "vulkan/attn_decode_fa_gqa6.spv", 5, 48, 1u << 4);
+    p36_vk.attn_decode_fa_gqa8 = P36_VK_KERNEL(decode_fa_f16 ? "vulkan/attn_decode_fa_f16_gqa8.spv"
+                                                             : "vulkan/attn_decode_fa_gqa8.spv", 5, 48, 1u << 4);
     p36_vk.attn_combine = P36_VK_KERNEL("vulkan/attn_combine.spv", 4, 32, 1u << 3);
     p36_vk.moe_gate_up = P36_VK_KERNEL("vulkan/moe_gate_up.spv", 8, 28, 1u << 6);
     p36_vk.moe_gate_up_iq2s = P36_VK_KERNEL("vulkan/moe_gate_up_iq2s.spv", 8, 28, 1u << 6);

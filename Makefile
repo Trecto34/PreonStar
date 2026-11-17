@@ -129,6 +129,8 @@ VULKAN_SHADERS := \
 	vulkan/attn_prefill_fa_f16_gqa8.spv \
 	vulkan/attn_decode_fa_gqa6.spv \
 	vulkan/attn_decode_fa_gqa8.spv \
+	vulkan/attn_decode_fa_f16_gqa6.spv \
+	vulkan/attn_decode_fa_f16_gqa8.spv \
 	vulkan/attn_combine.spv \
 	vulkan/moe_gate_up.spv \
 	vulkan/moe_gate_up_iq2s.spv \
@@ -603,6 +605,12 @@ vulkan/attn_decode_fa_gqa6.spv: vulkan/attn_decode_fa.comp
 
 vulkan/attn_decode_fa_gqa8.spv: vulkan/attn_decode_fa.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=8 -o $@ $<
+
+vulkan/attn_decode_fa_f16_gqa6.spv: vulkan/attn_decode_fa.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=6 -DFA_F16_K -DFA_F16_V -o $@ $<
+
+vulkan/attn_decode_fa_f16_gqa8.spv: vulkan/attn_decode_fa.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=8 -DFA_F16_K -DFA_F16_V -o $@ $<
 
 # Vulkan is the default backend. CORE_OBJS holds the GPU engine; CPU_CORE_OBJS
 # is the -DP36_NO_GPU reference build selected by `make cpu`.

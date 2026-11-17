@@ -1,0 +1,5 @@
+/home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_dec/dense/ref: n=32 mean_nll=0.0845 top1=31/32
+/home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_dec/dense/f16: n=32 mean_nll=0.0849 top1=31/32
+   vs /home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_dec/dense/ref: dNLL mean=+0.0004 med=-0.0000 MAD=0.0001 mean|d|=0.0011 worse=15 better=17 top1_same=32/32
+/home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_dec/dense/ctl: n=32 mean_nll=0.0836 top1=31/32
+   vs /home/server/.agy-account2/.gemini/antigravity-cli/brain/56bb8969-a788-41b4-8f85-65bdf6b4b1a3/scratch/nll_dec/dense/ref: dNLL mean=-0.0009 med=-0.0000 MAD=0.0001 mean|d|=0.0015 worse=12 better=19 top1_same=32/32

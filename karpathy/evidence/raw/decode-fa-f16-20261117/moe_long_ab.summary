@@ -1,0 +1,3 @@
+ctx  8192: decode A  80.00 (MAD 0.14) -> B  80.71 (MAD 0.18)  +0.89% [overlap: minB 80.03 vs maxA 80.14] | prefill med A 618.05 B 617.79
+ctx 16384: decode A  75.00 (MAD 0.20) -> B  76.60 (MAD 0.02)  +2.13% [clean: minB 76.58 vs maxA 75.35] | prefill med A 529.22 B 531.07
+ctx 32768: decode A  47.75 (MAD 4.46) -> B  59.34 (MAD 0.54)  +24.27% [overlap: minB 50.58 vs maxA 57.44] | prefill med A 431.09 B 432.39

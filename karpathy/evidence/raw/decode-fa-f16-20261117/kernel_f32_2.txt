@@ -1,0 +1,21 @@
+p36: timestamps period_ns=10.000000 computeAndGraphics=1 valid_bits=64 queue_family=0 (graphics fallback) ace=0
+p36: Vulkan device AMD BC-250 (RADV GFX1013), 15.34 GiB UMA
+p36: Vulkan generic backend, BC-250 fast path, subgroup 64
+p36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+gqa6 n_tok=1 pos0= 1023 sinks=1  split    90.1 us  fa    55.4 us  (1.63x)  max_abs=8.34e-07 max_ref=0.735 ok
+gqa6 n_tok=1 pos0= 4095 sinks=0  split   153.3 us  fa   128.9 us  (1.19x)  max_abs=1.04e-06 max_ref=0.634 ok
+gqa6 n_tok=1 pos0= 4110 sinks=1  split   154.4 us  fa   125.2 us  (1.23x)  max_abs=7.75e-07 max_ref=0.641 ok
+gqa6 n_tok=1 pos0= 8191 sinks=0  split   275.2 us  fa   238.9 us  (1.15x)  max_abs=1.61e-06 max_ref=0.86 ok
+gqa6 n_tok=1 pos0=16383 sinks=1  split   501.0 us  fa   429.2 us  (1.17x)  max_abs=1.73e-06 max_ref=0.796 ok
+gqa6 n_tok=1 pos0=32767 sinks=1  split   954.7 us  fa   816.7 us  (1.17x)  max_abs=1.01e-06 max_ref=0.64 ok
+gqa6 n_tok=4 pos0= 8188 sinks=0  split   907.3 us  fa   583.0 us  (1.56x)  max_abs=2.5e-06 max_ref=0.861 ok
+gqa6 n_tok=4 pos0=16380 sinks=1  split  1756.2 us  fa  1154.6 us  (1.52x)  max_abs=1.58e-06 max_ref=0.789 ok
+gqa8 n_tok=1 pos0= 1023 sinks=1  split    85.5 us  fa    54.9 us  (1.56x)  max_abs=1.37e-06 max_ref=0.672 ok
+gqa8 n_tok=1 pos0= 4095 sinks=0  split   125.9 us  fa    73.1 us  (1.72x)  max_abs=9.54e-07 max_ref=0.661 ok
+gqa8 n_tok=1 pos0= 4110 sinks=1  split   126.4 us  fa    73.6 us  (1.72x)  max_abs=1.79e-06 max_ref=0.745 ok
+gqa8 n_tok=1 pos0= 8191 sinks=0  split   201.7 us  fa   117.3 us  (1.72x)  max_abs=1.37e-06 max_ref=0.888 ok
+gqa8 n_tok=1 pos0=16383 sinks=1  split   343.4 us  fa   222.1 us  (1.55x)  max_abs=1.01e-06 max_ref=0.533 ok
+gqa8 n_tok=1 pos0=32767 sinks=1  split   647.4 us  fa   393.7 us  (1.64x)  max_abs=6.41e-07 max_ref=0.382 ok
+gqa8 n_tok=4 pos0= 8188 sinks=0  split   612.1 us  fa   281.7 us  (2.17x)  max_abs=1.13e-06 max_ref=0.853 ok
+gqa8 n_tok=4 pos0=16380 sinks=1  split  1195.4 us  fa   510.2 us  (2.34x)  max_abs=8.94e-07 max_ref=0.605 ok
+PASS

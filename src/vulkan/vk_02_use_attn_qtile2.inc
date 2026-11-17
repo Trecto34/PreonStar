@@ -108,13 +108,9 @@ static bool p36_vk_use_attn_splitk(void) {
 #define P36_VK_ATTN_DECODE_FA_GROUP 256u /* must match P36_FA_GROUP in the shader build */
 #endif
 static uint32_t p36_vk_attn_decode_fa_min(void) {
-    static long cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("P36_VK_ATTN_DECODE_FA_MIN");
-        long v = env && env[0] ? strtol(env, NULL, 10) : 4096;
-        cached = v < 0 ? 0 : v;
-    }
-    return (uint32_t)cached;
+    const char *env = getenv("P36_VK_ATTN_DECODE_FA_MIN");
+    long v = env && env[0] ? strtol(env, NULL, 10) : 4096;
+    return v < 0 ? 0u : (uint32_t)v;
 }
 
 static uint32_t p36_vk_attn_span(void) {

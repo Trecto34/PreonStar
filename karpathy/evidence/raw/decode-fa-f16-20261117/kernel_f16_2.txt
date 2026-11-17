@@ -1,0 +1,21 @@
+p36: timestamps period_ns=10.000000 computeAndGraphics=1 valid_bits=64 queue_family=0 (graphics fallback) ace=0
+p36: Vulkan device AMD BC-250 (RADV GFX1013), 15.34 GiB UMA
+p36: Vulkan generic backend, BC-250 fast path, subgroup 64
+p36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+gqa6 n_tok=1 pos0= 1023 sinks=1  split    93.2 us  fa    51.6 us  (1.81x)  max_abs=0.000379 max_ref=0.735 ok
+gqa6 n_tok=1 pos0= 4095 sinks=0  split   153.9 us  fa   102.7 us  (1.50x)  max_abs=0.000398 max_ref=0.634 ok
+gqa6 n_tok=1 pos0= 4110 sinks=1  split   154.6 us  fa   101.4 us  (1.52x)  max_abs=0.000438 max_ref=0.641 ok
+gqa6 n_tok=1 pos0= 8191 sinks=0  split   275.3 us  fa   187.8 us  (1.47x)  max_abs=0.000316 max_ref=0.86 ok
+gqa6 n_tok=1 pos0=16383 sinks=1  split   503.7 us  fa   337.6 us  (1.49x)  max_abs=0.000463 max_ref=0.796 ok
+gqa6 n_tok=1 pos0=32767 sinks=1  split   950.1 us  fa   636.9 us  (1.49x)  max_abs=0.000623 max_ref=0.64 ok
+gqa6 n_tok=4 pos0= 8188 sinks=0  split   912.6 us  fa   394.5 us  (2.31x)  max_abs=0.000606 max_ref=0.861 ok
+gqa6 n_tok=4 pos0=16380 sinks=1  split  1757.5 us  fa   762.8 us  (2.30x)  max_abs=0.000758 max_ref=0.789 ok
+gqa8 n_tok=1 pos0= 1023 sinks=1  split    85.5 us  fa    48.2 us  (1.78x)  max_abs=0.000424 max_ref=0.672 ok
+gqa8 n_tok=1 pos0= 4095 sinks=0  split   128.5 us  fa    66.1 us  (1.94x)  max_abs=0.000384 max_ref=0.661 ok
+gqa8 n_tok=1 pos0= 4110 sinks=1  split   127.0 us  fa    66.7 us  (1.90x)  max_abs=0.000323 max_ref=0.745 ok
+gqa8 n_tok=1 pos0= 8191 sinks=0  split   204.9 us  fa   106.5 us  (1.92x)  max_abs=0.00065 max_ref=0.888 ok
+gqa8 n_tok=1 pos0=16383 sinks=1  split   346.2 us  fa   193.9 us  (1.79x)  max_abs=0.000387 max_ref=0.533 ok
+gqa8 n_tok=1 pos0=32767 sinks=1  split   650.8 us  fa   342.8 us  (1.90x)  max_abs=0.000206 max_ref=0.382 ok
+gqa8 n_tok=4 pos0= 8188 sinks=0  split   615.8 us  fa   231.5 us  (2.66x)  max_abs=0.000429 max_ref=0.853 ok
+gqa8 n_tok=4 pos0=16380 sinks=1  split  1195.7 us  fa   417.1 us  (2.87x)  max_abs=0.0004 max_ref=0.605 ok
+PASS

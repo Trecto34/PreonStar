@@ -3866,3 +3866,43 @@ byte-identical (MoE untouched). Evidence: `evidence/raw/fa-gqa6-rs2-20261117/`.
   the whole-model delta is inside noise. Expect it to show only toward 32k.
 * **Status: KEPT, default** (owner asked for the fix; exact output, faster
   kernel, no regression). No flag: one tile shape for both GQA ratios.
+
+## 2026-11-17 Decode FA: f16 K/V staging in LDS (`attn_decode_fa`)
+
+Variant built from `vulkan/attn_decode_fa.comp` with `-DFA_F16_K -DFA_F16_V`
+(`attn_decode_fa_f16_gqa{6,8}.spv`), math stays f32 (`v_fma_mix_f32`).
+Halves LDS per workgroup (32 -> 16 KiB, lifting WGP workgroup residency from
+4 to 8 on 128 KiB LDS), and on dense `gqa6` also drops VGPRs from 256 to 128
+(waves 4 -> 8). Packed-f16 PV (`FA_F16_PV`) was probed and omitted: its
+per-pass `f16vec4` accumulators push `gqa6` back to 256 VGPRs / 4 waves and
+save only ~2% on `gqa8` at `n_tok=1`. Default f32 SPIR-V is byte-identical.
+Evidence: `evidence/raw/decode-fa-f16-20261117/`.
+
+* **Kernel + combine (`tests/test_attn_decode`, 2 warm interleaved runs, best-of):**
+  MoE `gqa8` `n_tok=1` -12..-15% (8k 125.6 -> 103.8 us, 16k 226.8 -> 193.5 us,
+  32k 393.2 -> 345.4 us), `n_tok=4` -19..-20% (16k 521.4 -> 414.4 us).
+  Dense `gqa6` `n_tok=1` -22..-24% (8k 243.6 -> 185.4 us, 16k 433.7 -> 336.8 us,
+  32k 819.9 -> 636.4 us), `n_tok=4` -32..-34% (16k 1155.9 -> 763.9 us).
+  Numerics: `max_abs` <= 7.58e-4 vs `attn_decode_split` across all 16 cases
+  (bound 2e-3); `p36_test --vulkan-kernels` with `P36_VK_ATTN_DECODE_FA_MIN=64`
+  lowers batch-vs-decode drift from 3.1e-5 to 9.4e-6 (both paths stage f16 K/V).
+* **In-model GPU timestamp profile (`P36_VK_PROF_KERNEL=1 P36_VK_PROF_DECODE=1`,
+  32 decode tokens):**
+  MoE Axion @ 32k (320 dispatches): `attn_decode_fa` **75.465 -> 61.338 ms
+  (-18.7%**, 15.2% -> 12.6% of decode GPU), total decode GPU 496.90 -> 486.61 ms
+  (-2.07%).
+  Dense Huihui @ 16k (512 dispatches): `attn_decode_fa` **140.338 -> 93.874 ms
+  (-33.1%**, 8.8% -> 6.1% of decode GPU), total decode GPU 1595.98 -> 1549.65 ms
+  (-2.90%, wall 19.23 -> 19.79 t/s).
+* **Whole model, MoE Axion, 3 interleaved reps (`gen=32`, same prefill kernel):**
+  ctx 8192 decode 80.00 -> 80.71 (+0.89%); ctx 16384 decode **75.00 -> 76.60
+  (+2.13%, PASS: clean separation**, min B 76.58 > max A 75.35); ctx 32768 B > A
+  in every pair (59.88 vs 57.44, 59.34 vs 47.75, 50.58 vs 43.29; later pairs
+  show mmap page-cache variance under the 32k KV footprint).
+* **Single-token decode frontier NLL (`8193..8224`, `n=32`, `step-incr 1`):**
+  drift inside the f32 reorder control (`P36_VK_ATTN_DECODE_FA_MIN=0`), zero
+  non-finite logits. MoE: dNLL med -0.0000 MAD 0.0001 mean|d| 0.423 top1_same
+  31/32 (ctl mean|d| 0.186, top1_same 32/32). Dense: dNLL med -0.0000 MAD 0.0001
+  mean|d| 0.0011 top1_same 32/32 (ctl mean|d| 0.0015, top1_same 32/32).
+* **Status: ACCEPTED, default on** (gated under `P36_VK_ATTN_FA_F16`, with
+  `P36_VK_ATTN_DECODE_FA_F16` for decode-only A/B).

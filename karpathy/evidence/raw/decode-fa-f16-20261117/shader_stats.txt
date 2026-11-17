@@ -1,0 +1,28 @@
+== vulkan/attn_decode_fa_gqa6.spv (subgroup=64)
+  stat VGPRs                    = 256
+  stat Spilled VGPRs            = 0
+  stat Code size                = 4264
+  stat LDS size                 = 32768
+  stat Subgroups per SIMD       = 4
+  stat Pre-Sched VGPRs          = 0
+== vulkan/attn_decode_fa_f16_gqa6.spv (subgroup=64)
+  stat VGPRs                    = 128
+  stat Spilled VGPRs            = 0
+  stat Code size                = 4884
+  stat LDS size                 = 16384
+  stat Subgroups per SIMD       = 8
+  stat Pre-Sched VGPRs          = 0
+== vulkan/attn_decode_fa_gqa8.spv (subgroup=64)
+  stat VGPRs                    = 128
+  stat Spilled VGPRs            = 0
+  stat Code size                = 4620
+  stat LDS size                 = 32768
+  stat Subgroups per SIMD       = 8
+  stat Pre-Sched VGPRs          = 0
+== vulkan/attn_decode_fa_f16_gqa8.spv (subgroup=64)
+  stat VGPRs                    = 128
+  stat Spilled VGPRs            = 0
+  stat Code size                = 5264
+  stat LDS size                 = 16384
+  stat Subgroups per SIMD       = 8
+  stat Pre-Sched VGPRs          = 0

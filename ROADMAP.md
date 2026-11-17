@@ -9,7 +9,7 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 - [x] Step B: packed-f16 PV math (`96a78f5`; kernel -10%, MoE +1.45% at 8k)
 - [ ] Step C: packed-f16 QK math — **delayed**: f16 products push error > 2e-3 for a -7% kernel; needs an f32-accumulating dot2
 - [x] Step C.1 (`78bb5d6`): dense gqa6 VGPR relief — 2 rows/lane: 256→128 VGPRs, kernel −11..−14%, bit-identical; whole model +0.4% at 16k
-- [ ] f16 K/V staging in `attn_decode_fa` (~15% of a 32k MoE decode token)
+- [x] f16 K/V staging in `attn_decode_fa` (default on; kernel −19% MoE 32k / −33% dense 16k, MoE 16k decode +2.13%)
 - [ ] Whole-model prefill at 16k+ (dense done 2026-11-17: attention only 13% of GPU time at 0..16k; MoE still open)
 - [ ] NLL check on the other FA-path models
 - [ ] Update README long-context table
