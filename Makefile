@@ -125,6 +125,8 @@ VULKAN_SHADERS := \
 	vulkan/attn_prefill_qtile2_gqa6.spv \
 	vulkan/attn_prefill_fa_gqa6.spv \
 	vulkan/attn_prefill_fa_gqa8.spv \
+	vulkan/attn_prefill_fa_f16_gqa6.spv \
+	vulkan/attn_prefill_fa_f16_gqa8.spv \
 	vulkan/attn_decode_fa_gqa6.spv \
 	vulkan/attn_decode_fa_gqa8.spv \
 	vulkan/attn_combine.spv \
@@ -589,6 +591,12 @@ vulkan/attn_prefill_fa_gqa6.spv: vulkan/attn_prefill_fa.comp
 
 vulkan/attn_prefill_fa_gqa8.spv: vulkan/attn_prefill_fa.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=8 -o $@ $<
+
+vulkan/attn_prefill_fa_f16_gqa6.spv: vulkan/attn_prefill_fa.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=6 -DFA_F16_K -DFA_F16_V -o $@ $<
+
+vulkan/attn_prefill_fa_f16_gqa8.spv: vulkan/attn_prefill_fa.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=8 -DFA_F16_K -DFA_F16_V -o $@ $<
 
 vulkan/attn_decode_fa_gqa6.spv: vulkan/attn_decode_fa.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DHQ=6 -o $@ $<

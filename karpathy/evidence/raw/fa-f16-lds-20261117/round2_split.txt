@@ -1,0 +1,16 @@
+shipped_gqa gqa6 n_tok= 256 fa 28.35 max_abs=3.64e-06
+shipped_gqa gqa6 n_tok=1024 pos0= fa 59.93 max_abs=6.08e-06
+shipped_gqa gqa8 n_tok= 256 fa 17.97 max_abs=3.64e-06
+shipped_gqa gqa8 n_tok=1024 pos0= fa 37.43 max_abs=5.19e-06
+v_gqa gqa6 n_tok= 256 fa 26.71 max_abs=0.000383
+v_gqa gqa6 n_tok=1024 pos0= fa 58.43 max_abs=0.000399
+v_gqa gqa8 n_tok= 256 fa 15.55 max_abs=0.000364
+v_gqa gqa8 n_tok=1024 pos0= fa 32.43 max_abs=0.000404
+k_gqa gqa6 n_tok= 256 fa 26.77 max_abs=0.000906
+k_gqa gqa6 n_tok=1024 pos0= fa 58.13 max_abs=0.00097
+k_gqa gqa8 n_tok= 256 fa 14.99 max_abs=0.000783
+k_gqa gqa8 n_tok=1024 pos0= fa 31.40 max_abs=0.000804
+h16_gqa gqa6 n_tok= 256 fa 25.40 max_abs=0.000943
+h16_gqa gqa6 n_tok=1024 pos0= fa 53.24 max_abs=0.000976
+h16_gqa gqa8 n_tok= 256 fa 13.93 max_abs=0.00088
+h16_gqa gqa8 n_tok=1024 pos0= fa 29.13 max_abs=0.000839

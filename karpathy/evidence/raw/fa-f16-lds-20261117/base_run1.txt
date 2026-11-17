@@ -1,0 +1,19 @@
+gqa6 n_tok=   2 pos0=    0 sinks=0  qtile2     0.08 ms  fa     0.08 ms  (1.02x)  max_abs=0 max_ref=0.999 ok
+gqa6 n_tok=   7 pos0= 1024 sinks=1  qtile2     4.96 ms  fa     2.29 ms  (2.16x)  max_abs=1.31e-06 max_ref=0.782 ok
+gqa6 n_tok= 256 pos0=    0 sinks=0  qtile2     3.26 ms  fa     1.77 ms  (1.84x)  max_abs=1.36e-06 max_ref=1.04 ok
+gqa6 n_tok= 256 pos0= 3968 sinks=1  qtile2    21.90 ms  fa     9.23 ms  (2.37x)  max_abs=5.72e-06 max_ref=1 ok
+gqa6 n_tok= 256 pos0= 7936 sinks=0  qtile2    37.50 ms  fa    15.52 ms  (2.42x)  max_abs=4.17e-06 max_ref=0.988 ok
+gqa6 n_tok= 256 pos0=16128 sinks=1  qtile2    73.41 ms  fa    28.28 ms  (2.60x)  max_abs=3.64e-06 max_ref=0.959 ok
+gqa6 n_tok=1024 pos0= 7936 sinks=1  qtile2   151.22 ms  fa    60.17 ms  (2.51x)  max_abs=6.08e-06 max_ref=1.02 ok
+gqa6 n_tok=   2 pos0= 8190 sinks=0  qtile2     0.39 ms  fa     0.39 ms  (1.00x)  max_abs=0 max_ref=0.807 ok
+gqa6 n_tok=  16 pos0= 8176 sinks=0  qtile2     5.22 ms  fa     2.24 ms  (2.33x)  max_abs=3.76e-06 max_ref=0.953 ok
+gqa8 n_tok=   2 pos0=    0 sinks=0  qtile2     0.06 ms  fa     0.05 ms  (1.01x)  max_abs=0 max_ref=0.915 ok
+gqa8 n_tok=   7 pos0= 1024 sinks=1  qtile2     1.55 ms  fa     0.49 ms  (3.14x)  max_abs=1.73e-06 max_ref=0.876 ok
+gqa8 n_tok= 256 pos0=    0 sinks=0  qtile2     0.98 ms  fa     0.61 ms  (1.59x)  max_abs=1.16e-06 max_ref=1.03 ok
+gqa8 n_tok= 256 pos0= 3968 sinks=1  qtile2    18.65 ms  fa     5.90 ms  (3.16x)  max_abs=3.99e-06 max_ref=0.953 ok
+gqa8 n_tok= 256 pos0= 7936 sinks=0  qtile2    30.54 ms  fa     9.93 ms  (3.08x)  max_abs=4.41e-06 max_ref=0.951 ok
+gqa8 n_tok= 256 pos0=16128 sinks=1  qtile2    55.36 ms  fa    18.00 ms  (3.08x)  max_abs=3.64e-06 max_ref=0.944 ok
+gqa8 n_tok=1024 pos0= 7936 sinks=1  qtile2   113.16 ms  fa    37.36 ms  (3.03x)  max_abs=5.19e-06 max_ref=1.02 ok
+gqa8 n_tok=   2 pos0= 8190 sinks=0  qtile2     0.22 ms  fa     0.22 ms  (1.00x)  max_abs=0 max_ref=0.718 ok
+gqa8 n_tok=  16 pos0= 8176 sinks=0  qtile2     5.99 ms  fa     1.83 ms  (3.27x)  max_abs=3.16e-06 max_ref=0.883 ok
+PASS

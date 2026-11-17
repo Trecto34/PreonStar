@@ -1,0 +1,19 @@
+gqa6 n_tok=   2 pos0=    0 sinks=0  qtile2     0.05 ms  fa     0.05 ms  (1.01x)  max_abs=0 max_ref=0.999 ok
+gqa6 n_tok=   7 pos0= 1024 sinks=1  qtile2     2.55 ms  fa     1.04 ms  (2.45x)  max_abs=0.000506 max_ref=0.782 FAIL
+gqa6 n_tok= 256 pos0=    0 sinks=0  qtile2     1.90 ms  fa     1.06 ms  (1.79x)  max_abs=0.000909 max_ref=1.04 FAIL
+gqa6 n_tok= 256 pos0= 3968 sinks=1  qtile2    38.27 ms  fa     8.24 ms  (4.65x)  max_abs=0.000756 max_ref=1 FAIL
+gqa6 n_tok= 256 pos0= 7936 sinks=0  qtile2    37.61 ms  fa    13.79 ms  (2.73x)  max_abs=0.000789 max_ref=0.988 FAIL
+gqa6 n_tok= 256 pos0=16128 sinks=1  qtile2    73.45 ms  fa    25.15 ms  (2.92x)  max_abs=0.000943 max_ref=0.959 FAIL
+gqa6 n_tok=1024 pos0= 7936 sinks=1  qtile2   150.35 ms  fa    53.71 ms  (2.80x)  max_abs=0.000976 max_ref=1.02 FAIL
+gqa6 n_tok=   2 pos0= 8190 sinks=0  qtile2     0.38 ms  fa     0.38 ms  (1.00x)  max_abs=0 max_ref=0.807 ok
+gqa6 n_tok=  16 pos0= 8176 sinks=0  qtile2     5.20 ms  fa     1.98 ms  (2.63x)  max_abs=0.000757 max_ref=0.953 FAIL
+gqa8 n_tok=   2 pos0=    0 sinks=0  qtile2     0.04 ms  fa     0.04 ms  (1.01x)  max_abs=0 max_ref=0.915 ok
+gqa8 n_tok=   7 pos0= 1024 sinks=1  qtile2     1.58 ms  fa     0.40 ms  (3.96x)  max_abs=0.000564 max_ref=0.876 FAIL
+gqa8 n_tok= 256 pos0=    0 sinks=0  qtile2     0.98 ms  fa     0.53 ms  (1.84x)  max_abs=0.00113 max_ref=1.03 FAIL
+gqa8 n_tok= 256 pos0= 3968 sinks=1  qtile2    18.66 ms  fa     4.63 ms  (4.03x)  max_abs=0.000938 max_ref=0.953 FAIL
+gqa8 n_tok= 256 pos0= 7936 sinks=0  qtile2    30.57 ms  fa     7.72 ms  (3.96x)  max_abs=0.00111 max_ref=0.951 FAIL
+gqa8 n_tok= 256 pos0=16128 sinks=1  qtile2    55.45 ms  fa    13.94 ms  (3.98x)  max_abs=0.00088 max_ref=0.944 FAIL
+gqa8 n_tok=1024 pos0= 7936 sinks=1  qtile2   113.01 ms  fa    29.05 ms  (3.89x)  max_abs=0.000839 max_ref=1.02 FAIL
+gqa8 n_tok=   2 pos0= 8190 sinks=0  qtile2     0.21 ms  fa     0.21 ms  (1.01x)  max_abs=0 max_ref=0.718 ok
+gqa8 n_tok=  16 pos0= 8176 sinks=0  qtile2     5.99 ms  fa     1.45 ms  (4.12x)  max_abs=0.000528 max_ref=0.883 FAIL
+FAIL

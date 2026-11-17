@@ -1,0 +1,24 @@
+== base_gqa6
+  stat VGPRs                    = 256   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat LDS size                 = 32768   (LDS size in bytes per workgroup)
+  stat Subgroups per SIMD       = 4   (The maximum number of subgroups in flight on a SIMD unit)
+  stat Pre-Sched VGPRs          = 0   (VGPR usage before scheduling)
+== h16_gqa6
+  stat VGPRs                    = 256   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat LDS size                 = 16384   (LDS size in bytes per workgroup)
+  stat Subgroups per SIMD       = 4   (The maximum number of subgroups in flight on a SIMD unit)
+  stat Pre-Sched VGPRs          = 0   (VGPR usage before scheduling)
+== base_gqa8
+  stat VGPRs                    = 128   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat LDS size                 = 32768   (LDS size in bytes per workgroup)
+  stat Subgroups per SIMD       = 8   (The maximum number of subgroups in flight on a SIMD unit)
+  stat Pre-Sched VGPRs          = 0   (VGPR usage before scheduling)
+== h16_gqa8
+  stat VGPRs                    = 128   (Number of VGPR registers allocated per subgroup)
+  stat Spilled VGPRs            = 0   (Number of VGPR registers spilled per subgroup)
+  stat LDS size                 = 16384   (LDS size in bytes per workgroup)
+  stat Subgroups per SIMD       = 8   (The maximum number of subgroups in flight on a SIMD unit)
+  stat Pre-Sched VGPRs          = 0   (VGPR usage before scheduling)

@@ -3749,3 +3749,38 @@ governor running. Evidence: `evidence/raw/w-moe-attn-20261110/`.
 * Open: packed-f16 attention (QK and/or PV). Estimate from the ablation:
   PV only ~+6% prefill at 8-16k, both ~+15%; changes numerics, needs the
   frontier-NLL protocol before it can be default.
+
+## 2026-11-17 Prefill FA: f16 K/V staging in LDS (step A of packed-f16 attention)
+
+Kernel level only (`tests/test_attn_fa`, governor active, best-of-N). Variant
+built from `vulkan/attn_prefill_fa.comp` with `-DFA_F16_K` / `-DFA_F16_V`
+(LDS 32 -> 16 KiB, VGPRs unchanged, math stays f32); default build is
+byte-identical to the shipped SPIR-V. Evidence: `evidence/raw/fa-f16-lds-20261117/`.
+
+* **Hypothesis confirmed: the tile is partly LDS-bound.** fa ms, shipped -> K+V f16,
+  two runs agree: MoE gqa8 n_tok 256 @16128 17.97 -> 13.93 (-22%), 1024 @7936
+  37.43 -> 29.13 (-22%); dense gqa6 28.35 -> 25.40 (-10%), 59.93 -> 53.24 (-11%).
+  K-only and V-only each give about half (MoE 14.99 / 15.55).
+* **Numerics:** max_abs vs the f32 reference ~9e-4 (K+V), ~4e-4 (V only), outputs ~1;
+  fails this harness's 1e-4 bound, inside p36_test's 2e-3 quality bound. The f16
+  rounding (2^-11 relative) is ~100x below the Q8_0/Q4_0 cache quantization step.
+* Whole-model estimate (attention share x kernel delta): MoE ~+7-8% prefill at
+  8-32k, dense ~+3-4% at 16-32k, ~0 at <= 4k.
+* **Host gate (opt-in):** `P36_VK_ATTN_FA_F16=1` loads `attn_prefill_fa_f16_gqa{6,8}.spv`
+  (Makefile builds both); unset/0 = shipped kernel, SPIR-V byte-identical.
+* **Frontier NLL (P3 protocol, ctx 8192..16384 step 256, chunk 256, n=33):** f16 drift
+  is no larger than the f32 reorder control (`P36_VK_ATTN_FA=0`, qtile2).
+  MoE Axion: f16 dNLL med -0.0000 MAD 0.0002 mean|d| 1.087 15/17 top1 30/33;
+  control med +0.0000 MAD 0.0001 mean|d| 1.058 17/15 top1 29/33 (Axion's frontier
+  logits are sensitive either way). Dense Huihui Coder390: f16 med -0.0001
+  mean|d| 0.0025 14/19 top1 33/33; control mean|d| 0.0238, top1 33/33.
+  No non-finite logits.
+* **Whole model, ctx 8192, chunk 256, 3 interleaved reps (same binary, env only):**
+  MoE Axion prefill 594.60 -> 610.97 (**+2.75%, PASS**), decode 79.01 -> 79.00.
+  Dense Huihui prefill 179.80 -> 181.20 (**+0.78%, FAIL** the 1.5% gate), decode
+  21.69 -> 21.73. Smaller than the 8-16k estimate because the 0..8k average
+  carries less attention; dense's ~10% kernel gain should only clear the gate
+  at 16k+ (not measured: short-bench rule).
+* **Status: DEFAULT ON** (owner decision, both GQA 6 and 8; dense is +0.78% at 8k,
+  neutral-positive). `P36_VK_ATTN_FA_F16=0` restores the f32-staged kernel.
+  Next: step B (packed-f16 PV math) on top.

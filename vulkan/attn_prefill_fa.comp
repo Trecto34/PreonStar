@@ -4,6 +4,24 @@
 #extension GL_KHR_shader_subgroup_clustered : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_EXT_control_flow_attributes : enable
+/* FA_F16_K / FA_F16_V stage K / V in LDS as f16: halves LDS bytes per key
+ * (the tile was partly LDS-read bound), math stays f32 (ACO folds the f16
+ * operand into v_fma_mix_f32).  The dequantized value rounds to f16 (2^-11
+ * relative, ~100x below the Q8_0/Q4_0 cache step).  The release build
+ * (attn_prefill_fa_f16_gqa*.spv) sets both; without them it is the f32 tile. */
+#if defined(FA_F16_K) || defined(FA_F16_V)
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+#ifdef FA_F16_K
+#define SHK f16vec4
+#else
+#define SHK vec4
+#endif
+#ifdef FA_F16_V
+#define SHV f16vec4
+#else
+#define SHV vec4
+#endif
 
 /* Flash-attention prefill, head_dim 256, Q8_0 K cache / Q4_0 V cache.  Built
  * twice: HQ=6 (dense Qwen3.8 GQA 24/4, 8 tokens x 3 rows per rowset) replaces
@@ -80,8 +98,8 @@ layout(push_constant) uniform Push {
 #define V_HEAD_BYTES 144u   /* 8 x Q4_0 block (2 B f16 + 16 B nibbles) */
 #define NEG_BIG -3.402823466e38
 
-shared vec4 sh_k[BK * (HD / 4u)];
-shared vec4 sh_v[BK * (HD / 4u)];
+shared SHK sh_k[BK * (HD / 4u)];
+shared SHV sh_v[BK * (HD / 4u)];
 
 /* Four dwords starting at an even (2-byte aligned) byte offset. */
 uvec4 load16_k(uint off) {
@@ -163,19 +181,19 @@ void main(void) {
             float kd = half_k(kb);
             uvec4 kw = load16_k(kb + 2u + st_half * 16u);
             [[unroll]] for (uint c = 0u; c < 4u; c++)
-                sh_k[sidx + c] = vec4(unpack8(int(kw[c]))) * kd;
+                sh_k[sidx + c] = SHK(vec4(unpack8(int(kw[c]))) * kd);
 
             uint vb = key * pc.v_row_bytes + kvh * V_HEAD_BYTES + st_blk * 18u;
             float vd = half_v(vb);
             uvec4 vw = load16_v(vb + 2u);
             [[unroll]] for (uint c = 0u; c < 4u; c++) {
                 uint nib = st_half != 0u ? (vw[c] >> 4u) & 0x0f0f0f0fu : vw[c] & 0x0f0f0f0fu;
-                sh_v[sidx + c] = (vec4(unpack8(int(nib))) - 8.0) * vd;
+                sh_v[sidx + c] = SHV((vec4(unpack8(int(nib))) - 8.0) * vd);
             }
         } else {
             [[unroll]] for (uint c = 0u; c < 4u; c++) {
-                sh_k[sidx + c] = vec4(0.0);
-                sh_v[sidx + c] = vec4(0.0);
+                sh_k[sidx + c] = SHK(0.0);
+                sh_v[sidx + c] = SHV(0.0);
             }
         }
         barrier();
@@ -184,7 +202,7 @@ void main(void) {
             float s[RS][SUB];
             [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
                 uint kr = (sub + kk) * (HD / 4u) + j;
-                vec4 k0 = sh_k[kr], k1 = sh_k[kr + 16u], k2 = sh_k[kr + 32u], k3 = sh_k[kr + 48u];
+                vec4 k0 = vec4(sh_k[kr]), k1 = vec4(sh_k[kr + 16u]), k2 = vec4(sh_k[kr + 32u]), k3 = vec4(sh_k[kr + 48u]);
                 [[unroll]] for (uint rr = 0u; rr < RS; rr++)
                     s[rr][kk] = dot(qr[rr][0], k0) + dot(qr[rr][1], k1) +
                                 dot(qr[rr][2], k2) + dot(qr[rr][3], k3);
@@ -212,7 +230,7 @@ void main(void) {
             }
             [[unroll]] for (uint kk = 0u; kk < SUB; kk++) {
                 uint vr = (sub + kk) * (HD / 4u) + j;
-                vec4 v0 = sh_v[vr], v1 = sh_v[vr + 16u], v2 = sh_v[vr + 32u], v3 = sh_v[vr + 48u];
+                vec4 v0 = vec4(sh_v[vr]), v1 = vec4(sh_v[vr + 16u]), v2 = vec4(sh_v[vr + 32u]), v3 = vec4(sh_v[vr + 48u]);
                 [[unroll]] for (uint rr = 0u; rr < RS; rr++) {
                     float p = s[rr][kk];
                     acc[rr][0] += p * v0;

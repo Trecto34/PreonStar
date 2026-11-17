@@ -1,0 +1,5 @@
+/tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/dense/ref: n=33 mean_nll=0.1047 top1=32/33
+/tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/dense/f16: n=33 mean_nll=0.1032 top1=32/33
+   vs /tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/dense/ref: dNLL mean=-0.0015 med=-0.0001 MAD=0.0002 mean|d|=0.0025 worse=14 better=19 top1_same=33/33
+/tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/dense/ctl: n=33 mean_nll=0.1159 top1=32/33
+   vs /tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/dense/ref: dNLL mean=+0.0112 med=-0.0001 MAD=0.0002 mean|d|=0.0238 worse=10 better=23 top1_same=33/33

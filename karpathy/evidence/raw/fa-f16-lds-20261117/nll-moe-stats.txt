@@ -1,0 +1,5 @@
+/tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/moe/ref: n=33 mean_nll=1.7363 top1=26/33
+/tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/moe/f16: n=33 mean_nll=0.8210 top1=29/33
+   vs /tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/moe/ref: dNLL mean=-0.9154 med=-0.0000 MAD=0.0002 mean|d|=1.0869 worse=15 better=17 top1_same=30/33
+/tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/moe/ctl: n=33 mean_nll=1.5952 top1=28/33
+   vs /tmp/claude-1000/-home-server-q36/966b6147-d426-4c92-9cf5-fcd558fe2d28/scratchpad/nll/moe/ref: dNLL mean=-0.1412 med=+0.0000 MAD=0.0001 mean|d|=1.0575 worse=17 better=15 top1_same=29/33

@@ -99,7 +99,9 @@ static int run_case(uint32_t n_head, uint32_t n_head_kv, uint32_t n_tok, uint32_
         if (!(d <= max_abs)) max_abs = d; /* NaN propagates as failure */
         if (fabs(oa[i]) > max_ref) max_ref = fabs(oa[i]);
     }
-    int bad = !(max_abs <= 1e-4 * (max_ref > 1 ? max_ref : 1));
+    /* f16 K/V LDS staging (default; P36_VK_ATTN_FA_F16=0 for f32) drifts ~1e-3 from
+     * the f32 qtile2 reference; 2e-3 is p36_test's attention quality bound. */
+    int bad = !(max_abs <= 2e-3 * (max_ref > 1 ? max_ref : 1));
     printf("gqa%u n_tok=%4u pos0=%5u sinks=%d  qtile2 %8.2f ms  fa %8.2f ms  (%.2fx)  max_abs=%.3g max_ref=%.3g %s\n",
            n_head / n_head_kv, n_tok, pos0, has_sinks, ms[0], ms[1], ms[0] / ms[1], max_abs, max_ref, bad ? "FAIL" : "ok");
     p36_gpu_tensor_free(q); p36_gpu_tensor_free(qg); p36_gpu_tensor_free(kc);
