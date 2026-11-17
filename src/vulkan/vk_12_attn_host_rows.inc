@@ -169,11 +169,12 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
                            head_dim == 256u &&
                            (ratio == 8u || ratio == 6u) &&
                            k_cache_type == 1u && v_cache_type == 2u;
-                /* The FA kernels write the same per-group partials, 8 (GQA 6)
-                 * or 4 (GQA 8) tokens per workgroup instead of 2. */
+                /* The FA kernels write the same per-group partials, 5 (GQA 6)
+                 * or 4 (GQA 8) tokens per workgroup instead of 2 (QT in
+                 * attn_prefill_fa.comp: 16 rowsets / (HQ / 2 rows)). */
                 bool fa = qt2 && p36_vk_use_attn_fa();
                 if (fa) {
-                    uint32_t fa_qt = ratio == 6u ? 8u : 4u;
+                    uint32_t fa_qt = ratio == 6u ? 5u : 4u;
                     ok = p36_vk_run_unlocked(ratio == 6u ? "attn_prefill_fa_gqa6" : "attn_prefill_fa_gqa8",
                                              ratio == 6u ? &p36_vk.attn_prefill_fa_gqa6
                                                          : &p36_vk.attn_prefill_fa_gqa8,

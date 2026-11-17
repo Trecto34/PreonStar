@@ -3841,3 +3841,28 @@ f32 before the 16-lane clustered add. VGPRs/occupancy unchanged. Evidence:
 * Owner decision: status **delayed**, not closed. Reopen if `v_dot2_f32_f16`
   is confirmed on gfx1013/RADV, or after step C.1 changes the tile shape.
   Ranked below C.1 (dense VGPR relief) and decode f16 staging.
+
+## 2026-11-17 Prefill FA gqa6: 2 rows per lane (step C.1, dense VGPR relief)
+
+Side finding of step C: narrower types (f16 Q, f16 PV partials) never moved
+gqa6 off 256 VGPRs / 4 waves. Compile-only probes (`mmq_info`): SUB 8->4 no
+change; RS 3->2 rows per rowset 128 VGPRs / 8 waves; RS 1 84 / 12 waves (but
+QT 2, 25% idle rowsets). Chosen: RS=2 for HQ=6 (same as HQ=8), QT 8 -> 5
+tokens per workgroup, rowset 15 idles; host `fa_qt` 8 -> 5. gqa8 SPIR-V
+byte-identical (MoE untouched). Evidence: `evidence/raw/fa-gqa6-rs2-20261117/`.
+
+* **Kernel (`tests/test_attn_fa`, 2 interleaved runs, best-of):** gqa6 -11..-14%
+  at 4k-16k (256@16128 22.54 -> 19.96, 1024@7936 47.76 -> 42.33), -23..-26%
+  on small chunks (16@8176 1.76 -> 1.35); 256@0 0.75 -> 0.79 (tiny absolute).
+  max_abs identical.
+* **Bit-identical:** per-row key order is unchanged, so outputs are exact;
+  dense frontier logits ctx 8192..8704 A vs B `diff -rq` clean. No NLL run needed.
+* **Whole model, Huihui dense, 3 interleaved reps:** ctx 8192 +0.04%, ctx 16384
+  +0.41% (both overlap, FAIL the gate), decode flat.
+* **Why so small (profiled ctx 16384, P36_VK_PROF_KERNEL):** attention is 13.1%
+  of dense GPU time averaged over 0..16k after steps A/B (the ~36% figure was the
+  16-32k slice on the f32 tile). In-model kernel 12598 -> 11479 ms (-8.9%)
+  predicts ~+1.2%; matmul time varied +3% between the two profiled runs, so
+  the whole-model delta is inside noise. Expect it to show only toward 32k.
+* **Status: KEPT, default** (owner asked for the fix; exact output, faster
+  kernel, no regression). No flag: one tile shape for both GQA ratios.

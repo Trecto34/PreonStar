@@ -1,0 +1,1 @@
+frontier logits ctx 8192..8704 step 256, Huihui dense, A vs B: diff -rq clean (bit-identical)

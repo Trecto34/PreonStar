@@ -1,0 +1,15 @@
+label,rep,start_temp_c,end_temp_c,prefill_tps,decode_tps
+A,1,52,64,188.65,21.57
+B,1,64,64,186.94,21.52
+B,2,64,64,186.61,21.73
+A,2,64,66,186.23,21.53
+A,3,65,65,186.53,21.70
+B,3,64,64,186.61,21.69
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    3     186.53         0.300     21.57          0.040     A/p36-bench
+B    3     186.61         0.000     21.69          0.040     B/p36-bench
+
+B vs A prefill: +0.04%   decode: +0.56%   (gate: +1.25%)
+separation: min B 186.61 vs max A 188.65 -> overlap
+verdict: FAIL (prefill)

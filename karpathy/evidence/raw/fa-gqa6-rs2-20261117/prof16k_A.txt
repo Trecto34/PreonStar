@@ -1,0 +1,26 @@
+p36: Vulkan kernel GPU time total_ms=96074.468 barriers=60354 fence_ready=5 fence_blocked=2368 spin_ms=17.704 block_ms=58818.256
+p36:   vulkan/copy_rows.spv             dispatches=64 groups=327680 gpu_ms=3.750 pct=0.0
+p36:   vulkan/rms_norm.spv              dispatches=64 groups=16384 gpu_ms=3.250 pct=0.0
+p36:   vulkan/matmul_q8_0_mm_f16.spv    dispatches=130 groups=43008 gpu_ms=468.396 pct=0.5
+p36:   vulkan/matmul_q8_0_mm.spv        dispatches=3072 groups=12288 gpu_ms=2128.727 pct=2.2
+p36:   vulkan/matmul_f32_fast_t8.spv    dispatches=3072 groups=4718592 gpu_ms=309.034 pct=0.3
+p36:   vulkan/recur_conv_silu_decode.spv dispatches=3072 groups=122880 gpu_ms=581.764 pct=0.6
+p36:   vulkan/delta_gates.spv           dispatches=3072 groups=786432 gpu_ms=8.720 pct=0.0
+p36:   vulkan/delta_qkv.spv             dispatches=3072 groups=37748736 gpu_ms=251.195 pct=0.3
+p36:   vulkan/delta_net_decode_reg_f16.spv dispatches=3072 groups=589824 gpu_ms=1159.561 pct=1.2
+p36:   vulkan/recur_norm_gate_q8_k.spv  dispatches=3072 groups=18874368 gpu_ms=575.026 pct=0.6
+p36:   vulkan/add_rms_norm_q8_k.spv     dispatches=8128 groups=2080768 gpu_ms=750.817 pct=0.8
+p36:   vulkan/predequant_b16.spv        dispatches=15232 groups=29966336 gpu_ms=254.527 pct=0.3
+p36:   vulkan/dense_iq3_xxs_mmq_pair.spv dispatches=4096 groups=4456448 gpu_ms=32205.031 pct=33.5
+p36:   vulkan/swiglu_q8_k.spv           dispatches=4096 groups=71303168 gpu_ms=648.306 pct=0.7
+p36:   vulkan/dense_iq4_xs_mmq.spv      dispatches=1024 groups=327680 gpu_ms=4917.228 pct=5.1
+p36:   vulkan/dense_kquant_mmq.spv      dispatches=8222 groups=2643968 gpu_ms=25451.919 pct=26.5
+p36:   vulkan/rms_norm_rope_qwen.spv    dispatches=1024 groups=6291456 gpu_ms=75.710 pct=0.1
+p36:   vulkan/rms_norm_rope_kv_qwen_quant.spv dispatches=1024 groups=1048576 gpu_ms=77.276 pct=0.1
+p36:   vulkan/attn_prefill_fa_f16_gqa6.spv dispatches=1024 groups=327680 gpu_ms=12597.737 pct=13.1
+p36:   vulkan/attn_combine.spv          dispatches=1024 groups=6291456 gpu_ms=94.557 pct=0.1
+p36:   vulkan/quantize_q8_k.spv         dispatches=1025 groups=6291476 gpu_ms=41.182 pct=0.0
+p36:   vulkan/dense_iq3_xxs_mmq.spv     dispatches=3072 groups=491520 gpu_ms=13463.884 pct=14.0
+p36:   vulkan/add_rms_norm.spv          dispatches=64 groups=16384 gpu_ms=4.174 pct=0.0
+p36:   vulkan/dense_q5k_decode.spv      dispatches=1 groups=62080 gpu_ms=2.689 pct=0.0
+p36:   vulkan/top2.spv                  dispatches=1 groups=129 gpu_ms=0.013 pct=0.0

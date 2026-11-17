@@ -1,0 +1,4 @@
+base: VGPRs = 256;Spilled VGPRs = 0;Subgroups per SIMD = 4;
+rs2: VGPRs = 128;Spilled VGPRs = 0;Subgroups per SIMD = 8;
+rs1: VGPRs = 84;Spilled VGPRs = 0;Subgroups per SIMD = 12;
+sub4: VGPRs = 256;Spilled VGPRs = 0;Subgroups per SIMD = 4;

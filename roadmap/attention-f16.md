@@ -1,7 +1,7 @@
 # f16 attention
 
 **Status:** step A landed (`670febe`, default on); step B done (default on,
-inside the same f16 build); step C delayed; the rest open.
+inside the same f16 build); step C delayed; C.1 (dense VGPR relief) done; the rest open.
 
 ## Background
 
@@ -23,6 +23,9 @@ Long-context shares that bound the remaining work (2026-11-10 data):
 |---|---|---|
 | Dense attention share of prefill | ~10% | ~36% |
 | MoE attention share of prefill | — | ~42% |
+
+Update 2026-11-17 (after steps A/B, profiled): dense attention is 13.1% of GPU
+time for a 0..16k prefill (average over positions, not the 16-32k slice).
 
 MoE 8-16k ablation: QK FMAs 20%, PV FMAs 14% of prefill time.
 
@@ -46,10 +49,13 @@ MoE 8-16k ablation: QK FMAs 20%, PV FMAs 14% of prefill time.
    below C.1 and the decode item. Revisit when: the dot2 question is
    answered, or C.1 changes the tile shape (re-measure then). Ledger
    2026-11-17, evidence `karpathy/evidence/raw/fa-f16-qk-20261117/`.
-3. **Step C.1: dense VGPR relief** (side finding of C). gqa6 sits at 256 VGPRs. Checked 2026-11-17: f16 Q
-   alone (f32 math) and step B's f16 PV partials both still compile to 256
-   VGPRs / 4 waves — the compiler re-spends freed registers. An occupancy
-   step needs a structural change (fewer rows per lane), not narrower types.
+3. **Step C.1: dense VGPR relief — done (2026-11-17).** Narrower types never
+   moved gqa6 off 256 VGPRs; the shape did: 2 rows per lane (like gqa8) gives
+   128 VGPRs / 8 waves, 5 tokens per workgroup (one idle rowset). Kernel
+   −11..−14% at 4-16k, −23% on small chunks, output bit-identical, gqa8
+   untouched. Whole model only +0.04% (8k) / +0.41% (16k): profiled, dense
+   attention is just 13% of GPU time averaged over 0..16k after steps A/B.
+   Ledger 2026-11-17, evidence `karpathy/evidence/raw/fa-gqa6-rs2-20261117/`.
 4. **f16 K/V staging in `attn_decode_fa`.** Same LDS staging as the prefill
    tile. At 32k MoE the kernel is ~15% of a decode token (0.24 ms × 10
    layers) and reads K/V at ~114 GB/s, a third of matvec bandwidth. Bigger

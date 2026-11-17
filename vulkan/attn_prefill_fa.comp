@@ -32,12 +32,12 @@
 #endif
 
 /* Flash-attention prefill, head_dim 256, Q8_0 K cache / Q4_0 V cache.  Built
- * twice: HQ=6 (dense Qwen3.8 GQA 24/4, 8 tokens x 3 rows per rowset) replaces
+ * twice: HQ=6 (dense Qwen3.8 GQA 24/4, 5 tokens x 2 rows per rowset) replaces
  * attn_prefill_qtile2_gqa6, HQ=8 (Qwen3.6/3.8 35B-A3B MoE GQA 16/2, 4 tokens x
  * 2 rows) replaces attn_prefill_qtile2, when P36_VK_ATTN_FA is on.  Both write
  * the same per-4096-key-group (acc, m, l) partials, so attn_combine is
- * unchanged.  The HQ=6 shape already sits at the 256-VGPR ceiling, which is
- * why HQ=8 trades tokens per workgroup for fewer rows per lane.
+ * unchanged.  Both trade tokens per workgroup for fewer rows per lane: the
+ * 3-row HQ=6 shape sat at the 256-VGPR ceiling (see RS below).
  *
  * Why a new shape: qtile2 serves 2 tokens per workgroup and re-reads six Q rows
  * from LDS for every K vector (~1 FMA per LDS float), so every 2-token
@@ -91,13 +91,13 @@ layout(push_constant) uniform Push {
 #ifndef HQ
 #define HQ 6                /* query heads per KV head (plain int: used in #if) */
 #endif
-#if HQ == 6
-#define RS 3u               /* rows (heads) per 16-lane rowset */
-#else
+/* Rows (heads) per 16-lane rowset.  2 for both shapes: 3 rows (HQ=6's old
+ * shape, 8 tokens) sat at 256 VGPRs / 4 waves; 2 rows is 128 VGPRs / 8 waves.
+ * HQ=6 then has 3 rowsets per token, so QT=5 and rowset 15 idles (t=5 is
+ * never < tn).  The host's fa_qt must match QT. */
 #define RS 2u
-#endif
 #define RPT (HQ / RS)       /* rowsets per token */
-#define QT (16u / RPT)      /* tokens per workgroup: 16 rowsets */
+#define QT (16u / RPT)      /* tokens per workgroup (16 rowsets; floor) */
 #define HD 256u
 #define BK 16u              /* keys staged in LDS per tile */
 #define SUB 8u              /* keys per online-softmax step */
