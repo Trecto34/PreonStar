@@ -3978,3 +3978,40 @@ masks 0 drop the vector-cache invalidate (wrong output). Evidence:
   subset of the old flushes, with one it emits the same.
 * reconsider_if: RADV stops setting `INV_L2` for buffer barriers on GFX10 (the
   remaining ~1.8 us over the drain), or an ACE compute queue becomes available.
+
+## 2026-11-17 Hazard barrier: no source access mask (dst-only) — ACCEPTED, +1.55% MoE decode
+
+Follow-up to the TRANSFER-mask entry above. With no copy pending, the hazard
+barrier's source access mask is now 0 (stage still `COMPUTE`, destination
+still `SHADER_READ|SHADER_WRITE`). RADV 26.2.6 then drops the `GL2_INV|GL2_WB`
+that any buffer `SHADER_WRITE` source adds, and keeps `CS_PARTIAL_FLUSH` +
+`GLK/GLV/GL1/GLM` invalidates. Evidence: `evidence/raw/barrier-dstonly-20261117/`.
+
+* **Probe** (same `bprobe.c` run as the previous entry): 2.25 -> **1.90 us** per
+  barrier, 0/15 wrong.
+* **Why it is correct here, not by the spec.** Vulkan calls RAW/WAW without a
+  source access undefined (validation layers flag it). On GFX10 GL2 is the
+  coherence point for every CU; radeonsi's own GFX10 shader-to-shader barrier
+  is exactly CS sync + GL0/GL1/scalar invalidate with no GL2 action, and the
+  LLVM GFX10 memory model does the same. `tcc_rb_non_coherent = 0` on this
+  board (16 TCCs) and the engine never renders, so RADV never re-adds `INV_L2`.
+  Both memory types (host-cached GTT, device-local) map MTYPE_NC.
+* **Independent review** (read-only agent, RADV/Linux/LLVM sources) found no
+  compute-to-compute hole and one real gap, fixed here: a host read right after
+  an eager submit (`P36_VK_BATCH_FLUSH_AT` hit on the last dispatch) recorded
+  no `HOST_READ` barrier, so GL2 writeback relied on the kernel fence alone,
+  which the engine's own comment says gave stale reads on this board before.
+  `p36_vk_flush_unlocked` now opens an empty batch for the host barrier when
+  work is in flight with no batch open (~1 in 32 reads, one tiny submit).
+  Env switches now treat `=0` as off.
+* **A/B, same binary, `P36_VK_BARRIER_SRC=1` vs default** (`bench_ab.sh`, ctx
+  1024, gen 64, 3 interleaved reps, before the flush fix): Axion-1.0-35B decode
+  **86.07 -> 87.40 t/s (+1.55%**, clean separation 87.37 > 86.26); prefill
+  +8.35% with overlapping reps (MoE noise, not claimed). One pair after the
+  flush fix: 86.54 -> 87.31. Dense not A/B'd: expected ~+0.3%, below what 3
+  reps resolve. Cumulative with the previous entry: Axion decode ~83.0 -> 87.4.
+* **Parity.** Greedy output byte-identical (same md5 as the original masks) on
+  Axion, Huihui dense 27B and Qwen3.6-35B-A3B + MTP head, before and after the
+  flush fix; `p36_test --vulkan-kernels` OK.
+* reconsider_if: a Mesa upgrade (re-run parity with `P36_VK_BARRIER_SRC=1` vs
+  default), an image or render pass enters the engine, or an ACE queue appears.

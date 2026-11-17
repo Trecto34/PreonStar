@@ -1,0 +1,5 @@
+label,rep,start_temp_c,end_temp_c,prefill_tps,decode_tps
+A,1,45,54,575.92,85.75
+B,1,54,55,617.69,87.40
+B,2,55,55,545.68,87.37
+A,2,55,55,562.94,86.07

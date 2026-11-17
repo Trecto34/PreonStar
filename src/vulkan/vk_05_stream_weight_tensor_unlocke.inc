@@ -134,7 +134,8 @@ static int p36_vk_run_unlocked(
             bool xfer = p36_vk_hazard_transfer || p36_vk_hazard_all || p36_vk_barrier_full();
             VkMemoryBarrier compute_barrier = {
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | (xfer ? VK_ACCESS_TRANSFER_WRITE_BIT : 0),
+                .srcAccessMask = xfer ? VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT
+                                 : p36_vk_barrier_src() ? VK_ACCESS_SHADER_WRITE_BIT : 0,
                 .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             };
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |

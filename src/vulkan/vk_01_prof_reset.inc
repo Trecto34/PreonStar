@@ -470,12 +470,37 @@ static bool p36_vk_hazard_all;
  * flush plus an end-of-pipe RELEASE_MEM/WAIT_REG_MEM round trip.  A
  * compute-only barrier measured 2.25 vs 3.61 us per link in a 400-dispatch
  * chain (evidence/raw/barrier-masks-20261117).  P36_VK_BARRIER_FULL=1 keeps
- * the old masks on every barrier (A/B and debug switch). */
+ * the old masks on every barrier (A/B and debug switch).
+ *
+ * Without a pending copy the source access mask is 0 (1.90 us per link).
+ * A SHADER_WRITE source only adds RADV's GL2 writeback + invalidate, which
+ * serves clients outside L2 (host, CP, CB/DB).  Shader-to-shader on GFX10
+ * does not need it: GL2 is the coherence point for every CU, stores reach it
+ * (GL0 write-through, GL1 read-only), CS_PARTIAL_FLUSH from the COMPUTE source
+ * stage waits for the writers, and the SHADER_READ destination invalidates
+ * GL0/GL1/scalar so readers miss to GL2 (the same sequence radeonsi uses for
+ * shader-to-shader on GFX10).  Host reads get their own SHADER_WRITE ->
+ * HOST_READ barrier at every flush (p36_vk_flush_unlocked), which writes GL2
+ * back.  By the Vulkan spec RAW/WAW without a source access is undefined and
+ * validation layers flag it; this rests on RADV 26.x doing the destination
+ * invalidates regardless, so re-check P36_VK_BARRIER_SRC=1 parity after a
+ * Mesa upgrade.  P36_VK_BARRIER_SRC=1 keeps SHADER_WRITE in the source. */
 static bool p36_vk_hazard_transfer;
+
+static int p36_vk_env_on(const char *name) {
+    const char *e = getenv(name);
+    return e && e[0] && e[0] != '0';
+}
 
 static bool p36_vk_barrier_full(void) {
     static int cached = -1;
-    if (cached < 0) cached = getenv("P36_VK_BARRIER_FULL") != NULL;
+    if (cached < 0) cached = p36_vk_env_on("P36_VK_BARRIER_FULL");
+    return cached == 1;
+}
+
+static bool p36_vk_barrier_src(void) {
+    static int cached = -1;
+    if (cached < 0) cached = p36_vk_env_on("P36_VK_BARRIER_SRC");
     return cached == 1;
 }
 

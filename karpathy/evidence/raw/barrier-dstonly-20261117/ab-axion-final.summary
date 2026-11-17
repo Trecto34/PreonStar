@@ -1,0 +1,8 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    1     602.38         0.000     86.54          0.000     /home/server/p36-wt/barrier-masks/ab-src.sh
+B    1     629.41         0.000     87.31          0.000     /home/server/p36-wt/barrier-masks/ab-new.sh
+
+B vs A prefill: +4.49%   decode: +0.89%   (gate: +1.25%)
+separation: min B 629.41 vs max A 602.38 -> clean
+verdict: PASS (prefill)

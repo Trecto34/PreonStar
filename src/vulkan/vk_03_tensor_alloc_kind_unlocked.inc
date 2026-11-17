@@ -443,8 +443,18 @@ static int p36_vk_submit_eager_unlocked(void) {
 }
 
 static int p36_vk_flush_unlocked(void) {
+    /* An eager submit carries no host barrier.  If the open batch is empty
+     * but such a submit is still in flight, record the host barrier in a
+     * batch of its own: hazard barriers no longer write GL2 back (see
+     * p36_vk_hazard_transfer), so the fence would be the only writeback. */
+    int ok = 1;
+    if (!p36_vk_batch_recording) {
+        bool in_flight = false;
+        for (uint32_t i = 0; i < P36_VK_CB_RING; i++) in_flight = in_flight || p36_vk_ring[i].pending;
+        if (in_flight) ok = p36_vk_begin_batch_unlocked(NULL);
+    }
     bool had_work = p36_vk_batch_recording;
-    int ok = p36_vk_submit_current_unlocked(true);
+    ok = p36_vk_submit_current_unlocked(true) && ok;
     uint64_t t0 = p36_vk_now_ns();
     for (uint32_t i = 0; i < P36_VK_CB_RING; i++) {
         had_work = had_work || p36_vk_ring[i].pending;
