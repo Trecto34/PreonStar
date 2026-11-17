@@ -3940,3 +3940,41 @@ qtile2 f32 reorder control). Evidence: `evidence/raw/fa-f16-nll-models-20261117/
   top1 23/33 top1_same 29/33 (ctl MAD 0.0008 mean|d| 1.346 top1 23/33).
 * Zero non-finite logits across all 99 frontier dumps (`max|logit| <= 31.3`);
   drift comparable to the f32 reorder control across all 5 checked models.
+
+## 2026-11-17 Hazard barrier: TRANSFER masks only when a copy is pending — ACCEPTED, +3.98% MoE / +1.35% dense decode
+
+The per-dispatch hazard barrier always carried `COMPUTE|TRANSFER` stages and
+`SHADER_WRITE|TRANSFER_WRITE` access. The only compute queue on this board is
+the GFX ring (no ACE family exposed), and in RADV 26.2.6
+(`radv_src_access_flush`, `gfx10_cs_emit_cache_flush`) `TRANSFER_WRITE` turns
+every barrier into `FLUSH_AND_INV_CB/DB` + meta flushes and an end-of-pipe
+`RELEASE_MEM` + `WAIT_REG_MEM` round trip. Earlier barrier work never changed
+the masks: buffer-scoped barriers keep them (RADV derives the same flush bits),
+masks 0 drop the vector-cache invalidate (wrong output). Evidence:
+`evidence/raw/barrier-masks-20261117/`.
+
+* **Probe** (`bprobe.c`, 400 dependent 32-WG dispatches, 15 rotated reps, both
+  host-cached and device-local memory, identical numbers): engine masks
+  **3.61 us/barrier**, compute-only (`COMPUTE`, `SHADER_WRITE`) **2.25 us**,
+  dst-only (src access 0) 1.90 us, all 0/15 wrong; no barrier 15/15 wrong.
+* **Change.** `p36_vk_hazard_transfer` is set when `p36_gpu_tensor_copy`
+  records a `vkCmdCopyBuffer` and cleared with the hazard sets; the barrier adds
+  the TRANSFER bits only then (or when the hazard set overflowed). Spec-legal
+  compute-only form kept; dst-only form not taken (relies on L2 coherence).
+  `P36_VK_BARRIER_FULL=1` restores the old masks.
+* **A/B, same binary, env toggled** (`bench_ab.sh`, ctx 1024, gen 64, 3 reps):
+  Axion-1.0-35B decode **82.99 -> 86.29 t/s (+3.98%**, MAD 0.03 / 0.16, clean
+  separation 85.84 > 83.27), prefill -1.55% (B MAD 20.44, inside the 3.4% MoE
+  floor; few barriers per prefill token). Huihui Qwen3.8-27B dense decode
+  **23.02 -> 23.33 t/s (+1.35%**, MAD 0.00 / 0.02, clean separation 23.31 >
+  23.02), prefill +0.03%. Probe predicted ~+4.7% / ~+1.3%.
+* **Parity.** Greedy 64 tokens byte-identical old vs new on Axion and the dense
+  27B; Qwen3.6-35B-A3B with the MTP head (`--mtp-draft 3 --mtp-margin 0`, the
+  path that records copies) byte-identical in 6/6 runs. `p36_test
+  --vulkan-kernels` OK.
+* **MTP speed not resolved:** the same 6 runs spread 45-100 t/s with identical
+  output (APEX-I + external-drive MTP head I/O noise, §item 0 of CAMPAIGN). No
+  mechanism for a loss: without a pending copy the new barrier emits a strict
+  subset of the old flushes, with one it emits the same.
+* reconsider_if: RADV stops setting `INV_L2` for buffer barriers on GFX10 (the
+  remaining ~1.8 us over the drain), or an ACE compute queue becomes available.

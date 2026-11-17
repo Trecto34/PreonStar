@@ -518,6 +518,7 @@ int p36_gpu_tensor_copy(p36_gpu_tensor *dst, uint64_t dst_offset,
                     .size = bytes,
                 };
                 vkCmdCopyBuffer(cmd, src_root->buffer, dst_root->buffer, 1, &copy);
+                p36_vk_hazard_transfer = true;
                 src_root->last_use_seq = p36_vk_submit_seq + 1;
                 dst_root->last_use_seq = p36_vk_submit_seq + 1;
                 dst_root->gpu_written = true;

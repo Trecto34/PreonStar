@@ -22,3 +22,8 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 - [ ] Diagnostic expert mask `P36_MOE_EXPERT_MASK`
 - [ ] Offline pruning tool `gguf-tools/prune-experts`
 - [ ] Engine audit for `expert_count != 256`
+
+## Decode synchronisation — `karpathy/AlreadyTried.md` (2026-11-17 hazard barrier)
+
+- [x] Hazard barrier carries TRANSFER masks only when a copy is pending (+3.98% MoE / +1.35% dense decode)
+- [ ] Dst-only barrier form (1.90 vs 2.25 us/barrier in the probe) — spec-loose, relies on GFX10 L2 coherence; owner decision

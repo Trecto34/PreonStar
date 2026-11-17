@@ -464,6 +464,20 @@ static p36_gpu_tensor *p36_vk_hazard_read[P36_VK_HAZARD_CAP];
 static uint32_t p36_vk_hazard_written_n;
 static uint32_t p36_vk_hazard_read_n;
 static bool p36_vk_hazard_all;
+/* A vkCmdCopyBuffer was recorded since the last barrier.  Only then does the
+ * hazard barrier need TRANSFER in its source masks: on the BC-250 the only
+ * compute queue is the GFX ring, where RADV turns TRANSFER_WRITE into a CB/DB
+ * flush plus an end-of-pipe RELEASE_MEM/WAIT_REG_MEM round trip.  A
+ * compute-only barrier measured 2.25 vs 3.61 us per link in a 400-dispatch
+ * chain (evidence/raw/barrier-masks-20261117).  P36_VK_BARRIER_FULL=1 keeps
+ * the old masks on every barrier (A/B and debug switch). */
+static bool p36_vk_hazard_transfer;
+
+static bool p36_vk_barrier_full(void) {
+    static int cached = -1;
+    if (cached < 0) cached = getenv("P36_VK_BARRIER_FULL") != NULL;
+    return cached == 1;
+}
 
 static bool p36_vk_hazard_in(p36_gpu_tensor **set, uint32_t n, const p36_gpu_tensor *root) {
     for (uint32_t i = 0; i < n; i++) {
@@ -482,6 +496,7 @@ static void p36_vk_hazard_reset(void) {
     p36_vk_hazard_written_n = 0;
     p36_vk_hazard_read_n = 0;
     p36_vk_hazard_all = false;
+    p36_vk_hazard_transfer = false;
 }
 
 /* GPU work is outstanding while a batch records or an eager submit's fence
