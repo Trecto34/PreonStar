@@ -4339,3 +4339,38 @@ same fp64 work. Axion, 63-token windows, md5 `f24e3634` in every run.
 * reconsider_if: `moe_down_route_reduce` is fused into a neighbour (removes
   the dispatch, its real cost), or a kernel with >= 8 waves per workgroup
   doing shared fp64 turns up in a profile.
+
+## 2026-11-17 Q3_K MoE down sum-decode: preloaded bytes + 4 rows per workgroup — ACCEPTED, -60% kernel, bit-identical
+
+The ledger's next step after the IQ3_XXS lane map was the same port for Q3_K
+down (4 layers on every NanoPlus file, 8-20 on MiniPlus/LFM2.5 files; 16 of
+the 50 local + external GGUFs). The lane-map port reorders sums, so instead the
+2-weight-stride lane map is kept and only its loads change. Evidence:
+`evidence/raw/q3k-down-loads-20261117/`.
+
+* **Why it was slow:** 66 us per dispatch, ~54 GB/s. Each lane read every
+  weight's qs byte, hmask byte and both scale bytes with separate `wb_u8()`
+  u16 loads, ~49 per lane per block, though a lane only ever touches qs and
+  hmask bytes l0, l0+1, l0+16, l0+17 of its half and scale bytes 96..107.
+* **Change.** `q3k_down_block()` loads those as 11 u16 words and extracts the
+  same values; same `fma(d*sc, dot(qv, a[p]), acc)` in the same order, so the
+  1-row build is **bit-identical** to the old one. New `-DP36_DOWN_ROWS=4u`
+  build `_q3kr4` (4 rows of one slot per workgroup, the 8 activation pairs
+  loaded once per block, per-row body unchanged). Host: Q3_K down joins
+  IQ3_XXS4 in the `down_rows` choice; `P36_VK_MOE_DOWN_ROWS=1` restores one
+  row for both. Other six down builds byte-identical.
+* **Kernel** (Axion, 63-token windows, 2 runs each): **66.3 -> 30.4 us**
+  (loads) **-> 26.5 us** (4 rows), 267 -> 107 us/token, ~136 GB/s; token span
+  11.82-11.84 -> 11.68-11.74 ms.
+* **A/B** (`bench_ab.sh`, ctx 1024, gen 64, 3 interleaved reps): Axion decode
+  **99.95 -> 100.67 t/s (+0.72%**, clean separation 100.46 > 100.02); prefill
+  -0.98% overlapping (noise, decode-only kernel). Under the 1.25% median gate;
+  kept on the bit-identical kernel and span win, as `5008064`.
+* **Parity:** `--dump-logprobs` (top-20 logits, 64 steps) byte-identical old
+  vs new on Axion and Ornith NanoPlus; `q3k_equiv.py` (old vs new extraction,
+  48k random lane-blocks, all 16 lanes); `--vulkan-kernels` OK; independent
+  read-only review clean. LFM2.5 (8 Q3_K down layers) not run, owner request.
+  MiniPlus files (20 Q3_K down layers, ~14 GB) not run: no memory headroom on
+  this box; expected gain there ~0.8 ms/token, unmeasured.
+* reconsider_if: the Q3_K gate/up decode (`moe_gate_up_decode_q3k`, MiniPlus
+  and LFM2.5) has the same per-element byte reads.

@@ -34,7 +34,8 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 
 - [x] Q4_K decode at 1 row per workgroup (+1.37% MoE decode, bit-identical; dense neutral)
 - [x] IQ3_XXS MoE down sum-decode on the gate/up lane map (+4.70% MoE decode, reordered sums, NLL-checked)
-- [ ] Same lane map for the Q3_K / IQ2_S / IQ3_S down builds
+- [x] Q3_K down: bytes preloaded + 4 rows per workgroup instead of the lane map (-60% kernel, +0.72% MoE decode, bit-identical)
+- [ ] Same lane map for the IQ2_S / IQ3_S down builds; preloaded bytes for the Q3_K gate/up decode
 - [x] IQ3_XXS MoE down sum-decode, 4 rows per workgroup sharing activations (+4.20% MoE decode, bit-identical)
 - [x] Activation sharing for the IQ2_S / IQ2_S+IQ2_XXS gate-up decode kernels (+1.76% MoE decode, bit-identical)
 - [x] `add_rms_norm_q8_k` fp64 divisions on one wave (-30% kernel, +0.78% MoE decode, bit-identical)

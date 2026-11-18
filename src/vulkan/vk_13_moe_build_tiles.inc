@@ -1686,13 +1686,14 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                 /* Four rows of one slot per workgroup share the lane's 16
                  * activations (half its loads): kernel 1.04 -> 0.64 ms/token on
                  * Axion, bit-identical to the 1-row build (2 rows 0.73, 8 rows
-                 * 0.70).  P36_VK_MOE_DOWN_ROWS=1 restores one row per group. */
+                 * 0.70).  Q3_K does the same with its 8 activation pairs.
+                 * P36_VK_MOE_DOWN_ROWS=1 restores one row per group. */
                 static int rows_env = -1;
                 if (rows_env < 0) {
                     const char *e = getenv("P36_VK_MOE_DOWN_ROWS");
                     rows_env = e && e[0] == '1' ? 1 : 4;
                 }
-                const uint32_t down_rows = down_iq3xxs && !q4k && p36_vk_moe_down_iq3xxs4() &&
+                const uint32_t down_rows = !q4k && (down_q3k || (down_iq3xxs && p36_vk_moe_down_iq3xxs4())) &&
                                            (out_dim % (uint32_t)rows_env) == 0u ? (uint32_t)rows_env : 1u;
                 const char *dname = q4k ? "moe_q4k_down_sum_decode" :
                                     down_q3k ? "moe_q3k_down_sum_decode" :
@@ -1701,7 +1702,8 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                     down_iq3s ? "moe_iq3s_down_sum_decode" :
                                     down_iq2s ? "moe_iq2s_down_sum_decode" : "moe_q2k_down_sum_decode";
                 p36_vk_kernel *dkernel = q4k ? &p36_vk.moe_down_q4k_sum_decode :
-                                          down_q3k ? &p36_vk.moe_down_q2k_sum_decode_q3k :
+                                          down_q3k ? (down_rows == 4u ? &p36_vk.moe_down_q2k_sum_decode_q3kr4
+                                                                      : &p36_vk.moe_down_q2k_sum_decode_q3k) :
                                           down_iq3xxs ? (p36_vk_moe_down_iq3xxs4()
                                                          ? (down_rows == 4u ? &p36_vk.moe_down_q2k_sum_decode_iq3xxs4r4
                                                                             : &p36_vk.moe_down_q2k_sum_decode_iq3xxs4)

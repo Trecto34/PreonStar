@@ -4,8 +4,10 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#ifdef P36_MOE_IQ3XXS4
+#if defined(P36_MOE_IQ3XXS4) || defined(P36_DOWN_ROWS)
 #extension GL_EXT_control_flow_attributes : require
+#endif
+#ifdef P36_MOE_IQ3XXS4
 #define P36_MOE_IQ3XXS 1
 #endif
 
@@ -56,6 +58,41 @@ const uint TAB_IQ3XXS_GRID = 3104u;
 #endif
 #ifdef P36_MOE_Q3K
 const uint Q3K_BYTES = 110u;
+/* One Q3_K superblock [hmask 32][qs 64][scales 12][d f16] of the 2-weight
+ * stride lane map: the lane owns elements 128*v_im + l0 + 16*p (+1) for
+ * p = 0..7.  Those touch only 4 qs bytes, 4 hmask bytes (l0, l0+1, l0+16,
+ * l0+17 of each run) and scale bytes 96..107, so they are loaded once as
+ * 11 u16 words instead of ~49 per-element byte reads.  The extracted values,
+ * the fma and its order are the old per-element loop's, so results are
+ * bit-identical to it.  a[p] = this lane's activation pair for step p. */
+float q3k_down_block(uint bb, uint v_im, uint l0, vec2 a[8], float acc) {
+    float d = unpackHalf2x16(uint(wb[(bb + 108u) >> 1u])).x;
+    uint qo = (bb + 32u + 32u * v_im + l0) >> 1u;
+    uint ho = (bb + l0) >> 1u;
+    uint so = (bb + 96u) >> 1u;
+    uint q4 = uint(wb[qo]) | (uint(wb[qo + 8u]) << 16u);     /* qs  l0, l0+1, l0+16, l0+17 */
+    uint h4 = uint(wb[ho]) | (uint(wb[ho + 8u]) << 16u);     /* hmask, same bytes */
+    uint slo0 = uint(wb[so]) | (uint(wb[so + 1u]) << 16u);           /* scales 96..99 */
+    uint slo1 = uint(wb[so + 2u]) | (uint(wb[so + 3u]) << 16u);      /* scales 100..103 */
+    uint shi4 = uint(wb[so + 4u]) | (uint(wb[so + 5u]) << 16u);      /* scales 104..107 */
+    for (uint p = 0u; p < 8u; p++) {
+        uint group = 8u * v_im + p;
+        uint slo = ((p < 4u ? slo0 : slo1) >> (8u * (p & 3u))) & 255u;
+        uint shi = (shi4 >> (8u * (p & 3u))) & 255u;
+        int sc = int(((group < 8u ? slo : (slo >> 4u)) & 15u) |
+                     (((shi >> (2u * (group >> 2u))) & 3u) << 4u)) - 32;
+        vec2 qv;
+        for (uint z = 0u; z < 2u; z++) {
+            uint bs = 16u * (p & 1u) + 8u * z;   /* byte l0 + 16*(p&1) + z */
+            uint q = (q4 >> bs) & 255u;
+            uint mask = 1u << (v_im * 4u + (p >> 1u));
+            uint lo = (q >> (2u * (p >> 1u))) & 3u;
+            qv[z] = float(int(lo) - ((((h4 >> bs) & 255u) & mask) != 0u ? 0 : 4));
+        }
+        acc = fma(d * float(sc), dot(qv, a[p]), acc);
+    }
+    return acc;
+}
 #endif
 #ifdef P36_MOE_IQ2S
 /* IQ2_S superblock: [d f16][32 qs][32 signs][8 qh][8 scales] = 82 bytes. */
@@ -72,7 +109,42 @@ const uint TAB_IQ3S_GRID = 2592u;
 #endif
 
 
-#ifdef P36_DOWN_ROWS
+#if defined(P36_DOWN_ROWS) && defined(P36_MOE_Q3K)
+/* Q3_K with P36_DOWN_ROWS output rows of one routed slot per workgroup: the
+ * lane's 8 activation pairs are loaded once per block for all rows, and each
+ * row runs q3k_down_block() exactly as the 1-row build does (same partials,
+ * same subgroupAdd), so output is bit-identical to it.  Host launches
+ * out_dim / P36_DOWN_ROWS workgroups (out_dim a multiple of it). */
+const uint DR = P36_DOWN_ROWS;
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint itid = tid & 15u;
+    uint ix = tid >> 4u;
+    uint v_im = itid >> 3u;
+    uint l0 = 2u * (itid & 7u);
+    uint y_off = 128u * v_im + l0;
+    uint row0 = gl_WorkGroupID.x * DR;
+    uint slot = gl_WorkGroupID.y;
+    uint expert = selected[slot];
+    uint row_bytes = pc.blocks * Q3K_BYTES;
+    uint m2 = slot * pc.in_dim / 2u;
+    float acc[DR];
+    [[unroll]] for (uint r = 0u; r < DR; r++) acc[r] = 0.0;
+    for (uint i = ix; i < pc.blocks; i += 2u) {
+        uint y2 = m2 + ((i * 256u + y_off) >> 1u);
+        vec2 a[8];
+        [[unroll]] for (uint p = 0u; p < 8u; p++) a[p] = mid[y2 + 8u * p];
+        [[unroll]] for (uint r = 0u; r < DR; r++)
+            acc[r] = q3k_down_block((expert * pc.out_dim + row0 + r) * row_bytes + i * Q3K_BYTES,
+                                    v_im, l0, a, acc[r]);
+    }
+    float sc = pc.has_scales != 0u ? scales[expert] : 1.0;
+    [[unroll]] for (uint r = 0u; r < DR; r++) {
+        float total = subgroupAdd(acc[r]);
+        if (tid == 0u) y[slot * pc.out_dim + row0 + r] = total * sc;
+    }
+}
+#elif defined(P36_DOWN_ROWS)
 /* IQ3_XXS4 with P36_DOWN_ROWS output rows of the same routed slot per workgroup: the
  * lane's 16 activations (half of its loads) are read once per block and
  * reused for every row.  Each row keeps the 1-row build's per-lane weights and
@@ -228,28 +300,10 @@ void main(void) {
         }
 #elif defined(P36_MOE_Q3K)
         for (uint i = ix; i < pc.blocks; i += 2u) {
-            uint bb = base_bytes + i * Q3K_BYTES;
-            float d = unpackHalf2x16(uint(wb[(bb + 108u) >> 1u])).x;
             uint y2 = m2 + ((i * 256u + y_off) >> 1u);
-            for (uint p = 0u; p < 8u; p++) {
-                uint n = y_off + 16u * p;
-                uint group = n >> 4u;
-                uint slo = wb_u8(bb + 96u + (group & 7u));
-                uint shi = wb_u8(bb + 104u + (group & 3u));
-                int sc = int(((group < 8u ? slo : (slo >> 4u)) & 15u) |
-                             (((shi >> (2u * (group >> 2u))) & 3u) << 4u)) - 32;
-                vec2 qv;
-                for (uint z = 0u; z < 2u; z++) {
-                    uint nn = n + z;
-                    uint half_id = nn >> 7u;
-                    uint g16 = (nn & 127u) >> 4u;
-                    uint q = wb_u8(bb + 32u + half_id * 32u + (nn & 31u));
-                    uint mask = 1u << (half_id * 4u + (g16 >> 1u));
-                    uint lo = (q >> (2u * (g16 >> 1u))) & 3u;
-                    qv[z] = float(int(lo) - ((wb_u8(bb + (nn & 31u)) & mask) != 0u ? 0 : 4));
-                }
-                acc = fma(d * float(sc), dot(qv, mid[y2 + 8u * p]), acc);
-            }
+            vec2 a[8];
+            for (uint p = 0u; p < 8u; p++) a[p] = mid[y2 + 8u * p];
+            acc = q3k_down_block(base_bytes + i * Q3K_BYTES, v_im, l0, a, acc);
         }
 #elif defined(P36_MOE_IQ2S)
         /* Same element slotting as the Q2_K path: this thread owns the two

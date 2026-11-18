@@ -1,0 +1,12 @@
+vulkan-kernels:
+p36: timestamps period_ns=10.000000 computeAndGraphics=1 valid_bits=64 queue_family=0 (graphics fallback) ace=0
+p36: Vulkan device AMD BC-250 (RADV GFX1013), 15.34 GiB UMA
+p36: Vulkan generic backend, BC-250 fast path, subgroup 64
+p36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+p36-test: routed gemm mv_max_rel=3.93391e-06 gemm_max_rel=0.00894794 worst(gemm=4994 matvec=4343) got=-1.0794 want=-1.08914
+p36-test: attn fa batch drift pos0=129 n_tok=3 ratio=8 = 0
+p36-test: attn fa batch drift pos0=129 n_tok=3 ratio=6 = 0
+p36-test: attn fa batch drift pos0=2100 n_tok=12 ratio=6 = 3.13618e-05
+p36-test: attn fa batch drift pos0=2100 n_tok=12 ratio=8 = 3.11979e-05
+vulkan-kernels: OK
+p36 tests: ok
