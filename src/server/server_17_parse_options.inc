@@ -1855,7 +1855,7 @@ static void test_truncated_generation_semantics(void) {
     trunc_free(&o);
     /* 10. normal chat and tool-less truncation are unchanged */
     trunc_parse(&o, "think</think>\n\nHello world", true, false, "stop");
-    TEST_ASSERT(o.content && !strcmp(o.content, "\n\nHello world") && !strcmp(o.reasoning, "think"));
+    TEST_ASSERT(o.content && !strcmp(o.content, "Hello world") && !strcmp(o.reasoning, "think"));
     trunc_free(&o);
     trunc_parse(&o, "Partial answer that was cut", false, false, "length");
     TEST_ASSERT(o.content && !strcmp(o.content, "Partial answer that was cut") && !o.incomplete);

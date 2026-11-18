@@ -468,6 +468,9 @@ static bool openai_sse_stream_update(int fd, server *s, const request *r, const 
     }
 
     if (st->mode == OPENAI_STREAM_TEXT) {
+        /* Same leading-newline drop as split_reasoning_content(). */
+        if (!st->sent_content)
+            while (st->emit_pos < raw_len && raw[st->emit_pos] == '\n') st->emit_pos++;
         const char *tool = r->has_tools ? find_any_tool_start(raw + st->emit_pos) : NULL;
         size_t limit = text_stream_safe_limit(raw, st->emit_pos, raw_len,
                                               r->has_tools, final);

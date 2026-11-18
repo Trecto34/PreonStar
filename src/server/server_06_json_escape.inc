@@ -96,7 +96,11 @@ static void split_reasoning_content(const char *text, size_t n, char **content_o
     if (think_end) {
         *think_end = '\0';
         *reasoning_out = xstrdup(body);
-        *content_out = xstrdup(think_end + 8);
+        /* Qwen-family models emit "</think>\n\n" before the answer; drop those
+         * newlines like the chat templates' lstrip('\n') does on history. */
+        const char *c = think_end + 8;
+        while (*c == '\n') c++;
+        *content_out = xstrdup(c);
     } else {
         *reasoning_out = NULL;
         *content_out = xstrdup(s);
