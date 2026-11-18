@@ -4318,3 +4318,24 @@ divide) and its block's Q8_K `iscale` / `d` (two fp64 divides), and fp64 runs at
 * reconsider_if: the same redundant per-thread fp64 in phase 3 (rot models),
   `rms_norm`, `quantize_q8_k`, `router_topk`, `moe_down_route_reduce`,
   `delta_qkv`, `recur_norm_gate_q8_k`, `rms_norm_rope_kv_qwen_quant`.
+
+## 2026-11-17 fp64 hoist in the other small decode kernels — CLOSED, no second case
+
+Follow-up to the `add_rms_norm_q8_k` hoist (`5008064`): checked the other
+small decode kernels with fp64. Only that kernel had many waves repeating the
+same fp64 work. Axion, 63-token windows, md5 `f24e3634` in every run.
+
+* **Not the pattern:** `router_topk` already does its fp64 on `lid == 0`;
+  `quantize_q8_k` and `delta_qkv` are single-wave workgroups (one wave costs
+  the same as one lane); `recur_norm_gate_q8_k` (4 waves) and
+  `rms_norm_rope_kv_qwen_quant` (per-block divides) would save at most
+  ~15-30 us/token each (~0.1-0.2%), below what an A/B resolves. Not built.
+* **`moe_down_route_reduce`, 256 -> 64 threads per workgroup** (8 -> 32
+  groups, same per-thread math, exact): **3.84 -> 3.84 us**. Not fp64
+  throughput: each thread's 8-step `fma32` chain is serial latency.
+* **Same kernel, `fma32` -> `precise fma()`** (probe; md5 unchanged):
+  **3.84 -> 3.56 us**, ~11 us/token. The kernel is mostly launch + load
+  latency; not worth reopening the exact-fma numerics decision. Reverted.
+* reconsider_if: `moe_down_route_reduce` is fused into a neighbour (removes
+  the dispatch, its real cost), or a kernel with >= 8 waves per workgroup
+  doing shared fp64 turns up in a profile.
