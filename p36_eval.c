@@ -1174,6 +1174,8 @@ typedef struct {
 typedef struct {
     const char *model_path;
     const char *mtp_path;
+    const char *chat_template;  /* NULL: engine falls back to $P36_CHAT_TEMPLATE, then built-in */
+    const char *system_prompt;  /* NULL: eval_system_prompt(); "" sends no system message */
     const char *trace_path;
     const char *regrade_trace_path;
     const char *case_sequence;
@@ -1190,6 +1192,9 @@ typedef struct {
     int top_k;
     float top_p;
     float min_p;
+    float presence_penalty;
+    float frequency_penalty;
+    float repeat_penalty;
     uint64_t seed;
     int pause_ms;
     int power_percent;
@@ -1602,6 +1607,7 @@ static eval_config parse_options(int argc, char **argv) {
         .top_k = 0,
         .top_p = P36_DEFAULT_TOP_P,
         .min_p = P36_DEFAULT_MIN_P,
+        .repeat_penalty = 1.0f,
         .pause_ms = 350,
         .soft_limit_reply_budget = 1024,
         .hard_limit_reply_budget = 512,
@@ -1622,6 +1628,10 @@ static eval_config parse_options(int argc, char **argv) {
             c.model_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--mtp")) {
             c.mtp_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--chat-template")) {
+            c.chat_template = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "-sys") || !strcmp(arg, "--system")) {
+            c.system_prompt = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) {
             c.ctx_size = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-ctk") || !strcmp(arg, "--cache-type-k")) {
@@ -1665,6 +1675,12 @@ static eval_config parse_options(int argc, char **argv) {
             c.top_p = parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
         } else if (!strcmp(arg, "--min-p")) {
             c.min_p = parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
+        } else if (!strcmp(arg, "--presence-penalty")) {
+            c.presence_penalty = parse_float_arg(need_arg(&i, argc, argv, arg), arg, -2.0f, 2.0f);
+        } else if (!strcmp(arg, "--frequency-penalty")) {
+            c.frequency_penalty = parse_float_arg(need_arg(&i, argc, argv, arg), arg, -2.0f, 2.0f);
+        } else if (!strcmp(arg, "--repeat-penalty")) {
+            c.repeat_penalty = parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.5f, 2.0f);
         } else if (!strcmp(arg, "--seed")) {
             c.seed = parse_u64_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--trace")) {
@@ -2482,7 +2498,19 @@ static void plain_reset_color(bool use_color) {
     if (use_color) fputs(ANSI_RESET, stdout);
 }
 
-static const char *eval_system_prompt(void) {
+/* Mirrors the engine's template resolution (option, then $P36_CHAT_TEMPLATE,
+ * off-words select the built-in renderer) so traces name what was rendered. */
+static const char *eval_chat_template_name(const eval_config *cfg) {
+    const char *t = cfg->chat_template && cfg->chat_template[0] ?
+                    cfg->chat_template : getenv("P36_CHAT_TEMPLATE");
+    if (!t || !t[0] || !strcasecmp(t, "off") || !strcasecmp(t, "none") ||
+        !strcasecmp(t, "false") || !strcmp(t, "0") || !strcasecmp(t, "default"))
+        return "builtin";
+    return t;
+}
+
+static const char *eval_system_prompt(const eval_config *cfg) {
+    if (cfg->system_prompt) return cfg->system_prompt;
     return "You are solving a hard benchmark question. Reason carefully. "
            "The final answer must follow the requested format exactly.";
 }
@@ -2571,6 +2599,44 @@ static int eval_max_generation_budget(const eval_config *cfg,
     return max_budget;
 }
 
+/* p36_encode_chat_prompt silently falls back to the built-in Qwen format when
+ * a loaded template fails to render, which would credit the template with
+ * built-in results. Render the same system/user pair here and stop the run
+ * instead. Every selected case passes through this before generation. */
+static void eval_require_template_render(p36_engine *engine, const eval_config *cfg,
+                                         const eval_case *tc, const char *system,
+                                         const char *question, p36_think_mode think_mode) {
+    const char *tmpl = p36_engine_chat_template(engine);
+    if (!tmpl) return;
+    p36_jinja_message msgs[2] = {0};
+    size_t n = 0;
+    if (system && system[0]) {
+        msgs[n].role = "system";
+        msgs[n++].content = system;
+    }
+    msgs[n].role = "user";
+    msgs[n++].content = question;
+    const bool thinking = p36_think_mode_enabled(think_mode);
+    p36_jinja_render_params jp = {
+        .messages = msgs,
+        .message_count = n,
+        .add_generation_prompt = true,
+        .enable_thinking_set = true,
+        .enable_thinking = thinking,
+        .reasoning_effort = thinking ? p36_jinja_effort_name(think_mode) : NULL,
+    };
+    char err[256] = {0};
+    char *rendered = p36_jinja_render(tmpl, &jp, err, sizeof(err));
+    if (rendered) {
+        free(rendered);
+        return;
+    }
+    fprintf(stderr, "p36-eval: chat template %s failed to render %s/%s: %s\n",
+            eval_chat_template_name(cfg), tc->source, tc->id,
+            err[0] ? err : "render failed");
+    exit(2);
+}
+
 static int eval_max_prompt_tokens(p36_engine *engine,
                                   const eval_config *cfg,
                                   const eval_case *cases,
@@ -2589,8 +2655,10 @@ static int eval_max_prompt_tokens(p36_engine *engine,
             fprintf(stderr, "p36-eval: failed to allocate prompt\n");
             exit(1);
         }
+        eval_require_template_render(engine, cfg, &cases[i], eval_system_prompt(cfg),
+                                     question, think_mode);
         p36_tokens prompt = {0};
-        p36_encode_chat_prompt(engine, eval_system_prompt(), question, think_mode, &prompt);
+        p36_encode_chat_prompt(engine, eval_system_prompt(cfg), question, think_mode, &prompt);
         if (prompt.len > max_prompt) {
             max_prompt = prompt.len;
             max_case = i;
@@ -2735,6 +2803,10 @@ static void trace_write_header(FILE *trace, const eval_config *cfg,
             "top_k: %d\n"
             "top_p: %.6g\n"
             "min_p: %.6g\n"
+            "presence_penalty: %.6g\n"
+            "frequency_penalty: %.6g\n"
+            "repeat_penalty: %.6g\n"
+            "chat_template: %s\n"
             "seed: %llu\n"
             "think_mode_requested: %s\n"
             "soft_limit_reply_budget: %d\n"
@@ -2758,6 +2830,10 @@ static void trace_write_header(FILE *trace, const eval_config *cfg,
             cfg->top_k,
             cfg->top_p,
             cfg->min_p,
+            cfg->presence_penalty,
+            cfg->frequency_penalty,
+            cfg->repeat_penalty,
+            eval_chat_template_name(cfg),
             (unsigned long long)cfg->seed,
             p36_think_mode_name(cfg->think_mode),
             cfg->soft_limit_reply_budget,
@@ -4128,7 +4204,7 @@ static eval_run_result run_one_case(p36_engine *engine, p36_session *session,
     const bool tty = ui->enabled;
     const bool use_plain_color = !tty && isatty(STDOUT_FILENO);
     const p36_think_mode think_mode = p36_think_mode_for_context(cfg->think_mode, cfg->ctx_size);
-    const char *system = eval_system_prompt();
+    const char *system = eval_system_prompt(cfg);
 
     char *question = build_question_prompt(tc);
     if (!question) {
@@ -4265,6 +4341,11 @@ static eval_run_result run_one_case(p36_engine *engine, p36_session *session,
     const int eos = p36_token_eos(engine);
     double t0 = ui->phase_start_sec;
     int forced_close_pos = -1;
+    /* Penalty history, as in p36-server: every token generated for this case,
+     * thinking included. Reused across cases and never freed, so none of the
+     * early returns below need to release it. */
+    static p36_tokens history;
+    history.len = 0;
     for (int i = 0; i < generation_limit; i++) {
         if (tty) {
             tui_consume_input(ui);
@@ -4361,14 +4442,21 @@ static eval_run_result run_one_case(p36_engine *engine, p36_session *session,
                 }
             }
         }
+        /* With all penalties at their neutral values this is exactly
+         * p36_session_sample, so default runs stay bit-identical. */
         if (token < 0)
-            token = p36_session_sample(session, cfg->temperature, cfg->top_k,
-                                       cfg->top_p, cfg->min_p, rng);
+            token = p36_session_sample_penalized(session, cfg->temperature, cfg->top_k,
+                                                 cfg->top_p, cfg->min_p,
+                                                 history.v, history.len,
+                                                 cfg->presence_penalty,
+                                                 cfg->frequency_penalty,
+                                                 cfg->repeat_penalty, NULL, rng);
         if (token == eos && generation_in_think) {
             token = p36_session_eos_to_think_close(session, token);
             if (token != eos) close_kind = EVAL_THINK_CLOSE_EOS;
         }
         if (token == eos) break;
+        p36_tokens_push(&history, token);
         if (close_kind != EVAL_THINK_CLOSE_NONE &&
             think_close.kind == EVAL_THINK_CLOSE_NONE) {
             think_close.kind = close_kind;
@@ -4791,6 +4879,7 @@ int main(int argc, char **argv) {
         .context_size = cfg.ctx_size,
         .model_path = cfg.model_path,
         .mtp_path = cfg.mtp_path,
+        .chat_template = cfg.chat_template,
         .backend = cfg.backend,
         .n_threads = cfg.threads,
         .mtp_draft_tokens = 1,

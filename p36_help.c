@@ -394,6 +394,9 @@ static void print_eval_specific(FILE *fp, const help_colors *c) {
     opt(fp, c, "--list-cases", "List selected cases without loading a model.");
     opt(fp, c, "--validate-cases", "Validate embedded case metadata and answers.");
     opt(fp, c, "--source NAME, --domain NAME, --case-id ID", "Filter the selected evaluation suite.");
+    opt(fp, c, "--presence-penalty F, --frequency-penalty F", "Penalize tokens already generated in the case, -2..2. Default: 0 (off).");
+    opt(fp, c, "--repeat-penalty F", "Multiplicative repeat penalty on generated tokens, 0.5..2.0. Default: 1 (off).");
+    opt(fp, c, "-sys, --system TEXT", "Replace the eval system prompt; an empty string sends none.");
     opt(fp, c, "--retry-incomplete", "Retry incomplete answers once with twice the output budget.");
     opt(fp, c, "-n, --tokens N", "Override per-case output budgets. Core default: 16000");
     opt(fp, c, "--questions N", "Run only the first N embedded questions.");
