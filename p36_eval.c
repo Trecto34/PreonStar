@@ -1409,8 +1409,11 @@ static uint32_t parse_suite(const char *s, const char *opt) {
     if (!strcmp(s, "hard")) return EVAL_SUITE_HARD;
     if (!strcmp(s, "all")) return EVAL_SUITE_CORE | EVAL_SUITE_HARD;
     if (!strcmp(s, "hard-smoke")) return EVAL_SUITE_HARD_SMOKE;
+    if (!strcmp(s, "lifeos")) return EVAL_SUITE_LIFEOS;
+    if (!strcmp(s, "multilingual")) return EVAL_SUITE_MULTILINGUAL;
     fprintf(stderr,
-            "p36-eval: invalid value for %s: %s (expected core, hard, all, or hard-smoke)\n",
+            "p36-eval: invalid value for %s: %s (expected core, hard, all, hard-smoke, "
+            "lifeos, or multilingual)\n",
             opt, s);
     exit(2);
 }
@@ -1420,6 +1423,8 @@ static const char *eval_suite_name(uint32_t mask) {
     if (mask == EVAL_SUITE_HARD) return "hard";
     if (mask == (EVAL_SUITE_CORE | EVAL_SUITE_HARD)) return "all";
     if (mask == EVAL_SUITE_HARD_SMOKE) return "hard-smoke";
+    if (mask == EVAL_SUITE_LIFEOS) return "lifeos";
+    if (mask == EVAL_SUITE_MULTILINGUAL) return "multilingual";
     return "custom";
 }
 
@@ -1447,15 +1452,11 @@ static eval_case *select_eval_cases(const eval_config *cfg, int *count_out) {
                 selected[count++] = eval_core_cases[i];
         }
     }
-    if (cfg->suite_mask & (EVAL_SUITE_HARD | EVAL_SUITE_HARD_SMOKE)) {
-        for (size_t i = 0; i < eval_hard_case_count; i++) {
-            const eval_case *tc = &eval_hard_cases[i];
-            if ((cfg->suite_mask & EVAL_SUITE_HARD_SMOKE) &&
-                !(cfg->suite_mask & EVAL_SUITE_HARD) &&
-                !(tc->suites & EVAL_SUITE_HARD_SMOKE))
-                continue;
-            if (eval_case_matches_filters(tc, cfg)) selected[count++] = *tc;
-        }
+    /* Every table case carries its suite bits (smoke cases also carry HARD). */
+    for (size_t i = 0; i < eval_hard_case_count; i++) {
+        const eval_case *tc = &eval_hard_cases[i];
+        if ((tc->suites & cfg->suite_mask) && eval_case_matches_filters(tc, cfg))
+            selected[count++] = *tc;
     }
 
     if (cfg->question_limit > count) {
@@ -4613,7 +4614,7 @@ static int validate_eval_cases(bool verbose) {
     const size_t core_count = eval_core_case_count();
     const size_t total = core_count + eval_hard_case_count;
     int errors = 0;
-    size_t smoke_count = 0;
+    size_t smoke_count = 0, hard_count = 0, lifeos_count = 0, multi_count = 0;
 
     for (size_t i = 0; i < total; i++) {
         bool hard = false;
@@ -4635,6 +4636,9 @@ static int validate_eval_cases(bool verbose) {
 #undef REQUIRE_CASE_FIELD
 
         if (hard && (tc->suites & EVAL_SUITE_HARD_SMOKE)) smoke_count++;
+        if (hard && (tc->suites & EVAL_SUITE_HARD)) hard_count++;
+        if (hard && (tc->suites & EVAL_SUITE_LIFEOS)) lifeos_count++;
+        if (hard && (tc->suites & EVAL_SUITE_MULTILINGUAL)) multi_count++;
         if (!tc->source || !tc->id || !tc->answer) continue;
         if (tc->answer_kind < EVAL_ANSWER_AUTO ||
             tc->answer_kind > EVAL_ANSWER_LINE_SET) {
@@ -4688,7 +4692,8 @@ static int validate_eval_cases(bool verbose) {
 
         if (hard) {
             if (tc->answer_kind == EVAL_ANSWER_AUTO ||
-                !(tc->suites & EVAL_SUITE_HARD) || tc->max_tokens == 0 ||
+                !(tc->suites & (EVAL_SUITE_HARD | EVAL_SUITE_LIFEOS |
+                                EVAL_SUITE_MULTILINGUAL)) || tc->max_tokens == 0 ||
                 !eval_source_is_declared(tc->source)) {
                 fprintf(stderr,
                         "p36-eval: hard case %s/%s lacks type, suite, budget, or source metadata\n",
@@ -4708,15 +4713,17 @@ static int validate_eval_cases(bool verbose) {
         }
     }
 
-    if (eval_hard_case_count != 50 || smoke_count != 12) {
+    if (hard_count != 50 || smoke_count != 12 || lifeos_count != 6 || multi_count != 16) {
         fprintf(stderr,
-                "p36-eval: hard suite shape changed: cases=%zu smoke=%zu (expected 50/12)\n",
-                eval_hard_case_count, smoke_count);
+                "p36-eval: suite shape changed: hard=%zu smoke=%zu lifeos=%zu "
+                "multilingual=%zu (expected 50/12/6/16)\n",
+                hard_count, smoke_count, lifeos_count, multi_count);
         errors++;
     }
     if (verbose || errors)
-        printf("p36-eval: validated %zu core and %zu hard cases (%zu hard-smoke): %s\n",
-               core_count, eval_hard_case_count, smoke_count,
+        printf("p36-eval: validated %zu core, %zu hard (%zu hard-smoke), %zu lifeos, "
+               "%zu multilingual cases: %s\n",
+               core_count, hard_count, smoke_count, lifeos_count, multi_count,
                errors ? "FAILED" : "ok");
     return errors ? 1 : 0;
 }

@@ -390,7 +390,7 @@ static void print_bench_specific(FILE *fp, const help_colors *c) {
 
 static void print_eval_specific(FILE *fp, const help_colors *c) {
     title(fp, c, "Evaluation");
-    opt(fp, c, "--suite core|hard|hard-smoke|all", "Select evaluation cases. Default: core.");
+    opt(fp, c, "--suite core|hard|hard-smoke|all|lifeos|multilingual", "Select evaluation cases. Default: core. all is core+hard.");
     opt(fp, c, "--list-cases", "List selected cases without loading a model.");
     opt(fp, c, "--validate-cases", "Validate embedded case metadata and answers.");
     opt(fp, c, "--source NAME, --domain NAME, --case-id ID", "Filter the selected evaluation suite.");

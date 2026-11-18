@@ -21,6 +21,8 @@ enum {
     EVAL_SUITE_CORE = 1u << 0,
     EVAL_SUITE_HARD = 1u << 1,
     EVAL_SUITE_HARD_SMOKE = 1u << 2,
+    EVAL_SUITE_LIFEOS = 1u << 3,
+    EVAL_SUITE_MULTILINGUAL = 1u << 4,
 };
 
 typedef struct {

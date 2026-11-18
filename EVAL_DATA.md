@@ -53,3 +53,26 @@ remains under the repository's top-level MIT license.
 The original 92-case `core` suite contains 25 GPQA Diamond, 25 SuperGPQA, 25
 AIME 2025, and 17 reduced defensive code-review cases. Its existing source IDs,
 ordering, prompts, and answer keys are unchanged by the hard-suite addition.
+
+## LifeOS suite
+
+`--suite lifeos` holds 6 original cases (MIT, written for p36) modelled on a
+personal-assistant workload: credit-card installments, a UTC cron seen across
+Europe/Lisbon DST changes, gym PR and progression rules, conflicting dated
+notes, facts the notes do not state, and picking tool calls from a request.
+The user, people, places, amounts and dates are fictional; no real assistant
+data is embedded. Each case has a single checkable answer and plants a
+distractor (a draft note, an assisted set, a closing-day purchase, a DST
+switch).
+
+## Multilingual suite
+
+`--suite multilingual` holds 16 cases from
+[MMLU-ProX](https://huggingface.co/datasets/li-lab/MMLU-ProX) (MIT, revision
+`8e6106a6c6ce1c5027e66cc338143cf997b2aa09`): the same 4 test questions in
+English, Portuguese, Chinese and Swahili, so a per-language gap is measured on
+identical content. Question IDs `8494` (math), `9212` (physics), `860` (law)
+and `11684` (engineering); none overlaps the MMLU-Pro IDs in the hard suite.
+Case IDs are `<lang>-<question_id>`, and `--domain <lang>` selects one
+language. Questions and the ten choices are unchanged; the final-answer
+instruction stays in English.

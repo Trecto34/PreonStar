@@ -1,6 +1,6 @@
 #include "p36_eval_cases.h"
 
-/* Curated hard cases. Source revisions and redistribution notes are recorded in
+/* Curated hard, LifeOS and multilingual cases. Source revisions and redistribution notes are recorded in
  * EVAL_DATA.md. Keep this table data-only; grading belongs in p36_eval.c. */
 
 const eval_source eval_hard_sources[] = {
@@ -8,6 +8,8 @@ const eval_source eval_hard_sources[] = {
     {"OlympiadBench", "https://huggingface.co/datasets/Hothan/OlympiadBench", "Apache-2.0"},
     {"LiveBench", "https://huggingface.co/datasets/livebench/reasoning", "Apache-2.0"},
     {"NIST Juliet", "https://samate.nist.gov/SARD/test-suites/112", "CC0-1.0"},
+    {"LifeOS", "EVAL_DATA.md", "MIT"},
+    {"MMLU-ProX", "https://huggingface.co/datasets/li-lab/MMLU-ProX", "MIT"},
 };
 
 const size_t eval_hard_source_count =
@@ -1111,6 +1113,717 @@ const eval_case eval_hard_cases[] = {
         .answer_kind = EVAL_ANSWER_LINE_SET,
         .suites = EVAL_SUITE_HARD,
         .max_tokens = 4096,
+    },
+    {
+        .source = "LifeOS",
+        .id = "lifeos-finance-card-bill-01",
+        .domain = "finance",
+        .title = "Credit card bill with installments",
+        .question = "Dana Okafor's assistant tracks one credit card with these rules:\n- The statement closes o"
+        "n the 5th of each month and the bill is due on the 12th of the same month.\n- A purchase m"
+        "ade on or before the closing day goes on that month's bill; a purchase made after the clos"
+        "ing day goes on the next month's bill.\n- An n-installment purchase is split evenly in eur"
+        "o cents; any leftover cents go to the first installment. Installment k lands on the bill k"
+        "-1 months after the first one.\n- A refund is credited in full on the first bill whose sta"
+        "tement closes on or after the refund date.\n- A monthly card fee of 4.50 is charged on eve"
+        "ry bill.\n\nCard activity:\n- 2026-10-03: laptop, 1234.57, 6 installments\n- 2026-11-05: h"
+        "eadphones, 74.30, 1 installment\n- 2026-11-06: sofa, 999.99, 3 installments\n- 2026-12-20:"
+        " gift, 136.00, 2 installments\n- 2026-12-28: refund for a returned jacket, 40.00\n\nWhat i"
+        "s the total of the bill due on 2027-01-12? Give a plain number in euros with two decimals "
+        "and no currency symbol.",
+        .answer = "571.59",
+        .alias[0] = "\342\202\254571.59",
+        .alias[1] = "571.59eur",
+        .alias[2] = "eur571.59",
+        .answer_kind = EVAL_ANSWER_EXACT_TEXT,
+        .suites = EVAL_SUITE_LIFEOS,
+        .max_tokens = 16384,
+    },
+    {
+        .source = "LifeOS",
+        .id = "lifeos-cron-dst-01",
+        .domain = "dates",
+        .title = "UTC cron seen from Lisbon across DST",
+        .question = "Dana lives in Lisbon (time zone Europe/Lisbon) and uses an assistant whose scheduler runs "
+        "in UTC. Her weekday reminder is the cron entry `30 6 * * 1-5`, interpreted in UTC.\n\nAt w"
+        "hat Lisbon local wall-clock times does the reminder fire on these three days, in this orde"
+        "r:\n1. Friday 2027-03-26\n2. Monday 2027-03-29\n3. Monday 2027-11-01\n\nWrite each time as"
+        " HH:MM in 24-hour format, separated by commas.",
+        .answer = "06:30, 07:30, 06:30",
+        .alias[0] = "6:30, 7:30, 6:30",
+        .answer_kind = EVAL_ANSWER_ORDERED_SEQUENCE,
+        .suites = EVAL_SUITE_LIFEOS,
+        .max_tokens = 16384,
+    },
+    {
+        .source = "LifeOS",
+        .id = "lifeos-gym-pr-progression-01",
+        .domain = "gym",
+        .title = "Bench press PR and next load",
+        .question = "Dana's gym assistant applies these rules to the barbell bench press:\n- Estimated one-rep "
+        "max (e1RM) uses the Epley formula: weight * (1 + reps / 30).\n- Only working sets count to"
+        "ward personal records. Dropset sets and spotter-assisted sets never count.\n- The current "
+        "PR date is the date the current best e1RM was first reached; tying it later does not move "
+        "the PR date.\n- Progression for the next session uses the last session's three working set"
+        "s at the top weight with a 6-8 rep target: if all three reached 8 reps, add 2.5 kg; if any"
+        " of them fell below 6 reps, reduce the weight by 5% and round to the nearest 1.25 kg; othe"
+        "rwise keep the weight.\n\nLog (weight kg x reps):\n- 2026-09-23: 65x8, 65x8, 65x8\n- 2026-"
+        "09-30: 67.5x8, 67.5x8, 67.5x8, dropset 50x12\n- 2026-10-07: 70x6, 70x6, 70x7\n- 2026-10-14"
+        ": 70x8, 70x7, 70x6, spotter-assisted 80x4\n- 2026-10-21: 70x8, 70x8, 70x8, dropset 60x15\n"
+        "\nGive the current PR date (YYYY-MM-DD) and the weight in kg for the next session, separat"
+        "ed by a comma.",
+        .answer = "2026-10-14, 72.5",
+        .alias[0] = "2026-10-14, 72.50",
+        .answer_kind = EVAL_ANSWER_ORDERED_SEQUENCE,
+        .suites = EVAL_SUITE_LIFEOS,
+        .max_tokens = 16384,
+    },
+    {
+        .source = "LifeOS",
+        .id = "lifeos-notes-conflict-01",
+        .domain = "grounding",
+        .title = "Conflicting notes about leg day",
+        .question = "Below are Dana's notes, oldest first. Notes marked \"draft\" were never approved and do no"
+        "t change the plan.\n\n- 2026-03-02: Leg day is Tuesday.\n- 2026-07-15 (draft): Thinking ab"
+        "out moving leg day to Wednesday.\n- 2026-10-01: Knee check booked for 2026-10-20.\n- 2026-"
+        "10-03: Physio: move leg day to Thursday, starting the week after the knee check.\n- 2026-1"
+        "0-10: Knee check moved earlier to 2026-10-13. It went fine.\n- 2026-10-17: The gym is clos"
+        "ed on Thursday 2026-10-22 for maintenance. In any week where the gym is closed on leg day,"
+        " train legs the day after instead.\n\nToday is Monday 2026-10-19. On which day this week s"
+        "hould Dana train legs?",
+        .choice[0] = "Monday",
+        .choice[1] = "Tuesday",
+        .choice[2] = "Wednesday",
+        .choice[3] = "Thursday",
+        .choice[4] = "Friday",
+        .choice[5] = "Saturday",
+        .answer = "E",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_LIFEOS,
+        .max_tokens = 16384,
+    },
+    {
+        .source = "LifeOS",
+        .id = "lifeos-notes-missing-fact-01",
+        .domain = "grounding",
+        .title = "Birthdays that the notes do and do not state",
+        .question = "Below are Dana's notes, oldest first. Use only these notes; do not guess.\n\n- 2026-02-11:"
+        " Mum's birthday is 3 September. Book the restaurant early.\n- 2026-04-02: Lena's birthday "
+        "is 14 May.\n- 2026-05-20: Correction: I had Lena's birthday wrong, it is 15 May. She laugh"
+        "ed about it.\n- 2026-06-18: Bought Tomas a book to bring to Lena's housewarming party on 2"
+        "0 June.\n- 2026-06-21: Tomas loved the book. He turns into a different person when he talk"
+        "s about birds.\n\nGive, in this order, the birthday of Lena, of Dana's mum, and of Tomas a"
+        "s MM-DD, separated by commas. For any birthday the notes do not state, write NOT_IN_NOTES "
+        "instead.",
+        .answer = "05-15, 09-03, NOT_IN_NOTES",
+        .answer_kind = EVAL_ANSWER_ORDERED_SEQUENCE,
+        .suites = EVAL_SUITE_LIFEOS,
+        .max_tokens = 16384,
+    },
+    {
+        .source = "LifeOS",
+        .id = "lifeos-tool-choice-01",
+        .domain = "tools",
+        .title = "Pick tools and arguments from a request",
+        .question = "An assistant has these tools:\n- set_timer(minutes, label): starts a focus countdown that "
+        "blocks notifications until it ends.\n- schedule_reminder(when, text): sends one reminder a"
+        "t a local date and time, `when` written as YYYY-MM-DDTHH:MM.\n- create_cron(expression, te"
+        "xt): creates a recurring reminder.\n- log_expense(amount, category): records money already"
+        " spent; amount is a plain number with two decimals.\n- save_note(text): saves a note for l"
+        "ater review.\n\nThe current local time is Saturday 2026-11-21 23:40. The user writes:\n\"R"
+        "emind me in 45 minutes to text Lena back, no focus timer please, I'm out. Oh and the taxi "
+        "here was 12.4, log it.\"\n\nList the tool calls the assistant should make, in the order th"
+        "e user asked for them. For each call give the tool name followed by only its first argumen"
+        "t (`when` for a reminder, `amount` for an expense); omit every other argument. Separate ev"
+        "ery item with a comma, for example: tool_a, arg, tool_b, arg",
+        .answer = "schedule_reminder, 2026-11-22T00:25, log_expense, 12.40",
+        .alias[0] = "schedule_reminder, 2026-11-22T00:25, log_expense, 12.4",
+        .answer_kind = EVAL_ANSWER_ORDERED_SEQUENCE,
+        .suites = EVAL_SUITE_LIFEOS,
+        .max_tokens = 16384,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "en-8494",
+        .domain = "en",
+        .title = "Math (en)",
+        .question = "The amount of rainfall per month in a certain city is approximately normally distributed, "
+        "with a mean of six inches and a standard deviation of 1.6 inches. Which of the following i"
+        "s the highest amount of rainfall, in inches, this city could have this month for the month"
+        " to be among the 10percent driest months the city has seen?",
+        .choice[0] = "3.5",
+        .choice[1] = "7.6",
+        .choice[2] = "8.05",
+        .choice[3] = "3.37",
+        .choice[4] = "2.3",
+        .choice[5] = "4.6",
+        .choice[6] = "5.2",
+        .choice[7] = "3.95",
+        .choice[8] = "6.1",
+        .choice[9] = "2.8",
+        .answer = "H",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "pt-8494",
+        .domain = "pt",
+        .title = "Math (pt)",
+        .question = "A quantidade de chuva por m\303\252s em uma determinada cidade tem distribui\303\247\303\243"
+        "o aproximadamente normal, com m\303\251dia de seis polegadas e desvio padr\303\243o de 1,6"
+        " polegadas. Qual das seguintes alternativas representa a maior quantidade de chuva, em pol"
+        "egadas, que esta cidade poderia ter neste m\303\252s para estar entre os 10% dos meses mai"
+        "s secos que a cidade j\303\241 viu?",
+        .choice[0] = "3,5",
+        .choice[1] = "7,6",
+        .choice[2] = "8,05",
+        .choice[3] = "3,37",
+        .choice[4] = "2,3",
+        .choice[5] = "4,6",
+        .choice[6] = "5,2",
+        .choice[7] = "3,95",
+        .choice[8] = "6,1",
+        .choice[9] = "2,8",
+        .answer = "H",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "zh-8494",
+        .domain = "zh",
+        .title = "Math (zh)",
+        .question = "\346\237\220\344\270\252\345\237\216\345\270\202\347\232\204\346\234\210\351\231\215\351\233"
+        "\250\351\207\217\350\277\221\344\274\274\345\221\210\346\255\243\346\200\201\345\210\206\345"
+        "\270\203\357\274\214\345\271\263\345\235\207\345\200\274\344\270\2726\350\213\261\345\257\270"
+        "\357\274\214\346\240\207\345\207\206\345\267\256\344\270\2721.6\350\213\261\345\257\270\343"
+        "\200\202\344\273\245\344\270\213\345\223\252\344\270\252\346\230\257\350\257\245\345\237\216"
+        "\345\270\202\346\234\254\346\234\210\345\217\257\350\203\275\345\207\272\347\216\260\347\232"
+        "\204\346\234\200\351\253\230\351\231\215\351\233\250\351\207\217\357\274\210\344\273\245\350"
+        "\213\261\345\257\270\350\256\241\357\274\211\357\274\214\344\275\277\345\276\227\350\277\231"
+        "\344\270\252\346\234\210\346\210\220\344\270\272\350\257\245\345\237\216\345\270\202\347\273"
+        "\217\345\216\206\350\277\207\347\232\204\346\234\200\345\271\262\347\207\245\347\232\20410"
+        "%\347\232\204\346\234\210\344\273\275\344\271\213\344\270\200\357\274\237",
+        .choice[0] = "3.5",
+        .choice[1] = "7.6",
+        .choice[2] = "8.05",
+        .choice[3] = "3.37",
+        .choice[4] = "2.3",
+        .choice[5] = "4.6",
+        .choice[6] = "5.2",
+        .choice[7] = "3.95",
+        .choice[8] = "6.1",
+        .choice[9] = "2.8",
+        .answer = "H",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "sw-8494",
+        .domain = "sw",
+        .title = "Math (sw)",
+        .question = "Kipi kati ya vifuatavyo ni kiwango cha juu zaidi cha mvua, kwa inchi, ambacho jiji hili li"
+        "naweza kuwa nacho mwezi huu ili mwezi huo uwe miongoni mwa miezi 10 ya asilimia ya ukame z"
+        "aidi ambayo jiji limewahi kuona?",
+        .choice[0] = "3.5",
+        .choice[1] = "7.6",
+        .choice[2] = "8.05",
+        .choice[3] = "3.37",
+        .choice[4] = "2.3",
+        .choice[5] = "4.6",
+        .choice[6] = "5.2",
+        .choice[7] = "3.95",
+        .choice[8] = "6.1",
+        .choice[9] = "2.8",
+        .answer = "H",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "en-9212",
+        .domain = "en",
+        .title = "Physics (en)",
+        .question = "A rocket has a length L = 600 m measured at rest on the earth. It moves directly away from"
+        " the earth at constant velocity, and a pulse of radar is sent from earth and reflected bac"
+        "k by devices at the nose and tail of the rocket. The reflected signal from the tail is det"
+        "ected on earth 200 sec after emission and the signal from the nose 17.4 \303\227 10^-6 sec"
+        " later. Calculate the distance of the rocket from the earth and the velocity of the rocket"
+        " with respect to the earth.",
+        .choice[0] = "R = 3.2 \303\227 10^10 m, v = 2.40 \303\227 10^8 m/sec",
+        .choice[1] = "R = 2 \303\227 10^10 m, v = 1.63 \303\227 10^8 m/sec",
+        .choice[2] = "R = 3.5 \303\227 10^10 m, v = 2.50 \303\227 10^8 m/sec",
+        .choice[3] = "R = 4.5 \303\227 10^10 m, v = 3.00 \303\227 10^8 m/sec",
+        .choice[4] = "R = 2.5 \303\227 10^10 m, v = 2.00 \303\227 10^8 m/sec",
+        .choice[5] = "R = 1.5 \303\227 10^10 m, v = 1.50 \303\227 10^8 m/sec",
+        .choice[6] = "R = 4 \303\227 10^10 m, v = 2.63 \303\227 10^8 m/sec",
+        .choice[7] = "R = 1 \303\227 10^10 m, v = 1.13 \303\227 10^8 m/sec",
+        .choice[8] = "R = 3 \303\227 10^10 m, v = 2.13 \303\227 10^8 m/sec",
+        .choice[9] = "R = 2.8 \303\227 10^10 m, v = 1.90 \303\227 10^8 m/sec",
+        .answer = "I",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "pt-9212",
+        .domain = "pt",
+        .title = "Physics (pt)",
+        .question = "Um foguete tem um comprimento L = 600 m medido em repouso na Terra. Ele se move diretament"
+        "e para longe da Terra com velocidade constante, e um pulso de radar \303\251 enviado da Te"
+        "rra e refletido de volta por dispositivos no nariz e na cauda do foguete. O sinal refletid"
+        "o da cauda \303\251 detectado na Terra 200 seg ap\303\263s a emiss\303\243o e o sinal do n"
+        "ariz 17,4 \303\227 10^-6 seg depois. Calcule a dist\303\242ncia do foguete at\303\251 a Te"
+        "rra e a velocidade do foguete em rela\303\247\303\243o \303\240 Terra.",
+        .choice[0] = "R = 3,2 \303\227 10^10 m, v = 2,40 \303\227 10^8 m/seg",
+        .choice[1] = "R = 2 \303\227 10^10 m, v = 1,63 \303\227 10^8 m/seg",
+        .choice[2] = "R = 3,5 \303\227 10^10 m, v = 2,50 \303\227 10^8 m/seg",
+        .choice[3] = "R = 4,5 \303\227 10^10 m, v = 3,00 \303\227 10^8 m/seg",
+        .choice[4] = "R = 2,5 \303\227 10^10 m, v = 2,00 \303\227 10^8 m/seg",
+        .choice[5] = "R = 1,5 \303\227 10^10 m, v = 1,50 \303\227 10^8 m/seg",
+        .choice[6] = "R = 4 \303\227 10^10 m, v = 2,63 \303\227 10^8 m/seg",
+        .choice[7] = "R = 1 \303\227 10^10 m, v = 1,13 \303\227 10^8 m/seg",
+        .choice[8] = "R = 3 \303\227 10^10 m, v = 2,13 \303\227 10^8 m/seg",
+        .choice[9] = "R = 2,8 \303\227 10^10 m, v = 1,90 \303\227 10^8 m/seg",
+        .answer = "I",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "zh-9212",
+        .domain = "zh",
+        .title = "Physics (zh)",
+        .question = "\344\270\200\346\236\232\347\201\253\347\256\255\345\234\250\345\234\260\347\220\203\344\270"
+        "\212\351\235\231\346\255\242\346\265\213\351\207\217\346\227\266\347\232\204\351\225\277\345"
+        "\272\246L\344\270\272600\347\261\263\343\200\202\345\256\203\344\273\245\346\201\222\345\256"
+        "\232\351\200\237\345\272\246\347\233\264\346\216\245\350\277\234\347\246\273\345\234\260\347"
+        "\220\203\357\274\214\344\273\216\345\234\260\347\220\203\345\217\221\345\207\272\344\270\200"
+        "\344\270\252\351\233\267\350\276\276\350\204\211\345\206\262\357\274\214\347\224\261\347\201"
+        "\253\347\256\255\345\244\264\351\203\250\345\222\214\345\260\276\351\203\250\347\232\204\350"
+        "\243\205\347\275\256\345\217\215\345\260\204\345\233\236\346\235\245\343\200\202\345\260\276"
+        "\351\203\250\345\217\215\345\260\204\347\232\204\344\277\241\345\217\267\345\234\250\345\217"
+        "\221\345\260\204\345\220\216200\347\247\222\350\242\253\345\234\260\347\220\203\346\216\242"
+        "\346\265\213\345\210\260\357\274\214\350\200\214\345\244\264\351\203\250\347\232\204\344\277"
+        "\241\345\217\267\345\234\25017.4\303\22710^-6\347\247\222\344\271\213\345\220\216\350\242\253"
+        "\346\216\242\346\265\213\345\210\260\343\200\202\350\256\241\347\256\227\347\201\253\347\256"
+        "\255\350\267\235\347\246\273\345\234\260\347\220\203\347\232\204\350\267\235\347\246\273\345"
+        "\222\214\347\201\253\347\256\255\347\233\270\345\257\271\344\272\216\345\234\260\347\220\203"
+        "\347\232\204\351\200\237\345\272\246\343\200\202",
+        .choice[0] = "R = 3.2\303\22710^10\347\261\263\357\274\214v = 2.40\303\22710^8\347\261\263/\347\247\222",
+        .choice[1] = "R = 2\303\22710^10\347\261\263\357\274\214v = 1.63\303\22710^8\347\261\263/\347\247\222",
+        .choice[2] = "R = 3.5\303\22710^10\347\261\263\357\274\214v = 2.50\303\22710^8\347\261\263/\347\247\222",
+        .choice[3] = "R = 4.5\303\22710^10\347\261\263\357\274\214v = 3.00\303\22710^8\347\261\263/\347\247\222",
+        .choice[4] = "R = 2.5\303\22710^10\347\261\263\357\274\214v = 2.00\303\22710^8\347\261\263/\347\247\222",
+        .choice[5] = "R = 1.5\303\22710^10\347\261\263\357\274\214v = 1.50\303\22710^8\347\261\263/\347\247\222",
+        .choice[6] = "R = 4\303\22710^10\347\261\263\357\274\214v = 2.63\303\22710^8\347\261\263/\347\247\222",
+        .choice[7] = "R = 1\303\22710^10\347\261\263\357\274\214v = 1.13\303\22710^8\347\261\263/\347\247\222",
+        .choice[8] = "R = 3\303\22710^10\347\261\263\357\274\214v = 2.13\303\22710^8\347\261\263/\347\247\222",
+        .choice[9] = "R = 2.8\303\22710^10\347\261\263\357\274\214v = 1.90\303\22710^8\347\261\263/\347\247\222",
+        .answer = "I",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "sw-9212",
+        .domain = "sw",
+        .title = "Physics (sw)",
+        .question = "Roketi ina urefu L = 600 m iliyopimwa ikiwa imetulia kwenye Dunia. Inasogea moja kwa moja "
+        "mbali na Dunia kwa kasi ya kudumu, na mpigo wa rada unatumwa kutoka Dunia na kurejeshwa na"
+        " vifaa vilivyoko kwenye pua na mkia wa roketi. Ishara iliyorejeshwa kutoka kwa mkia hugund"
+        "uliwa kwenye Dunia sekunde 200 baada ya kutumwa na ishara kutoka kwa pua sekunde 17.4 \303"
+        "\227 10^-6 baadaye. Hesabu umbali wa roketi kutoka Dunia na kasi ya roketi ikilinganishwa "
+        "na Dunia.",
+        .choice[0] = "R = 3.2 \303\227 10^10 m, v = 2.40 \303\227 10^8 m/sec",
+        .choice[1] = "R = 2 \303\227 10^10 m, v = 1.63 \303\227 10^8 m/sec",
+        .choice[2] = "R = 3.5 \303\227 10^10 m, v = 2.50 \303\227 10^8 m/sec",
+        .choice[3] = "R = 4.5 \303\227 10^10 m, v = 3.00 \303\227 10^8 m/sec",
+        .choice[4] = "R = 2.5 \303\227 10^10 m, v = 2.00 \303\227 10^8 m/sec",
+        .choice[5] = "R = 1.5 \303\227 10^10 m, v = 1.50 \303\227 10^8 m/sec",
+        .choice[6] = "R = 4 \303\227 10^10 m, v = 2.63 \303\227 10^8 m/sec",
+        .choice[7] = "R = 1 \303\227 10^10 m, v = 1.13 \303\227 10^8 m/sec",
+        .choice[8] = "R = 3 \303\227 10^10 m, v = 2.13 \303\227 10^8 m/sec",
+        .choice[9] = "R = 2.8 \303\227 10^10 m, v = 1.90 \303\227 10^8 m/sec",
+        .answer = "I",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "en-860",
+        .domain = "en",
+        .title = "Law (en)",
+        .question = "A federal grand jury was investigating a corporation whose tanker ship had spilled crude o"
+        "il into environmentally sensitive waters. The grand jury issued a subpoena requiring the c"
+        "orporation to produce all emails and internal documents regarding the corporation's knowle"
+        "dge of the risks of an oil spill. The corporation has objected, citing its Fifth Amendment"
+        " privilege against self-incrimination. Can the subpoena be enforced?",
+        .choice[0] = "Yes, because the Fifth Amendment privilege only applies to personal testimonies.",
+        .choice[1] = "Yes, because a corporation has no Fifth Amendment privilege.",
+        .choice[2] = "No, because the corporation was not granted use-and-derivative-use immunity.",
+        .choice[3] = "No, because the corporation was not granted transactional immunity.",
+        .choice[4] = "Yes, because the Fifth Amendment privilege does not apply to the compelled production of d"
+        "ocuments.",
+        .choice[5] = "No, because the documents are protected under attorney-client privilege.",
+        .choice[6] = "No, because a corporation has the same Fifth Amendment rights as an individual.",
+        .choice[7] = "No, because the subpoena violates the corporation's Fourth Amendment rights.",
+        .choice[8] = "Yes, because the documents are not self-incriminating.",
+        .choice[9] = "Yes, because the subpoena is part of a lawful investigation.",
+        .answer = "B",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "pt-860",
+        .domain = "pt",
+        .title = "Law (pt)",
+        .question = "Um grande j\303\272ri federal estava investigando uma empresa cujo navio-tanque havia derr"
+        "amado petr\303\263leo bruto em \303\241guas ambientalmente sens\303\255veis. O grande j\303"
+        "\272ri emitiu uma intima\303\247\303\243o exigindo que a empresa apresentasse todos os e-m"
+        "ails e documentos internos relacionados ao conhecimento da empresa sobre os riscos de um d"
+        "erramamento de petr\303\263leo. A empresa objetou, citando seu privil\303\251gio da Fifth "
+        "Amendment contra a autoincrimina\303\247\303\243o. A intima\303\247\303\243o pode ser exec"
+        "utada?",
+        .choice[0] = "Sim, porque o privil\303\251gio da Fifth Amendment se aplica apenas a testemunhos pessoais"
+        ".",
+        .choice[1] = "Sim, porque uma empresa n\303\243o possui privil\303\251gio da Fifth Amendment.",
+        .choice[2] = "N\303\243o, porque a empresa n\303\243o recebeu imunidade de uso e uso derivado.",
+        .choice[3] = "N\303\243o, porque a empresa n\303\243o recebeu imunidade transacional.",
+        .choice[4] = "Sim, porque o privil\303\251gio da Fifth Amendment n\303\243o se aplica \303\240 produ\303"
+        "\247\303\243o compuls\303\263ria de documentos.",
+        .choice[5] = "N\303\243o, porque os documentos est\303\243o protegidos pelo privil\303\251gio advogado-c"
+        "liente.",
+        .choice[6] = "N\303\243o, porque uma empresa tem os mesmos direitos da Fifth Amendment que um indiv\303\255"
+        "duo.",
+        .choice[7] = "N\303\243o, porque a intima\303\247\303\243o viola os direitos da Fourth Amendment da empr"
+        "esa.",
+        .choice[8] = "Sim, porque os documentos n\303\243o s\303\243o autoincriminat\303\263rios.",
+        .choice[9] = "Sim, porque a intima\303\247\303\243o faz parte de uma investiga\303\247\303\243o legal.",
+        .answer = "B",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "zh-860",
+        .domain = "zh",
+        .title = "Law (zh)",
+        .question = "\350\201\224\351\202\246\345\244\247\351\231\252\345\256\241\345\233\242\346\255\243\345\234"
+        "\250\350\260\203\346\237\245\344\270\200\345\256\266\345\205\254\345\217\270\357\274\214\350"
+        "\257\245\345\205\254\345\217\270\347\232\204\346\262\271\350\275\256\345\234\250\347\216\257"
+        "\345\242\203\346\225\217\346\204\237\346\260\264\345\237\237\346\263\204\346\274\217\344\272"
+        "\206\345\216\237\346\262\271\343\200\202\345\244\247\351\231\252\345\256\241\345\233\242\345"
+        "\217\221\345\207\272\344\274\240\347\245\250\357\274\214\350\246\201\346\261\202\350\257\245"
+        "\345\205\254\345\217\270\346\217\220\344\276\233\346\211\200\346\234\211\345\205\263\344\272"
+        "\216\345\205\254\345\217\270\345\257\271\347\237\263\346\262\271\346\263\204\346\274\217\351"
+        "\243\216\351\231\251\350\256\244\347\237\245\347\232\204\347\224\265\345\255\220\351\202\256"
+        "\344\273\266\345\222\214\345\206\205\351\203\250\346\226\207\344\273\266\343\200\202\350\257"
+        "\245\345\205\254\345\217\270\344\273\245\345\256\252\346\263\225\347\254\254\344\272\224\344"
+        "\277\256\346\255\243\346\241\210\350\247\204\345\256\232\347\232\204\345\205\215\344\272\216"
+        "\350\207\252\350\257\201\345\205\266\347\275\252\347\211\271\346\235\203\344\270\272\347\224"
+        "\261\346\217\220\345\207\272\345\274\202\350\256\256\343\200\202\350\277\231\344\273\275\344"
+        "\274\240\347\245\250\350\203\275\345\220\246\350\242\253\346\211\247\350\241\214\357\274\237",
+        .choice[0] = "\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\347\254\254\344\272\224\344\277"
+        "\256\346\255\243\346\241\210\347\211\271\346\235\203\344\273\205\351\200\202\347\224\250\344"
+        "\272\216\344\270\252\344\272\272\350\257\201\350\257\215",
+        .choice[1] = "\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\345\205\254\345\217\270\346\262"
+        "\241\346\234\211\347\254\254\344\272\224\344\277\256\346\255\243\346\241\210\347\211\271\346"
+        "\235\203",
+        .choice[2] = "\344\270\215\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\350\257\245\345\205"
+        "\254\345\217\270\346\234\252\350\242\253\346\216\210\344\272\210\344\275\277\347\224\250\345"
+        "\222\214\350\241\215\347\224\237\344\275\277\347\224\250\350\261\201\345\205\215\346\235\203",
+        .choice[3] = "\344\270\215\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\350\257\245\345\205"
+        "\254\345\217\270\346\234\252\350\242\253\346\216\210\344\272\210\344\272\244\346\230\223\350"
+        "\261\201\345\205\215\346\235\203",
+        .choice[4] = "\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\347\254\254\344\272\224\344\277"
+        "\256\346\255\243\346\241\210\347\211\271\346\235\203\344\270\215\351\200\202\347\224\250\344"
+        "\272\216\345\274\272\345\210\266\346\217\220\344\276\233\346\226\207\344\273\266",
+        .choice[5] = "\344\270\215\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\350\277\231\344\272"
+        "\233\346\226\207\344\273\266\345\217\227\345\276\213\345\270\210-\345\256\242\346\210\267\347"
+        "\211\271\346\235\203\344\277\235\346\212\244",
+        .choice[6] = "\344\270\215\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\345\205\254\345\217"
+        "\270\344\270\216\344\270\252\344\272\272\344\272\253\346\234\211\347\233\270\345\220\214\347"
+        "\232\204\347\254\254\344\272\224\344\277\256\346\255\243\346\241\210\346\235\203\345\210\251",
+        .choice[7] = "\344\270\215\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\344\274\240\347\245"
+        "\250\350\277\235\345\217\215\344\272\206\345\205\254\345\217\270\347\232\204\347\254\254\345"
+        "\233\233\344\277\256\346\255\243\346\241\210\346\235\203\345\210\251",
+        .choice[8] = "\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\350\277\231\344\272\233\346\226"
+        "\207\344\273\266\344\270\215\345\205\267\346\234\211\350\207\252\350\257\201\345\205\266\347"
+        "\275\252\346\200\247\350\264\250",
+        .choice[9] = "\345\217\257\344\273\245\357\274\214\345\233\240\344\270\272\344\274\240\347\245\250\346\230"
+        "\257\345\220\210\346\263\225\350\260\203\346\237\245\347\232\204\344\270\200\351\203\250\345"
+        "\210\206",
+        .answer = "B",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "sw-860",
+        .domain = "sw",
+        .title = "Law (sw)",
+        .question = "Jopo kuu la majaji wa shirikisho lilikuwa likichunguza shirika ambalo meli yake ya kubeba "
+        "mafuta ghafi ilimwaga mafuta ghafi katika maji yaliyo nyeti kwa mazingira. Jopo hilo lilit"
+        "oa hati ya wito wa mahakama likitaka shirika hilo kutoa barua pepe zote na nyaraka za ndan"
+        "i kuhusu maarifa ya shirika hilo juu ya hatari za kumwagika kwa mafuta. Shirika hilo limep"
+        "inga, likitaja haki yake ya Marekebisho ya Tano ya Katiba dhidi ya kujishitaki. Je, hati h"
+        "iyo ya wito wa mahakama inaweza kutekelezwa?",
+        .choice[0] = "Ndiyo, kwa sababu haki ya Marekebisho ya Tano ya Katiba inatumika tu kwa ushuhuda wa kibin"
+        "afsi.",
+        .choice[1] = "Ndiyo, kwa sababu shirika halina haki ya Marekebisho ya Tano ya Katiba.",
+        .choice[2] = "Hapana, kwa sababu shirika halikupewa kinga ya matumizi na matumizi ya kiambatanisho.",
+        .choice[3] = "Hapana, kwa sababu shirika halikupewa kinga ya miamala.",
+        .choice[4] = "Ndiyo, kwa sababu haki ya Marekebisho ya Tano ya Katiba haifai kwa utoaji wa nyaraka kwa l"
+        "azima.",
+        .choice[5] = "Hapana, kwa sababu nyaraka zinalindwa chini ya haki ya wakili na mteja.",
+        .choice[6] = "Hapana, kwa sababu shirika lina haki sawa za Marekebisho ya Tano ya Katiba kama mtu binafs"
+        "i.",
+        .choice[7] = "Hapana, kwa sababu hati ya wito wa mahakama inakiuka haki za Marekebisho ya Nne ya Katiba "
+        "za shirika.",
+        .choice[8] = "Ndiyo, kwa sababu nyaraka hizo hazijishitaki zenyewe.",
+        .choice[9] = "Ndiyo, kwa sababu hati ya wito wa mahakama ni sehemu ya uchunguzi halali.",
+        .answer = "B",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "en-11684",
+        .domain = "en",
+        .title = "Engineering (en)",
+        .question = "A 50 V pulse is incident on a 30 ohm load (Z_L = R_L) in a line with characteristic resist"
+        "ance of Z_0 = R_0 = 50 ohms. Find the following: a) Incident Current Pulse, b) Reflection "
+        "Coefficient, c) Reflected Voltage Pulse, d) Reflected Current Pulse, e) Net voltage and cu"
+        "rrent at the load.",
+        .choice[0] = "Incident Current Pulse: 1.5 Ampere, Reflection Coefficient: -0.3, Reflected Voltage Pulse:"
+        " -15V, Reflected Current Pulse: 0.3 Amperes, Net voltage at the load: 35V, Net current at "
+        "the load: 1.8 Amperes",
+        .choice[1] = "Incident Current Pulse: 0.6 Ampere, Reflection Coefficient: -0.5, Reflected Voltage Pulse:"
+        " -30V, Reflected Current Pulse: 0.3 Amperes, Net voltage at the load: 20V, Net current at "
+        "the load: 0.9 Amperes",
+        .choice[2] = "Incident Current Pulse: 0.75 Ampere, Reflection Coefficient: 0, Reflected Voltage Pulse: 0"
+        "V, Reflected Current Pulse: 0 Amperes, Net voltage at the load: 50V, Net current at the lo"
+        "ad: 0.75 Amperes",
+        .choice[3] = "Incident Current Pulse: 2 Amperes, Reflection Coefficient: -0.4, Reflected Voltage Pulse: "
+        "-20V, Reflected Current Pulse: 0.8 Amperes, Net voltage at the load: 30V, Net current at t"
+        "he load: 2.8 Amperes",
+        .choice[4] = "Incident Current Pulse: 0.5 Ampere, Reflection Coefficient: -0.1, Reflected Voltage Pulse:"
+        " -5V, Reflected Current Pulse: 0.1 Amperes, Net voltage at the load: 45V, Net current at t"
+        "he load: 0.6 Amperes",
+        .choice[5] = "Incident Current Pulse: 1 Ampere, Reflection Coefficient: 0.2, Reflected Voltage Pulse: 10"
+        "V, Reflected Current Pulse: -0.2 Amperes, Net voltage at the load: 40V, Net current at the"
+        " load: 1.2 Amperes",
+        .choice[6] = "Incident Current Pulse: 1.2 Ampere, Reflection Coefficient: -0.2, Reflected Voltage Pulse:"
+        " -6V, Reflected Current Pulse: 0.24 Amperes, Net voltage at the load: 44V, Net current at "
+        "the load: 1.44 Amperes",
+        .choice[7] = "Incident Current Pulse: 1 Ampere, Reflection Coefficient: 0.1, Reflected Voltage Pulse: 5V"
+        ", Reflected Current Pulse: -0.1 Amperes, Net voltage at the load: 55V, Net current at the "
+        "load: 0.9 Amperes",
+        .choice[8] = "Incident Current Pulse: 1 Ampere, Reflection Coefficient: -0.25, Reflected Voltage Pulse: "
+        "-12.5V, Reflected Current Pulse: 0.25 Amperes, Net voltage at the load: 37.5V, Net current"
+        " at the load: 1.25 Amperes",
+        .choice[9] = "Incident Current Pulse: 2 Ampere, Reflection Coefficient: -0.5, Reflected Voltage Pulse: -"
+        "10V, Reflected Current Pulse: 0.5 Amperes, Net voltage at the load: 40V, Net current at th"
+        "e load: 1.5 Amperes",
+        .answer = "I",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "pt-11684",
+        .domain = "pt",
+        .title = "Engineering (pt)",
+        .question = "Um pulso de 50 V incide sobre uma carga de 30 ohms (Z_L = R_L) em uma linha com resist\303"
+        "\252ncia caracter\303\255stica de Z_0 = R_0 = 50 ohms. Encontre o seguinte: a) Pulso de Co"
+        "rrente Incidente, b) Coeficiente de Reflex\303\243o, c) Pulso de Tens\303\243o Refletido, "
+        "d) Pulso de Corrente Refletido, e) Tens\303\243o e corrente resultantes na carga.",
+        .choice[0] = "Pulso de Corrente Incidente: 1,5 amperes, Coeficiente de Reflex\303\243o: -0,3, Pulso de T"
+        "ens\303\243o Refletido: -15V, Pulso de Corrente Refletido: 0,3 amperes, Tens\303\243o resu"
+        "ltante na carga: 35V, Corrente resultante na carga: 1,8 amperes",
+        .choice[1] = "Pulso de Corrente Incidente: 0,6 amperes, Coeficiente de Reflex\303\243o: -0,5, Pulso de T"
+        "ens\303\243o Refletido: -30V, Pulso de Corrente Refletido: 0,3 amperes, Tens\303\243o resu"
+        "ltante na carga: 20V, Corrente resultante na carga: 0,9 amperes",
+        .choice[2] = "Pulso de Corrente Incidente: 0,75 amperes, Coeficiente de Reflex\303\243o: 0, Pulso de Ten"
+        "s\303\243o Refletido: 0V, Pulso de Corrente Refletido: 0 amperes, Tens\303\243o resultante"
+        " na carga: 50V, Corrente resultante na carga: 0,75 amperes",
+        .choice[3] = "Pulso de Corrente Incidente: 2 amperes, Coeficiente de Reflex\303\243o: -0,4, Pulso de Ten"
+        "s\303\243o Refletido: -20V, Pulso de Corrente Refletido: 0,8 amperes, Tens\303\243o result"
+        "ante na carga: 30V, Corrente resultante na carga: 2,8 amperes",
+        .choice[4] = "Pulso de Corrente Incidente: 0,5 amperes, Coeficiente de Reflex\303\243o: -0,1, Pulso de T"
+        "ens\303\243o Refletido: -5V, Pulso de Corrente Refletido: 0,1 amperes, Tens\303\243o resul"
+        "tante na carga: 45V, Corrente resultante na carga: 0,6 amperes",
+        .choice[5] = "Pulso de Corrente Incidente: 1 amperes, Coeficiente de Reflex\303\243o: 0,2, Pulso de Tens"
+        "\303\243o Refletido: 10V, Pulso de Corrente Refletido: -0,2 amperes, Tens\303\243o resulta"
+        "nte na carga: 40V, Corrente resultante na carga: 1,2 amperes",
+        .choice[6] = "Pulso de Corrente Incidente: 1,2 amperes, Coeficiente de Reflex\303\243o: -0,2, Pulso de T"
+        "ens\303\243o Refletido: -6V, Pulso de Corrente Refletido: 0,24 amperes, Tens\303\243o resu"
+        "ltante na carga: 44V, Corrente resultante na carga: 1,44 amperes",
+        .choice[7] = "Pulso de Corrente Incidente: 1 amperes, Coeficiente de Reflex\303\243o: 0,1, Pulso de Tens"
+        "\303\243o Refletido: 5V, Pulso de Corrente Refletido: -0,1 amperes, Tens\303\243o resultan"
+        "te na carga: 55V, Corrente resultante na carga: 0,9 amperes",
+        .choice[8] = "Pulso de Corrente Incidente: 1 amperes, Coeficiente de Reflex\303\243o: -0,25, Pulso de Te"
+        "ns\303\243o Refletido: -12,5V, Pulso de Corrente Refletido: 0,25 amperes, Tens\303\243o re"
+        "sultante na carga: 37,5V, Corrente resultante na carga: 1,25 amperes",
+        .choice[9] = "Pulso de Corrente Incidente: 2 amperes, Coeficiente de Reflex\303\243o: -0,5, Pulso de Ten"
+        "s\303\243o Refletido: -10V, Pulso de Corrente Refletido: 0,5 amperes, Tens\303\243o result"
+        "ante na carga: 40V, Corrente resultante na carga: 1,5 amperes",
+        .answer = "I",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "zh-11684",
+        .domain = "zh",
+        .title = "Engineering (zh)",
+        .question = "\345\234\250\344\270\200\346\235\241\347\211\271\345\276\201\351\230\273\346\212\227\344\270"
+        "\272Z_0 = R_0 = 50\316\251\347\232\204\344\274\240\350\276\223\347\272\277\344\270\212\357"
+        "\274\214\344\270\200\344\270\25250V\347\232\204\350\204\211\345\206\262\345\205\245\345\260"
+        "\204\345\210\260\344\270\200\344\270\25230\316\251\347\232\204\350\264\237\350\275\275\357"
+        "\274\210Z_L = R_L\357\274\211\344\270\212\343\200\202\346\261\202\344\273\245\344\270\213\345"
+        "\220\204\351\241\271\357\274\232a\357\274\211\345\205\245\345\260\204\347\224\265\346\265\201"
+        "\350\204\211\345\206\262\357\274\214b\357\274\211\345\217\215\345\260\204\347\263\273\346\225"
+        "\260\357\274\214c\357\274\211\345\217\215\345\260\204\347\224\265\345\216\213\350\204\211\345"
+        "\206\262\357\274\214d\357\274\211\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211"
+        "\345\206\262\357\274\214e\357\274\211\350\264\237\350\275\275\345\244\204\347\232\204\345\207"
+        "\200\347\224\265\345\216\213\345\222\214\347\224\265\346\265\201\343\200\202",
+        .choice[0] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2321.5A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\232-0.3\357\274\214\345\217"
+        "\215\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\232-15V\357\274\214"
+        "\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320.3A\357"
+        "\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357\274\232"
+        "35V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265\201\357"
+        "\274\2321.8A",
+        .choice[1] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320.6A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\232-0.5\357\274\214\345\217"
+        "\215\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\232-30V\357\274\214"
+        "\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320.3A\357"
+        "\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357\274\232"
+        "20V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265\201\357"
+        "\274\2320.9A",
+        .choice[2] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320.75A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\2320\357\274\214\345\217\215"
+        "\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\2320V\357\274\214\345"
+        "\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320A\357\274"
+        "\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357\274\23250"
+        "V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265\201\357\274"
+        "\2320.75A",
+        .choice[3] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2322A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\232-0.4\357\274\214\345\217"
+        "\215\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\232-20V\357\274\214"
+        "\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320.8A\357"
+        "\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357\274\232"
+        "30V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265\201\357"
+        "\274\2322.8A",
+        .choice[4] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320.5A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\232-0.1\357\274\214\345\217"
+        "\215\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\232-5V\357\274\214"
+        "\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320.1A\357"
+        "\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357\274\232"
+        "45V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265\201\357"
+        "\274\2320.6A",
+        .choice[5] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2321A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\2320.2\357\274\214\345\217"
+        "\215\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\23210V\357\274\214"
+        "\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\232-0.2A\357"
+        "\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357\274\232"
+        "40V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265\201\357"
+        "\274\2321.2A",
+        .choice[6] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2321.2A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\232-0.2\357\274\214\345\217"
+        "\215\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\232-6V\357\274\214"
+        "\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320.24A\357"
+        "\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357\274\232"
+        "44V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265\201\357"
+        "\274\2321.44A",
+        .choice[7] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2321A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\2320.1\357\274\214\345\217"
+        "\215\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\2325V\357\274\214"
+        "\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\232-0.1A\357"
+        "\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357\274\232"
+        "55V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265\201\357"
+        "\274\2320.9A",
+        .choice[8] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2321A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\232-0.25\357\274\214\345\217"
+        "\215\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\232-12.5V\357\274"
+        "\214\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320."
+        "25A\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357"
+        "\274\23237.5V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265"
+        "\201\357\274\2321.25A",
+        .choice[9] = "\345\205\245\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2322A\357"
+        "\274\214\345\217\215\345\260\204\347\263\273\346\225\260\357\274\232-0.5\357\274\214\345\217"
+        "\215\345\260\204\347\224\265\345\216\213\350\204\211\345\206\262\357\274\232-10V\357\274\214"
+        "\345\217\215\345\260\204\347\224\265\346\265\201\350\204\211\345\206\262\357\274\2320.5A\357"
+        "\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\345\216\213\357\274\232"
+        "40V\357\274\214\350\264\237\350\275\275\345\244\204\345\207\200\347\224\265\346\265\201\357"
+        "\274\2321.5A",
+        .answer = "I",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
+    },
+    {
+        .source = "MMLU-ProX",
+        .id = "sw-11684",
+        .domain = "sw",
+        .title = "Engineering (sw)",
+        .question = "Pigo la voltage la 50 V linapita kwenye mzigo wa 30 \316\251 katika mstari wenye upinzani "
+        "wa tabia wa 50 \316\251. Tafuta yafuatayo: a) Mpigo wa Sasa ya Awali, b) Mgawo wa Uakisi, "
+        "c) Mpigo wa Voltage Uliorejelea, d) Mpigo wa Sasa Uliorejelea, e) Voltage na Sasa Jumla kw"
+        "enye Mzigo.",
+        .choice[0] = "Mpigo wa Sasa ya Awali: 1.5 A, Mgawo wa Uakisi: -0.3, Mpigo wa Voltage Uliorejelea: -15 V,"
+        " Mpigo wa Sasa Uliorejelea: 0.3 A, Voltage Jumla kwenye Mzigo: 35 V, Sasa Jumla kwenye Mzi"
+        "go: 1.8 A",
+        .choice[1] = "Mpigo wa Sasa ya Awali: 0.6 A, Mgawo wa Uakisi: -0.5, Mpigo wa Voltage Uliorejelea: -30 V,"
+        " Mpigo wa Sasa Uliorejelea: 0.3 A, Voltage Jumla kwenye Mzigo: 20 V, Sasa Jumla kwenye Mzi"
+        "go: 0.9 A",
+        .choice[2] = "Mpigo wa Sasa ya Awali: 0.75 A, Mgawo wa Uakisi: 0, Mpigo wa Voltage Uliorejelea: 0 V, Mpi"
+        "go wa Sasa Uliorejelea: 0 A, Voltage Jumla kwenye Mzigo: 50 V, Sasa Jumla kwenye Mzigo: 0."
+        "75 A",
+        .choice[3] = "Mpigo wa Sasa ya Awali: 2 A, Mgawo wa Uakisi: -0.4, Mpigo wa Voltage Uliorejelea: -20 V, M"
+        "pigo wa Sasa Uliorejelea: 0.8 A, Voltage Jumla kwenye Mzigo: 30 V, Sasa Jumla kwenye Mzigo"
+        ": 2.8 A",
+        .choice[4] = "Mpigo wa Sasa ya Awali: 0.5 A, Mgawo wa Uakisi: -0.1, Mpigo wa Voltage Uliorejelea: -5 V, "
+        "Mpigo wa Sasa Uliorejelea: 0.1 A, Voltage Jumla kwenye Mzigo: 45 V, Sasa Jumla kwenye Mzig"
+        "o: 0.6 A",
+        .choice[5] = "Mpigo wa Sasa ya Awali: 1 A, Mgawo wa Uakisi: 0.2, Mpigo wa Voltage Uliorejelea: 10 V, Mpi"
+        "go wa Sasa Uliorejelea: -0.2 A, Voltage Jumla kwenye Mzigo: 40 V, Sasa Jumla kwenye Mzigo:"
+        " 1.2 A",
+        .choice[6] = "Mpigo wa Sasa ya Awali: 1.2 A, Mgawo wa Uakisi: -0.2, Mpigo wa Voltage Uliorejelea: -6 V, "
+        "Mpigo wa Sasa Uliorejelea: 0.24 A, Voltage Jumla kwenye Mzigo: 44 V, Sasa Jumla kwenye Mzi"
+        "go: 1.44 A",
+        .choice[7] = "Mpigo wa Sasa ya Awali: 1 A, Mgawo wa Uakisi: 0.1, Mpigo wa Voltage Uliorejelea: 5 V, Mpig"
+        "o wa Sasa Uliorejelea: -0.1 A, Voltage Jumla kwenye Mzigo: 55 V, Sasa Jumla kwenye Mzigo: "
+        "0.9 A",
+        .choice[8] = "Mpigo wa Sasa ya Awali: 1 A, Mgawo wa Uakisi: -0.25, Mpigo wa Voltage Uliorejelea: -12.5 V"
+        ", Mpigo wa Sasa Uliorejelea: 0.25 A, Voltage Jumla kwenye Mzigo: 37.5 V, Sasa Jumla kwenye"
+        " Mzigo: 1.25 A",
+        .choice[9] = "Mpigo wa Sasa ya Awali: 2 A, Mgawo wa Uakisi: -0.5, Mpigo wa Voltage Uliorejelea: -10 V, M"
+        "pigo wa Sasa Uliorejelea: 0.5 A, Voltage Jumla kwenye Mzigo: 40 V, Sasa Jumla kwenye Mzigo"
+        ": 1.5 A",
+        .answer = "I",
+        .answer_kind = EVAL_ANSWER_CHOICE,
+        .suites = EVAL_SUITE_MULTILINGUAL,
+        .max_tokens = 8192,
     },
 };
 
