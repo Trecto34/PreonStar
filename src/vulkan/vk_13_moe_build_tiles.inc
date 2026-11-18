@@ -1624,6 +1624,17 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                 ok = p36_vk_run_unlocked("moe_q4k_gate_up", &p36_vk.moe_gate_up_q4k_f32b, qgb, &gpush, sizeof(gpush),
                                          mid_dim, wave_tile_count, 1);
             } else {
+                /* Identity decode, IQ2 gate/up: 4 rows of one pair per workgroup share the
+                 * IQ2_XXS grid fill and the lane's activations: kernel 1.247 -> 1.062
+                 * ms/token on Axion, bit-identical (2 rows 1.13).  P36_VK_MOE_GU_ROWS=1
+                 * restores one row per workgroup. */
+                static int gu_rows_env = -1;
+                if (gu_rows_env < 0) {
+                    const char *e = getenv("P36_VK_MOE_GU_ROWS");
+                    gu_rows_env = e && e[0] == '1' ? 1 : 4;
+                }
+                const uint32_t gu_rows = !gemm && identity && (gu_iq2s_iq2xxs || gu_iq2s) &&
+                                         (mid_dim % (uint32_t)gu_rows_env) == 0u ? (uint32_t)gu_rows_env : 1u;
                 ok = gemm ? p36_vk_run_unlocked(gu_q3k ? "moe_q3k_gate_up_gemm" :
                                                 gu_iq3xxs ? "moe_iq3xxs_gate_up_gemm" :
                                                 (gu_iq2s_iq2xxs ? "moe_iq2s_iq2xxs_gate_up_gemm" :
@@ -1645,12 +1656,14 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                                          : (gu_iq2s ? "moe_iq2s_gate_up_f32b" : "moe_iq2_gate_up"),
                                                 identity ? (gu_q3k ? &p36_vk.moe_gate_up_decode_q3k :
                                                             gu_iq3xxs ? &p36_vk.moe_gate_up_decode_iq3xxs :
-                                                            (gu_iq2s_iq2xxs ? &p36_vk.moe_gate_up_decode_iq2s_iq2xxs :
-                                                             (gu_iq2s ? &p36_vk.moe_gate_up_decode_iq2s
+                                                            (gu_iq2s_iq2xxs ? (gu_rows == 4u ? &p36_vk.moe_gate_up_decode_iq2s_iq2xxs_r4
+                                                                                             : &p36_vk.moe_gate_up_decode_iq2s_iq2xxs) :
+                                                             (gu_iq2s ? (gu_rows == 4u ? &p36_vk.moe_gate_up_decode_iq2s_r4
+                                                                                       : &p36_vk.moe_gate_up_decode_iq2s)
                                                                       : &p36_vk.moe_gate_up_decode)))
                                                          : (gu_iq2s ? &p36_vk.moe_gate_up_f32b_iq2s
                                                                      : &p36_vk.moe_gate_up_f32b),
-                                                gb, &gpush, sizeof(gpush), mid_dim, wave_tile_count, 1);
+                                                gb, &gpush, sizeof(gpush), mid_dim / gu_rows, wave_tile_count, 1);
             }
         }
         if (ok) {

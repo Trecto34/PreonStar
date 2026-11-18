@@ -36,4 +36,4 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 - [x] IQ3_XXS MoE down sum-decode on the gate/up lane map (+4.70% MoE decode, reordered sums, NLL-checked)
 - [ ] Same lane map for the Q3_K / IQ2_S / IQ3_S down builds
 - [x] IQ3_XXS MoE down sum-decode, 4 rows per workgroup sharing activations (+4.20% MoE decode, bit-identical)
-- [ ] Activation sharing for the IQ3_XXS / IQ2_S gate-up decode kernels
+- [x] Activation sharing for the IQ2_S / IQ2_S+IQ2_XXS gate-up decode kernels (+1.76% MoE decode, bit-identical)

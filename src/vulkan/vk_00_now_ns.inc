@@ -238,9 +238,11 @@ typedef struct {
     p36_vk_kernel moe_gate_up_f32b_iq2s;
     p36_vk_kernel moe_gate_up_decode;
     p36_vk_kernel moe_gate_up_decode_iq2s;
+    p36_vk_kernel moe_gate_up_decode_iq2s_r4;
     p36_vk_kernel moe_gate_up_decode_iq3xxs;
     p36_vk_kernel moe_gate_up_decode_q3k;
     p36_vk_kernel moe_gate_up_decode_iq2s_iq2xxs;
+    p36_vk_kernel moe_gate_up_decode_iq2s_iq2xxs_r4;
     p36_vk_kernel moe_down_q2k_f32b;
     p36_vk_kernel moe_down_q2k_f32b_iq2s;
     p36_vk_kernel moe_down_q2k_sum_decode;

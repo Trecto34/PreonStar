@@ -4255,3 +4255,34 @@ output row of a slot. Evidence: `evidence/raw/moe-down-r2-20261117/`.
 * reconsider_if: the same activation sharing for the IQ3_XXS gate/up decode
   (its activations are shared by all 512 rows of an expert), and for the Q4_K
   trunk decode if a row-sharing form can keep its occupancy.
+
+## 2026-11-17 IQ2 MoE gate/up decode, 4 rows per workgroup — ACCEPTED, +1.76% MoE decode, bit-identical
+
+The down-kernel row sharing (`830850c`) applied to the gate/up decode kernels.
+All six local MoE files use IQ2_S/IQ2_XXS gate/up on 22 layers and IQ2_S/IQ2_S
+on 14 (IQ3_XXS on 4), together ~11% of Axion decode GPU time. Each
+(row, pair) workgroup filled the 512-word IQ2_XXS grid into LDS (+ barrier)
+and loaded the lane's 16 activations per block, both identical for all 512
+rows of an expert. Evidence: `evidence/raw/moe-gu-rows-20261117/`.
+
+* **Change.** `-DP36_GU_ROWS=N` entry of `moe_gate_up_decode.comp` for the
+  IQ2_S and IQ2_S/IQ2_XXS builds: N rows of one pair per workgroup, grid fill
+  once (mixed build only; the IQ2_S path never reads it), activations loaded
+  once per block as `a[4]`, per-row loop is the 1-row main's body with `a[]`
+  in place of `xv[]`, so outputs are **bit-identical**. Host launches
+  `mid_dim / N` (identity decode only, never the GEMM). Default N = 4;
+  `P36_VK_MOE_GU_ROWS=1` restores one row. Other five builds byte-identical.
+* **Kernel** (IQ2 gate/up ms/token, 63-token windows, 2 runs each, md5
+  `2279363d` every run): 1 row 1.247 / 1.247, 2 rows 1.128 / 1.132,
+  **4 rows 1.061 / 1.063 (-14.8%)**; token span 12.07 -> 11.88. 4 rows = 64
+  VGPRs / 16 subgroups per SIMD (was 44/22 and 56/18). 2-row builds not kept.
+* **A/B** (`bench_ab.sh`, same binary, ctx 1024, gen 64, 3 interleaved reps):
+  Axion decode **96.29 -> 97.98 t/s (+1.76%**, clean separation 97.40 >
+  96.46). Prefill read -5.07% with overlapping reps (B 647 > A 614): no
+  mechanism (the entry is reached only by identity decode batches; prefill
+  pipelines are unchanged), and the three previous decode-only A/Bs read
+  +1.6 / -2.0 / -3.2% on prefill, so recorded as noise.
+* **Parity:** greedy md5 1 vs 4 rows identical on Axion and Qwen3.6
+  (`908fbd7d`); `--vulkan-kernels` OK.
+* reconsider_if: the IQ3_XXS gate/up (4 layers) and Q3_K paths, or N=8 if a
+  later register cut brings 8 rows under 64 VGPRs.
