@@ -4224,3 +4224,34 @@ lanes per block, 1 row per workgroup, rows of >= 8 blocks). Patch kept as
   The Q4_K decode limit is not memory instructions per weight.
 * reconsider_if: a Q4_K layout with pre-unpacked scales (no `k4_scale_min` per
   lane) or q8 activations staged once per workgroup in LDS.
+
+## 2026-11-17 IQ3_XXS MoE down sum-decode, 4 rows per workgroup sharing activations — ACCEPTED, +4.20% MoE decode, bit-identical
+
+Follow-up to the lane-map entry above (`3ade95c`). In that kernel half of a
+lane's loads per block (4 of ~8, the `vec4` activations) are the same for every
+output row of a slot. Evidence: `evidence/raw/moe-down-r2-20261117/`.
+
+* **Change.** `-DP36_DOWN_ROWS=N` entry of `moe_down_q2k_sum_decode.comp` (needs
+  `P36_MOE_IQ3XXS4`): a workgroup computes N consecutive rows of one routed
+  slot, loads the lane's 4 activation `vec4`s once per block and runs each
+  row's weights through the unchanged per-lane loop into `acc[r]`; one
+  `subgroupAdd` + partial store per row. Per-row lane weights and fma order
+  are those of the 1-row build, so partials are **bit-identical** to it.
+  Host launches `out_dim / N` workgroups. Default N = 4;
+  `P36_VK_MOE_DOWN_ROWS=1` restores the 1-row build.
+* **Row sweep** (Axion kernel ms/token, 63-token windows, 2 runs each; md5
+  `2279363d` in every run): 1 row 1.040 / 1.047, 2 rows 0.734 / 0.730,
+  **4 rows 0.638 / 0.638**, 8 rows 0.701 / 0.696. 4 rows = 64 VGPRs, 16
+  subgroups/SIMD (1 and 2 rows: 48 / 20); 8 rows loses the occupancy without
+  more reuse. 2- and 8-row builds not kept.
+* **A/B** (`bench_ab.sh`, same binary, ctx 1024, gen 64, 3 interleaved reps):
+  Axion decode **92.52 -> 96.41 t/s (+4.20%**, clean separation 95.99 >
+  93.18); prefill -3.22% is noise (decode-only kernel, A rep at 642).
+* **Parity:** greedy md5 1 vs 4 rows identical on Axion (`2279363d`) and
+  Qwen3.6-35B-A3B (`908fbd7d`); `--vulkan-kernels` OK. The MTP verify path runs
+  the same per-slot code (grid y = n_tok x n_used), not run end to end (memory
+  limit, see the previous entry).
+* Session total on Axion decode: ~83.0 (start) -> 96.4 t/s.
+* reconsider_if: the same activation sharing for the IQ3_XXS gate/up decode
+  (its activations are shared by all 512 rows of an expert), and for the Q4_K
+  trunk decode if a row-sharing form can keep its occupancy.

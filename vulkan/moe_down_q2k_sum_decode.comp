@@ -72,6 +72,58 @@ const uint TAB_IQ3S_GRID = 2592u;
 #endif
 
 
+#ifdef P36_DOWN_ROWS
+/* IQ3_XXS4 with P36_DOWN_ROWS output rows of the same routed slot per workgroup: the
+ * lane's 16 activations (half of its loads) are read once per block and
+ * reused for every row.  Each row keeps the 1-row build's per-lane weights and
+ * fma order, so the partials are bit-identical to it.  Host launches
+ * out_dim / P36_DOWN_ROWS workgroups (out_dim a multiple of it). */
+const uint DR = P36_DOWN_ROWS;
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint itid = tid & 15u;
+    uint ix = tid >> 4u;
+    uint row0 = gl_WorkGroupID.x * DR;
+    uint slot = gl_WorkGroupID.y;
+    uint expert = selected[slot];
+    uint row_bytes = pc.blocks * IQ3XXS_BYTES;
+    uint m4 = slot * pc.in_dim / 4u;
+    uint g32 = itid >> 1u;
+    uint half16 = itid & 1u;
+    float acc[DR];
+    [[unroll]] for (uint r = 0u; r < DR; r++) acc[r] = 0.0;
+    for (uint i = ix; i < pc.blocks; i += 2u) {
+        uint y4 = m4 + ((i * 256u + 16u * itid) >> 2u);
+        vec4 a[4] = vec4[4](mid4[y4], mid4[y4 + 1u], mid4[y4 + 2u], mid4[y4 + 3u]);
+        [[unroll]] for (uint r = 0u; r < DR; r++) {
+            uint bb = (expert * pc.out_dim + row0 + r) * row_bytes + i * IQ3XXS_BYTES;
+            uint aux = wb_u32(bb + 66u + 4u * g32);
+            float wsc = unpackHalf2x16(uint(wb[bb >> 1u])).x * 0.25 * float(2u * (aux >> 28u) + 1u);
+            uint eo = (bb + 2u + 8u * g32 + 4u * half16) >> 1u;
+            uint ent = uint(wb[eo]) | (uint(wb[eo + 1u]) << 16u);
+            [[unroll]] for (uint h = 0u; h < 2u; h++) {
+                uint si = (aux >> (7u * (2u * half16 + h))) & 127u;
+                uint sign = (tables[TAB_KSIGNS + (si >> 2u)] >> (8u * (si & 3u))) & 255u;
+                [[unroll]] for (uint e = 0u; e < 2u; e++) {
+                    uint l = 2u * h + e;
+                    vec4 gv = vec4(unpack8(tables[TAB_IQ3XXS_GRID + ((ent >> (8u * l)) & 255u)]));
+                    uint ss = 4u * e;
+                    gv = mix(gv, -gv, bvec4(((sign >> (ss + 0u)) & 1u) != 0u,
+                                            ((sign >> (ss + 1u)) & 1u) != 0u,
+                                            ((sign >> (ss + 2u)) & 1u) != 0u,
+                                            ((sign >> (ss + 3u)) & 1u) != 0u));
+                    acc[r] = fma(wsc, dot(gv, a[l]), acc[r]);
+                }
+            }
+        }
+    }
+    float sc = pc.has_scales != 0u ? scales[expert] : 1.0;
+    [[unroll]] for (uint r = 0u; r < DR; r++) {
+        float total = subgroupAdd(acc[r]);
+        if (tid == 0u) y[slot * pc.out_dim + row0 + r] = total * sc;
+    }
+}
+#else
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
     uint row = gl_WorkGroupID.x;
@@ -322,3 +374,4 @@ void main(void) {
         }
     }
 }
+#endif

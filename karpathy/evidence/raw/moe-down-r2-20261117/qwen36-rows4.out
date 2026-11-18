@@ -1,0 +1,13 @@
+Here's a C function that reverses a singly linked list:
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+// Definition of a singly linked list node
+struct Node {
+    int data;
+    struct Node* next;
+};
+
+// Function to reverse a singly linked list

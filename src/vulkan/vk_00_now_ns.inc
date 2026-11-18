@@ -248,6 +248,7 @@ typedef struct {
     p36_vk_kernel moe_down_q2k_sum_decode_iq3s;
     p36_vk_kernel moe_down_q2k_sum_decode_iq3xxs;
     p36_vk_kernel moe_down_q2k_sum_decode_iq3xxs4;
+    p36_vk_kernel moe_down_q2k_sum_decode_iq3xxs4r4;
     p36_vk_kernel moe_down_q2k_sum_decode_q3k;
     p36_vk_kernel moe_gate_up_q4k_f32b;
     p36_vk_kernel moe_down_q4k_sum_decode;

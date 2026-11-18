@@ -348,6 +348,7 @@ int p36_gpu_init(void) {
     p36_vk.moe_down_q2k_sum_decode_iq3s = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq3s.spv", 7, 24, 1u << 5);
     p36_vk.moe_down_q2k_sum_decode_iq3xxs = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq3xxs.spv", 7, 24, 1u << 5);
     p36_vk.moe_down_q2k_sum_decode_iq3xxs4 = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq3xxs4.spv", 7, 24, 1u << 5);
+    p36_vk.moe_down_q2k_sum_decode_iq3xxs4r4 = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_iq3xxs4r4.spv", 7, 24, 1u << 5);
     p36_vk.moe_down_q2k_sum_decode_q3k = P36_VK_KERNEL("vulkan/moe_down_q2k_sum_decode_q3k.spv", 6, 24, 1u << 5);
     p36_vk.moe_gate_up_q4k_f32b = P36_VK_KERNEL("vulkan/moe_gate_up_q4k_f32b.spv", 7, 24, 1u << 6);
     p36_vk.moe_down_q4k_sum_decode = P36_VK_KERNEL("vulkan/moe_down_q4k_sum_decode.spv", 6, 24, 1u << 5);
