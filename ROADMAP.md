@@ -35,8 +35,25 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 - [x] Q4_K decode at 1 row per workgroup (+1.37% MoE decode, bit-identical; dense neutral)
 - [x] IQ3_XXS MoE down sum-decode on the gate/up lane map (+4.70% MoE decode, reordered sums, NLL-checked)
 - [x] Q3_K down: bytes preloaded + 4 rows per workgroup instead of the lane map (-60% kernel, +0.72% MoE decode, bit-identical)
-- [ ] Same lane map for the IQ2_S / IQ3_S down builds; preloaded bytes for the Q3_K gate/up decode
 - [x] IQ3_XXS MoE down sum-decode, 4 rows per workgroup sharing activations (+4.20% MoE decode, bit-identical)
 - [x] Activation sharing for the IQ2_S / IQ2_S+IQ2_XXS gate-up decode kernels (+1.76% MoE decode, bit-identical)
 - [x] `add_rms_norm_q8_k` fp64 divisions on one wave (-30% kernel, +0.78% MoE decode, bit-identical)
 - [x] Same fp64 hoist in the other small decode kernels — **closed**, no second case (route_reduce is latency, not fp64: 64-thread groups 0%, native fma -7% kernel)
+
+### Next decode items and their gates
+
+Every item: a kernel-level win in a 63-token `P36_VK_PROF_KERNEL` window (2 runs
+per arm, same binary or `P36_SHADER_DIR`), then `bench_ab.sh` 3 interleaved reps
+(ctx 1024, gen 64) with clean decode separation; stop and reject on a >5% first
+pair. **Bit-identical** items need byte-identical `--dump-logprobs` vs HEAD on
+Axion + one more NanoPlus file; `5008064` and `582e1ff` were kept on kernel win +
+clean separation with the decode median under 1.25% (**owner to confirm** that
+as the bit-identical gate). **Reordered-sum** items also need the frontier NLL
+check (`3ade95c` protocol) and the 1.25% median. No LFM2 runs; 14 GB MiniPlus
+files only with memory headroom.
+
+- [ ] Fuse `moe_down_route_reduce` into `ffn_tail` — 40 dispatches/token, est. ~100 us/token. Gate: bit-identical (`ffn_tail`'s fma on the same float, now in a register); Axion + Qwen3.6.
+- [ ] IQ3_XXS gate/up decode, 4 rows per workgroup — 4 layers on every NanoPlus file, 175 us/token at ~148 GB/s, est. −15% kernel. Gate: bit-identical; kernel win only (≈0.2% decode is below A/B resolution).
+- [ ] Q3_K gate/up decode, preloaded bytes as `582e1ff` — 20 layers on MiniPlus, 8 on LFM2.5. Gate: bit-identical. **Blocked:** no runnable test model (LFM2 off-limits, MiniPlus has no memory headroom); needs an owner call.
+- [ ] IQ2_S / IQ3_S down (Qwen3.8-IQ2_M: 37 / 3 layers) — preloaded bytes first (bit-identical gate); the lane map only if that falls short (NLL gate).
+- [ ] Q4_K trunk decode — 28% of decode GPU at ~230 GB/s (Q8_0 trunk: ~355). Pre-unpacked scales or q8 activations staged in LDS (ledger `reconsider_if`). Gate: bit-identical if the per-lane fma order survives, else NLL + 1.25% median; dense 27B neutral or better.
