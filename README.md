@@ -213,7 +213,10 @@ calls.
   20.4k-token server prompt 709 -> 811 t/s end to end) for ~+125 MiB scratch.
   Measured 2026-11-17 to 32k (`p36-bench`) and 20.4k (`p36-server` with
   `--kv-disk-dir`) with no failure; the RADV 64 MB scratch-buffer failure
-  earlier builds hit at 1024 no longer reproduces. Dense (GQA 6) models stay
+  earlier builds hit at 1024 no longer reproduces. Builds before the
+  2026-11-17 scratch-pool fix decoded ~23% slower after a multi-chunk prefill
+  at 1024 (Axion 76 vs 99 t/s); rebuild before switching a server to 1024.
+  Dense (GQA 6) models stay
   clamped to 256 on this board: 512 measured +3% prefill for +93 MiB scratch.
 - Chunk 512 was validated earlier to **22,361 live context tokens** under an
   agentic workload; a 31k-token agentic session (15.5k prefill + 15.5k decode)

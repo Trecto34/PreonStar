@@ -101,6 +101,30 @@ static p36_gpu_tensor *p36_vk_tensor_alloc_scratch_unlocked(uint64_t bytes) {
         if (p36_gpu_live_bytes > p36_gpu_peak_bytes) p36_gpu_peak_bytes = p36_gpu_live_bytes;
         return tensor;
     }
+    /* Idle pooled buffers still count against the private limit.  A
+     * 1024-token prefill chunk leaves the pool holding chunk-sized buffers
+     * that decode never matches; without this eviction every decode scratch
+     * request fell back to a fresh, zero-filled host-cached allocation (~87
+     * per token on Axion) whose snooped writes also slowed each barrier:
+     * decode 99 -> 76 t/s after a chunk-1024 prefill.  Evict largest first
+     * (keeps the small hot decode buffers), only when that can make room, and
+     * for the driver-rounded size the allocation will be charged. */
+    uint64_t need = p36_round_up_u64(alloc_bytes, 4096);
+    uint64_t pooled = 0;
+    for (uint32_t i = 0; i < p36_vk_private_pool_n; i++)
+        pooled += p36_vk_private_pool[i]->private_charge;
+    if (need <= P36_VK_PRIVATE_LIMIT &&
+        p36_vk_private_bytes - pooled <= P36_VK_PRIVATE_LIMIT - need) {
+        while (p36_vk_private_pool_n && p36_vk_private_bytes > P36_VK_PRIVATE_LIMIT - need) {
+            uint32_t big = 0;
+            for (uint32_t i = 1; i < p36_vk_private_pool_n; i++)
+                if (p36_vk_private_pool[i]->private_charge > p36_vk_private_pool[big]->private_charge)
+                    big = i;
+            p36_gpu_tensor *victim = p36_vk_private_pool[big];
+            p36_vk_private_pool[big] = p36_vk_private_pool[--p36_vk_private_pool_n];
+            p36_vk_tensor_free_unlocked(victim);
+        }
+    }
     if (p36_vk_private_bytes <= P36_VK_PRIVATE_LIMIT &&
         alloc_bytes <= P36_VK_PRIVATE_LIMIT - p36_vk_private_bytes) {
         p36_gpu_tensor *tensor = p36_vk_tensor_alloc_dl_unlocked(bytes);

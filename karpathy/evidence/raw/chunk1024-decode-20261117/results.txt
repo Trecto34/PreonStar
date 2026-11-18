@@ -1,0 +1,19 @@
+# CLI: Axion, 3.3k-token prompt (p3k = 'Continue this story in detail.' + 15000 chars of tests/long_context_story_prompt.txt), -n 128 --ctx 8192 --nothink --temp 0
+## before fix
+cli3k-512: prefill: 820.43 t/s, generation: 99.64 t/s
+cli3k-1024: prefill: 908.63 t/s, generation: 75.96 t/s
+## allocations per run (temporary log), before: chunk 512 = 109, chunk 1024 = 3089 (-n 32), 392 at -n 1
+## after fix
+fix2-512: prefill: 791.65 t/s, generation: 99.90 t/s allocs=109 md5=1b371fec
+fix2-1024: prefill: 952.70 t/s, generation: 99.24 t/s allocs=127 md5=1b371fec
+## Qwen3.6 default chunk (1024), old -> new: generation: 74.60 t/s -> generation: 96.54 t/s
+## dense 27B (chunk 256): generation: 23.20 t/s -> generation: 23.17 t/s, md5 equal
+## logprobs chunk 1024 old vs new: 30cff407 30cff407
+## server LifeOS profile (srv-*.log): A=chunk 512, B=1024 before fix, Bfix=1024 after
+A.log    prefill 3344 tok avg 757.5 t/s | decode 103 tok avg 92.47 t/s
+A.log    prefill 3344 tok avg 855.7 t/s | decode 128 tok avg 94.26 t/s
+B.log    prefill 3344 tok avg 780.6 t/s | decode 128 tok avg 71.37 t/s
+B.log    prefill 3344 tok avg 919.9 t/s | decode 128 tok avg 70.43 t/s
+Bfix.log prefill 3345 tok avg 889.0 t/s | decode 128 tok avg 92.96 t/s
+Bfix.log prefill 3345 tok avg 995.0 t/s | decode 128 tok avg 94.55 t/s
+## note: the server Bfix run used the first version of the fix (LIFO eviction); the committed version (largest-first, skip when it cannot make room, 4 KiB-rounded need) is the fix2-* CLI rows

@@ -38,6 +38,7 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 - [x] IQ3_XXS MoE down sum-decode, 4 rows per workgroup sharing activations (+4.20% MoE decode, bit-identical)
 - [x] Activation sharing for the IQ2_S / IQ2_S+IQ2_XXS gate-up decode kernels (+1.76% MoE decode, bit-identical)
 - [x] `add_rms_norm_q8_k` fp64 divisions on one wave (-30% kernel, +0.78% MoE decode, bit-identical)
+- [x] Decode after a chunk-1024 prefill 23% slow: scratch pool kept prefill-sized buffers, decode allocated host memory every token — fixed (decode 76 -> 99 t/s at chunk 1024, bit-identical)
 - [x] Same fp64 hoist in the other small decode kernels — **closed**, no second case (route_reduce is latency, not fp64: 64-thread groups 0%, native fma -7% kernel)
 
 ### Next decode items and their gates

@@ -4374,3 +4374,38 @@ the 50 local + external GGUFs). The lane-map port reorders sums, so instead the
   this box; expected gain there ~0.8 ms/token, unmeasured.
 * reconsider_if: the Q3_K gate/up decode (`moe_gate_up_decode_q3k`, MiniPlus
   and LFM2.5) has the same per-element byte reads.
+
+## 2026-11-17 Decode after a chunk-1024 prefill was 23% slow: scratch pool never released prefill buffers — FIXED, bit-identical
+
+Found while checking the LifeOS server profile. The 2026-11-17 chunk-1024 entry
+measured decode only in `p36-bench` (no multi-chunk prefill before decode) and
+left a 1.9 s server gap "outside prefill" unexplained; this was it. Evidence:
+`evidence/raw/chunk1024-decode-20261117/results.txt`.
+
+* **Symptom.** After a multi-chunk prefill at chunk 1024, decode ran 76 vs 99
+  t/s (Axion CLI, 3.3k-token prompt) and 71 vs 93 t/s (LifeOS server
+  profile). A 34-token prompt was unaffected. Kernel GPU time per token was
+  unchanged (10.53 vs 10.70 ms); every intra-command-buffer dispatch gap grew
+  ~1.4 -> ~4.5 us. Same pipelines (57, no scratch/spills), same 960 dispatches
+  and 647 barriers per token; `P36_VK_BARRIER_FULL=1` at chunk 512 costs only
+  6.5%, so not the barrier form.
+* **Cause.** Pooled device-local "private" scratch keeps counting against
+  `P36_VK_PRIVATE_LIMIT` (512 MiB) while idle. A 1024-row chunk leaves the pool
+  full of chunk-sized buffers decode never matches (reuse is exact-size), so
+  every decode scratch request fell back to a fresh zero-filled host-cached
+  allocation, ~87 per token (run allocations 109 at chunk 512 vs 3089 at 1024),
+  retired into the generic pool the scratch path never reads. Decode
+  activations living in snooped host memory also lengthen every barrier.
+* **Fix.** Before falling back, the scratch allocator frees idle pooled private
+  buffers, largest first, only when that can make room, sized for the
+  4 KiB-rounded charge (independent review: safe, every pooled buffer has
+  retired its last GPU use).
+* **Result.** Axion chunk 1024: decode **76 -> 99.2-99.4 t/s** (chunk 512:
+  98.8-99.9), prefill 940-953 t/s, allocations 3089 -> 127. Qwen3.6 at the CLI
+  default chunk (1024): decode **74.6 -> 96.5 t/s**. LifeOS server profile at
+  chunk 1024: prefill 889/995 t/s (+16-17% over chunk 512's 758/856) with decode
+  93.0/94.6 (512: 92.5/94.3). Dense 27B (chunk 256): 23.20 -> 23.17, unchanged.
+  Greedy md5 identical; Axion `--dump-logprobs` at chunk 1024 identical to the
+  pre-fix build.
+* reconsider_if: a model whose decode working set alone exceeds 512 MiB of
+  private scratch (the fallback is then still host memory).
