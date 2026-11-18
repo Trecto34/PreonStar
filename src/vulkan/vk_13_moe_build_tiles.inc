@@ -1269,6 +1269,16 @@ int p36_gpu_moe_ffn_q8_tensor(p36_gpu_tensor *out,
  * reduce.  Besides the native IQ2_XXS/Q2_K recipe this covers APEX's
  * IQ3_XXS/Q3_K, IQ2_S/IQ3_XXS and mixed IQ2_S+IQ2_XXS/IQ3_XXS recipes.
  * No q8_K stage anywhere, no host read of the selection. */
+/* IQ3_XXS down sum-decode with the gate/up lane map (16 consecutive weights
+ * per lane, vec4 activations): -29.6% kernel time, +4.70% Axion decode, logits
+ * reordered only (frontier NLL median +0.0000, top-1 25/25).  Default on;
+ * P36_VK_MOE_DOWN_IQ3XXS4=0 restores the 2-weight-stride kernel for parity. */
+static bool p36_vk_moe_down_iq3xxs4(void) {
+    static int cached = -1;
+    if (cached < 0) cached = p36_vk_env_default_on("P36_VK_MOE_DOWN_IQ3XXS4") ? 1 : 0;
+    return cached == 1;
+}
+
 int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                       const void *model_map,
                                       uint64_t model_size,
@@ -1662,12 +1672,15 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                 };
                 const char *dname = q4k ? "moe_q4k_down_sum_decode" :
                                     down_q3k ? "moe_q3k_down_sum_decode" :
-                                    down_iq3xxs ? "moe_iq3xxs_down_sum_decode" :
+                                    down_iq3xxs ? (p36_vk_moe_down_iq3xxs4() ? "moe_iq3xxs4_down_sum_decode"
+                                                                           : "moe_iq3xxs_down_sum_decode") :
                                     down_iq3s ? "moe_iq3s_down_sum_decode" :
                                     down_iq2s ? "moe_iq2s_down_sum_decode" : "moe_q2k_down_sum_decode";
                 p36_vk_kernel *dkernel = q4k ? &p36_vk.moe_down_q4k_sum_decode :
                                           down_q3k ? &p36_vk.moe_down_q2k_sum_decode_q3k :
-                                          down_iq3xxs ? &p36_vk.moe_down_q2k_sum_decode_iq3xxs :
+                                          down_iq3xxs ? (p36_vk_moe_down_iq3xxs4()
+                                                         ? &p36_vk.moe_down_q2k_sum_decode_iq3xxs4
+                                                         : &p36_vk.moe_down_q2k_sum_decode_iq3xxs) :
                                           down_iq3s ? &p36_vk.moe_down_q2k_sum_decode_iq3s :
                                           down_iq2s ? &p36_vk.moe_down_q2k_sum_decode_iq2s :
                                                        &p36_vk.moe_down_q2k_sum_decode;

@@ -154,6 +154,7 @@ VULKAN_SHADERS := \
 	vulkan/moe_down_q2k_sum_decode_iq2s.spv \
 	vulkan/moe_down_q2k_sum_decode_iq3s.spv \
 	vulkan/moe_down_q2k_sum_decode_iq3xxs.spv \
+	vulkan/moe_down_q2k_sum_decode_iq3xxs4.spv \
 	vulkan/moe_down_q2k_sum_decode_q3k.spv \
 	vulkan/moe_down_q2k_f32b.spv \
 	vulkan/moe_down_q2k_sum_decode.spv \
@@ -508,6 +509,9 @@ vulkan/moe_down_q2k_sum_decode_iq3s.spv: vulkan/moe_down_q2k_sum_decode.comp
 
 vulkan/moe_down_q2k_sum_decode_iq3xxs.spv: vulkan/moe_down_q2k_sum_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_IQ3XXS -o $@ $<
+
+vulkan/moe_down_q2k_sum_decode_iq3xxs4.spv: vulkan/moe_down_q2k_sum_decode.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_IQ3XXS4 -o $@ $<
 
 vulkan/moe_down_q2k_sum_decode_q3k.spv: vulkan/moe_down_q2k_sum_decode.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_MOE_Q3K -o $@ $<

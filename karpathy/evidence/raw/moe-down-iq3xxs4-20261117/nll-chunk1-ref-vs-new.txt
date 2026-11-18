@@ -1,0 +1,3 @@
+/tmp/claude-1000/-home-server-q36/326a9c33-bbe3-4dae-a44a-eba92bf8b014/scratchpad/nll/ref: n=25 mean_nll=2.5142 top1=17/25
+/tmp/claude-1000/-home-server-q36/326a9c33-bbe3-4dae-a44a-eba92bf8b014/scratchpad/nll/new: n=25 mean_nll=2.5946 top1=17/25
+   vs /tmp/claude-1000/-home-server-q36/326a9c33-bbe3-4dae-a44a-eba92bf8b014/scratchpad/nll/ref: dNLL mean=+0.0804 med=+0.0000 MAD=0.0011 mean|d|=0.2270 worse=13 better=11 top1_same=25/25

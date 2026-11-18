@@ -33,3 +33,5 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 ## Decode kernels
 
 - [x] Q4_K decode at 1 row per workgroup (+1.37% MoE decode, bit-identical; dense neutral)
+- [x] IQ3_XXS MoE down sum-decode on the gate/up lane map (+4.70% MoE decode, reordered sums, NLL-checked)
+- [ ] Same lane map for the Q3_K / IQ2_S / IQ3_S down builds

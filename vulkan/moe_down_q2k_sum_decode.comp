@@ -4,6 +4,10 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#ifdef P36_MOE_IQ3XXS4
+#extension GL_EXT_control_flow_attributes : require
+#define P36_MOE_IQ3XXS 1
+#endif
 
 /* Decode-only Q2_K down projection and routing-weighted sum. One
  * workgroup owns one output row and visits the eight experts in order. */
@@ -11,7 +15,11 @@
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Weights { uint16_t wb[]; };
+#ifdef P36_MOE_IQ3XXS4
+layout(set = 0, binding = 1) readonly buffer Mid { vec4 mid4[]; };
+#else
 layout(set = 0, binding = 1) readonly buffer Mid { vec2 mid[]; };
+#endif
 layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
 layout(set = 0, binding = 3) readonly buffer Scales { float scales[]; };
 layout(set = 0, binding = 4) readonly buffer RouteWeights { float route[]; };  /* used by the reduce */
@@ -98,10 +106,44 @@ void main(void) {
 #else
         uint base_u16 = (expert * pc.out_dim + row) * row_u16;
 #endif
+#ifdef P36_MOE_IQ3XXS4
+        uint m4 = slot * pc.in_dim / 4u;
+#else
         uint m2 = slot * pc.in_dim / 2u;
+#endif
         float acc = 0.0;
 
-#ifdef P36_MOE_IQ3XXS
+#ifdef P36_MOE_IQ3XXS4
+        /* gate/up's lane map: a lane owns 16 consecutive weights of a block
+         * (itid*16 ..), one aux word, two 16-bit entry loads for its four
+         * grid words, one sign byte per 8 weights and vec4 activations --
+         * about half the memory instructions per weight of the 2-weight
+         * stride below.  Sums differ from it in the last bits. */
+        uint g32 = itid >> 1u;
+        uint half16 = itid & 1u;
+        for (uint i = ix; i < pc.blocks; i += 2u) {
+            uint bb = base_bytes + i * IQ3XXS_BYTES;
+            uint aux = wb_u32(bb + 66u + 4u * g32);
+            float wsc = unpackHalf2x16(uint(wb[bb >> 1u])).x * 0.25 * float(2u * (aux >> 28u) + 1u);
+            uint eo = (bb + 2u + 8u * g32 + 4u * half16) >> 1u;
+            uint ent = uint(wb[eo]) | (uint(wb[eo + 1u]) << 16u);
+            uint y4 = m4 + ((i * 256u + 16u * itid) >> 2u);
+            [[unroll]] for (uint h = 0u; h < 2u; h++) {
+                uint si = (aux >> (7u * (2u * half16 + h))) & 127u;
+                uint sign = (tables[TAB_KSIGNS + (si >> 2u)] >> (8u * (si & 3u))) & 255u;
+                [[unroll]] for (uint e = 0u; e < 2u; e++) {
+                    uint l = 2u * h + e;
+                    vec4 gv = vec4(unpack8(tables[TAB_IQ3XXS_GRID + ((ent >> (8u * l)) & 255u)]));
+                    uint ss = 4u * e;
+                    gv = mix(gv, -gv, bvec4(((sign >> (ss + 0u)) & 1u) != 0u,
+                                            ((sign >> (ss + 1u)) & 1u) != 0u,
+                                            ((sign >> (ss + 2u)) & 1u) != 0u,
+                                            ((sign >> (ss + 3u)) & 1u) != 0u));
+                    acc = fma(wsc, dot(gv, mid4[y4 + l]), acc);
+                }
+            }
+        }
+#elif defined(P36_MOE_IQ3XXS)
         for (uint i = ix; i < pc.blocks; i += 2u) {
             uint bb = base_bytes + i * IQ3XXS_BYTES;
             float d = unpackHalf2x16(uint(wb[bb >> 1u])).x;

@@ -4163,3 +4163,44 @@ REJECTED" ("the answer is more parallelism, not fewer workgroups"). Evidence:
   27B (`a184c524`), Qwen3.6-35B-A3B (`908fbd7d`); `--vulkan-kernels` OK.
 * reconsider_if: a trunk with much wider rows (K >= 8192) shows the 1-row
   kernel losing; then pick rows by `blocks`.
+
+## 2026-11-17 IQ3_XXS MoE down sum-decode with the gate/up lane map — ACCEPTED, +4.70% MoE decode
+
+Re-profile first: on Axion `moe_down_q2k_sum_decode_iq3xxs` was 13.3% of decode
+GPU time at ~78 GB/s (36 layers x 8 slots x 2048 rows x 196 B). The ledger's
+row-packing attempts (4-row split, 80 GB/s) and the "instruction-issue bound"
+R2 diagnosis pointed at instructions per weight, not workgroup shape. Evidence:
+`evidence/raw/moe-down-iq3xxs4-20261117/`.
+
+* **Change.** New build `-DP36_MOE_IQ3XXS4` of `moe_down_q2k_sum_decode.comp`
+  (same grid, 32-lane workgroups, same subgroupAdd/partial store) with the IQ3_XXS
+  gate/up decode kernel's lane map: a lane owns 16 consecutive weights of a
+  block, one aux word, its four grid entries as two 16-bit loads, one ksigns
+  byte per 8 weights, `vec4` activations. ~17 memory instructions per lane per
+  block instead of ~36 for the old 2-weight stride. Other four builds are
+  byte-identical. Default on; `P36_VK_MOE_DOWN_IQ3XXS4=0` restores the old kernel
+  (profile name `moe_iq3xxs4_down_sum_decode` vs `moe_iq3xxs_down_sum_decode`).
+* **Kernel** (63-token windows, timestamps): **1.489 -> 1.048 ms/token
+  (-29.6%)**, ~78 -> ~110 GB/s; token span 12.93 -> 12.50.
+* **A/B** (`bench_ab.sh`, same binary, ctx 1024, gen 64, 3 interleaved reps):
+  Axion decode **88.73 -> 92.90 t/s (+4.70%**, clean separation 92.52 > 89.20);
+  prefill +1.55% (noise, decode-only kernel).
+* **Numerics: not bit-identical** (per-lane weight subsets change the sum
+  order). Frontier NLL on the decode path (`--prefill-chunk 1`, ctx 512..2048
+  step 64, n=25, old kernel as ref): dNLL median **+0.0000**, MAD 0.0011,
+  mean|d| 0.227 (smaller than the accepted chunk-256-vs-1 0.97 and f16-FA 1.7
+  drifts), worse/better 13/11, **top-1 same 25/25**, 0 non-finite. Greedy text
+  identical to the old kernel on Axion (`2279363d`) and Qwen3.6-35B-A3B
+  (`908fbd7d`); `--vulkan-kernels` OK with the new kernel.
+* **Independent review** (read-only agent): every weight used once with the same
+  magnitude/sign/scale/activation as the old branch, scripted over blocks 1-4
+  and several slots incl. the multi-row MTP verify grid; host wiring complete.
+  Its hardening points (cached switch, distinct profile name, one release path)
+  are in.
+* **MTP not run end to end with the new kernel:** Qwen3.6 + MTP head hit the
+  global OOM killer in both arms (old kernel too) after working earlier the
+  same day; it is at this board's memory limit. The verify path uses the same
+  per-slot code (grid y = n_tok x n_used), covered by the review.
+* reconsider_if: ~110 GB/s is still a third of the dense kernels; the next step
+  is the same lane-map port for the Q3_K (4 layers) and IQ2_S down builds, then
+  fewer table loads per weight.
