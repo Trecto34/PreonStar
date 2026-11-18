@@ -4204,3 +4204,23 @@ R2 diagnosis pointed at instructions per weight, not workgroup shape. Evidence:
 * reconsider_if: ~110 GB/s is still a third of the dense kernels; the next step
   is the same lane-map port for the Q3_K (4 layers) and IQ2_S down builds, then
   fewer table loads per weight.
+
+## 2026-11-17 Q4_K decode, 8 lanes per block using both nibbles — REJECTED, +16% kernel time
+
+Tried the MoE-down lesson (fewer memory instructions per weight) on
+`dense_q4k_decode`: a `P36_Q4K_V2` entry where lane j of a block reads the 4 qs
+dwords of nibble pair j>>1 once and uses both nibbles (32 weights per lane, 8
+lanes per block, 1 row per workgroup, rows of >= 8 blocks). Patch kept as
+`evidence/raw/q4k-v2-20261117/q4k-v2-rejected.patch`.
+
+* **Slower:** Axion kernel **2.78 -> 3.21-3.23 ms/token (+16%)**, token span
+  12.49 -> 12.88-12.92 (63-token windows, 2 runs each). Rejected on the kernel
+  number; no A/B run.
+* Output coherent but different (`7789eb2b` vs `2279363d`, an early token
+  flip from the regrouped sums), not a mapping bug.
+* Why it differs from the IQ3_XXS down win: the "double fetch" it removes was
+  already a same-instruction broadcast; each lane now does twice the q8 loads
+  and two `k4_scale_min` decodes, and those cost more than the shared dword.
+  The Q4_K decode limit is not memory instructions per weight.
+* reconsider_if: a Q4_K layout with pre-unpacked scales (no `k4_scale_min` per
+  lane) or q8 activations staged once per workgroup in LDS.

@@ -1,0 +1,143 @@
+diff --git a/Makefile b/Makefile
+index 11085a3..481a066 100644
+--- a/Makefile
++++ b/Makefile
+@@ -214,6 +214,7 @@ VULKAN_SHADERS := \
+ 	vulkan/dense_kquant_decode.spv \
+ 	vulkan/dense_q4k_decode.spv \
+ 	vulkan/dense_q4k_decode_r1.spv \
++	vulkan/dense_q4k_decode_v2.spv \
+ 	vulkan/dense_q5k_decode.spv \
+ 	vulkan/dense_q3k_decode.spv \
+ 	vulkan/dense_q2k_decode.spv \
+@@ -399,6 +400,9 @@ vulkan/dense_q4k_decode.spv: vulkan/dense_kquant_decode.comp
+ vulkan/dense_q4k_decode_r1.spv: vulkan/dense_kquant_decode.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q4K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS=1u -o $@ $<
+ 
++vulkan/dense_q4k_decode_v2.spv: vulkan/dense_kquant_decode.comp
++	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q4K_ONLY=1 -DP36_BOUNDS=0 -DP36_ROWS=1u -DP36_Q4K_V2=1 -o $@ $<
++
+ vulkan/dense_q2k_decode.spv: vulkan/dense_kquant_decode.comp
+ 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_Q2K_ONLY=1 -o $@ $<
+ 
+diff --git a/src/vulkan/vk_00_now_ns.inc b/src/vulkan/vk_00_now_ns.inc
+index e8aa821..9ec43b9 100644
+--- a/src/vulkan/vk_00_now_ns.inc
++++ b/src/vulkan/vk_00_now_ns.inc
+@@ -316,6 +316,7 @@ typedef struct {
+     p36_vk_kernel dense_kquant_decode;
+     p36_vk_kernel dense_q4k_decode;
+     p36_vk_kernel dense_q4k_decode_r1;
++    p36_vk_kernel dense_q4k_decode_v2;
+     p36_vk_kernel dense_q5k_decode;
+     p36_vk_kernel dense_q3k_decode;
+     p36_vk_kernel dense_q2k_decode;
+diff --git a/src/vulkan/vk_05_stream_weight_tensor_unlocke.inc b/src/vulkan/vk_05_stream_weight_tensor_unlocke.inc
+index 7ea5042..4b92376 100644
+--- a/src/vulkan/vk_05_stream_weight_tensor_unlocke.inc
++++ b/src/vulkan/vk_05_stream_weight_tensor_unlocke.inc
+@@ -419,6 +419,7 @@ int p36_gpu_init(void) {
+     p36_vk.dense_kquant_decode = P36_VK_KERNEL("vulkan/dense_kquant_decode.spv", 3, 28, 1u << 2);
+     p36_vk.dense_q4k_decode = P36_VK_KERNEL("vulkan/dense_q4k_decode.spv", 3, 28, 1u << 2);
+     p36_vk.dense_q4k_decode_r1 = P36_VK_KERNEL("vulkan/dense_q4k_decode_r1.spv", 3, 28, 1u << 2);
++    p36_vk.dense_q4k_decode_v2 = P36_VK_KERNEL("vulkan/dense_q4k_decode_v2.spv", 3, 28, 1u << 2);
+     p36_vk.dense_q5k_decode = P36_VK_KERNEL("vulkan/dense_q5k_decode.spv", 3, 28, 1u << 2);
+     p36_vk.dense_q3k_decode = P36_VK_KERNEL("vulkan/dense_q3k_decode.spv", 3, 28, 1u << 2);
+     p36_vk.dense_q2k_decode = P36_VK_KERNEL("vulkan/dense_q2k_decode.spv", 3, 28, 1u << 2);
+diff --git a/src/vulkan/vk_06_prof_report.inc b/src/vulkan/vk_06_prof_report.inc
+index 6ab8ea7..b6805df 100644
+--- a/src/vulkan/vk_06_prof_report.inc
++++ b/src/vulkan/vk_06_prof_report.inc
+@@ -172,6 +172,7 @@ void p36_gpu_cleanup(void) {
+     p36_vk_kernel_destroy(&p36_vk.dense_kquant_decode);
+     p36_vk_kernel_destroy(&p36_vk.dense_q4k_decode);
+     p36_vk_kernel_destroy(&p36_vk.dense_q4k_decode_r1);
++    p36_vk_kernel_destroy(&p36_vk.dense_q4k_decode_v2);
+     p36_vk_kernel_destroy(&p36_vk.dense_q5k_decode);
+     p36_vk_kernel_destroy(&p36_vk.dense_q3k_decode);
+     p36_vk_kernel_destroy(&p36_vk.dense_q2k_decode);
+@@ -692,6 +693,7 @@ static void p36_vk_prepare_dense_kernels(void) {
+         &p36_vk.dense_iq3_xxs_decode_r4,
+         &p36_vk.dense_q4k_decode,
+         &p36_vk.dense_q4k_decode_r1,
++        &p36_vk.dense_q4k_decode_v2,
+         &p36_vk.dense_kquant_decode,
+         &p36_vk.dense_extra_decode_iq2s,
+         &p36_vk.dense_extra_decode_iq2xxs,
+diff --git a/src/vulkan/vk_09_predequant_b16_unlocked.inc b/src/vulkan/vk_09_predequant_b16_unlocked.inc
+index fd4a499..b2f616f 100644
+--- a/src/vulkan/vk_09_predequant_b16_unlocked.inc
++++ b/src/vulkan/vk_09_predequant_b16_unlocked.inc
+@@ -161,8 +161,12 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
+                 const char *e = getenv("P36_VK_Q4K_DECODE_ROWS");
+                 q4_rows = e && e[0] == '4' ? 4 : 1;
+             }
+-            const uint32_t rows = q4_full ? (uint32_t)q4_rows : 4u;
+-            p36_vk_kernel *kernel = q4_full ? (rows == 1u ? &p36_vk.dense_q4k_decode_r1
++            static int q4_v2 = -1;
++            if (q4_v2 < 0) q4_v2 = p36_vk_env_on("P36_VK_Q4K_DECODE_V2") ? 1 : 0;
++            const bool v2 = q4_full && q4_v2 && blocks >= 8u;
++            const uint32_t rows = v2 ? 1u : q4_full ? (uint32_t)q4_rows : 4u;
++            p36_vk_kernel *kernel = v2 ? &p36_vk.dense_q4k_decode_v2 :
++                                   q4_full ? (rows == 1u ? &p36_vk.dense_q4k_decode_r1
+                                                           : &p36_vk.dense_q4k_decode) :
+                                    q5_full ? &p36_vk.dense_q5k_decode :
+                                    q3_full ? &p36_vk.dense_q3k_decode :
+diff --git a/vulkan/dense_kquant_decode.comp b/vulkan/dense_kquant_decode.comp
+index 8406938..180a042 100644
+--- a/vulkan/dense_kquant_decode.comp
++++ b/vulkan/dense_kquant_decode.comp
+@@ -224,6 +224,48 @@ vec4 unpack_i8(uint v) {
+                 float(bitfieldExtract(int(v), 24, 8)));
+ }
+ 
++#ifdef P36_Q4K_V2
++/* One-row, one-token Q4_K decode with 8 lanes per block: lane j reads the 4
++ * qs dwords of nibble pair j>>1, half j&1 once and uses both nibbles (low ->
++ * group 2*(j>>1), high -> the next group), 32 weights per lane instead of 16
++ * with each dword fetched by two lanes.  Same per-group terms as the generic
++ * loop below; the per-lane sums are grouped differently, so not bit-identical.
++ * Needs blocks >= 8 to fill the 64 lanes (host checks). */
++void main(void) {
++    uint lid = gl_LocalInvocationID.x;
++    uint j8 = lid & 7u;
++    uint pair = j8 >> 1u;
++    uint half_id = j8 & 1u;
++    uint row = gl_WorkGroupID.x;
++    float acc = 0.0;
++    for (uint b = lid >> 3u; b < pc.blocks; b += 8u) {
++        uint base = row * pc.row_bytes + 144u * b;
++        uint qbase = b * Q8K_WORDS;
++        uint w0 = (base >> 2u) + 4u + 8u * pair + 4u * half_id;
++        uint q0 = qbase + 2u + 16u * pair + 4u * half_id;
++        uint sc0, mn0, sc1, mn1;
++        k4_scale_min(base, 2u * pair, sc0, mn0);
++        k4_scale_min(base, 2u * pair + 1u, sc1, mn1);
++        float dlo = 0.0, dhi = 0.0, slo = 0.0, shi = 0.0;
++        for (uint i = 0u; i < 4u; i++) {
++            uint ql = ww[w0 + i];
++            vec4 alo = unpack_i8(q8[q0 + i]);
++            vec4 ahi = unpack_i8(q8[q0 + 8u + i]);
++            dlo += dot(unpack_i8(ql & 0x0f0f0f0fu), alo);
++            dhi += dot(unpack_i8((ql >> 4u) & 0x0f0f0f0fu), ahi);
++            slo += alo.x + alo.y + alo.z + alo.w;
++            shi += ahi.x + ahi.y + ahi.z + ahi.w;
++        }
++        float dw = load_f16(base);
++        float dm = load_f16(base + 2u);
++        float yd = uintBitsToFloat(q8[qbase]);
++        acc = fma(yd, dw * float(sc0) * dlo - dm * float(mn0) * slo, acc);
++        acc = fma(yd, dw * float(sc1) * dhi - dm * float(mn1) * shi, acc);
++    }
++    float total = subgroupAdd(acc);
++    if (lid == 0u) y[row] = total * pc.scale;
++}
++#else
+ void main(void) {
+     uint lid = gl_LocalInvocationID.x;
+     uint itid = lid & 15u;
+@@ -465,3 +507,4 @@ void main(void) {
+         }
+     }
+ }
++#endif
