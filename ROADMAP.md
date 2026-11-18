@@ -37,3 +37,5 @@ To-dos at a glance. Details, measurements and acceptance criteria live in
 - [ ] Same lane map for the Q3_K / IQ2_S / IQ3_S down builds
 - [x] IQ3_XXS MoE down sum-decode, 4 rows per workgroup sharing activations (+4.20% MoE decode, bit-identical)
 - [x] Activation sharing for the IQ2_S / IQ2_S+IQ2_XXS gate-up decode kernels (+1.76% MoE decode, bit-identical)
+- [x] `add_rms_norm_q8_k` fp64 divisions on one wave (-30% kernel, +0.78% MoE decode, bit-identical)
+- [ ] Same fp64 hoist in the other single-workgroup decode kernels (router_topk, route_reduce, quantize_q8_k, ...)

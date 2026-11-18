@@ -1,0 +1,8 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    3     608.83         15.760    98.55          0.100     /tmp/claude-1000/-home-server-q36/bd73a82c-b2c4-4642-aa1a-5a21efb63b41/scratchpad/A/p36-bench
+B    3     600.92         25.440    99.32          0.390     ./p36-bench
+
+B vs A prefill: -1.30%   decode: +0.78%   (gate: +1.25%)
+separation: min B 572.48 vs max A 634.31 -> overlap
+verdict: FAIL (prefill)

@@ -1,0 +1,13 @@
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct Node {
+    int data;
+    struct Node* next;
+} Node;
+
+Node* reverseList(Node* head) {
+    Node* prev = NULL;
+    Node* current = head;
+    Node

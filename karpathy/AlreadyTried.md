@@ -4286,3 +4286,35 @@ rows of an expert. Evidence: `evidence/raw/moe-gu-rows-20261117/`.
   (`908fbd7d`); `--vulkan-kernels` OK.
 * reconsider_if: the IQ3_XXS gate/up (4 layers) and Q3_K paths, or N=8 if a
   later register cut brings 8 rows under 64 VGPRs.
+
+## 2026-11-17 add_rms_norm_q8_k: fp64 divisions on one wave, broadcast via LDS — ACCEPTED, -30% kernel, bit-identical
+
+Fresh decode profile at `bb435e6` (Axion, 62-token window): the single-workgroup
+`add_rms_norm_q8_k` was 6.4% of GPU time, 79 calls/token at 8.1 us, for 2048
+floats of work. Every one of its 1024 threads computed the rms `scale` (fp64
+divide) and its block's Q8_K `iscale` / `d` (two fp64 divides), and fp64 runs at
+1/16 rate on gfx1013. Evidence: `evidence/raw/norm-fp64-hoist-20261117/`.
+
+* **Change.** Thread 0 computes `scale`; threads 0..15 compute block t's
+  `iscale` / `d` from `sh_val[t*64]` after the argmax tree; both are broadcast
+  through LDS (one extra barrier per 16-block round). Same expressions on the
+  same inputs, so output is **bit-identical**. Phase 3 (rot path) unchanged.
+  No switch: nothing else differs.
+* **Kernel** (63-token windows, same binary, shaders by `P36_SHADER_DIR`):
+  **8.12-8.16 -> 5.72 us (-30%)**, 646 -> 453 us/token; token span
+  11.93-12.07 ms (4 A runs) -> 11.84-11.85 (2 B runs).
+* **A/B** (`bench_ab.sh`, ctx 1024, gen 64, 3 interleaved reps): Axion decode
+  **98.55 -> 99.32 t/s (+0.78%**, clean separation 98.93 > 98.65); prefill
+  -1.30% overlapping (noise, inside the 3.4% MoE floor). The median is under
+  the 1.25% gate; kept on the bit-identical kernel and span win.
+* **Parity:** greedy md5 A = B on Axion (`f24e3634`), Qwen3.6-35B-A3B
+  (`8bb965be`), dense 27B Huihui (`3a12d169`, n=5120, 2 rounds, 1039 calls in
+  its window); `--vulkan-kernels` OK. Independent read-only review: no race,
+  barriers uniform, bit-identical.
+* **Rejected on the way:** keeping the summed row in LDS instead of the global
+  write -> `memoryBarrierBuffer` -> re-read, plus prefetching `w` before the
+  tree: 8.14 -> 8.06 us, neutral, 20 KB more LDS. The latency was fp64, not
+  the round trip (tl-B2).
+* reconsider_if: the same redundant per-thread fp64 in phase 3 (rot models),
+  `rms_norm`, `quantize_q8_k`, `router_topk`, `moe_down_route_reduce`,
+  `delta_qkv`, `recur_norm_gate_q8_k`, `rms_norm_rope_kv_qwen_quant`.

@@ -1,0 +1,8 @@
+f24e363452552980d938ffc3c2236316  out-A6.txt
+f24e363452552980d938ffc3c2236316  out-A8.txt
+f24e363452552980d938ffc3c2236316  out-B7.txt
+f24e363452552980d938ffc3c2236316  out-B9.txt
+8bb965be1621dfe436aa842e3924bbea  par-Qwen3.-A.out
+8bb965be1621dfe436aa842e3924bbea  par-Qwen3.-B.out
+3a12d16953de616ffb3d0bd15c92a3d2  par-Huihui-A.out
+3a12d16953de616ffb3d0bd15c92a3d2  par-Huihui-B.out
