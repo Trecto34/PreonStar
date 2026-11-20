@@ -4564,3 +4564,30 @@ loop issued one `vec4` load of `w` and `x` per iteration and waited on each
   `./p36_test --vulkan-kernels` OK.
 * reconsider_if: a model with `n_expert > 256` (the old 256-thread shader had
   the same 256-expert cap).
+
+## 2026-11-20 Q4_K decode shape-aware row count (4 rows on wide `out_dim` / short `K`, 1 row elsewhere) — ACCEPTED, +2.14% MoE decode, bit-identical
+
+After `b2097ee` cut Q4_K decode VGPRs (`q8_K` `bsums` + compact `qword[4]`),
+re-measured `ROWS=1` vs `ROWS=4` per shape on Axion: `2048x8192` (`80.86 ->
+76.35 ms`) and `512x2048` (`9.65 -> 9.03 ms`) are faster at 4 rows/WG (2048 /
+512 workgroups saturate all 40 CUs while sharing `q8` reads 4x), whereas
+`4096x2048`, `2048x512` and `2048x32` stay faster at 1 row/WG. Evidence:
+`karpathy/evidence/raw/q4k-shape-rows-20261120/`.
+
+* **Change.** In `src/vulkan/vk_09_predequant_b16_unlocked.inc`, select
+  `rows = (out_dim >= 4096u || (out_dim >= 2048u && in_dim <= 512u)) ? 4u : 1u`
+  (both `dense_q4k_decode.spv` and `dense_q4k_decode_r1.spv` already exist).
+  `P36_VK_Q4K_DECODE_ROWS=1` or `=4` still forces a fixed row count.
+* **Kernel** (Axion, 63-token windows, 2 interleaved pairs, same binary via
+  `P36_VK_Q4K_DECODE_ROWS=1` vs default): `2048x8192` **81.64 / 80.97 -> 74.52
+  / 74.14 ms (-8.6%)**, `512x2048` **10.12 / 9.75 -> 9.23 / 9.16 ms (-7.4%)**;
+  total Q4_K GPU time `143.17 / 141.51 -> 138.54 / 138.08 ms`.
+* **A/B** (`bench_ab.sh`, same binary, ctx 1024, gen 64, 5 interleaved reps):
+  Axion decode **109.44 (MAD 0.140) -> 111.78 (MAD 0.380) = +2.14%** (5/5 pairs
+  positive, clears +1.25% gate); prefill +0.43% (noise, decode-only).
+* **Parity:** `--dump-logprobs` (top-20 logits, 64 steps) byte-identical on
+  Axion (`6cc01236a53d3933a6271a26aca8297d`) and Qwen3.6-35B-A3B
+  (`89dc8c468ce5d29eb6a85564993b2cdd`); greedy md5 identical (`f24e3634`);
+  `./p36_test --vulkan-kernels` OK.
+* reconsider_if: a `ROWS=2` build beats both 1 and 4 on `4096x2048` or
+  `2048x512`.

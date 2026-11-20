@@ -150,18 +150,20 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
             bool q2_full = weight_type == P36_VK_TENSOR_Q2_K &&
                            out_dim % 4u == 0u &&
                            p36_vk_env_default_on("P36_VK_DENSE_Q2K_DECODE");
-            /* Q4_K decode runs one row per workgroup: the 35B MoE trunk is
-             * K=2048 (8 blocks per row), so a 4-row group moved ~4.6 KB and
-             * the kernel ran at ~221 GB/s; 1 row is -8% kernel time and +1.37%
-             * Axion decode, neutral on the K=5120 dense trunk.  Same per-row
-             * lane order, so bit-identical.  P36_VK_Q4K_DECODE_ROWS=4 restores
-             * the 4-row build. */
-            static int q4_rows = -1;
-            if (q4_rows < 0) {
+            /* Q4_K decode row-packing by shape: large out_dim (>= 4096) or
+             * short K (<= 512 with out_dim >= 2048) saturates all 40 CUs at 4
+             * rows/WG and saves ~5.6% by sharing q8 reads across 4 rows;
+             * smaller out_dim (32, 512, or 2048 with K >= 2048) needs 1 row/WG
+             * to keep the CUs full.  Same per-row lane order (bit-identical).
+             * P36_VK_Q4K_DECODE_ROWS=1 or =4 forces a fixed row count. */
+            static int q4_rows_env = -1;
+            if (q4_rows_env < 0) {
                 const char *e = getenv("P36_VK_Q4K_DECODE_ROWS");
-                q4_rows = e && e[0] == '4' ? 4 : 1;
+                q4_rows_env = (e && e[0] == '4') ? 4 : (e && e[0] == '1') ? 1 : 0;
             }
-            const uint32_t rows = q4_full ? (uint32_t)q4_rows : 4u;
+            const uint32_t q4_auto_rows =
+                (out_dim >= 4096u || (out_dim >= 2048u && in_dim <= 512u)) ? 4u : 1u;
+            const uint32_t rows = q4_full ? (q4_rows_env > 0 ? (uint32_t)q4_rows_env : q4_auto_rows) : 4u;
             p36_vk_kernel *kernel = q4_full ? (rows == 1u ? &p36_vk.dense_q4k_decode_r1
                                                           : &p36_vk.dense_q4k_decode) :
                                    q5_full ? &p36_vk.dense_q5k_decode :

@@ -1,0 +1,8 @@
+f24e363452552980d938ffc3c2236316  karpathy/evidence/raw/q4k-shape-rows-20261120/out-A1.txt
+f24e363452552980d938ffc3c2236316  karpathy/evidence/raw/q4k-shape-rows-20261120/out-A2.txt
+f24e363452552980d938ffc3c2236316  karpathy/evidence/raw/q4k-shape-rows-20261120/out-B1.txt
+f24e363452552980d938ffc3c2236316  karpathy/evidence/raw/q4k-shape-rows-20261120/out-B2.txt
+6cc01236a53d3933a6271a26aca8297d  karpathy/evidence/raw/q4k-shape-rows-20261120/lp-axion-A.json
+6cc01236a53d3933a6271a26aca8297d  karpathy/evidence/raw/q4k-shape-rows-20261120/lp-axion-B.json
+89dc8c468ce5d29eb6a85564993b2cdd  karpathy/evidence/raw/q4k-shape-rows-20261120/lp-q36-A.json
+89dc8c468ce5d29eb6a85564993b2cdd  karpathy/evidence/raw/q4k-shape-rows-20261120/lp-q36-B.json
