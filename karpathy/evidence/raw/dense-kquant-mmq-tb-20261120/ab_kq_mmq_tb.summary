@@ -1,0 +1,8 @@
+
+bin  n     prefill_med    mad       decode_med     mad       source
+A    5     1052.55        2.730     111.43         0.640     /tmp/base_cur/p36-bench
+B    5     1079.75        6.800     106.77         3.060     ./p36-bench
+
+B vs A prefill: +2.58%   decode: -4.18%   (gate: +1.25%)
+separation: min B 1040.54 vs max A 1072.55 -> overlap
+verdict: FAIL (prefill)

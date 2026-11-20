@@ -4617,3 +4617,36 @@ Axion 4k chunk-1024 prefill (plus 1.8% in `moe_down_gemm_q3k.spv`). Evidence:
   `t16`) and Qwen3.6-35B-A3B (chunk 1024); `./p36_test --vulkan-kernels` OK.
 * reconsider_if: a model with `out_dim` not divisible by 128 or very few tiles
   sees tail underfill at `BM=128` (still bounds-checked).
+
+## 2026-11-20 `dense_kquant_mmq`: transposed `buf_b` (`B_STRIDE=64`) + swizzled `f16vec4 buf_a` + `uvec4 b16` + aligned Q4_K loads — ACCEPTED, -8.5% kernel, +2.58% MoE 4k prefill, bit-identical
+
+`dense_kquant_mmq.spv` was the #1 single shader in Axion 4k chunk-1024 prefill
+(27.2% of GPU time, 120 VGPRs, 15.9 KB LDS), emitting 147 `v_xor_b32_sdwa` +
+117 `v_and_b32` inner-loop register-repack instructions to build `(tok_even,
+tok_odd)` pairs from row-major `buf_b`, plus scalar `b16` loads and
+byte-at-a-time Q4_K scale/word loads. Evidence:
+`karpathy/evidence/raw/dense-kquant-mmq-tb-20261120/`.
+
+* **Change.** In `vulkan/dense_kquant_mmq.comp`: (1) transposed `buf_b` into
+  `[BK][64]` (`B_STRIDE=64`, 16-byte aligned) staged via `uvec4 b16` loads
+  (`st_tp = lid >> 1`, 32 tokens/wave, hoisted `st_ok_a/b`), eliminating all
+  inner-loop `bv` repacking; (2) swizzled `f16vec4 buf_a[BM * 8]` (`kw ^
+  ((lr >> 3) & 7)`) for bank-conflict-free 64-bit `ds_read_b64` on all rows;
+  (3) direct aligned `wb[]` word loads for Q4_K `qs` and 3-word scale unpack.
+  VGPRs 120 -> 96, LDS 15,872 -> 14,848 B, 8 subgroups/SIMD, 0 spills.
+* **Kernel** (Axion, 4k chunk-1024 prefill, 2 interleaved pairs `A, B, B, A`):
+  `dense_kquant_mmq_q4k` **939.11 / 928.55 -> 855.40 / 846.73 ms (-8.9%)**,
+  `dense_kquant_mmq_q6k` **78.71 / 79.28 -> 75.76 / 75.45 ms (-4.3%)**; total
+  `dense_kquant_mmq.spv` **1017.83 / 1007.84 -> 931.16 / 922.18 ms (-8.5%)**.
+* **A/B** (`bench_ab.sh`, ctx 4096, chunk 1024, gen 16, 5 interleaved reps):
+  Axion prefill **1052.55 (MAD 2.73) -> 1079.75 (MAD 6.80) = +2.58%** (4/5
+  pairs positive).
+* **Parity:** `--dump-logprobs` byte-identical on Axion (chunk 1024 + chunk 64)
+  and Qwen3.6-35B-A3B (chunk 1024); `./p36_test --vulkan-kernels` OK.
+* **Rejected along the way:** (a) `st_tp = lid & 63` (64 tokens/wave uncoalesced
+  `b16` reads): regressed to 1207 ms; (b) `[[dont_unroll]]` step-2 `k`-loop
+  (80 VGPRs, 11.3 KB code): regressed 904 -> 941 ms; (c) `moe_gate_up_gemm`
+  `BM=128` (128 VGPRs, 22.5 KB LDS, occupancy 12 -> 8): regressed +11..20%
+  across all 3 gate/up kernels.
+* reconsider_if: a separate `-DP36_Q4K_ONLY` build or `predequant_b16` transposed
+  output avoids the LDS transpose altogether.
