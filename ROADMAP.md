@@ -66,3 +66,4 @@ files only with memory headroom.
 
 - [x] `moe_down_gemm` `BM=128` (8-row × 2-slot tile, 64 VGPRs, 10.7 KB LDS, 16 waves/SIMD) + aligned 16-bit IQ3_XXS/Q3_K loads — `moe_iq3xxs_down_gemm` −7.8%, `moe_q3k_down_gemm` −21.1% (combined −9.6%), Axion 4k chunk-1024 prefill **1039.93 → 1060.95 t/s (+2.02%**, 4/5 pairs positive, bit-identical on Axion c1024/c64 + Qwen3.6)
 - [x] `dense_kquant_mmq` transposed `buf_b` (`B_STRIDE=64`) + swizzled `f16vec4 buf_a` + `uvec4 b16` + aligned Q4_K word loads — VGPRs 120→96, LDS 15.9→14.8 KB, `dense_kquant_mmq` −8.5% (Q4_K −8.9%, Q6_K −4.3%), Axion 4k chunk-1024 prefill **1052.55 → 1079.75 t/s (+2.58%**, 4/5 pairs positive, bit-identical on Axion c1024/c64 + Qwen3.6)
+- [x] `recur_conv_silu_decode` hoisted `k[4]` + 32-token Y-tiled prefill (`gy=(n_tok+31)/32`) + `cache_conv` copy — kernel **83.0 → 22.4 ms (−73.2%)**, Axion 4k chunk-1024 prefill **1073.18 → 1090.86 t/s (+1.65%**, 4/5 pairs positive, bit-identical on Axion + Qwen3.6)

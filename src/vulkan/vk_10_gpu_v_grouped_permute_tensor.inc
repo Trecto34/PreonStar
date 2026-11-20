@@ -466,11 +466,18 @@ int p36_gpu_recurrent_conv_silu_tensor(p36_gpu_tensor *cache_conv,
             uint32_t n_tok;
         } push = { conv_dim, n_taps, n_tok };
         const p36_gpu_tensor *bindings[4] = { cache_conv, cur, kt, out };
+        uint32_t gy = (n_tok >= 32u && n_tok >= n_taps && n_taps > 1u) ? (n_tok + 31u) / 32u : 1u;
         ok = p36_vk_run_unlocked("recurrent_conv_silu_decode", &p36_vk.recur_conv_silu_decode,
                                  bindings, &push, sizeof(push),
-                                 (conv_dim + 255u) / 256u, 1, 1);
+                                 (conv_dim + 255u) / 256u, gy, 1);
     }
     pthread_mutex_unlock(&p36_vk_mu);
+    if (ok && n_tok >= 32u && n_tok >= n_taps && n_taps > 1u) {
+        uint32_t hist = n_taps - 1u;
+        ok = p36_gpu_tensor_copy(cache_conv, 0, cur,
+                                 (uint64_t)(n_tok - hist) * conv_dim * sizeof(float),
+                                 (uint64_t)hist * conv_dim * sizeof(float));
+    }
     return ok;
 }
 

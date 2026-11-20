@@ -4650,3 +4650,30 @@ byte-at-a-time Q4_K scale/word loads. Evidence:
   across all 3 gate/up kernels.
 * reconsider_if: a separate `-DP36_Q4K_ONLY` build or `predequant_b16` transposed
   output avoids the LDS transpose altogether.
+
+## 2026-11-20 `recur_conv_silu_decode`: hoist `ker[4]` + 32-token Y-tiled prefill + `cache_conv` copy — ACCEPTED, -73.2% kernel, +1.65% MoE 4k prefill, bit-identical
+
+`recur_conv_silu_decode.spv` launched only `(conv_dim + 255) / 256` = 32
+workgroups across 40 CUs for a 1024-token prefill chunk, looping serially over
+all 1024 tokens while reloading `ker[c * n_taps + t]` from global memory on
+every token (83.0 ms = 2.3% of Axion 4k prefill). Evidence:
+`karpathy/evidence/raw/recur-conv-par-20261120/`.
+
+* **Change.** In `vulkan/recur_conv_silu_decode.comp`, hoisted `k[4]` outside
+  the token loop and added a 32-token-per-workgroup Y-tiled prefill mode
+  (`gl_NumWorkGroups.y > 1`) that reads `cachev` for `tok0 == 0` and `cur[tok0
+  - hist ..]` for `tok0 > 0` without mutating `cachev`. In
+  `src/vulkan/vk_10_gpu_v_grouped_permute_tensor.inc`, when `n_tok >= 32 &&
+  n_tok >= n_taps && n_taps > 1`, dispatch `gy = (n_tok + 31) / 32` (1024
+  workgroups across all 40 CUs) followed by `p36_gpu_tensor_copy` of the last
+  `n_taps - 1` rows of `cur` into `cache_conv` (96 KB). Decode (`n_tok == 1`)
+  keeps `gy = 1` with hoisted `k[4]`.
+* **Kernel** (Axion, 4k chunk-1024 prefill): `recur_conv_silu_decode.spv`
+  **84.19 / 83.02 -> 22.31 / 22.45 ms (-73.2%, -61 ms)**.
+* **A/B** (`bench_ab.sh`, ctx 4096, chunk 1024, gen 16, 5 interleaved reps):
+  Axion prefill **1073.18 (MAD 10.41) -> 1090.86 (MAD 1.88) = +1.65%** (4/5
+  pairs positive; reps 2-5 all +14..+20 t/s).
+* **Parity:** `--dump-logprobs` byte-identical on Axion (chunk 1024) and
+  Qwen3.6-35B-A3B (chunk 1024); `./p36_test --vulkan-kernels` OK.
+* reconsider_if: `recur_conv_silu_decode` is fused into `delta_qkv` (saves one
+  full-chunk write/read of `conv_dim`, ~22 ms ceiling).
