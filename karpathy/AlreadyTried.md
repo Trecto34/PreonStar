@@ -4591,3 +4591,29 @@ re-measured `ROWS=1` vs `ROWS=4` per shape on Axion: `2048x8192` (`80.86 ->
   `./p36_test --vulkan-kernels` OK.
 * reconsider_if: a `ROWS=2` build beats both 1 and 4 on `4096x2048` or
   `2048x512`.
+
+## 2026-11-20 `moe_down_gemm` 128-row tile (`BM=128`) + aligned 16-bit IQ3_XXS/Q3_K loads — ACCEPTED, -9.6% kernel, +2.02% MoE 4k prefill, bit-identical
+
+`moe_down_gemm_iq3xxs.spv` used only 48 VGPRs and 6.6 KB LDS (20 waves/SIMD)
+with a 64-row tile (`4 rows x 2 slots` per thread), accounting for 12.2% of
+Axion 4k chunk-1024 prefill (plus 1.8% in `moe_down_gemm_q3k.spv`). Evidence:
+`karpathy/evidence/raw/moe-down-bm128-20261120/`.
+
+* **Change.** Widened `vulkan/moe_down_gemm.comp` from `BM=64` to `BM=128`
+  (`8 rows x 2 slots` per thread, 64 VGPRs, 10.7 KB LDS, 16 waves/SIMD, 0
+  spills), halving workgroups (`(out_dim + 127u) / 128u` in
+  `src/vulkan/vk_13_moe_build_tiles.inc`), `Mid` global loads, and `Bs` LDS
+  reads, and replaced byte-at-a-time `b_u8()` loads with 16-bit aligned `wb[]`
+  loads for IQ3_XXS `aux`/`e0,e1` and Q3_K `qs`/`hmask`.
+* **Kernel** (Axion, 4k chunk-1024 prefill, 2 interleaved pairs):
+  `moe_iq3xxs_down_gemm` **454.51 / 453.67 -> 418.67 / 418.93 ms (-7.8%)**,
+  `moe_q3k_down_gemm` **67.22 / 79.77 -> 57.93 / 57.96 ms (-21.1%)**; combined
+  **521.72 / 533.44 -> 476.60 / 476.90 ms (-9.6%)**.
+* **A/B** (`bench_ab.sh`, ctx 4096, chunk 1024, gen 16, 5 interleaved reps):
+  Axion prefill **1039.93 (MAD 5.15) -> 1060.95 (MAD 3.38) = +2.02%** (4/5
+  pairs positive; single rep-4 dip on B); decode at ctx 1024 gen 64 flat
+  (111.57 -> 111.43, -0.13%).
+* **Parity:** `--dump-logprobs` byte-identical on Axion (chunk 1024 + chunk 64
+  `t16`) and Qwen3.6-35B-A3B (chunk 1024); `./p36_test --vulkan-kernels` OK.
+* reconsider_if: a model with `out_dim` not divisible by 128 or very few tiles
+  sees tail underfill at `BM=128` (still bounds-checked).

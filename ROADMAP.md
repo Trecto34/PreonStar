@@ -61,3 +61,7 @@ files only with memory headroom.
 - [x] `matmul_f32_fast` decode 4× unroll (router `256×2048`, shared gate `1×N`, `ssm_alpha/beta`) — −44.1% kernel (`43.7 → 24.4 ms`), Axion decode **108.77 → 110.44 t/s (+1.54%**, clean separation, bit-identical on Axion + Qwen3.6)
 - [x] `router_topk` single-wave64 zero-barrier + parallel lanes `0..7` `exp`/`ddiv` — −40.5% kernel (`13.0 → 7.7 ms`), Axion decode **110.21 → 110.55 t/s (+0.31%**, 4/5 pairs positive, bit-identical on Axion + Qwen3.6)
 - [x] Q4_K decode shape-aware row count (`out_dim >= 4096 || (out_dim >= 2048 && in_dim <= 512) → 4 rows`, else 1 row) — `2048×8192` −8.6%, `512×2048` −7.4%, Axion decode **109.44 → 111.78 t/s (+2.14%**, 5/5 pairs positive, bit-identical on Axion + Qwen3.6)
+
+## Prefill kernels
+
+- [x] `moe_down_gemm` `BM=128` (8-row × 2-slot tile, 64 VGPRs, 10.7 KB LDS, 16 waves/SIMD) + aligned 16-bit IQ3_XXS/Q3_K loads — `moe_iq3xxs_down_gemm` −7.8%, `moe_q3k_down_gemm` −21.1% (combined −9.6%), Axion 4k chunk-1024 prefill **1039.93 → 1060.95 t/s (+2.02%**, 4/5 pairs positive, bit-identical on Axion c1024/c64 + Qwen3.6)

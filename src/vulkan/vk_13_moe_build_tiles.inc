@@ -1786,7 +1786,7 @@ int p36_gpu_moe_ffn_f32_tail_tensor(p36_gpu_tensor *out,
                                           down_iq3s ? &p36_vk.moe_down_gemm_iq3s :
                                           down_iq2s ? &p36_vk.moe_down_gemm_iq2s : &p36_vk.moe_down_gemm;
                 ok = gemm ? p36_vk_run_unlocked(dname, dkernel, db, &dpush, sizeof(dpush),
-                                                (out_dim + 63u) / 64u, wave_tile_count, 1)
+                                                (out_dim + 127u) / 128u, wave_tile_count, 1)
                           : p36_vk_run_unlocked(down_iq2s ? "moe_iq2s_down_f32b" : "moe_q2k_down",
                                                 down_iq2s ? &p36_vk.moe_down_q2k_f32b_iq2s
                                                           : &p36_vk.moe_down_q2k_f32b,
