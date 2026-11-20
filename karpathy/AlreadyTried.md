@@ -4482,3 +4482,26 @@ Follow-up to the Q4_K trunk decode ROADMAP item (29.2% of decode GPU time at
   `./p36_test --vulkan-kernels` OK.
 * reconsider_if: apply the same `q8_K` `bsums` + streamed `q8` + specialized
   word loads to `dense_kquant_decode.spv` (`Q6_K`, now 15.7% of decode GPU).
+
+## 2026-11-20 Q6_K decode specialization (`q8_K` bsums + compact `qword` / `load_16b`) — REJECTED, neutral
+
+Answered the `reconsider_if` above: `dense_kquant_decode.spv` (15.4% of Axion
+decode GPU, dominated by `output.weight` `2048x248320` at ~369 GB/s, 81% of
+DRAM roofline) was the only K-quant still on the generic dispatch. Evidence:
+`karpathy/evidence/raw/q6k-decode-bsum-20261120/`.
+
+* **Tried.** Specialized `P36_Q6K_ONLY` build (`dense_q6k_decode.spv`) with
+  `q8_K` `bsums`, compact `uint qword[TOK][4]`, and `wh[]` loads (plus a
+  scratch `load_16b` u32 variant).
+* **Kernel** (Axion, 63-token windows, 2 interleaved pairs, same binary via
+  `P36_VK_DENSE_Q6K_DECODE=0` vs `1`): `85.180 / 85.040 ms` -> **`85.215 /
+  85.308 ms`** (flat; scratch `load_16b` regressed to `87.80 ms` from extra
+  VGPRs + funnel-shift).
+* **A/B** (`bench_ab.sh`, ctx 1024, gen 64, 5 interleaved reps): Axion decode
+  `108.39 (MAD 0.100) -> 108.76 (MAD 0.170) = +0.34%` (overlapping, 3/5
+  positive). Bit-identical `--dump-logprobs` on Axion and Qwen3.6, but no
+  kernel win.
+* **Verdict:** REJECTED & reverted. `Q6_K` `output.weight` is already
+  DRAM-bandwidth-bound at ~369 GB/s, so cutting ALU/VGPRs buys nothing.
+* reconsider_if: a lower-precision LM head or a model where smaller Q6_K trunk
+  matrices dominate over `output.weight`.
