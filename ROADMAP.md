@@ -58,3 +58,4 @@ files only with memory headroom.
 - [ ] Q3_K gate/up decode, preloaded bytes as `582e1ff` — 20 layers on MiniPlus, 8 on LFM2.5. Gate: bit-identical. **Blocked:** no runnable test model (LFM2 off-limits, MiniPlus has no memory headroom); needs an owner call.
 - [ ] IQ2_S / IQ3_S down (Qwen3.8-IQ2_M: 37 / 3 layers) — preloaded bytes first (bit-identical gate); the lane map only if that falls short (NLL gate).
 - [x] Q4_K trunk decode — read precomputed `q8_K` `bsums`, `unpackHalf2x16` d/dmin, direct word scale unpack, stream `q8` words for `ROWS=1` (`dense_q4k_decode_r1` −16.1% kernel, Axion decode **103.89 → 108.34 t/s, +4.28%**, clean separation, bit-identical on Axion + Qwen3.6)
+- [x] `matmul_f32_fast` decode 4× unroll (router `256×2048`, shared gate `1×N`, `ssm_alpha/beta`) — −44.1% kernel (`43.7 → 24.4 ms`), Axion decode **108.77 → 110.44 t/s (+1.54%**, clean separation, bit-identical on Axion + Qwen3.6)

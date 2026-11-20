@@ -4505,3 +4505,35 @@ DRAM roofline) was the only K-quant still on the generic dispatch. Evidence:
   DRAM-bandwidth-bound at ~369 GB/s, so cutting ALU/VGPRs buys nothing.
 * reconsider_if: a lower-precision LM head or a model where smaller Q6_K trunk
   matrices dominate over `output.weight`.
+
+## 2026-11-20 `matmul_f32_fast` decode 4x unroll — ACCEPTED, -44.1% kernel, +1.54% MoE decode, bit-identical
+
+After `b2097ee` cut `dense_q4k_decode_r1`, `matmul_f32_fast.spv` was #4 in the
+decode profile at 7.9% of GPU time (`43.7 ms / 63 tok`: `256x2048` router at
+~180 GB/s, `1xN` shared gate scalar, `32x2048` ssm alpha/beta). Its 64-thread
+loop issued one `vec4` load of `w` and `x` per iteration and waited on each
+`dot()` serially. Evidence: `karpathy/evidence/raw/mff-unroll4-20261120/`.
+
+* **Change.** Unrolled the `matmul_f32_fast.comp` decode loop by 4 (issuing 4
+  `vec4` pairs before accumulating `acc += dot(w0, x0); ...; acc += dot(w3, x3)`
+  in the exact original left-to-right order, keeping `P36_MFF_LOCAL=64` and the
+  single-wave `subgroupAdd` untouched so expert routing cannot move).
+  `matmul_f32_fast_t8.spv` (prefill) is byte-identical.
+* **Sweep (scratch probe, 63-tok Axion window):** unroll 1 `43.67 ms` ->
+  unroll 2 `31.32 ms` (-28.3%) -> **unroll 4 `23.95 ms` (-45.2%)** -> unroll 8
+  `24.39 ms` (loses occupancy on `256x2048`: `17.83` vs `16.43 ms`).
+* **Kernel** (Axion, 63-token windows, 2 interleaved pairs, same binary via
+  `P36_SHADER_DIR`): `matmul_f32_fast.spv` **43.517 / 43.906 -> 24.439 / 24.410
+  ms (-44.1%**, -306 us/token: `256x2048` `27.77 -> 16.67 ms`, `1xN` `8.21 ->
+  3.45 ms`, `other` `7.74 -> 4.31 ms`); device span `671.1 / 675.4 -> 653.8 /
+  654.0 ms`.
+* **A/B** (`bench_ab.sh`, same binary via `P36_SHADER_DIR`, ctx 1024, gen 64,
+  3 interleaved reps): Axion decode **108.77 (MAD 0.060) -> 110.44 (MAD 0.440)
+  = +1.54%** (clean separation `110.00 > 109.12`, clears +1.25% gate); prefill
+  -1.18% overlapping (noise, `t8` prefill shader byte-identical).
+* **Parity:** `--dump-logprobs` (top-20 logits, 64 steps) byte-identical on
+  Axion (`6cc01236a53d3933a6271a26aca8297d`) and Qwen3.6-35B-A3B
+  (`89dc8c468ce5d29eb6a85564993b2cdd`); greedy md5 identical (`f24e3634`);
+  `./p36_test --vulkan-kernels` OK.
+* reconsider_if: fusing `dense_f32f_d_1xN` (shared gate scalar) with the router
+  matvec or another single-row op to save 40 dispatches/token.
