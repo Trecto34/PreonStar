@@ -4444,3 +4444,41 @@ Evidence: `karpathy/evidence/raw/route-tail-fuse-20261120/`.
   (`89dc8c468ce5d29eb6a85564993b2cdd`); greedy md5 identical (`f24e3634`);
   `./p36_test --vulkan-kernels` OK.
 * reconsider_if: a future change alters `ffn_tail` or `shared_first` ordering.
+
+## 2026-11-20 Q4_K trunk decode: `q8_K` bsums + `unpackHalf2x16` + direct word scales + streamed `q8` — ACCEPTED, -16.1% kernel, +4.28% MoE decode, bit-identical
+
+Follow-up to the Q4_K trunk decode ROADMAP item (29.2% of decode GPU time at
+~221–230 GB/s). Evidence: `karpathy/evidence/raw/q4k-bsum-vgpr-20261120/`.
+
+* **Why it was slow:** Every block did 16 float adds to recompute `qsum` even
+  though every `q8_K` producer (`quantize_q8_k`, `add_rms_norm_q8_k`,
+  `recur_norm_gate_q8_k`, host) already stores `bsums[16]` at `qbase+66..73`;
+  held `vec4 qvec[TOK][4]` (16 floats of VGPR pressure) live across `k4_scale_min`;
+  and used 3 `load_u8` + 2 `load_f16` calls per block.
+* **Change.** Specialized `#ifdef P36_Q4K_ONLY` loop in
+  `vulkan/dense_kquant_decode.comp`: reads `qsum` directly from `q8_K` `bsums`
+  via `bitfieldExtract`, unpacks `d`/`dmin` with one `unpackHalf2x16(ww[w0])`,
+  extracts `sc`/`mn` from aligned `ww[w0+1..3]`, and streams `q8` words inside
+  the 4-word `i` loop for `ROWS==1` (or stores packed `uint qword[TOK][4]` for
+  `ROWS>1`). Exact same per-lane `dot(wv, av)` and `fma` order, so output is
+  **bit-identical**. Non-Q4_K `.spv`s (`dense_kquant_decode`, `q3k`, `q5k`) are
+  byte-identical.
+* **Rejected variants along the way (scratch probe, same kernel window):**
+  - Integer `iq` dot product (`v_mul_lo_u32` is 1/4-rate on GFX1013):
+    `169.68 -> 171.09 ms` (+0.8% slower).
+  - Hoisting all 4 `ww` + 4 `q8` words before the dot loop: `141.60 -> 143.20 ms`
+    (+1.1% slower from extra VGPRs).
+* **Kernel** (Axion, 63-token windows, 2 interleaved pairs, same binary via
+  `P36_SHADER_DIR`): `dense_q4k_decode_r1.spv` **170.504 / 169.469 -> 143.512 /
+  141.669 ms (-16.1%**, -440 us/token, ~221 -> ~268 GB/s); device span
+  `701.0 / 701.1 -> 675.1 / 668.5 ms`.
+* **A/B** (`bench_ab.sh`, same binary via `P36_SHADER_DIR`, ctx 1024, gen 64,
+  3 interleaved reps): Axion decode **103.89 (MAD 0.360) -> 108.34 (MAD 0.430)
+  = +4.28%** (clean separation `107.38 > 104.76`, clears +1.25% gate by 3.4x);
+  prefill -1.25% overlapping (noise, decode-only kernel).
+* **Parity:** `--dump-logprobs` (top-20 logits, 64 steps) byte-identical on
+  Axion (`6cc01236a53d3933a6271a26aca8297d`) and Qwen3.6-35B-A3B
+  (`89dc8c468ce5d29eb6a85564993b2cdd`); greedy md5 identical (`f24e3634`);
+  `./p36_test --vulkan-kernels` OK.
+* reconsider_if: apply the same `q8_K` `bsums` + streamed `q8` + specialized
+  word loads to `dense_kquant_decode.spv` (`Q6_K`, now 15.7% of decode GPU).
