@@ -12,11 +12,26 @@ layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0) readonly buffer Part { float part[]; };
 layout(set = 0, binding = 1) readonly buffer RouteWeights { float route[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+#ifdef P36_ROUTE_TAIL
+layout(set = 0, binding = 3) readonly buffer Shared { float sharedv[]; };
+layout(set = 0, binding = 4) readonly buffer Scalar { float scalarv[]; };
+#endif
 
 layout(push_constant) uniform Push {
     uint out_dim;
     uint n_used;
 } pc;
+
+#ifdef P36_ROUTE_TAIL
+float sigmoid_stable(float x) {
+    if (x >= 0.0f) {
+        float z = exp(-x);
+        return 1.0f / (1.0f + z);
+    }
+    float z = exp(x);
+    return z / (1.0f + z);
+}
+#endif
 
 float fma32(float a, float b, float c) {
     double p = double(a) * double(b);
@@ -43,5 +58,11 @@ void main(void) {
         uint slot = t * pc.n_used + u;
         sum = fma32(part[slot * pc.out_dim + row], route[slot], sum);
     }
-    y[t * pc.out_dim + row] = sum;
+    uint idx = t * pc.out_dim + row;
+#ifdef P36_ROUTE_TAIL
+    float g = sigmoid_stable(scalarv[t]);
+    y[idx] = fma(sharedv[idx], g, sum);
+#else
+    y[idx] = sum;
+#endif
 }

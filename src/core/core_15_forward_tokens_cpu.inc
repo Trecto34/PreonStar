@@ -516,12 +516,16 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
      * built and consumed on GPU. When it runs, the q8_K input staging is
      * only needed for k-quant shared-expert projections, which this model
      * does not have. */
+    bool tail_done = false;
     bool routed_done =
-        p36_gpu_moe_ffn_f32_tensor(out, m->map, m->size,
-                                          &gate, &up, &down,
-                                          rt->ffn_selected, rt->ffn_weights,
-                                          il, P36_N_EXPERT_USED, inp, n_tok,
-                                          P36_N_EMBD, P36_N_FF_EXP, P36_N_EMBD, P36_N_EXPERT) != 0;
+        p36_gpu_moe_ffn_f32_tail_tensor(out, m->map, m->size,
+                                        &gate, &up, &down,
+                                        rt->ffn_selected, rt->ffn_weights,
+                                        il, P36_N_EXPERT_USED, inp, n_tok,
+                                        P36_N_EMBD, P36_N_FF_EXP, P36_N_EMBD, P36_N_EXPERT,
+                                        shared_first ? rt->ffn_shared_out : NULL,
+                                        shared_first ? rt->ffn_scalar : NULL,
+                                        &tail_done) != 0;
     /* Diagnostic only: why a layer left the fused f32 expert path. */
     if (!routed_done && getenv("P36_VK_MOE_ROUTE_DEBUG")) {
         fprintf(stderr, "p36: moe f32 route miss il=%u n_tok=%u gate=%u up=%u down=%u\n",
@@ -624,6 +628,7 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
     (void)shared;
     (void)scalar;
     (void)outp;
+    if (tail_done) return true;
     return p36_gpu_ffn_tail_tensor(out, rt->ffn_shared_out, rt->ffn_scalar, P36_N_EMBD, n_tok) != 0;
 }
 

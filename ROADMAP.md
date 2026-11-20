@@ -53,7 +53,7 @@ as the bit-identical gate). **Reordered-sum** items also need the frontier NLL
 check (`3ade95c` protocol) and the 1.25% median. No LFM2 runs; 14 GB MiniPlus
 files only with memory headroom.
 
-- [ ] Fuse `moe_down_route_reduce` into `ffn_tail` — 40 dispatches/token, est. ~100 us/token. Gate: bit-identical (`ffn_tail`'s fma on the same float, now in a register); Axion + Qwen3.6.
+- [x] Fuse `moe_down_route_reduce` into `ffn_tail` — 40 dispatches/token removed (`moe_down_route_reduce_tail`, −20.7% combined kernel GPU time, +0.65% Axion decode, 6/7 pairs positive, bit-identical on Axion + Qwen3.6)
 - [ ] IQ3_XXS gate/up decode, 4 rows per workgroup — 4 layers on every NanoPlus file, 175 us/token at ~148 GB/s, est. −15% kernel. Gate: bit-identical; kernel win only (≈0.2% decode is below A/B resolution).
 - [ ] Q3_K gate/up decode, preloaded bytes as `582e1ff` — 20 layers on MiniPlus, 8 on LFM2.5. Gate: bit-identical. **Blocked:** no runnable test model (LFM2 off-limits, MiniPlus has no memory headroom); needs an owner call.
 - [ ] IQ2_S / IQ3_S down (Qwen3.8-IQ2_M: 37 / 3 layers) — preloaded bytes first (bit-identical gate); the lane map only if that falls short (NLL gate).

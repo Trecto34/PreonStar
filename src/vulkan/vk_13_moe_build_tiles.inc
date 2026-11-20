@@ -1279,7 +1279,13 @@ static bool p36_vk_moe_down_iq3xxs4(void) {
     return cached == 1;
 }
 
-int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
+static bool p36_vk_moe_route_tail_fuse(void) {
+    static int cached = -1;
+    if (cached < 0) cached = p36_vk_env_default_on("P36_VK_MOE_ROUTE_TAIL_FUSE") ? 1 : 0;
+    return cached == 1;
+}
+
+int p36_gpu_moe_ffn_f32_tail_tensor(p36_gpu_tensor *out,
                                       const void *model_map,
                                       uint64_t model_size,
                                       const p36_gpu_moe_weight *gate,
@@ -1294,7 +1300,11 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                                       uint32_t in_dim,
                                       uint32_t mid_dim,
                                       uint32_t out_dim,
-                                      uint32_t n_expert) {
+                                      uint32_t n_expert,
+                                      const p36_gpu_tensor *shared,
+                                      const p36_gpu_tensor *scalar,
+                                      bool *tail_done) {
+    if (tail_done) *tail_done = false;
     bool q4k = gate->type == P36_VK_TENSOR_Q4_K && up->type == P36_VK_TENSOR_Q4_K &&
                down->type == P36_VK_TENSOR_Q4_K;
     /* IQ2_S experts (Qwen3.8-35B-A3B-IQ2_M): the fused f32 expert path carries
@@ -1363,28 +1373,45 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
          (gu_iq2s_iq2xxs && down_iq3xxs) || (gu_iq2xxs && down_q2k));
     if (row_pair && rows_on && p36_vk_micro_batch && n_tok > 1u && n_tok <= 4u && !multi_rows) {
         p36_gpu_tensor *vx[4] = {0}, *vs[4] = {0}, *vw[4] = {0}, *vo[4] = {0};
+        p36_gpu_tensor *vsh[4] = {0}, *vsc[4] = {0};
         uint64_t x_row = (uint64_t)in_dim * sizeof(float);
         uint64_t o_row = (uint64_t)out_dim * sizeof(float);
         uint64_t s_row = (uint64_t)n_used * sizeof(uint32_t);
+        bool want_tail = shared && scalar && tail_done &&
+                         !p36_gpu_quality && p36_vk_use_gpu_ffn_tail() &&
+                         p36_vk_moe_route_tail_fuse();
+        bool all_tail = want_tail;
         int ok = 1;
         for (uint32_t t = 0; t < n_tok && ok; t++) {
+            bool row_tail = false;
             vx[t] = p36_gpu_tensor_view(x, t * x_row, x_row);
             vs[t] = p36_gpu_tensor_view(selected, t * s_row, s_row);
             vw[t] = p36_gpu_tensor_view(weights, t * s_row, s_row);
             vo[t] = p36_gpu_tensor_view(out, t * o_row, o_row);
-            ok = vx[t] && vs[t] && vw[t] && vo[t] &&
-                 p36_gpu_moe_ffn_f32_tensor(vo[t], model_map, model_size,
-                                            gate, up, down, vs[t], vw[t],
-                                            layer, n_used, vx[t], 1u,
-                                            in_dim, mid_dim, out_dim, n_expert);
+            if (want_tail) {
+                vsh[t] = p36_gpu_tensor_view(shared, t * o_row, o_row);
+                vsc[t] = p36_gpu_tensor_view(scalar, (uint64_t)t * sizeof(float), sizeof(float));
+            }
+            ok = vx[t] && vs[t] && vw[t] && vo[t] && (!want_tail || (vsh[t] && vsc[t])) &&
+                 p36_gpu_moe_ffn_f32_tail_tensor(vo[t], model_map, model_size,
+                                                 gate, up, down, vs[t], vw[t],
+                                                 layer, n_used, vx[t], 1u,
+                                                 in_dim, mid_dim, out_dim, n_expert,
+                                                 vsh[t], vsc[t], want_tail ? &row_tail : NULL);
+            if (want_tail && !row_tail) all_tail = false;
         }
         for (uint32_t t = 0; t < n_tok; t++) {
             p36_gpu_tensor_free(vx[t]);
             p36_gpu_tensor_free(vs[t]);
             p36_gpu_tensor_free(vw[t]);
             p36_gpu_tensor_free(vo[t]);
+            p36_gpu_tensor_free(vsh[t]);
+            p36_gpu_tensor_free(vsc[t]);
         }
-        if (ok) return 1;
+        if (ok) {
+            if (tail_done) *tail_done = all_tail;
+            return 1;
+        }
     }
     uint32_t gate_block_bytes = q4k ? 144u : gate->type == P36_VK_TENSOR_IQ2_S ? 82u :
                                 gate->type == P36_VK_TENSOR_IQ3_XXS ? 98u :
@@ -1720,10 +1747,24 @@ int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
                         uint32_t out_dim;
                         uint32_t n_used;
                     } rpush = { out_dim, n_used };
-                    const p36_gpu_tensor *rb[3] = { down8, weights, out };
-                    ok = p36_vk_run_unlocked("moe_down_route_reduce", &p36_vk.moe_down_route_reduce,
-                                             rb, &rpush, sizeof(rpush),
-                                             (out_dim + 255u) / 256u, (uint32_t)n_tok, 1);
+                    const bool fuse_tail = shared && scalar && tail_done &&
+                                           !p36_gpu_quality &&
+                                           p36_vk_use_gpu_ffn_tail() &&
+                                           p36_vk_moe_route_tail_fuse() &&
+                                           p36_gpu_tensor_range_ok(shared, 0, (uint64_t)out_dim * n_tok * sizeof(float)) &&
+                                           p36_gpu_tensor_range_ok(scalar, 0, (uint64_t)n_tok * sizeof(float));
+                    if (fuse_tail) {
+                        const p36_gpu_tensor *rb[5] = { down8, weights, out, shared, scalar };
+                        ok = p36_vk_run_unlocked("moe_down_route_reduce_tail", &p36_vk.moe_down_route_reduce_tail,
+                                                 rb, &rpush, sizeof(rpush),
+                                                 (out_dim + 255u) / 256u, (uint32_t)n_tok, 1);
+                        if (ok) *tail_done = true;
+                    } else {
+                        const p36_gpu_tensor *rb[3] = { down8, weights, out };
+                        ok = p36_vk_run_unlocked("moe_down_route_reduce", &p36_vk.moe_down_route_reduce,
+                                                 rb, &rpush, sizeof(rpush),
+                                                 (out_dim + 255u) / 256u, (uint32_t)n_tok, 1);
+                    }
                 }
             } else {
                 const p36_gpu_tensor *db[6] = {
@@ -1776,6 +1817,29 @@ done:
     p36_gpu_tensor_free(tiles);
     p36_gpu_tensor_free(sel_slots);
     return ok;
+}
+
+int p36_gpu_moe_ffn_f32_tensor(p36_gpu_tensor *out,
+                               const void *model_map,
+                               uint64_t model_size,
+                               const p36_gpu_moe_weight *gate,
+                               const p36_gpu_moe_weight *up,
+                               const p36_gpu_moe_weight *down,
+                               const p36_gpu_tensor *selected,
+                               const p36_gpu_tensor *weights,
+                               uint32_t layer,
+                               uint32_t n_used,
+                               const p36_gpu_tensor *x,
+                               uint32_t n_tok,
+                               uint32_t in_dim,
+                               uint32_t mid_dim,
+                               uint32_t out_dim,
+                               uint32_t n_expert) {
+    return p36_gpu_moe_ffn_f32_tail_tensor(out, model_map, model_size,
+                                           gate, up, down, selected, weights,
+                                           layer, n_used, x, n_tok,
+                                           in_dim, mid_dim, out_dim, n_expert,
+                                           NULL, NULL, NULL);
 }
 
 int p36_gpu_moe_ffn_tensor(p36_gpu_tensor *out,

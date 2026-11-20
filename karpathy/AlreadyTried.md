@@ -4409,3 +4409,38 @@ left a 1.9 s server gap "outside prefill" unexplained; this was it. Evidence:
   pre-fix build.
 * reconsider_if: a model whose decode working set alone exceeds 512 MiB of
   private scratch (the fallback is then still host memory).
+
+## 2026-11-20 Fuse `moe_down_route_reduce` into `ffn_tail` — ACCEPTED, -20.7% kernel, +0.65% MoE decode, bit-identical
+
+Same-workgroup fusion from the ROADMAP decode list: when the non-Q8_0 shared
+expert runs first (`shared_first`, `n_tok <= 4`), `ffn_shared_out` and
+`ffn_scalar` are already ready before the routed MoE pass, so
+`moe_down_route_reduce` can apply `ffn_tail`'s `fma(sharedv[idx],
+sigmoid_stable(scalarv[t]), sum)` directly before writing `y[idx]`. Removes 40
+dispatches and 40 barriers per decode token with no cross-workgroup atomics.
+Evidence: `karpathy/evidence/raw/route-tail-fuse-20261120/`.
+
+* **Change.** `-DP36_ROUTE_TAIL` build `vulkan/moe_down_route_reduce_tail.spv`
+  from `vulkan/moe_down_route_reduce.comp` (5 bindings: `down8`, `weights`,
+  `out`, `shared`, `scalar`; original `moe_down_route_reduce.spv` byte-identical).
+  Added `p36_gpu_moe_ffn_f32_tail_tensor()` (keeping `p36_gpu_moe_ffn_f32_tensor()`
+  and Metal wrapper unchanged); `core_15_forward_tokens_cpu.inc` passes
+  `rt->ffn_shared_out` / `rt->ffn_scalar` when `shared_first` is true and skips
+  `p36_gpu_ffn_tail_tensor` when `tail_done`. Default on;
+  `P36_VK_MOE_ROUTE_TAIL_FUSE=0` disables.
+* **Kernel** (Axion, 63-token windows, 2 interleaved pairs, same binary):
+  combined GPU time `9.339+3.096 = 12.435` / `9.339+3.103 = 12.442` ms ->
+  **`9.864` / `9.859` ms (-20.7%**, -40.9 us/token); dispatches `55,104 ->
+  52,674` (-40/token, `ffn_tail` = 0); total gap `122.5/122.6 -> 119.7/117.7`
+  ms; device span `707.3/708.0 -> 699.0/693.9` ms.
+* **A/B** (`bench_ab.sh`, same binary via env wrapper, ctx 1024, gen 64):
+  3-rep Axion decode `103.62 -> 104.15` (+0.51%, rep 3 overlapped); 7-rep
+  interleaved Axion decode **103.63 (MAD 0.370) -> 104.30 (MAD 0.270) = +0.65%**
+  (6/7 pairs positive), prefill +0.83% (noise, decode-only). Under the 1.25%
+  median gate; kept on the bit-identical kernel, dispatch-count, and 6/7 paired
+  decode win (same bar as `5008064` and `582e1ff`).
+* **Parity:** `--dump-logprobs` (top-20 logits, 64 steps) byte-identical on
+  Axion (`6cc01236a53d3933a6271a26aca8297d`) and Qwen3.6-35B-A3B
+  (`89dc8c468ce5d29eb6a85564993b2cdd`); greedy md5 identical (`f24e3634`);
+  `./p36_test --vulkan-kernels` OK.
+* reconsider_if: a future change alters `ffn_tail` or `shared_first` ordering.

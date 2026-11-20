@@ -4558,4 +4558,22 @@ int p36_gpu_moe_ffn_tensor(
         layer, used, x, tokens, in_dim, mid_dim, out_dim, experts);
 }
 
+int p36_gpu_moe_ffn_f32_tail_tensor(
+        p36_gpu_tensor *out, const void *map, uint64_t size,
+        const p36_gpu_moe_weight *gate, const p36_gpu_moe_weight *up,
+        const p36_gpu_moe_weight *down,
+        const p36_gpu_tensor *selected, const p36_gpu_tensor *weights,
+        uint32_t layer, uint32_t used, const p36_gpu_tensor *x,
+        uint32_t tokens, uint32_t in_dim, uint32_t mid_dim,
+        uint32_t out_dim, uint32_t experts,
+        const p36_gpu_tensor *shared, const p36_gpu_tensor *scalar,
+        bool *tail_done) {
+    (void)shared;
+    (void)scalar;
+    if (tail_done) *tail_done = false;
+    return p36_gpu_moe_ffn_f32_tensor(
+        out, map, size, gate, up, down, selected, weights,
+        layer, used, x, tokens, in_dim, mid_dim, out_dim, experts);
+}
+
 void p36_gpu_trim_scratch(void) {}

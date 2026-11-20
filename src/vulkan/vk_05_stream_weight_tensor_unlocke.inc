@@ -440,6 +440,7 @@ int p36_gpu_init(void) {
     p36_vk.dense_q6k_rows3 = P36_VK_KERNEL("vulkan/dense_q6k_rows3.spv", 3, 28, 1u << 2);
     p36_vk.moe_reduce = P36_VK_KERNEL("vulkan/moe_reduce.spv", 3, 8, 1u << 2);
     p36_vk.moe_down_route_reduce = P36_VK_KERNEL("vulkan/moe_down_route_reduce.spv", 3, 8, 1u << 2);
+    p36_vk.moe_down_route_reduce_tail = P36_VK_KERNEL("vulkan/moe_down_route_reduce_tail.spv", 5, 8, 1u << 2);
     p36_vk.ffn_tail = P36_VK_KERNEL("vulkan/ffn_tail.spv", 3, 8, 1u << 0);
 
     p36_vk.api_version = VK_API_VERSION_1_0;

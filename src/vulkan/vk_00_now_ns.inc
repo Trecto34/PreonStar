@@ -337,6 +337,7 @@ typedef struct {
     p36_vk_kernel dense_q6k_rows3;
     p36_vk_kernel moe_reduce;
     p36_vk_kernel moe_down_route_reduce;
+    p36_vk_kernel moe_down_route_reduce_tail;
     p36_vk_kernel ffn_tail;
     p36_vk_kernel fwht;
     p36_vk_kernel signs_mul;

@@ -245,6 +245,7 @@ VULKAN_SHADERS := \
 	vulkan/moe_down_gemm_iq3xxs_t16.spv \
 	vulkan/moe_down_gemm_q3k_t16.spv \
 	vulkan/moe_down_route_reduce.spv \
+	vulkan/moe_down_route_reduce_tail.spv \
 	vulkan/ffn_tail.spv
 
 vulkan/moe_matvec_fast.spv: vulkan/moe_matvec_fast.comp
@@ -1230,6 +1231,9 @@ p36_eval_cases.o: p36_eval_cases.c p36_eval_cases.h
 
 vulkan/moe_down_route_reduce.spv: vulkan/moe_down_route_reduce.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/moe_down_route_reduce_tail.spv: vulkan/moe_down_route_reduce.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -DP36_ROUTE_TAIL -o $@ $<
 
 vulkan/moe_gate_up_gemm_t16.spv: vulkan/moe_gate_up_gemm.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -DP36_SLOT_TILE=16u -o $@ $<

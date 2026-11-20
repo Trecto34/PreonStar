@@ -946,4 +946,25 @@ int p36_gpu_moe_ffn_f32_tensor(
         uint32_t                out_dim,
         uint32_t                n_expert);
 
+int p36_gpu_moe_ffn_f32_tail_tensor(
+        p36_gpu_tensor       *out,
+        const void             *model_map,
+        uint64_t                model_size,
+        const p36_gpu_moe_weight *gate,
+        const p36_gpu_moe_weight *up,
+        const p36_gpu_moe_weight *down,
+        const p36_gpu_tensor *selected,
+        const p36_gpu_tensor *weights,
+        uint32_t                layer,
+        uint32_t                n_used,
+        const p36_gpu_tensor *x,
+        uint32_t                n_tok,
+        uint32_t                in_dim,
+        uint32_t                mid_dim,
+        uint32_t                out_dim,
+        uint32_t                n_expert,
+        const p36_gpu_tensor *shared,
+        const p36_gpu_tensor *scalar,
+        bool                   *tail_done);
+
 #endif
