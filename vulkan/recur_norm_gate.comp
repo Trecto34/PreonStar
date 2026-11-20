@@ -1,6 +1,12 @@
 #version 460
 
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) buffer State { float state[]; };
 layout(set = 0, binding = 1) readonly buffer Gate { float gatev[]; };
@@ -12,25 +18,59 @@ layout(push_constant) uniform Push {
     float eps;
 } pc;
 
-shared double sh_sum[256];
+shared double sh_sum[2];
 
 void main(void) {
     uint row = gl_WorkGroupID.x;
     uint lid = gl_LocalInvocationID.x;
     uint base = row * pc.width;
+    if (pc.width == 128u) {
+        float v0 = state[base + lid];
+        float v1 = state[base + lid + 64u];
+        double ss = double(v0) * double(v0) + double(v1) * double(v1);
+        /* Match the original s = 32, 16, 8, 4, 2, 1 binary tree reduction. */
+        double total;
+        if (gl_NumSubgroups == 1u) {
+            ss += subgroupShuffleDown(ss, 32u);
+            ss += subgroupShuffleDown(ss, 16u);
+            ss += subgroupShuffleDown(ss, 8u);
+            ss += subgroupShuffleDown(ss, 4u);
+            ss += subgroupShuffleDown(ss, 2u);
+            ss += subgroupShuffleDown(ss, 1u);
+            total = subgroupBroadcastFirst(ss);
+        } else {
+            ss += subgroupShuffleDown(ss, 16u);
+            ss += subgroupShuffleDown(ss, 8u);
+            ss += subgroupShuffleDown(ss, 4u);
+            ss += subgroupShuffleDown(ss, 2u);
+            ss += subgroupShuffleDown(ss, 1u);
+            if (subgroupElect()) sh_sum[gl_SubgroupID] = ss;
+            barrier();
+            total = sh_sum[0] + sh_sum[1];
+        }
+        float scale = inversesqrt(float(total / 128.0lf) + pc.eps);
+        float u0 = (v0 * scale) * weight[lid];
+        float g0 = gatev[base + lid];
+        state[base + lid] = (g0 / (1.0f + exp(-g0))) * u0;
+        float u1 = (v1 * scale) * weight[lid + 64u];
+        float g1 = gatev[base + lid + 64u];
+        state[base + lid + 64u] = (g1 / (1.0f + exp(-g1))) * u1;
+        return;
+    }
     double ss = 0.0;
-    for (uint i = lid; i < pc.width; i += 256u) {
+    for (uint i = lid; i < pc.width; i += 64u) {
         float v = state[base + i];
         ss += double(v) * double(v);
     }
-    sh_sum[lid] = ss;
-    barrier();
-    for (uint s = 128u; s > 0u; s >>= 1u) {
-        if (lid < s) sh_sum[lid] += sh_sum[lid + s];
+    ss = subgroupAdd(ss);
+    double total = ss;
+    if (gl_NumSubgroups > 1u) {
+        if (subgroupElect()) sh_sum[gl_SubgroupID] = ss;
         barrier();
+        total = sh_sum[0] + sh_sum[1];
     }
-    float scale = inversesqrt(float(sh_sum[0] / double(pc.width)) + pc.eps);
-    for (uint i = lid; i < pc.width; i += 256u) {
+    float scale = inversesqrt(float(total / double(pc.width)) + pc.eps);
+    for (uint i = lid; i < pc.width; i += 64u) {
         uint off = base + i;
         float u = (state[off] * scale) * weight[i];
         float g = gatev[off];

@@ -4677,3 +4677,28 @@ every token (83.0 ms = 2.3% of Axion 4k prefill). Evidence:
   Qwen3.6-35B-A3B (chunk 1024); `./p36_test --vulkan-kernels` OK.
 * reconsider_if: `recur_conv_silu_decode` is fused into `delta_qkv` (saves one
   full-chunk write/read of `conv_dim`, ~22 ms ceiling).
+
+## 2026-11-20 `recur_norm_gate`: single-wave64 zero-barrier + single `state[]` load — ACCEPTED, -68.7% kernel, +0.96% MoE 4k prefill, bit-identical
+
+`recur_norm_gate.spv` launched 256 threads for `width = 128` (half idle), ran
+8 workgroup barriers in `shared double sh_sum[256]`, and read `state[]` twice
+from global memory (53.6 ms = 1.5% of Axion 4k prefill). Evidence:
+`karpathy/evidence/raw/recur-norm-gate-w64-20261120/`.
+
+* **Change.** Switched `vulkan/recur_norm_gate.comp` to `local_size_x = 64`
+  (single wave64 on BC-250). For `pc.width == 128`, each lane holds `v0 =
+  state[base + lid]` and `v1 = state[base + lid + 64]` in registers (eliminating
+  the second `state[]` global read) and runs the exact binary-tree `double`
+  reduction via `subgroupShuffleDown` (`32, 16, 8, 4, 2, 1`) with 0 barriers
+  and 0 LDS (`gl_NumSubgroups > 1` wave32 fallback keeps `sh_sum[2]`).
+* **Kernel** (Axion, 4k chunk-1024 prefill): `recur_norm_gate.spv` **53.63 ->
+  16.81 / 16.80 ms (-68.7%, -36.8 ms)**; total GPU time `3555.0 -> 3510.3 ms`.
+* **A/B** (`bench_ab.sh`, ctx 4096, chunk 1024, gen 16, 5 interleaved reps):
+  Axion prefill **1082.29 -> 1092.63 t/s (+0.96%, peak 1110.53)**, decode
+  103.73 -> 106.26 (+2.44%, same kernel runs in decode). Kept on the -68.7%
+  bit-identical kernel win matching the ~1% whole-model ceiling.
+* **Parity:** `--dump-logprobs` byte-identical on Axion (chunk 1024) and
+  Qwen3.6-35B-A3B (chunk 1024); `./p36_test --vulkan-kernels` OK.
+* **Rejected along the way:** `matmul_f32_fast_t8` 2x unroll (84 VGPRs,
+  occupancy -> 12): regressed 102.2 -> 112.3 ms.
+* reconsider_if: `recur_norm_gate` is fused into `delta_net_decode_reg_f16`.
