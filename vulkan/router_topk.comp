@@ -2,19 +2,21 @@
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 
-/* Expert router top-k for decode/small batches. Selection runs on raw
- * logits (softmax is monotone, so the order matches the host's prob-based
- * scan), then weights renormalize the selected logits only: the full
- * softmax denominator cancels, mirroring p36_vk_router_fast_rows. Ties
- * pick the lower expert index like the host insertion scan.
+/* Expert router top-k for decode/small batches (n_expert <= 256, n_used <= 8).
+ * Selection runs on raw logits (softmax is monotone, so the order matches the
+ * host's prob-based scan), then weights renormalize the selected logits only:
+ * the full softmax denominator cancels, mirroring p36_vk_router_fast_rows.
+ * Ties pick the lower expert index like the host insertion scan.
  *
- * Each round is one subgroup max plus one subgroup min for the tie-break
- * lane, so a subgroup leader publishes (value, index) and the workgroup
- * reduces only that handful of candidates. Two barriers per round instead
- * of the eleven the full 256-lane tree needs. */
+ * 64 threads x 4 experts/thread fits in a single wave64 on GFX10 (zero
+ * workgroup barriers and zero LDS traffic across the 8 selection rounds),
+ * and lanes 0..n_used-1 compute exp() and the fp64 normalization divide in
+ * parallel while keeping the exact 0..n_used-1 sum order (bit-identical).
+ * Wave32 GPUs (nsub == 2) fall back to the 2-subgroup LDS combine. */
 
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Logits {
     float logits[];
@@ -35,58 +37,90 @@ layout(push_constant) uniform Push {
     float route_scale;
 } pc;
 
-shared float subv[8];
-shared uint subi[8];
-shared uint win[8];
-shared float winv[8];
+shared float subv[2];
+shared uint subi[2];
+shared uint sh_win;
+shared float sh_winv;
+shared float sh_exp[8];
 
 void main(void) {
     uint tok = gl_WorkGroupID.x;
     uint lid = gl_LocalInvocationID.x;
     if (tok >= pc.n_tok) return;
 
-    float v = lid < pc.n_expert ? logits[tok * pc.n_expert + lid] : -1.0 / 0.0;
+    uint base = tok * pc.n_expert;
+    float v0 = (lid        < pc.n_expert) ? logits[base + lid]        : -1.0 / 0.0;
+    float v1 = (lid + 64u  < pc.n_expert) ? logits[base + lid + 64u]  : -1.0 / 0.0;
+    float v2 = (lid + 128u < pc.n_expert) ? logits[base + lid + 128u] : -1.0 / 0.0;
+    float v3 = (lid + 192u < pc.n_expert) ? logits[base + lid + 192u] : -1.0 / 0.0;
+
+    uint my_win = 0u;
+    float my_winv = 0.0;
+    float maxv = 0.0;
     uint nsub = gl_NumSubgroups;
 
     for (uint k = 0u; k < pc.n_used; k++) {
-        float m = subgroupMax(v);
-        uint cand = (v == m) ? gl_SubgroupInvocationID : 0xffffffffu;
-        uint li = subgroupMin(cand);
-        if (gl_SubgroupInvocationID == 0u) {
-            subv[gl_SubgroupID] = m;
-            subi[gl_SubgroupID] = gl_SubgroupID * gl_SubgroupSize + li;
-        }
-        barrier();
-        if (lid == 0u) {
-            float bv = subv[0];
-            uint bi = subi[0];
-            for (uint s = 1u; s < nsub; s++) {
-                float sv = subv[s];
-                uint si = subi[s];
-                if (sv > bv || (sv == bv && si < bi)) {
-                    bv = sv;
-                    bi = si;
-                }
+        float lm = v0;
+        uint li = lid;
+        if (v1 > lm) { lm = v1; li = lid + 64u; }
+        if (v2 > lm) { lm = v2; li = lid + 128u; }
+        if (v3 > lm) { lm = v3; li = lid + 192u; }
+
+        float m = subgroupMax(lm);
+        uint cand = (lm == m) ? li : 0xffffffffu;
+        uint bi = subgroupMin(cand);
+
+        if (nsub > 1u) {
+            if (gl_SubgroupInvocationID == 0u) {
+                subv[gl_SubgroupID] = m;
+                subi[gl_SubgroupID] = bi;
             }
-            win[k] = bi;
-            winv[k] = bv;
+            barrier();
+            if (lid == 0u) {
+                if (subv[1] > subv[0] || (subv[1] == subv[0] && subi[1] < subi[0])) {
+                    m = subv[1];
+                    bi = subi[1];
+                } else {
+                    m = subv[0];
+                    bi = subi[0];
+                }
+                sh_win = bi;
+                sh_winv = m;
+            }
+            barrier();
+            bi = sh_win;
+            m = sh_winv;
         }
-        barrier();
-        if (lid == win[k]) v = -1.0 / 0.0;
+        if (k == 0u) maxv = m;
+        if (lid == k) {
+            my_win = bi;
+            my_winv = m;
+        }
+        if ((bi & 63u) == lid) {
+            uint slot = bi >> 6u;
+            if (slot == 0u) v0 = -1.0 / 0.0;
+            else if (slot == 1u) v1 = -1.0 / 0.0;
+            else if (slot == 2u) v2 = -1.0 / 0.0;
+            else v3 = -1.0 / 0.0;
+        }
     }
 
-    if (lid == 0u) {
-        float maxv = winv[0];
-        double sum = 0.0;
-        float top_exp[8];
+    float my_exp = (lid < pc.n_used) ? exp(my_winv - maxv) : 0.0;
+    double sum = 0.0;
+    if (nsub == 1u) {
         for (uint i = 0u; i < pc.n_used; i++) {
-            top_exp[i] = exp(winv[i] - maxv);
-            sum += double(top_exp[i]);
+            sum += double(subgroupShuffle(my_exp, i));
         }
-        if (sum < 6.103515625e-5) sum = 6.103515625e-5;
+    } else {
+        if (lid < pc.n_used) sh_exp[lid] = my_exp;
+        barrier();
         for (uint i = 0u; i < pc.n_used; i++) {
-            selected[tok * pc.n_used + i] = win[i];
-            wout[tok * pc.n_used + i] = float(double(top_exp[i]) / sum) * pc.route_scale;
+            sum += double(sh_exp[i]);
         }
+    }
+    if (sum < 6.103515625e-5) sum = 6.103515625e-5;
+    if (lid < pc.n_used) {
+        selected[tok * pc.n_used + lid] = my_win;
+        wout[tok * pc.n_used + lid] = float(double(my_exp) / sum) * pc.route_scale;
     }
 }

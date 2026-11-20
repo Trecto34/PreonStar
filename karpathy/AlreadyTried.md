@@ -4537,3 +4537,30 @@ loop issued one `vec4` load of `w` and `x` per iteration and waited on each
   `./p36_test --vulkan-kernels` OK.
 * reconsider_if: fusing `dense_f32f_d_1xN` (shared gate scalar) with the router
   matvec or another single-row op to save 40 dispatches/token.
+
+## 2026-11-20 `router_topk`: single-wave64 zero-barrier + parallel `exp`/fp64 divide — ACCEPTED, -40.5% kernel, +0.31% MoE decode, bit-identical
+
+`router_topk.spv` ran 256 threads (4 wave64s) with 16 workgroup barriers across
+8 selection rounds plus 8 serial `exp()` and fp64 divides on `lid == 0`
+(`13.0 ms / 63 tok`). Evidence: `karpathy/evidence/raw/router-topk-w64-20261120/`.
+
+* **Change.** Switched `vulkan/router_topk.comp` to `local_size_x = 64` (4
+  experts/thread in registers `v0..v3`), eliminating all 16 workgroup barriers
+  and LDS traffic on wave64 GPUs (`nsub == 1`; wave32 keeps the 2-subgroup LDS
+  fallback), and moved `exp()` and `double(my_exp) / sum` to run in parallel on
+  lanes `0..n_used-1` while keeping the exact `0..n_used-1` `double` sum order
+  via `subgroupShuffle`.
+* **Kernel** (Axion, 63-token windows, 2 interleaved pairs, same binary via
+  `P36_SHADER_DIR`): `router_topk.spv` **12.895 / 13.070 -> 7.742 / 7.715 ms
+  (-40.5%**, -83 us/token; wave64 without parallel `exp`/`ddiv` was 8.68 ms).
+* **A/B** (`bench_ab.sh`, same binary via `P36_SHADER_DIR`, ctx 1024, gen 64,
+  5 interleaved reps): Axion decode **110.21 (MAD 0.520) -> 110.55 (MAD 0.150)
+  = +0.31%** (4/5 pairs positive; partially overlapped with `shared_first`
+  shared-expert projections, so ~26 us/tok reaches wall clock); prefill -1.17%
+  overlapping (noise). Kept on the -40.5% bit-identical kernel win + 4/5 pairs.
+* **Parity:** `--dump-logprobs` (top-20 logits, 64 steps) byte-identical on
+  Axion (`6cc01236a53d3933a6271a26aca8297d`) and Qwen3.6-35B-A3B
+  (`89dc8c468ce5d29eb6a85564993b2cdd`); greedy md5 identical (`f24e3634`);
+  `./p36_test --vulkan-kernels` OK.
+* reconsider_if: a model with `n_expert > 256` (the old 256-thread shader had
+  the same 256-expert cap).
