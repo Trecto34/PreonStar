@@ -1,0 +1,93 @@
+#version 460
+
+#extension GL_EXT_control_flow_attributes : require
+
+/* Tiled F32 GEMM for Inkling-2-Mini prefill (loop_down 64x4608, router 128x2304).
+ * Tile: BM = 32 output rows x BN = 32 tokens, BK = 32 (8 vec4s), swizzled LDS (8 KiB).
+ * 2x more WGs than BM=64 (64 WGs for loop_down, 128 WGs for router) -> fills all 40 CUs.
+ * Dispatch: (out_dim / 32, ceil(n_tok / 32), 1), local_size_x = 128. */
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { vec4 w[]; };
+layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+
+layout(push_constant) uniform Push {
+    uint in_dim;    /* multiple of 32 */
+    uint out_dim;   /* multiple of 32 */
+    uint n_tok;
+} pc;
+
+const uint BM = 32u;
+const uint BN = 32u;
+const uint KK = 8u;
+#define P36_SWZ(i) (((i) >> 1u) & 3u)
+
+shared vec4 As[BM][KK];
+shared vec4 Bs[BN][KK];
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint row0 = gl_WorkGroupID.x * BM;
+    uint tok0 = gl_WorkGroupID.y * BN;
+    uint k4 = pc.in_dim >> 2u;
+
+    uint ar = tid >> 2u;       /* 0..31 */
+    uint ak = tid & 3u;        /* 0..3 -> 2 vec4s */
+    uint sa = P36_SWZ(ar);
+    uint a_k0 = (ak * 2u     ) ^ sa;
+    uint a_k1 = (ak * 2u + 1u) ^ sa;
+    uint a_row_base = (row0 + ar) * k4 + ak * 2u;
+
+    bool b_live = (tok0 + ar) < pc.n_tok;
+    uint b_row_base = b_live ? ((tok0 + ar) * k4 + ak * 2u) : 0u;
+
+    uint sl = tid & 15u;       /* 0..15 -> tokens sl, sl+16 */
+    uint ry = tid >> 4u;       /* 0..7 -> rows ry + 8*i */
+    uint swz_sl = P36_SWZ(sl);
+    uint swz_ry = P36_SWZ(ry);
+    bool hi_live = (tok0 + 16u) < pc.n_tok;
+
+    float acc0[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    float acc1[4] = float[4](0.0, 0.0, 0.0, 0.0);
+
+    for (uint kb = 0u; kb < k4; kb += KK) {
+        As[ar][a_k0] = w[a_row_base + kb + 0u];
+        As[ar][a_k1] = w[a_row_base + kb + 1u];
+        Bs[ar][a_k0] = b_live ? xv[b_row_base + kb + 0u] : vec4(0.0);
+        Bs[ar][a_k1] = b_live ? xv[b_row_base + kb + 1u] : vec4(0.0);
+        barrier();
+
+        if (hi_live) {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk_idx = kk ^ swz_ry ^ swz_sl;
+                vec4 bv0 = Bs[sl][bk_idx];
+                vec4 bv1 = Bs[sl + 16u][bk_idx];
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    vec4 av = As[ry + 8u * i][kk];
+                    acc0[i] += dot(av, bv0);
+                    acc1[i] += dot(av, bv1);
+                }
+            }
+        } else {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk_idx = kk ^ swz_ry ^ swz_sl;
+                vec4 bv0 = Bs[sl][bk_idx];
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    vec4 av = As[ry + 8u * i][kk];
+                    acc0[i] += dot(av, bv0);
+                }
+            }
+        }
+        barrier();
+    }
+
+    uint t0 = tok0 + sl;
+    uint t1 = tok0 + sl + 16u;
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        uint row = row0 + ry + 8u * i;
+        if (t0 < pc.n_tok) y[t0 * pc.out_dim + row] = acc0[i];
+        if (t1 < pc.n_tok) y[t1 * pc.out_dim + row] = acc1[i];
+    }
+}

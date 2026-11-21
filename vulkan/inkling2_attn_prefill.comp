@@ -9,7 +9,11 @@
 
 /* Inkling-2-Mini GQA-3 FlashAttention prefill (head_dim == 128, F16 KV, BK == 32).
  * 1 workgroup owns 1 KV head (ALL 3 GQA query heads!) x 8 query tokens (8 half-waves of 32 lanes).
- * Reads K, V (as f16vec4 into LDS) and rel_bias ONCE across all 3 query heads!
+ * Optimizations:
+ *  - Stages rel_bias[d_base..d_base+39][16] into LDS (2.5 KiB) -> ZERO global loads in inner loop!
+ *  - Fused Q.K + R.rel_bias inside ONE sum32 (-15 ds_bpermute shuffles per key!)
+ *  - Pre-scaled LOG2E for native hardware exp2() (v_exp_f32, -9 FMULs per key!)
+ *  - Branchless j_start..j_stop causal/SWA inner loop.
  * Dispatch: (n_head_kv = 8, ceil(n_tok / 8), 1). */
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -35,19 +39,14 @@ layout(push_constant) uniform Push {
 } pc;
 
 const uint BK = 32u;
+const uint RB_ROWS = 40u;
+const float LOG2E = 1.4426950408889634;
 shared f16vec4 sh_k[BK][32];
 shared f16vec4 sh_v[BK][32];
+shared float sh_rb[RB_ROWS][16];
 
 float sum32(float v) {
     v += subgroupShuffleXor(v, 16u);
-    v += subgroupShuffleXor(v, 8u);
-    v += subgroupShuffleXor(v, 4u);
-    v += subgroupShuffleXor(v, 2u);
-    v += subgroupShuffleXor(v, 1u);
-    return v;
-}
-
-float sum16(float v) {
     v += subgroupShuffleXor(v, 8u);
     v += subgroupShuffleXor(v, 4u);
     v += subgroupShuffleXor(v, 2u);
@@ -66,18 +65,19 @@ void main(void) {
 
     uint h0 = kvh * 3u;
     uint q_pos = pc.pos0 + t;
+    float q_scale = pc.scale * LOG2E;
 
-    vec4 q0 = active_t ? q_buf[(t * pc.n_head + h0 + 0u) * 32u + lane] : vec4(0.0);
-    vec4 q1 = active_t ? q_buf[(t * pc.n_head + h0 + 1u) * 32u + lane] : vec4(0.0);
-    vec4 q2 = active_t ? q_buf[(t * pc.n_head + h0 + 2u) * 32u + lane] : vec4(0.0);
+    vec4 q0 = active_t ? q_buf[(t * pc.n_head + h0 + 0u) * 32u + lane] * q_scale : vec4(0.0);
+    vec4 q1 = active_t ? q_buf[(t * pc.n_head + h0 + 1u) * 32u + lane] * q_scale : vec4(0.0);
+    vec4 q2 = active_t ? q_buf[(t * pc.n_head + h0 + 2u) * 32u + lane] * q_scale : vec4(0.0);
 
-    float r0 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 0u) * 16u + lane] : 0.0;
-    float r1 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 1u) * 16u + lane] : 0.0;
-    float r2 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 2u) * 16u + lane] : 0.0;
+    float r0 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 0u) * 16u + lane] * LOG2E : 0.0;
+    float r1 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 1u) * 16u + lane] * LOG2E : 0.0;
+    float r2 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 2u) * 16u + lane] * LOG2E : 0.0;
 
-    float m0 = active_t ? sinks[t * pc.n_head + h0 + 0u] : -1.0e30;
-    float m1 = active_t ? sinks[t * pc.n_head + h0 + 1u] : -1.0e30;
-    float m2 = active_t ? sinks[t * pc.n_head + h0 + 2u] : -1.0e30;
+    float m0 = active_t ? sinks[t * pc.n_head + h0 + 0u] * LOG2E : -1.0e30;
+    float m1 = active_t ? sinks[t * pc.n_head + h0 + 1u] * LOG2E : -1.0e30;
+    float m2 = active_t ? sinks[t * pc.n_head + h0 + 2u] * LOG2E : -1.0e30;
     float l0 = active_t ? 1.0 : 0.0;
     float l1 = active_t ? 1.0 : 0.0;
     float l2 = active_t ? 1.0 : 0.0;
@@ -92,9 +92,10 @@ void main(void) {
     uint my_k_start = (pc.is_swa != 0u && q_pos >= pc.kv_cap)
                     ? (q_pos - pc.kv_cap + 1u) : 0u;
     uint mask = pc.kv_cap - 1u;
-    uint bcast_lane = (hw & 1u) * 32u;
+    uint q_pos0 = pc.pos0 + t0;
+    bool lane_lt16 = (lane < 16u);
 
-    /* 256 threads load 32 rows x 32 f16vec4 = 1024 f16vec4s -> 4 f16vec4s per thread */
+    /* 256 threads load 32 rows x 32 f16vec4 K/V + 40 rows x 16 float rel_bias into LDS */
     for (uint kb = k_min_tile; kb < k_end_tile; kb += BK) {
         [[unroll]] for (uint r = 0u; r < 4u; r++) {
             uint row = hw + r * 8u;
@@ -106,36 +107,37 @@ void main(void) {
                 sh_v[row][lane] = cache_v[kv_base];
             }
         }
+        uint d_base = (q_pos0 >= kb + 31u) ? (q_pos0 - kb - 31u) : 0u;
+        for (uint idx = tid; idx < RB_ROWS * 16u; idx += 256u) {
+            uint rr = idx >> 4u;
+            uint cc = idx & 15u;
+            uint d = d_base + rr;
+            sh_rb[rr][cc] = (d < pc.rel_extent) ? rel_bias[d * 16u + cc] : 0.0;
+        }
         barrier();
 
         if (active_t) {
             uint j_end = min(BK, k_end_tile - kb);
-            for (uint j = 0u; j < j_end; j++) {
-                uint k_pos = kb + j;
-                if (k_pos < my_k_start || k_pos > q_pos) continue;
+            uint j_start = (my_k_start > kb) ? (my_k_start - kb) : 0u;
+            uint j_stop  = (q_pos >= kb) ? min(j_end, q_pos - kb + 1u) : 0u;
+            uint rb_base = q_pos - kb - d_base;
+            for (uint j = j_start; j < j_stop; j++) {
+                float rb = lane_lt16 ? sh_rb[rb_base - j][lane] : 0.0;
 
                 vec4 kv = vec4(sh_k[j][lane]);
-                float s0 = sum32(dot(q0, kv)) * pc.scale;
-                float s1 = sum32(dot(q1, kv)) * pc.scale;
-                float s2 = sum32(dot(q2, kv)) * pc.scale;
-
-                uint dist = q_pos - k_pos;
-                if (dist < pc.rel_extent) {
-                    float rb = (lane < 16u) ? rel_bias[dist * 16u + lane] : 0.0;
-                    s0 += subgroupShuffle(sum16(r0 * rb), bcast_lane);
-                    s1 += subgroupShuffle(sum16(r1 * rb), bcast_lane);
-                    s2 += subgroupShuffle(sum16(r2 * rb), bcast_lane);
-                }
+                float s0 = sum32(fma(r0, rb, dot(q0, kv)));
+                float s1 = sum32(fma(r1, rb, dot(q1, kv)));
+                float s2 = sum32(fma(r2, rb, dot(q2, kv)));
 
                 vec4 vv = vec4(sh_v[j][lane]);
 
-                float mn0 = max(m0, s0); float a0 = exp(m0 - mn0); float p0 = exp(s0 - mn0);
+                float mn0 = max(m0, s0); float a0 = exp2(m0 - mn0); float p0 = exp2(s0 - mn0);
                 o0 = o0 * a0 + vv * p0; l0 = l0 * a0 + p0; m0 = mn0;
 
-                float mn1 = max(m1, s1); float a1 = exp(m1 - mn1); float p1 = exp(s1 - mn1);
+                float mn1 = max(m1, s1); float a1 = exp2(m1 - mn1); float p1 = exp2(s1 - mn1);
                 o1 = o1 * a1 + vv * p1; l1 = l1 * a1 + p1; m1 = mn1;
 
-                float mn2 = max(m2, s2); float a2 = exp(m2 - mn2); float p2 = exp(s2 - mn2);
+                float mn2 = max(m2, s2); float a2 = exp2(m2 - mn2); float p2 = exp2(s2 - mn2);
                 o2 = o2 * a2 + vv * p2; l2 = l2 * a2 + p2; m2 = mn2;
             }
         }

@@ -502,8 +502,12 @@ static bool p36_inkling2_control_vk(const p36_model *m,
                                                             cur, msg, hp->n_embd, hp->loop_gate_rank) != 0;
     } else {
         down_ok = p36_gpu_inkling2_control_prep_tensor(ink->ctrl_in, cur, msg, n_tok, hp->n_embd) &&
-                  p36_gpu_tensor_matmul_scaled(m, l->loop_down[mod], ink->ctrl_in, ink->ctrl_h[0],
-                                               2u * hp->n_embd, hp->loop_gate_rank, n_tok, 1.0f);
+                  ((n_tok >= 16u && l->loop_down[mod]->type == P36_TENSOR_F32 && (hp->loop_gate_rank % 64u) == 0u)
+                       ? (p36_gpu_inkling2_f32_gemm_tensor(ink->ctrl_h[0], m->map, m->size,
+                                                           l->loop_down[mod]->abs_offset,
+                                                           ink->ctrl_in, 2u * hp->n_embd, hp->loop_gate_rank, n_tok) != 0)
+                       : p36_gpu_tensor_matmul_scaled(m, l->loop_down[mod], ink->ctrl_in, ink->ctrl_h[0],
+                                                      2u * hp->n_embd, hp->loop_gate_rank, n_tok, 1.0f));
     }
     return down_ok &&
            p36_gpu_inkling2_control_gate_tensor(out, m->map, m->size,
@@ -705,18 +709,18 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
         INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_q, n_in[0], q8_in[0], ink->q_buf, D, Q, n_tok, 1.0f), "attn_q");
         INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_k, n_in[1], q8_in[1], ink->k_buf, D, KV, n_tok, 1.0f), "attn_k");
         INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_v, n_in[2], q8_in[2], ink->v_buf, D, KV, n_tok, 1.0f), "attn_v");
+        INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_rel, n_in[0], q8_in[0], ink->r_buf, D, hp->n_head * hp->n_relative, n_tok, 1.0f), "attn_rel");
         if (n_tok == 1u &&
-            l->attn_gate->type == P36_TENSOR_Q8_0 && l->attn_rel->type == P36_TENSOR_Q8_0 &&
-            p36_gpu_matmul_q8_0_pair_scaled_tensor(ink->gate_buf, ink->r_buf, m->map, m->size,
-                                                   l->attn_gate->abs_offset, l->attn_rel->abs_offset,
-                                                   D, Q, hp->n_head * hp->n_relative,
+            l->attn_gate->type == P36_TENSOR_Q8_0 && l->attn_sink_proj->type == P36_TENSOR_Q8_0 &&
+            p36_gpu_matmul_q8_0_pair_scaled_tensor(ink->gate_buf, ink->sinks_buf, m->map, m->size,
+                                                   l->attn_gate->abs_offset, l->attn_sink_proj->abs_offset,
+                                                   D, Q, hp->n_head,
                                                    n_in[0], 1.0f, 1.0f)) {
-            /* Fused Q8_0 pair: attn_gate + attn_rel in 1 dispatch! */
+            /* Fused Q8_0 pair: attn_gate + attn_sink_proj in 1 dispatch! (-48 disp/tok) */
         } else {
-            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_rel, n_in[0], q8_in[0], ink->r_buf, D, hp->n_head * hp->n_relative, n_tok, 1.0f), "attn_rel");
             INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_gate, n_in[0], q8_in[0], ink->gate_buf, D, Q, n_tok, 1.0f), "attn_gate");
+            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_sink_proj, n_in[0], q8_in[0], ink->sinks_buf, D, hp->n_head, n_tok, 1.0f), "attn_sink");
         }
-        INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_sink_proj, n_in[0], q8_in[0], ink->sinks_buf, D, hp->n_head, n_tok, 1.0f), "attn_sink");
         if (!is_swa) {
             INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_k_conv_proj, n_in[1], q8_in[1], ink->k_dyn, D, hp->n_conv * hp->n_head_kv, n_tok, 1.0f), "k_dyn");
             INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_v_conv_proj, n_in[2], q8_in[2], ink->v_dyn, D, hp->n_conv * hp->n_head_kv, n_tok, 1.0f), "v_dyn");
@@ -820,7 +824,13 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
         }
 
         /* MoE router + top-k + gate_up/SITU + down + ffn_post_conv + residual add */
-        INK_CHK(p36_gpu_tensor_matmul_scaled(m, l->ffn_gate_inp, ink->norm[0], ink->router_logits, D, hp->n_expert, n_tok, 1.0f), "router_mm");
+        if (n_tok >= 16u && l->ffn_gate_inp->type == P36_TENSOR_F32 && (hp->n_expert % 64u) == 0u) {
+            INK_CHK(p36_gpu_inkling2_f32_gemm_tensor(ink->router_logits, m->map, m->size,
+                                                     l->ffn_gate_inp->abs_offset,
+                                                     ink->norm[0], D, hp->n_expert, n_tok), "router_gemm");
+        } else {
+            INK_CHK(p36_gpu_tensor_matmul_scaled(m, l->ffn_gate_inp, ink->norm[0], ink->router_logits, D, hp->n_expert, n_tok, 1.0f), "router_mm");
+        }
         INK_CHK(p36_gpu_inkling2_router_topk_tensor(ink->selected, ink->router_w, ink->router_logits,
                                                     m->map, m->size,
                                                     l->exp_probs_b ? l->exp_probs_b->abs_offset : 0,

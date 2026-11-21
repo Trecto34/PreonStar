@@ -194,18 +194,19 @@ PreonStar supports Thinking Machines' `inkling2_loop` models (both APEX-I and
 upstream `llama.cpp` PR #32695 loop-controller tensor layouts, including `Q5_0`
 and `IQ4_NL` MoE down projections) with dedicated Vulkan compute shaders
 (`vulkan/inkling2_*.comp`). Measured on BC-250 (16 GB UMA, RADV, greedy,
-`p36-bench`, `n=128`, `--prefill-chunk 1024`):
+`p36-bench`, `n=128`, default `prefill_chunk=1024`):
 
-| Model / Engine | GGUF Size | `pp512` (warm) | `pp1024` (warm) | `tg128 @ 512` | `tg128 @ 1k` | `tg128 @ 2k` | Safe Max Context *(14 GiB RAM)* |
+| Model / Engine | GGUF Size | `pp1024` (warm) | `tg128 @ 512` | `tg128 @ 1k` | `tg128 @ 2k` | `5.3K` Needle *(pp / tg)* | Safe Max Context *(14 GiB RAM)* |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `llama-inkling2` `UD-IQ3_XXS` *(ref)* | — | 431.8 t/s | 421.5 t/s | 47.1 t/s | — | — | — |
-| **PreonStar NanoPlus-V2.1** | 10.23 GiB | **553.4 t/s** | **583.9 t/s** | **67.9 t/s** | **67.0 t/s** | **65.7 t/s** | **~56K–64K** *(32 KiB/tok)* |
-| **PreonStar MiniPlus-V2.1** | 12.09 GiB | **524.9 t/s** | **566.7 t/s** | **66.9 t/s** | **65.8 t/s** | **65.8 t/s** | **~8K–12K** *(use chunk 512 for 12K)* |
+| `llama-inkling2` `UD-IQ3_XXS` *(ref)* | — | 421.5 t/s | 47.1 t/s | — | — | — | — |
+| **PreonStar NanoPlus-V2.1** | 10.23 GiB | **652.1 t/s** | **67.9 t/s** | **67.1 t/s** | **67.1 t/s** | — | **~56K–64K** *(32 KiB/tok)* |
+| **PreonStar MiniPlus-V2.1** | 12.09 GiB | **629.8 t/s** | **66.9 t/s** | **66.3 t/s** | **66.1 t/s** | **597.2 / 63.3 t/s** | **~8K–12K** *(use chunk 512 for 12K)* |
 
 40 of the 48 logical layers use fixed-size sliding-window attention (window
 1024, 160 MiB total), so only the 8 full-attention layers grow with context
 (`32 KiB/tok` in F16, plus ~0.49–0.57 GiB fixed runtime buffers). Exact needle
-retrieval was verified at 4,960 tokens (`--ctx 8192`, 5× SWA ring-buffer wrap).
+retrieval (`COBALT-7749`) was verified at 5,292 tokens (`--ctx 8192`, 5× SWA
+ring-buffer wrap, 0.22 GiB context buffers).
 
 **Recommended models:** [IsValorum](https://huggingface.co/IsValorum) on Hugging
 Face. PreonStar is built to run these quants well: the APEX-I NanoPlus files

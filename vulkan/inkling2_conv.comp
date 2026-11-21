@@ -3,7 +3,9 @@
 /* Causal short convolution (l_cache = 4) with residual + optional dynamic
  * per-head taps + optional post-conv residual add.
  * state layout: [3, n_channels] where slot 0 is oldest (t-3), slot 2 is t-1.
- * Safe in-place (out == cur). */
+ * When n_tok >= 3, dispatches 2D parallel tiles of 16 tokens ((C+63)/64, (n_tok+15)/16)
+ * with state READ-ONLY; host copies last 3 rows of cur into state via vkCmdCopyBuffer.
+ * When n_tok < 3, dispatches ((C+63)/64, 1) and updates state in-place. */
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -28,19 +30,23 @@ void main(void) {
     uint c = gl_GlobalInvocationID.x;
     if (c >= pc.n_channels) return;
 
+    uint C = pc.n_channels;
     vec4 kw = w[c];
-    float s0 = state[c];
-    float s1 = state[pc.n_channels + c];
-    float s2 = state[2u * pc.n_channels + c];
+    uint t0 = gl_WorkGroupID.y * 16u;
+    uint t_end = min(t0 + 16u, pc.n_tok);
+    if (t0 >= pc.n_tok) return;
+
+    float s0 = (t0 >= 3u) ? cur[(t0 - 3u) * C + c] : state[t0 * C + c];
+    float s1 = (t0 >= 2u) ? cur[(t0 - 2u) * C + c] : state[(t0 + 1u) * C + c];
+    float s2 = (t0 >= 1u) ? cur[(t0 - 1u) * C + c] : state[(t0 + 2u) * C + c];
     uint head = pc.has_dyn != 0u ? (c / pc.head_dim) : 0u;
 
-    for (uint t = 0u; t < pc.n_tok; t++) {
-        uint idx = t * pc.n_channels + c;
+    for (uint t = t0; t < t_end; t++) {
+        uint idx = t * C + c;
         float x3 = cur[idx];
         float acc = s0 * kw.x + s1 * kw.y + s2 * kw.z + x3 * kw.w;
         if (pc.has_dyn != 0u) {
             vec4 dt = dyn[t * pc.n_heads + head];
-            /* lag 0 -> x3, lag 1 -> s2, lag 2 -> s1, lag 3 -> s0 */
             acc += x3 * dt.x + s2 * dt.y + s1 * dt.z + s0 * dt.w;
         }
         float y = (x3 + acc) * pc.inv_scale;
@@ -53,7 +59,9 @@ void main(void) {
         s2 = x3;
     }
 
-    state[c] = s0;
-    state[pc.n_channels + c] = s1;
-    state[2u * pc.n_channels + c] = s2;
+    if (pc.n_tok < 3u) {
+        state[c] = s0;
+        state[C + c] = s1;
+        state[2u * C + c] = s2;
+    }
 }

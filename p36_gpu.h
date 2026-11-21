@@ -1187,4 +1187,14 @@ int p36_gpu_inkling2_softcap_tensor(
         uint32_t        n,
         float           cap);
 
+int p36_gpu_inkling2_f32_gemm_tensor(
+        p36_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        const p36_gpu_tensor *x,
+        uint32_t              in_dim,
+        uint32_t              out_dim,
+        uint32_t              n_tok);
+
 #endif

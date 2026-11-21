@@ -4,6 +4,7 @@
 
 static p36_vk_kernel p36_vk_ink_mix;
 static p36_vk_kernel p36_vk_ink_post_attn_mix;
+static p36_vk_kernel p36_vk_ink_f32_gemm;
 static p36_vk_kernel p36_vk_ink_ctrl_prep;
 static p36_vk_kernel p36_vk_ink_ctrl_prep_down;
 static p36_vk_kernel p36_vk_ink_ctrl_gate;
@@ -35,6 +36,7 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     if (p36_vk_ink_kernels_inited) return;
     p36_vk_ink_mix            = P36_VK_KERNEL("vulkan/inkling2_mix.spv", 6, 40, (1u << 0) | (1u << 3) | (1u << 5));
     p36_vk_ink_post_attn_mix  = P36_VK_KERNEL("vulkan/inkling2_post_attn_mix.spv", 9, 32, (1u << 0) | (1u << 4) | (1u << 5) | (1u << 8));
+    p36_vk_ink_f32_gemm       = P36_VK_KERNEL("vulkan/inkling2_f32_gemm.spv", 3, 12, 1u << 2);
     p36_vk_ink_ctrl_prep      = P36_VK_KERNEL("vulkan/inkling2_control_prep.spv", 3, 4, 1u << 2);
     p36_vk_ink_ctrl_prep_down = P36_VK_KERNEL("vulkan/inkling2_control_prep_down.spv", 4, 4, 1u << 3);
     p36_vk_ink_ctrl_gate      = P36_VK_KERNEL("vulkan/inkling2_control_gate.spv", 6, 12, 1u << 5);
@@ -66,6 +68,7 @@ static void p36_vk_inkling2_cleanup_unlocked(void) {
     if (!p36_vk_ink_kernels_inited) return;
     p36_vk_kernel_destroy(&p36_vk_ink_mix);
     p36_vk_kernel_destroy(&p36_vk_ink_post_attn_mix);
+    p36_vk_kernel_destroy(&p36_vk_ink_f32_gemm);
     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_prep);
     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_prep_down);
     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_gate);
@@ -318,9 +321,16 @@ int p36_gpu_inkling2_conv_kv_store_tensor(
         uint32_t n_head_kv, n_tok, pos0, kv_cap, is_swa, has_dyn;
         float inv_scale, qk_clip;
     } pc = { n_head_kv, n_tok, pos0, kv_cap, is_swa, k_dyn != NULL ? 1u : 0u, inv_scale, qk_clip };
+    uint32_t gy = (n_tok >= 3u) ? ((n_tok + 7u) / 8u) : 1u;
     ok = p36_vk_run_unlocked("inkling2_conv_kv", &p36_vk_ink_conv_kv_store, bindings, &pc, sizeof(pc),
-                             n_head_kv, 1, 1);
+                             n_head_kv, gy, 1);
     pthread_mutex_unlock(&p36_vk_mu);
+    if (ok && n_tok >= 3u) {
+        uint64_t row_bytes = (uint64_t)n_head_kv * 128u * sizeof(float);
+        uint64_t src_off = (uint64_t)(n_tok - 3u) * row_bytes;
+        ok = p36_gpu_tensor_copy(k_state, 0, k_in, src_off, 3u * row_bytes) &&
+             p36_gpu_tensor_copy(v_state, 0, v_in, src_off, 3u * row_bytes);
+    }
     return ok;
 }
 
@@ -385,9 +395,14 @@ int p36_gpu_inkling2_conv_tensor(
         uint32_t n_channels, n_tok, has_dyn, n_heads, head_dim, has_res;
         float inv_scale;
     } pc = { n_channels, n_tok, dyn != NULL ? 1u : 0u, n_heads, head_dim, res != NULL ? 1u : 0u, inv_scale };
+    uint32_t gy = (n_tok >= 3u) ? ((n_tok + 15u) / 16u) : 1u;
     ok = p36_vk_run_unlocked("inkling2_conv", &p36_vk_ink_conv, bindings, &pc, sizeof(pc),
-                             (n_channels + 63u) / 64u, 1, 1);
+                             (n_channels + 63u) / 64u, gy, 1);
     pthread_mutex_unlock(&p36_vk_mu);
+    if (ok && n_tok >= 3u) {
+        uint64_t row_bytes = (uint64_t)n_channels * sizeof(float);
+        ok = p36_gpu_tensor_copy(state, 0, cur, (uint64_t)(n_tok - 3u) * row_bytes, 3u * row_bytes);
+    }
     return ok;
 }
 
@@ -647,7 +662,7 @@ int p36_gpu_inkling2_moe_ffn_tensor(
                 dn_t, mid_scratch, selected, weights, out, cw_t, conv_state, res
             };
             ok = p36_vk_run_unlocked("inkling2_moe_dn_dec", dn_k, dn_b, &dn_pc, sizeof(dn_pc),
-                                     out_dim / 4u, 1, 1);
+                                     out_dim / 8u, 1, 1);
         }
     } else {
         switch (gate_up_type) {
@@ -701,6 +716,32 @@ int p36_gpu_inkling2_softcap_tensor(
     struct { uint32_t n; float cap, inv_cap; } pc = { n, cap, 1.0f / cap };
     ok = p36_vk_run_unlocked("inkling2_softcap", &p36_vk_ink_softcap, bindings, &pc, sizeof(pc),
                              (n + 63u) / 64u, 1, 1);
+    pthread_mutex_unlock(&p36_vk_mu);
+    return ok;
+}
+
+int p36_gpu_inkling2_f32_gemm_tensor(
+        p36_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        const p36_gpu_tensor *x,
+        uint32_t              in_dim,
+        uint32_t              out_dim,
+        uint32_t              n_tok) {
+    int ok = 0;
+    uint64_t w_bytes = (uint64_t)in_dim * out_dim * sizeof(float);
+    pthread_mutex_lock(&p36_vk_mu);
+    if (!p36_vk.ready) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
+    p36_vk_inkling2_init_kernels_unlocked();
+    const unsigned char *w_src = p36_gpu_weight_bytes(model_map, model_size, weight_offset, w_bytes);
+    if (!w_src) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
+    p36_gpu_tensor *w_t = p36_vk_weight_get_unlocked(w_src, w_bytes);
+    if (!w_t) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
+    const p36_gpu_tensor *bindings[3] = { w_t, x, out };
+    struct { uint32_t in_dim, out_dim, n_tok; } pc = { in_dim, out_dim, n_tok };
+    ok = p36_vk_run_unlocked("inkling2_f32_gemm", &p36_vk_ink_f32_gemm, bindings, &pc, sizeof(pc),
+                             out_dim / 32u, (n_tok + 31u) / 32u, 1);
     pthread_mutex_unlock(&p36_vk_mu);
     return ok;
 }

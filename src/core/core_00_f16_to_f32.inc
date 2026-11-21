@@ -1119,7 +1119,7 @@ static uint32_t p36_engine_gpu_prefill_cap(const p36_engine *e) {
 #endif
     uint32_t cap;
     if (e->prefill_cap_override) cap = e->prefill_cap_override;
-    else if (e->variant == P36_VARIANT_INKLING2_LOOP && !getenv("P36_VK_PREFILL_CHUNK")) cap = 512;
+    else if (e->variant == P36_VARIANT_INKLING2_LOOP && !getenv("P36_VK_PREFILL_CHUNK")) cap = 1024;
     else if (e->ssd_streaming && !getenv("P36_VK_PREFILL_CHUNK")) cap = 512;
     else cap = p36_default_gpu_prefill_cap();
     return p36_engine_clamp_prefill_cap(cap);

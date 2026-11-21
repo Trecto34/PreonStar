@@ -30,7 +30,7 @@ layout(push_constant) uniform Push {
     float inv_scale; /* 1 / sqrt(5) for fused ffn_post_conv + residual */
 } pc;
 
-const uint ROWS = 4u;
+const uint ROWS = 8u;
 
 #ifdef P36_MOE_IQ4NL
 const uint BLOCK_U16 = 9u;

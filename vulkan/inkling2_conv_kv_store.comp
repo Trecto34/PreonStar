@@ -7,10 +7,10 @@
 
 /* Fused K/V short-conv (l_cache=4, optional dynamic taps) + K L2-clip +
  * V RMSNorm + F16 KV cache store for Inkling-2-Mini.
- * Replaces 3 dispatches (conv_k, conv_v, clip_kv) with 1 dispatch!
- * Each workgroup (1 wave64) owns 1 KV head (128 dims = 2 dims/lane) and loops
- * over t = 0..n_tok-1 keeping the 3-slot conv history in registers.
- * Dispatch: (n_head_kv = 8, 1, 1). */
+ * Each workgroup (1 wave64) owns 1 KV head (128 dims = 2 dims/lane) x 8 tokens.
+ * When n_tok >= 3, dispatches (n_head_kv = 8, ceil(n_tok / 8), 1) with state READ-ONLY;
+ * host copies last 3 rows of k_in/v_in into k_state/v_state via vkCmdCopyBuffer.
+ * When n_tok < 3, dispatches (n_head_kv = 8, 1, 1) and updates state in-place. */
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -38,6 +38,10 @@ layout(push_constant) uniform Push {
 
 void main(void) {
     uint h = gl_WorkGroupID.x;
+    uint t0 = gl_WorkGroupID.y * 8u;
+    uint t_end = min(t0 + 8u, pc.n_tok);
+    if (t0 >= pc.n_tok) return;
+
     uint tid = gl_LocalInvocationID.x;
     uint C = pc.n_head_kv * 128u;
     uint c0 = h * 128u + tid;
@@ -46,14 +50,23 @@ void main(void) {
     vec4 kw0 = kw[c0], kw1 = kw[c1];
     vec4 vw0 = vw[c0], vw1 = vw[c1];
 
-    float ks0_0 = ks[c0], ks1_0 = ks[C + c0], ks2_0 = ks[2u * C + c0];
-    float ks0_1 = ks[c1], ks1_1 = ks[C + c1], ks2_1 = ks[2u * C + c1];
-    float vs0_0 = vs[c0], vs1_0 = vs[C + c0], vs2_0 = vs[2u * C + c0];
-    float vs0_1 = vs[c1], vs1_1 = vs[C + c1], vs2_1 = vs[2u * C + c1];
+    float ks0_0 = (t0 >= 3u) ? k_in[(t0 - 3u) * C + c0] : ks[t0 * C + c0];
+    float ks1_0 = (t0 >= 2u) ? k_in[(t0 - 2u) * C + c0] : ks[(t0 + 1u) * C + c0];
+    float ks2_0 = (t0 >= 1u) ? k_in[(t0 - 1u) * C + c0] : ks[(t0 + 2u) * C + c0];
+    float ks0_1 = (t0 >= 3u) ? k_in[(t0 - 3u) * C + c1] : ks[t0 * C + c1];
+    float ks1_1 = (t0 >= 2u) ? k_in[(t0 - 2u) * C + c1] : ks[(t0 + 1u) * C + c1];
+    float ks2_1 = (t0 >= 1u) ? k_in[(t0 - 1u) * C + c1] : ks[(t0 + 2u) * C + c1];
+
+    float vs0_0 = (t0 >= 3u) ? v_in[(t0 - 3u) * C + c0] : vs[t0 * C + c0];
+    float vs1_0 = (t0 >= 2u) ? v_in[(t0 - 2u) * C + c0] : vs[(t0 + 1u) * C + c0];
+    float vs2_0 = (t0 >= 1u) ? v_in[(t0 - 1u) * C + c0] : vs[(t0 + 2u) * C + c0];
+    float vs0_1 = (t0 >= 3u) ? v_in[(t0 - 3u) * C + c1] : vs[t0 * C + c1];
+    float vs1_1 = (t0 >= 2u) ? v_in[(t0 - 2u) * C + c1] : vs[(t0 + 1u) * C + c1];
+    float vs2_1 = (t0 >= 1u) ? v_in[(t0 - 1u) * C + c1] : vs[(t0 + 2u) * C + c1];
 
     uint mask = pc.kv_cap - 1u;
 
-    for (uint t = 0u; t < pc.n_tok; t++) {
+    for (uint t = t0; t < t_end; t++) {
         uint base = t * C;
         float kx0 = k_in[base + c0];
         float kx1 = k_in[base + c1];
@@ -97,8 +110,10 @@ void main(void) {
         cache_v[kv_base + tid + 64u] = float16_t(vo1 * v_inv);
     }
 
-    ks[c0] = ks0_0; ks[C + c0] = ks1_0; ks[2u * C + c0] = ks2_0;
-    ks[c1] = ks0_1; ks[C + c1] = ks1_1; ks[2u * C + c1] = ks2_1;
-    vs[c0] = vs0_0; vs[C + c0] = vs1_0; vs[2u * C + c0] = vs2_0;
-    vs[c1] = vs0_1; vs[C + c1] = vs1_1; vs[2u * C + c1] = vs2_1;
+    if (pc.n_tok < 3u) {
+        ks[c0] = ks0_0; ks[C + c0] = ks1_0; ks[2u * C + c0] = ks2_0;
+        ks[c1] = ks0_1; ks[C + c1] = ks1_1; ks[2u * C + c1] = ks2_1;
+        vs[c0] = vs0_0; vs[C + c0] = vs1_0; vs[2u * C + c0] = vs2_0;
+        vs[c1] = vs0_1; vs[C + c1] = vs1_1; vs[2u * C + c1] = vs2_1;
+    }
 }
