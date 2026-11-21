@@ -241,7 +241,7 @@ static void bpe_tokenize_text(const p36_vocab *vocab, const char *text, token_ve
         uint64_t start = pos;
         uint8_t c = (uint8_t)text[pos];
 
-        if (c == ' ' && pos + 1 < len) {
+        if (c == ' ' && pos + 1 < len && !ascii_space((uint8_t)text[pos + 1])) {
             uint64_t next = pos + 1;
             uint8_t nc = (uint8_t)text[next];
             if (ascii_digit(nc)) {
@@ -281,7 +281,8 @@ static void bpe_tokenize_text(const p36_vocab *vocab, const char *text, token_ve
             if (c == ' ') pos++;
             while (pos < len && qwen_punct_symbol_at(text, len, pos)) pos = next_utf8_char(text, len, pos);
             while (pos < len && ((uint8_t)text[pos] == '/' || ascii_newline((uint8_t)text[pos]))) pos++;
-        } else if (ascii_space(c)) {
+        }
+        if (pos == start && ascii_space(c)) {
             uint64_t p = pos;
             uint64_t last_newline_end = 0;
             while (p < len && ascii_space((uint8_t)text[p])) {
@@ -290,13 +291,12 @@ static void bpe_tokenize_text(const p36_vocab *vocab, const char *text, token_ve
             }
             if (last_newline_end) {
                 pos = last_newline_end;
-            } else if (p < len && p > pos + 1 &&
-                       (qwen_letter_like_at(text, len, p) || qwen_punct_symbol_at(text, len, p))) {
+            } else if (p < len && p > pos + 1 && !ascii_space((uint8_t)text[p])) {
                 pos = p - 1;
             } else {
                 pos = p;
             }
-        } else {
+        } else if (pos == start) {
             pos = next_utf8_char(text, len, pos);
         }
 

@@ -810,23 +810,52 @@ static void canonicalize_tool_checkpoint(server *s, server_slot *slot,
     }
 
     p36_tokens canonical = {0};
-    p36_tokenize_rendered_chat(s->engine, rendered.ptr ? rendered.ptr : "", &canonical);
     const int live_len = p36_session_pos(slot->session);
-    const int common = p36_session_common_prefix(slot->session, &canonical);
-    if (common == live_len && canonical.len == live_len) goto done;
 
     size_t live_text_len = 0;
     char *live_text = render_tokens_text(s->engine, p36_session_tokens(slot->session), &live_text_len);
-    if (live_text_len == rendered.len &&
-        (live_text_len == 0 || memcmp(live_text, rendered.ptr, live_text_len) == 0))
+    if (byte_prefix_match(rendered.ptr ? rendered.ptr : "", rendered.len,
+                          live_text, live_text_len))
     {
-        /* The graph already represents the bytes the next request will render.
-         * Token-level canonicalization would only replace a valid sampled
-         * history with a different BPE spelling of the same transcript. */
+        /* The live graph already represents the exact canonical bytes up to
+         * live_text_len (typically missing only the EOS stop marker such as
+         * <|content_model_end_sampling|> or <|im_end|>\n).  Never re-tokenize
+         * the prefix or rebuild the KV/vision cache; just append the tiny
+         * byte suffix onto the live tokens in place. */
+        if (live_text_len < rendered.len) {
+            p36_tokens extended = {0};
+            build_prompt_from_exact_prefix_and_text_suffix(
+                s->engine, p36_session_tokens(slot->session),
+                rendered.ptr + live_text_len, &extended);
+            char append_err[160] = {0};
+            if (extended.len > live_len) {
+                int rc = server_session_sync_multimodal(
+                    s, slot, &extended, j->req.images, j->req.image_count,
+                    append_err, sizeof(append_err));
+                if (rc == 0) {
+                    server_log(P36_LOG_KVCACHE,
+                               "p36-server: tool checkpoint canonicalized ctx=%s common=%d live=%d canonical=%d via=append",
+                               ctx, live_len, live_len, extended.len);
+                    trace_event(s, trace_id,
+                                "tool checkpoint canonicalized via append: live=%d canonical=%d",
+                                live_len, extended.len);
+                } else {
+                    server_log(P36_LOG_KVCACHE,
+                               "p36-server: tool checkpoint canonicalization failed ctx=%s common=%d live=%d canonical=%d error=\"%s\"",
+                               ctx, live_len, live_len, extended.len, append_err);
+                    trace_event(s, trace_id, "tool checkpoint suffix append failed: %s", append_err);
+                }
+            }
+            p36_tokens_free(&extended);
+        }
         free(live_text);
         goto done;
     }
     free(live_text);
+
+    p36_tokenize_rendered_chat(s->engine, rendered.ptr ? rendered.ptr : "", &canonical);
+    const int common = p36_session_common_prefix(slot->session, &canonical);
+    if (common == live_len && canonical.len == live_len) goto done;
 
     int stable_len = j->req.prompt.len;
     if (strip_empty) {

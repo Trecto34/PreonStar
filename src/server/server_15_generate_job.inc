@@ -287,6 +287,8 @@ static void generate_job(server *s, server_slot *slot, job *j) {
     } ink_state = INK_OUT_IDLE;
     bool ink_think_open = j->req.inkling2 && j->req.kind == REQ_CHAT &&
                           p36_think_mode_enabled(j->req.think_mode);
+    buf ink_raw_tools = {0};
+    buf ink_pending_msg = {0};
     const bool thinking_gates_tool_markers = p36_think_mode_enabled(j->req.think_mode);
     bool tool_scan_waiting_for_think_close =
         thinking_gates_tool_markers && thinking.inside;
@@ -427,10 +429,13 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                 const char *emit_str = NULL;
                 if (piece_len == 17 && !memcmp(piece, "<|message_model|>", 17)) {
                     ink_state = INK_OUT_AFTER_MSG_MODEL;
+                    ink_pending_msg.len = 0;
+                    buf_append(&ink_pending_msg, piece, piece_len);
                     emit_str = "";
                 } else if (ink_state == INK_OUT_AFTER_MSG_MODEL) {
                     if (piece_len == 20 && !memcmp(piece, "<|content_thinking|>", 20)) {
                         ink_state = INK_OUT_IN_THINKING;
+                        ink_pending_msg.len = 0;
                         if (!ink_think_open) {
                             emit_str = "<think>";
                             ink_think_open = true;
@@ -439,6 +444,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                         }
                     } else if (piece_len == 16 && !memcmp(piece, "<|content_text|>", 16)) {
                         ink_state = INK_OUT_IN_TEXT;
+                        ink_pending_msg.len = 0;
                         if (ink_think_open) {
                             emit_str = "</think>\n\n";
                             ink_think_open = false;
@@ -448,6 +454,10 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                     } else if (piece_len == 28 &&
                                !memcmp(piece, "<|content_invoke_tool_json|>", 28)) {
                         ink_state = INK_OUT_IN_TOOL_JSON;
+                        if (ink_pending_msg.len > 0)
+                            buf_append(&ink_raw_tools, ink_pending_msg.ptr, ink_pending_msg.len);
+                        buf_append(&ink_raw_tools, piece, piece_len);
+                        ink_pending_msg.len = 0;
                         if (ink_think_open) {
                             emit_str = "</think>\n\n<tool_call>\n";
                             ink_think_open = false;
@@ -456,6 +466,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                         }
                     } else {
                         /* Function name prefix token(s) before <|content_invoke_tool_json|> */
+                        buf_append(&ink_pending_msg, piece, piece_len);
                         emit_str = "";
                     }
                 } else if (piece_len == 15 && !memcmp(piece, "<|end_message|>", 15)) {
@@ -463,11 +474,14 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                         emit_str = "</think>\n\n";
                         ink_think_open = false;
                     } else if (ink_state == INK_OUT_IN_TOOL_JSON) {
+                        buf_append(&ink_raw_tools, piece, piece_len);
                         emit_str = "\n</tool_call>";
                     } else {
                         emit_str = "";
                     }
                     ink_state = INK_OUT_IDLE;
+                } else if (ink_state == INK_OUT_IN_TOOL_JSON) {
+                    buf_append(&ink_raw_tools, piece, piece_len);
                 }
                 if (emit_str) {
                     free(piece);
@@ -725,9 +739,13 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             if (j->req.inkling2) {
                 free(parsed_calls.raw_tool_text);
                 parsed_calls.raw_tool_text = NULL;
-                buf ink_raw = {0};
-                append_inkling2_tool_calls_text(&ink_raw, &parsed_calls);
-                parsed_calls.raw_tool_text = buf_take(&ink_raw);
+                if (!incomplete_tool_call && ink_raw_tools.len > 0) {
+                    parsed_calls.raw_tool_text = buf_take(&ink_raw_tools);
+                } else {
+                    buf ink_raw = {0};
+                    append_inkling2_tool_calls_text(&ink_raw, &parsed_calls);
+                    parsed_calls.raw_tool_text = buf_take(&ink_raw);
+                }
             }
             /* Known tool IDs can replay Qwen's empty thinking prelude exactly,
              * preserving recurrent and vision state without a full rebuild. */
@@ -743,16 +761,6 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                  saw_tool_start, saw_tool_end,
                  parsed_content ? parsed_content : (text.ptr ? text.ptr : ""),
                  parsed_reasoning, &parsed_calls, now_sec() - t0);
-
-    if (j->req.kind == REQ_CHAT && parsed_calls.len) {
-        canonicalize_tool_checkpoint(s, slot, j, ctx_span, trace_id,
-                                     parsed_content ? parsed_content : "",
-                                     parsed_reasoning, &parsed_calls);
-    } else if (!parsed_calls.len &&
-               should_canonicalize_thinking_checkpoint(&j->req, &thinking, final_finish)) {
-        canonicalize_thinking_checkpoint(s, slot, j, ctx_span, trace_id,
-                                         parsed_content ? parsed_content : "");
-    }
 
     slot_remember_vision_tools(s, slot, &j->req, &parsed_calls);
 
@@ -865,10 +873,27 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                        now_sec() - t0);
         }
     }
+    /* Deliver TCP FIN immediately so the client receives [DONE] and can start
+     * running tool calls while checkpoint canonicalization finishes on the slot.
+     * Clear the client-disconnect cancel hook first so the client closing its
+     * socket does not abort canonicalization. */
+    shutdown(j->fd, SHUT_WR);
+    p36_session_set_cancel(slot->session, NULL, NULL);
+    if (j->req.kind == REQ_CHAT && parsed_calls.len) {
+        canonicalize_tool_checkpoint(s, slot, j, ctx_span, trace_id,
+                                     parsed_content ? parsed_content : "",
+                                     parsed_reasoning, &parsed_calls);
+    } else if (!parsed_calls.len &&
+               should_canonicalize_thinking_checkpoint(&j->req, &thinking, final_finish)) {
+        canonicalize_thinking_checkpoint(s, slot, j, ctx_span, trace_id,
+                                         parsed_content ? parsed_content : "");
+    }
     free(parsed_content);
     free(parsed_reasoning);
     tool_calls_free(&parsed_calls);
     openai_stream_free(&openai_live);
+    buf_free(&ink_raw_tools);
+    buf_free(&ink_pending_msg);
     buf_free(&text);
     p36_tokens_free(&generated_tokens);
     p36_tokens_free(&effective_prompt);

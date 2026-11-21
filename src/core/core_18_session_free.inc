@@ -364,11 +364,15 @@ p36_session_rewrite_result p36_session_rewrite_from_common(p36_session *s, const
      * spans and rope_delta describe it); the caller owns the vision rebuild. */
     if (s->vision_state) return P36_SESSION_REWRITE_REBUILD_NEEDED;
     /* A BROKEN session (valid=false after a failed forward, len>0) holds a
-     * half-written cache.  Never mark it valid again: always go through sync,
-     * which resets the runtime and rebuilds from token zero. */
+     * half-written cache, and recurrent/conv state cannot be rewound when
+     * common < live_len.  Signal rebuild-needed so callers can prefer an
+     * earlier disk checkpoint over replaying from token zero. */
     if (p36_session_rewrite_requires_rebuild(s->checkpoint.len, prompt->len, common) ||
         (!s->checkpoint_valid && s->checkpoint.len > 0)) {
-        return p36_session_sync(s, prompt, err, errlen) == 0 ? P36_SESSION_REWRITE_OK : P36_SESSION_REWRITE_ERROR;
+        if (err && errlen) snprintf(err, errlen,
+                                    "rewrite requires rebuild (common=%d live=%d)",
+                                    common, s->checkpoint.len);
+        return P36_SESSION_REWRITE_REBUILD_NEEDED;
     }
     if (common == s->checkpoint.len && common == prompt->len) return P36_SESSION_REWRITE_OK;
     s->checkpoint.len = common;

@@ -503,12 +503,46 @@ static char *render_inkling2_chat_prompt_text(const chat_msgs *msgs,
             char *content = chat_content_text(m->content, false, NULL);
             failures = tool_response_is_error(content) ? failures + 1 : 0;
             const char *fn_name = find_inkling2_tool_name_by_id(msgs, i, m->tool_call_id);
-            buf_puts(&out, "<|message_tool|>");
-            buf_puts(&out, fn_name);
-            buf_puts(&out, "<|content_text|>");
-            buf_puts(&out, content);
-            append_tool_error_warning(&out, failures);
-            buf_puts(&out, "<|end_message|>");
+            if (m->images.len > 0) {
+                /* Inkling-2 gives each image its own <|message_tool|>{fn}<|content_image|>...<|end_message|>
+                 * block; request_tokenize_multimodal_prompt replaces each marker with
+                 * <|content_image|> + N embeddings + <|end_message|>. */
+                const char *cur = content;
+                bool emitted_any = false;
+                for (size_t img_i = 0; img_i < m->images.len; img_i++) {
+                    const char *mk = strstr(cur, m->images.v[img_i].marker);
+                    if (!mk) continue;
+                    size_t pre_len = (size_t)(mk - cur);
+                    if (pre_len > 0) {
+                        buf_puts(&out, "<|message_tool|>");
+                        buf_puts(&out, fn_name);
+                        buf_puts(&out, "<|content_text|>");
+                        buf_append(&out, cur, pre_len);
+                        buf_puts(&out, "<|end_message|>");
+                        emitted_any = true;
+                    }
+                    buf_puts(&out, "<|message_tool|>");
+                    buf_puts(&out, fn_name);
+                    buf_puts(&out, m->images.v[img_i].marker);
+                    emitted_any = true;
+                    cur = mk + strlen(m->images.v[img_i].marker);
+                }
+                if (*cur || !emitted_any) {
+                    buf_puts(&out, "<|message_tool|>");
+                    buf_puts(&out, fn_name);
+                    buf_puts(&out, "<|content_text|>");
+                    buf_puts(&out, cur);
+                    append_tool_error_warning(&out, failures);
+                    buf_puts(&out, "<|end_message|>");
+                }
+            } else {
+                buf_puts(&out, "<|message_tool|>");
+                buf_puts(&out, fn_name);
+                buf_puts(&out, "<|content_text|>");
+                buf_puts(&out, content);
+                append_tool_error_warning(&out, failures);
+                buf_puts(&out, "<|end_message|>");
+            }
             free(content);
         } else if (!strcmp(m->role, "assistant")) {
             char *reasoning = NULL;
