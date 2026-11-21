@@ -1098,6 +1098,28 @@ int p36_gpu_inkling2_mix_norm_tensor(
         uint32_t              state_stride,
         float                 eps);
 
+int p36_gpu_inkling2_post_attn_mix_tensor(
+        p36_gpu_tensor       *blocks_normed,
+        const p36_gpu_tensor *wo_out,
+        const p36_gpu_tensor *inp_sa,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              conv_w_offset,
+        p36_gpu_tensor       *conv_state,
+        p36_gpu_tensor       *ffn_inp,
+        uint64_t              query_offset,
+        uint64_t              query_bytes,
+        uint64_t              norm_w_offset,
+        bool                  has_norm,
+        p36_gpu_tensor       *out,
+        uint32_t              n_embd,
+        uint32_t              n_blocks,
+        uint32_t              state_stride,
+        uint32_t              push_slot,
+        uint32_t              has_res,
+        float                 inv_scale,
+        float                 eps);
+
 int p36_gpu_inkling2_attn_tensor(
         p36_gpu_tensor       *out,
         const p36_gpu_tensor *q,
@@ -1144,6 +1166,10 @@ int p36_gpu_inkling2_moe_ffn_tensor(
         uint64_t              down_offset,
         uint32_t              down_type,
         uint64_t              down_bytes,
+        uint64_t              conv_w_offset,
+        p36_gpu_tensor       *conv_state,
+        const p36_gpu_tensor *res,
+        float                 conv_inv_scale,
         const p36_gpu_tensor *x,
         const p36_gpu_tensor *selected,
         const p36_gpu_tensor *weights,

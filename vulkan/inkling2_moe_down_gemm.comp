@@ -11,7 +11,7 @@
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer Weights { uint16_t w[]; };
+layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
 layout(set = 0, binding = 1) readonly buffer Act { vec4 xv[]; };
 layout(set = 0, binding = 2) readonly buffer Tiles { uint tiles[]; };
 layout(set = 0, binding = 3) writeonly buffer Output { float y[]; };
@@ -98,12 +98,22 @@ void main(void) {
 
     for (uint b = 0u; b < pc.blocks; b++) {
         uint boff = exp_u16 + (row0 + lr) * row_u16 + b * BLOCK_U16;
-        if (lc == 0u) {
-            Dw[lr] = unpackHalf2x16(uint(w[boff])).x;
-        }
+        uint wi = boff >> 1u;
+        bool odd = (b & 1u) != 0u;
 #ifdef P36_MOE_IQ4NL
-        uint q0 = uint(w[boff + 1u + lc * 4u]) | (uint(w[boff + 2u + lc * 4u]) << 16u);
-        uint q1 = uint(w[boff + 3u + lc * 4u]) | (uint(w[boff + 4u + lc * 4u]) << 16u);
+        uint q0, q1;
+        if (odd) {
+            if (lc == 0u) Dw[lr] = unpackHalf2x16(w[wi] >> 16u).x;
+            q0 = w[wi + 1u + lc * 2u];
+            q1 = w[wi + 2u + lc * 2u];
+        } else {
+            uint u0 = w[wi + lc * 2u];
+            uint u1 = w[wi + 1u + lc * 2u];
+            uint u2 = w[wi + 2u + lc * 2u];
+            if (lc == 0u) Dw[lr] = unpackHalf2x16(u0).x;
+            q0 = (u0 >> 16u) | (u1 << 16u);
+            q1 = (u1 >> 16u) | (u2 << 16u);
+        }
         Aw[lr][(lc * 2u     ) ^ sa] = f16vec4(sh_lut[(q0      ) & 15u], sh_lut[(q0 >>  8u) & 15u],
                                               sh_lut[(q0 >> 16u) & 15u], sh_lut[(q0 >> 24u) & 15u]);
         Aw[lr][(lc * 2u + 1u) ^ sa] = f16vec4(sh_lut[(q1      ) & 15u], sh_lut[(q1 >>  8u) & 15u],
@@ -113,9 +123,23 @@ void main(void) {
         Aw[lr][(4u + lc * 2u + 1u) ^ sa] = f16vec4(sh_lut[(q1 >>  4u) & 15u], sh_lut[(q1 >> 12u) & 15u],
                                                    sh_lut[(q1 >> 20u) & 15u], sh_lut[(q1 >> 28u) & 15u]);
 #elif defined(P36_MOE_Q5_0)
-        uint qh = uint(w[boff + 1u]) | (uint(w[boff + 2u]) << 16u);
-        uint q0 = uint(w[boff + 3u + lc * 4u]) | (uint(w[boff + 4u + lc * 4u]) << 16u);
-        uint q1 = uint(w[boff + 5u + lc * 4u]) | (uint(w[boff + 6u + lc * 4u]) << 16u);
+        uint qh, q0, q1;
+        if (odd) {
+            if (lc == 0u) Dw[lr] = unpackHalf2x16(w[wi] >> 16u).x;
+            qh = w[wi + 1u];
+            q0 = w[wi + 2u + lc * 2u];
+            q1 = w[wi + 3u + lc * 2u];
+        } else {
+            uint h0 = w[wi];
+            uint h1 = w[wi + 1u];
+            if (lc == 0u) Dw[lr] = unpackHalf2x16(h0).x;
+            qh = (h0 >> 16u) | (h1 << 16u);
+            uint v0 = (lc == 0u) ? h1 : w[wi + 3u];
+            uint v1 = w[wi + 2u + lc * 2u];
+            uint v2 = w[wi + 3u + lc * 2u];
+            q0 = (v0 >> 16u) | (v1 << 16u);
+            q1 = (v1 >> 16u) | (v2 << 16u);
+        }
         uint sh = lc * 8u;
         Aw[lr][(lc * 2u     ) ^ sa] = f16vec4(
             float16_t(int(((q0      ) & 15u) | (((qh >> (sh     )) & 1u) << 4u)) - 16),

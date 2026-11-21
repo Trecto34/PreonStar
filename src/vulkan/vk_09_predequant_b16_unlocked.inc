@@ -162,7 +162,8 @@ int p36_gpu_matmul_k_quant_q8_scaled_tensor(p36_gpu_tensor *out,
                 q4_rows_env = (e && e[0] == '4') ? 4 : (e && e[0] == '1') ? 1 : 0;
             }
             const uint32_t q4_auto_rows =
-                (out_dim >= 4096u || (out_dim >= 2048u && in_dim <= 512u)) ? 4u : 1u;
+                (out_dim >= 4096u || (out_dim >= 2048u && in_dim <= 512u) ||
+                 ((in_dim == 2304u || out_dim == 2304u) && out_dim >= 1024u)) ? 4u : 1u;
             const uint32_t rows = q4_full ? (q4_rows_env > 0 ? (uint32_t)q4_rows_env : q4_auto_rows) : 4u;
             p36_vk_kernel *kernel = q4_full ? (rows == 1u ? &p36_vk.dense_q4k_decode_r1
                                                           : &p36_vk.dense_q4k_decode) :

@@ -705,9 +705,18 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
         INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_q, n_in[0], q8_in[0], ink->q_buf, D, Q, n_tok, 1.0f), "attn_q");
         INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_k, n_in[1], q8_in[1], ink->k_buf, D, KV, n_tok, 1.0f), "attn_k");
         INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_v, n_in[2], q8_in[2], ink->v_buf, D, KV, n_tok, 1.0f), "attn_v");
-        INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_rel, n_in[0], q8_in[0], ink->r_buf, D, hp->n_head * hp->n_relative, n_tok, 1.0f), "attn_rel");
+        if (n_tok == 1u &&
+            l->attn_gate->type == P36_TENSOR_Q8_0 && l->attn_rel->type == P36_TENSOR_Q8_0 &&
+            p36_gpu_matmul_q8_0_pair_scaled_tensor(ink->gate_buf, ink->r_buf, m->map, m->size,
+                                                   l->attn_gate->abs_offset, l->attn_rel->abs_offset,
+                                                   D, Q, hp->n_head * hp->n_relative,
+                                                   n_in[0], 1.0f, 1.0f)) {
+            /* Fused Q8_0 pair: attn_gate + attn_rel in 1 dispatch! */
+        } else {
+            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_rel, n_in[0], q8_in[0], ink->r_buf, D, hp->n_head * hp->n_relative, n_tok, 1.0f), "attn_rel");
+            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_gate, n_in[0], q8_in[0], ink->gate_buf, D, Q, n_tok, 1.0f), "attn_gate");
+        }
         INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_sink_proj, n_in[0], q8_in[0], ink->sinks_buf, D, hp->n_head, n_tok, 1.0f), "attn_sink");
-        INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_gate, n_in[0], q8_in[0], ink->gate_buf, D, Q, n_tok, 1.0f), "attn_gate");
         if (!is_swa) {
             INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_k_conv_proj, n_in[1], q8_in[1], ink->k_dyn, D, hp->n_conv * hp->n_head_kv, n_tok, 1.0f), "k_dyn");
             INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_v_conv_proj, n_in[2], q8_in[2], ink->v_dyn, D, hp->n_conv * hp->n_head_kv, n_tok, 1.0f), "v_dyn");
@@ -741,51 +750,72 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
         /* Output projection */
         INK_CHK(p36_gpu_tensor_matmul_scaled(m, l->attn_output, ink->attn_out, ink->wo_out, Q, D, n_tok, 1.0f), "attn_out");
 
-        /* Block residual boundary + attn_post_conv */
-        if ((ip % hp->attn_res_block_size) == 0u) {
-            /* Push rms(inpSA) into blocks_normed[n_blocks] and start fresh residual stream */
-            if (!p36_gpu_inkling2_mix_tensor(ink->blocks_normed, inp_sa_t, m->map, m->size,
-                                             0, 0, NULL, n_tok, D, 0, 1, 0, 0,
-                                             state_stride, state_stride, n_blocks)) {
-                return false;
-            }
-            n_blocks++;
-            if (!p36_gpu_inkling2_conv_tensor(ink->ffn_inp, ink->wo_out, m->map, m->size,
-                                              l->attn_post_conv->abs_offset, ink->conv_attn_post[il],
-                                              NULL, NULL, D, n_tok, 0, 0, inv_sqrt_5)) {
-                return false;
-            }
-        } else {
-            if (!p36_gpu_inkling2_conv_tensor(ink->ffn_inp, ink->wo_out, m->map, m->size,
-                                              l->attn_post_conv->abs_offset, ink->conv_attn_post[il],
-                                              NULL, inp_sa_t, D, n_tok, 0, 0, inv_sqrt_5)) {
-                return false;
-            }
-        }
-
-        /* FFN input: depth-residual mix -> optional loop control -> ffn_norm */
-        if (pass <= 0) {
-            /* Fused mix + ffn_norm (1 dispatch instead of 2!) */
-            if (!p36_gpu_inkling2_mix_norm_tensor(ink->blocks_normed, ink->ffn_inp, m->map, m->size,
-                                                  l->ffn_res_query->abs_offset, l->ffn_res_query->bytes,
-                                                  l->ffn_norm->abs_offset,
-                                                  ink->norm[0], NULL, n_tok, D, n_blocks, 1,
-                                                  state_stride, hp->rms_eps)) {
-                return false;
+        /* Block residual boundary + attn_post_conv + FFN mix (+ optional ffn_norm) */
+        if (n_tok == 1u) {
+            bool is_boundary = ((ip % hp->attn_res_block_size) == 0u);
+            uint32_t push_slot = is_boundary ? n_blocks : 0xffffffffu;
+            uint32_t has_res = is_boundary ? 0u : 1u;
+            INK_CHK(p36_gpu_inkling2_post_attn_mix_tensor(ink->blocks_normed, ink->wo_out, inp_sa_t,
+                                                          m->map, m->size,
+                                                          l->attn_post_conv->abs_offset, ink->conv_attn_post[il],
+                                                          ink->ffn_inp,
+                                                          l->ffn_res_query->abs_offset, l->ffn_res_query->bytes,
+                                                          l->ffn_norm->abs_offset, pass <= 0,
+                                                          pass <= 0 ? ink->norm[0] : ink->cur,
+                                                          D, n_blocks, state_stride, push_slot, has_res,
+                                                          inv_sqrt_5, hp->rms_eps), "post_attn_mix");
+            if (is_boundary) n_blocks++;
+            if (pass > 0) {
+                if (!p36_inkling2_control_vk(m, l, hp, ink, ink->ctrl_out[3], ink->cur, ink->msg_view[3], 3, 1u)) {
+                    return false;
+                }
+                if (!p36_gpu_rms_norm_weight_rows_tensor(ink->norm[0], ink->ctrl_out[3], m->map, m->size,
+                                                         l->ffn_norm->abs_offset, D, 1u, hp->rms_eps)) {
+                    return false;
+                }
             }
         } else {
-            if (!p36_gpu_inkling2_mix_tensor(ink->blocks_normed, ink->ffn_inp, m->map, m->size,
-                                             l->ffn_res_query->abs_offset, l->ffn_res_query->bytes,
-                                             ink->cur, n_tok, D, n_blocks, 1, 1, 0,
-                                             state_stride, state_stride, 0xffffffffu)) {
-                return false;
+            if ((ip % hp->attn_res_block_size) == 0u) {
+                if (!p36_gpu_inkling2_mix_tensor(ink->blocks_normed, inp_sa_t, m->map, m->size,
+                                                 0, 0, NULL, n_tok, D, 0, 1, 0, 0,
+                                                 state_stride, state_stride, n_blocks)) {
+                    return false;
+                }
+                n_blocks++;
+                if (!p36_gpu_inkling2_conv_tensor(ink->ffn_inp, ink->wo_out, m->map, m->size,
+                                                  l->attn_post_conv->abs_offset, ink->conv_attn_post[il],
+                                                  NULL, NULL, D, n_tok, 0, 0, inv_sqrt_5)) {
+                    return false;
+                }
+            } else {
+                if (!p36_gpu_inkling2_conv_tensor(ink->ffn_inp, ink->wo_out, m->map, m->size,
+                                                  l->attn_post_conv->abs_offset, ink->conv_attn_post[il],
+                                                  NULL, inp_sa_t, D, n_tok, 0, 0, inv_sqrt_5)) {
+                    return false;
+                }
             }
-            if (!p36_inkling2_control_vk(m, l, hp, ink, ink->ctrl_out[3], ink->cur, ink->msg_view[3], 3, n_tok)) {
-                return false;
-            }
-            if (!p36_gpu_rms_norm_weight_rows_tensor(ink->norm[0], ink->ctrl_out[3], m->map, m->size,
-                                                     l->ffn_norm->abs_offset, D, n_tok, hp->rms_eps)) {
-                return false;
+            if (pass <= 0) {
+                if (!p36_gpu_inkling2_mix_norm_tensor(ink->blocks_normed, ink->ffn_inp, m->map, m->size,
+                                                      l->ffn_res_query->abs_offset, l->ffn_res_query->bytes,
+                                                      l->ffn_norm->abs_offset,
+                                                      ink->norm[0], NULL, n_tok, D, n_blocks, 1,
+                                                      state_stride, hp->rms_eps)) {
+                    return false;
+                }
+            } else {
+                if (!p36_gpu_inkling2_mix_tensor(ink->blocks_normed, ink->ffn_inp, m->map, m->size,
+                                                 l->ffn_res_query->abs_offset, l->ffn_res_query->bytes,
+                                                 ink->cur, n_tok, D, n_blocks, 1, 1, 0,
+                                                 state_stride, state_stride, 0xffffffffu)) {
+                    return false;
+                }
+                if (!p36_inkling2_control_vk(m, l, hp, ink, ink->ctrl_out[3], ink->cur, ink->msg_view[3], 3, n_tok)) {
+                    return false;
+                }
+                if (!p36_gpu_rms_norm_weight_rows_tensor(ink->norm[0], ink->ctrl_out[3], m->map, m->size,
+                                                         l->ffn_norm->abs_offset, D, n_tok, hp->rms_eps)) {
+                    return false;
+                }
             }
         }
 
@@ -796,16 +826,20 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                                                     l->exp_probs_b ? l->exp_probs_b->abs_offset : 0,
                                                     l->exp_probs_b != NULL,
                                                     n_tok, hp->n_expert, hp->n_expert_used, hp->expert_weights_scale), "router_topk");
-        INK_CHK(p36_gpu_inkling2_moe_ffn_tensor(ink->moe_out, ink->moe_mid, ink->moe_down,
+        INK_CHK(p36_gpu_inkling2_moe_ffn_tensor(n_tok == 1u ? ink->cur : ink->moe_out,
+                                                ink->moe_mid, ink->moe_down,
                                                 m->map, m->size,
                                                 l->ffn_gate_up_exps->abs_offset, l->ffn_gate_up_exps->type, l->ffn_gate_up_exps->bytes,
                                                 l->ffn_down_exps->abs_offset, l->ffn_down_exps->type, l->ffn_down_exps->bytes,
+                                                l->ffn_post_conv->abs_offset, ink->conv_ffn_post[il], ink->ffn_inp, inv_sqrt_5,
                                                 ink->norm[0], ink->selected, ink->router_w,
                                                 n_tok, D, hp->n_ff_exp, D, hp->n_expert, hp->n_expert_used,
                                                 hp->situ_beta, hp->situ_linear_beta), "moe_ffn");
-        INK_CHK(p36_gpu_inkling2_conv_tensor(ink->cur, ink->moe_out, m->map, m->size,
-                                             l->ffn_post_conv->abs_offset, ink->conv_ffn_post[il],
-                                             NULL, ink->ffn_inp, D, n_tok, 0, 0, inv_sqrt_5), "conv_ffn");
+        if (n_tok > 1u) {
+            INK_CHK(p36_gpu_inkling2_conv_tensor(ink->cur, ink->moe_out, m->map, m->size,
+                                                 l->ffn_post_conv->abs_offset, ink->conv_ffn_post[il],
+                                                 NULL, ink->ffn_inp, D, n_tok, 0, 0, inv_sqrt_5), "conv_ffn");
+        }
     }
 
     /* Final fused depth-residual mix + output_norm */

@@ -560,7 +560,7 @@ static __thread int p36_vk_parallel_depth;
  * batch is open are parked on the retire list until the fence signals,
  * since recorded commands still reference their memory. */
 enum {
-    P36_VK_BATCH_FLUSH_AT = 32,
+    P36_VK_BATCH_FLUSH_AT = 64,
     P36_VK_RETIRE_CAP = 1024,
 };
 static bool p36_vk_batch_recording;
