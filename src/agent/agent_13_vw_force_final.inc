@@ -104,6 +104,8 @@ static agent_tool_observation agent_execute_tool_observation(
             agent_tool_observation_puts(&obs, "\n");
         free(res);
     }
+    if (calls->len > 0 && calls->v[0].name && calls->v[0].name[0])
+        snprintf(obs.tool_name, sizeof(obs.tool_name), "%s", calls->v[0].name);
     if (calls->len == 0)
         agent_tool_observation_puts(&obs, "Tool error: empty tool call block\n");
     return obs;
@@ -164,8 +166,14 @@ static bool agent_tool_observation_build(agent_worker *w,
         }
     }
     p36_tokens_copy(tokens, &w->transcript);
+    char tool_role[80];
+    const char *role = "tool";
+    if (p36_engine_is_inkling2(w->engine) && obs->tool_name[0]) {
+        snprintf(tool_role, sizeof(tool_role), "tool:%s", obs->tool_name);
+        role = tool_role;
+    }
     bool ok = p36_chat_append_multimodal_message(
-        w->engine, tokens, "tool",
+        w->engine, tokens, role,
         parts, images, obs->image_count, spans,
         err, err_len) != 0;
     free(parts);
@@ -290,7 +298,10 @@ static int agent_compact_tail_start(agent_worker *w, int bottom, int sys_len) {
     if (budget > AGENT_COMPACT_TAIL_CAP_TOKENS) budget = AGENT_COMPACT_TAIL_CAP_TOKENS;
     if (budget < 1) budget = 1;
     p36_tokens user = {0};
-    p36_tokenize_rendered_chat(w->engine, "<|im_start|>user\n", &user);
+    p36_tokenize_rendered_chat(
+        w->engine,
+        p36_engine_is_inkling2(w->engine) ? "<|message_user|>" : "<|im_start|>user\n",
+        &user);
     int start = agent_compact_tail_boundary(&w->transcript, bottom, sys_len, budget, &user);
     p36_tokens_free(&user);
     return start;
@@ -372,8 +383,9 @@ static int agent_compact_image_boundary(const p36_vision_span *images, size_t co
  * the retained tail carries actions and results, not deliberation. */
 static void agent_tokens_append_range_no_think(p36_engine *engine, p36_tokens *dst,
                                                const p36_tokens *src, int from, int to) {
-    int ts = agent_special_token_id(engine, "<think>");
-    int te = agent_special_token_id(engine, "</think>");
+    bool ink = p36_engine_is_inkling2(engine);
+    int ts = agent_special_token_id(engine, ink ? "<|content_thinking|>" : "<think>");
+    int te = agent_special_token_id(engine, ink ? "<|end_message|>" : "</think>");
     for (int i = from; i < to; i++) {
         if (src->v[i] == ts) {
             int j = i + 1;
@@ -442,21 +454,48 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
     agent_tokens_append_range(&prompt, &w->transcript, 0, summary_bottom);
     /* A bounded prefix may end inside a user message, thinking, or code.
      * Close it only in the private summary prompt; the real tail is untouched. */
-    int im_start = agent_special_token_id(w->engine, "<|im_start|>");
-    int im_end = agent_special_token_id(w->engine, "<|im_end|>");
-    int think_start = agent_special_token_id(w->engine, "<think>");
-    int think_end = agent_special_token_id(w->engine, "</think>");
-    bool message_open = false, think_open = false;
-    for (int i = 0; i < prompt.len; i++) {
-        int token = prompt.v[i];
-        if (token == im_start) { message_open = true; think_open = false; }
-        if (token == im_end) { message_open = false; think_open = false; }
-        if (token == think_start) think_open = true;
-        if (token == think_end) think_open = false;
-    }
-    if (message_open) {
-        if (think_open) p36_tokenize_rendered_chat(w->engine, "</think>\n", &prompt);
-        p36_tokenize_rendered_chat(w->engine, "<|im_end|>\n", &prompt);
+    if (p36_engine_is_inkling2(w->engine)) {
+        int m_sys = agent_special_token_id(w->engine, "<|message_system|>");
+        int m_usr = agent_special_token_id(w->engine, "<|message_user|>");
+        int m_mod = agent_special_token_id(w->engine, "<|message_model|>");
+        int m_tool = agent_special_token_id(w->engine, "<|message_tool|>");
+        int m_end = agent_special_token_id(w->engine, "<|end_message|>");
+        int m_eos = p36_token_eos(w->engine);
+        bool msg_open = false, in_model = false;
+        for (int i = 0; i < prompt.len; i++) {
+            int token = prompt.v[i];
+            if (token == m_sys || token == m_usr || token == m_tool) {
+                msg_open = true;
+                in_model = false;
+            } else if (token == m_mod) {
+                msg_open = true;
+                in_model = true;
+            } else if (token == m_end) {
+                msg_open = false;
+            } else if (token == m_eos) {
+                msg_open = false;
+                in_model = false;
+            }
+        }
+        if (msg_open) p36_tokenize_rendered_chat(w->engine, "<|end_message|>", &prompt);
+        if (in_model) p36_tokens_push(&prompt, m_eos);
+    } else {
+        int im_start = agent_special_token_id(w->engine, "<|im_start|>");
+        int im_end = agent_special_token_id(w->engine, "<|im_end|>");
+        int think_start = agent_special_token_id(w->engine, "<think>");
+        int think_end = agent_special_token_id(w->engine, "</think>");
+        bool message_open = false, think_open = false;
+        for (int i = 0; i < prompt.len; i++) {
+            int token = prompt.v[i];
+            if (token == im_start) { message_open = true; think_open = false; }
+            if (token == im_end) { message_open = false; think_open = false; }
+            if (token == think_start) think_open = true;
+            if (token == think_end) think_open = false;
+        }
+        if (message_open) {
+            if (think_open) p36_tokenize_rendered_chat(w->engine, "</think>\n", &prompt);
+            p36_tokenize_rendered_chat(w->engine, "<|im_end|>\n", &prompt);
+        }
     }
     agent_tokens_append_range(&prompt, &summary_suffix, 0, summary_suffix.len);
     p36_tokens_free(&summary_suffix);
@@ -623,8 +662,9 @@ have_summary:
      * partial word or code line. A synthetic user request to "continue" can
      * make the model skip the unfinished fragment or start a different task. */
     if (open_assistant && tail_start > *open_assistant) {
-        int think_start = agent_special_token_id(w->engine, "<think>");
-        int think_end = agent_special_token_id(w->engine, "</think>");
+        bool ink = p36_engine_is_inkling2(w->engine);
+        int think_start = agent_special_token_id(w->engine, ink ? "<|content_thinking|>" : "<think>");
+        int think_end = agent_special_token_id(w->engine, ink ? "<|end_message|>" : "</think>");
         bool in_think = false;
         for (int i = *open_assistant; i < tail_start; i++) {
             if (w->transcript.v[i] == think_start) in_think = true;
@@ -634,7 +674,9 @@ have_summary:
         p36_chat_append_assistant_prefix(w->engine, &compacted,
             agent_resume_think_mode(w->cfg, in_think));
     } else if (tail_start < bottom &&
-        w->transcript.v[tail_start] != agent_special_token_id(w->engine, "<|im_start|>")) {
+        w->transcript.v[tail_start] != agent_special_token_id(
+            w->engine,
+            p36_engine_is_inkling2(w->engine) ? "<|message_user|>" : "<|im_start|>")) {
         p36_chat_append_message(w->engine, &compacted, "user",
             "[Verbatim tail of the previous conversation; it may begin mid-message.]\n");
     }

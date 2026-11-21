@@ -618,7 +618,127 @@ static void agent_stream_normal_byte(agent_stream_renderer *sr, char c) {
  * parser continue building executable calls, and paints semantic tool output
  * from parser state changes.  The sampled transcript remains unchanged: only
  * the terminal projection is rewritten. */
+enum {
+    AGENT_INK_IDLE = 0,
+    AGENT_INK_AFTER_MODEL,
+    AGENT_INK_THINKING,
+    AGENT_INK_TEXT,
+    AGENT_INK_TOOL_JSON,
+};
+
+static bool agent_ink_is_partial(const char *s, size_t rem) {
+    static const char *const toks[] = {
+        "<|message_model|>",
+        "<|content_thinking|>",
+        "<|content_text|>",
+        "<|content_invoke_tool_json|>",
+        "<|end_message|>",
+        "<|content_model_end_sampling|>",
+    };
+    for (size_t k = 0; k < sizeof(toks) / sizeof(toks[0]); k++) {
+        if (bytes_is_partial_prefix(s, rem, toks[k])) return true;
+    }
+    return false;
+}
+
+static char *agent_stream_translate_inkling2(agent_stream_renderer *sr,
+                                             const char *text, size_t len,
+                                             bool finish, size_t *out_len) {
+    size_t total = sr->ink_pending_len + len;
+    char *in = xmalloc(total ? total : 1);
+    if (sr->ink_pending_len) memcpy(in, sr->ink_pending, sr->ink_pending_len);
+    if (len) memcpy(in + sr->ink_pending_len, text, len);
+    sr->ink_pending_len = 0;
+
+    size_t cap = total + 64;
+    char *out = xmalloc(cap);
+    size_t n = 0;
+#define INK_PUT(s, slen) do { \
+    size_t _sl = (slen); \
+    if (n + _sl + 1 > cap) { \
+        while (n + _sl + 1 > cap) cap *= 2; \
+        out = xrealloc(out, cap); \
+    } \
+    memcpy(out + n, (s), _sl); \
+    n += _sl; \
+} while (0)
+
+    size_t i = 0;
+    while (i < total) {
+        const char *cur = in + i;
+        size_t rem = total - i;
+        if (cur[0] == '<') {
+            if (bytes_has_prefix(cur, rem, "<|message_model|>")) {
+                sr->ink_state = AGENT_INK_AFTER_MODEL;
+                i += 17;
+                continue;
+            }
+            if (bytes_has_prefix(cur, rem, "<|content_thinking|>")) {
+                sr->ink_state = AGENT_INK_THINKING;
+                if (!sr->in_think) INK_PUT("<think>", 7);
+                i += 20;
+                continue;
+            }
+            if (bytes_has_prefix(cur, rem, "<|content_text|>")) {
+                if (sr->ink_state == AGENT_INK_THINKING || sr->in_think)
+                    INK_PUT("</think>\n\n", 10);
+                sr->ink_state = AGENT_INK_TEXT;
+                i += 16;
+                continue;
+            }
+            if (bytes_has_prefix(cur, rem, "<|content_invoke_tool_json|>")) {
+                if (sr->ink_state == AGENT_INK_THINKING || sr->in_think)
+                    INK_PUT("</think>\n\n<tool_call>\n", 22);
+                else
+                    INK_PUT("\n<tool_call>\n", 13);
+                sr->ink_state = AGENT_INK_TOOL_JSON;
+                i += 28;
+                continue;
+            }
+            if (bytes_has_prefix(cur, rem, "<|end_message|>")) {
+                if (sr->ink_state == AGENT_INK_THINKING || sr->in_think)
+                    INK_PUT("</think>\n\n", 10);
+                else if (sr->ink_state == AGENT_INK_TOOL_JSON)
+                    INK_PUT("\n</tool_call>", 13);
+                sr->ink_state = AGENT_INK_IDLE;
+                i += 15;
+                continue;
+            }
+            if (bytes_has_prefix(cur, rem, "<|content_model_end_sampling|>")) {
+                sr->ink_state = AGENT_INK_IDLE;
+                i += 30;
+                continue;
+            }
+            if (!finish && agent_ink_is_partial(cur, rem)) {
+                if (rem < sizeof(sr->ink_pending)) {
+                    memcpy(sr->ink_pending, cur, rem);
+                    sr->ink_pending_len = rem;
+                }
+                break;
+            }
+        }
+        /* Suppress tool-name role header bytes between <|message_model|> and
+         * <|content_invoke_tool_json|> (the name is already inside the JSON). */
+        if (sr->ink_state != AGENT_INK_AFTER_MODEL) {
+            INK_PUT(cur, 1);
+        }
+        i++;
+    }
+#undef INK_PUT
+    free(in);
+    out[n] = '\0';
+    *out_len = n;
+    return out;
+}
+
 static void agent_stream_text(agent_stream_renderer *sr, const char *text, size_t len, bool finish) {
+    char *ink_buf = NULL;
+    if (sr->inkling2) {
+        size_t ink_len = 0;
+        ink_buf = agent_stream_translate_inkling2(sr, text, len, finish, &ink_len);
+        text = ink_buf;
+        len = ink_len;
+    }
     const char *think_open = "<think>";
     const char *think_close = "</think>";
     size_t total = sr->pending_len + len;
@@ -692,6 +812,7 @@ static void agent_stream_text(agent_stream_renderer *sr, const char *text, size_
         i++;
     }
     free(buf);
+    free(ink_buf);
 
     if (finish) {
         agent_stream_flush_start_tail(sr);

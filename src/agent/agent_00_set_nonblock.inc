@@ -425,6 +425,7 @@ typedef struct {
     p36_vision_embedding *images;
     size_t image_count;
     size_t image_cap;
+    char tool_name[64];
 } agent_tool_observation;
 
 typedef enum {
@@ -505,6 +506,10 @@ typedef struct {
     bool qwen_tool_in_think;
     bool qwen_tool_in_think_reported;
     bool post_think_gap;
+    bool inkling2;
+    int ink_state;
+    char ink_pending[32];
+    size_t ink_pending_len;
     bool tool_preflight_error;
     char tool_preflight_error_msg[256];
 } agent_stream_renderer;

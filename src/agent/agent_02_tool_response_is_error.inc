@@ -406,6 +406,90 @@ static const char agent_json_tool_syntax_reminder[] =
     "{\"name\": \"$TOOL_NAME\", \"arguments\": {\"$PARAMETER_NAME\": \"$PARAMETER_VALUE\"}}\n"
     "</tool_call>\n";
 
+static const char agent_inkling2_tool_syntax_reminder[] =
+    "Invoke tools using your native tool-call JSON format with {\"name\":\"$TOOL_NAME\",\"args\":{...}}.\n";
+
+static const char agent_inkling2_tool_declare_base[] =
+    "{\"description\":\"Search Google in a visible browser and return compact Markdown links.\",\"name\":\"google_search\",\"parameters\":{\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"Open a URL in a visible browser and return rendered page Markdown.\",\"name\":\"visit_page\",\"parameters\":{\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"],\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"Run a shell command.\",\"name\":\"bash\",\"parameters\":{\"properties\":{\"command\":{\"type\":\"string\"},\"refresh_sec\":{\"type\":\"integer\"},\"timeout_sec\":{\"type\":\"integer\"}},\"required\":[\"command\"],\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"Report current status and recent output for a bash job.\",\"name\":\"bash_status\",\"parameters\":{\"properties\":{\"job\":{\"type\":\"integer\"},\"pid\":{\"type\":\"integer\"},\"refresh_sec\":{\"type\":\"integer\"}},\"required\":[\"job\"],\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"Terminate a running bash job and report its final output.\",\"name\":\"bash_stop\",\"parameters\":{\"properties\":{\"job\":{\"type\":\"integer\"},\"pid\":{\"type\":\"integer\"},\"refresh_sec\":{\"type\":\"integer\"}},\"required\":[\"job\"],\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"Read a text file or a range of lines.\",\"name\":\"read\",\"parameters\":{\"properties\":{\"max_lines\":{\"type\":\"integer\"},\"path\":{\"type\":\"string\"},\"raw\":{\"type\":\"boolean\"},\"start_line\":{\"type\":\"integer\"},\"whole\":{\"type\":\"boolean\"}},\"required\":[\"path\"],\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"Continue the previous read-like output.\",\"name\":\"more\",\"parameters\":{\"properties\":{\"count\":{\"type\":\"number\"}},\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"Create or overwrite a text file.\",\"name\":\"write\",\"parameters\":{\"properties\":{\"append\":{\"type\":\"boolean\"},\"content\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"Replace exactly one old text match.\",\"name\":\"edit\",\"parameters\":{\"properties\":{\"end_line\":{\"type\":\"integer\"},\"new\":{\"type\":\"string\"},\"old\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"start_line\":{\"type\":\"integer\"}},\"required\":[\"path\",\"new\"],\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"Search files and return compact edit-friendly matches.\",\"name\":\"search\",\"parameters\":{\"properties\":{\"case_sensitive\":{\"type\":\"boolean\"},\"context\":{\"type\":\"integer\"},\"glob\":{\"type\":\"string\"},\"max_results\":{\"type\":\"integer\"},\"mode\":{\"enum\":[\"literal\",\"regex\"],\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"},\"type\":\"function\"},"
+    "{\"description\":\"List one directory compactly.\",\"name\":\"list\",\"parameters\":{\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"},\"type\":\"function\"}";
+
+static const char agent_inkling2_tool_declare_vision[] =
+    ",{\"description\":\"Open a local PNG or JPEG as a visual observation.\",\"name\":\"view_image\",\"parameters\":{\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"},\"type\":\"function\"}";
+
+static const char agent_inkling2_system_intro[] =
+    "You are a coding agent running in a local workspace. Use the declared tools for local file and system work. "
+    "Avoid printing large file contents or large code blocks as answers; create or edit files with tools, "
+    "then summarize results briefly.\n\n"
+    "Read defaults to a bounded chunk: path alone returns the first 500 lines, not the whole file. "
+    "If read says more lines are available, call more with count=<lines> to read the next chunk; "
+    "more defaults to the next 500 lines. "
+    "If the user explicitly asks you to read a complete file into context, call read with whole=true.\n\n"
+    AGENT_TOOL_CONTRACTS
+    "## Editing files\n\n"
+    "Use write for new files or deliberate whole-file replacement. Use edit with path, old, and new (or start_line, end_line, new) for changes. "
+    "The old text must match exactly once in the current file; otherwise edit fails for safety. "
+    "Read enough of the file to provide the exact old text being replaced.\n\n"
+    "For long-running bash commands, pass refresh_sec. If a bash job is still running, use "
+    "bash_status to check it early or bash_stop to terminate it.\n\n"
+    "Run sudo normally when needed. Never ask for passwords in chat or put them in tool arguments.\n\n"
+    "Use google_search to find web pages and visit_page to read a known URL with a visible browser.\n\n"
+    "# Rules\n\n"
+    "- This system runs on local inference. Use read/search to get the exact text you need, then use edit instead of rewriting whole files.\n"
+    "- Write reliable code and verify your work concisely.\n"
+    "- Work in a way that preserves the current system configuration integrity, unless explicitly asked otherwise by the user.\n";
+
+static const char *agent_inkling2_effort_level(p36_think_mode think_mode, bool thinking) {
+    if (!thinking || think_mode == P36_THINK_NONE) return "0";
+    switch (think_mode) {
+    case P36_THINK_LOW: return "0.2";
+    case P36_THINK_MEDIUM: return "0.7";
+    case P36_THINK_HIGH: return "0.9";
+    case P36_THINK_XHIGH:
+    case P36_THINK_MAX: return "0.99";
+    default: return "0.9";
+    }
+}
+
+static char *agent_build_inkling2_tool_declare(bool vision) {
+    const char *head = "<|message_system|>tool_declare<|content_xml|>[";
+    const char *tail = "]<|end_message|>";
+    size_t len = strlen(head) + strlen(agent_inkling2_tool_declare_base) +
+                 (vision ? strlen(agent_inkling2_tool_declare_vision) : 0) +
+                 strlen(tail) + 1;
+    char *out = xmalloc(len);
+    out[0] = '\0';
+    strcat(out, head);
+    strcat(out, agent_inkling2_tool_declare_base);
+    if (vision) strcat(out, agent_inkling2_tool_declare_vision);
+    strcat(out, tail);
+    return out;
+}
+
+static char *agent_build_inkling2_system_prompt(const char *extra, bool *thinking) {
+    char *plain = agent_chat_control_text(extra, thinking);
+    if (!plain[0]) {
+        free(plain);
+        return xstrdup(agent_inkling2_system_intro);
+    }
+    size_t a = strlen(agent_inkling2_system_intro);
+    size_t b = strlen(plain);
+    char *out = xmalloc(a + 2 + b + 1);
+    memcpy(out, agent_inkling2_system_intro, a);
+    memcpy(out + a, "\n\n", 2);
+    memcpy(out + a + 2, plain, b + 1);
+    free(plain);
+    return out;
+}
+
 #define AGENT_SYSTEM_PROMPT_REMINDER_TOKENS 50000
 
 static const char agent_hints_prompt[] =
@@ -532,6 +616,20 @@ static void agent_append_system_prompt(p36_engine *engine, p36_tokens *tokens,
             return;
         }
     }
+    if (!chat_tmpl && p36_engine_is_inkling2(engine)) {
+        char *decl = agent_build_inkling2_tool_declare(p36_engine_has_vision(engine));
+        p36_tokenize_rendered_chat(engine, decl, tokens);
+        free(decl);
+        char *prompt = agent_build_inkling2_system_prompt(extra, thinking);
+        p36_chat_append_message(engine, tokens, "system", prompt);
+        free(prompt);
+        bool en_think = (!thinking || *thinking) && think_mode != P36_THINK_NONE;
+        char effort_msg[64];
+        snprintf(effort_msg, sizeof(effort_msg), "Thinking effort level: %s",
+                 agent_inkling2_effort_level(think_mode, en_think));
+        p36_chat_append_message(engine, tokens, "system", effort_msg);
+        return;
+    }
     /* The built-in prompt is trusted P36 control text.  User supplied system
      * text remains ordinary chat content. */
     char *prompt = agent_build_system_prompt(extra, thinking, edit_upto,
@@ -576,9 +674,11 @@ static void agent_worker_maybe_append_system_prompt_reminder(agent_worker *w) {
         return;
     }
 
-    char *reminder = agent_build_system_prompt_reminder(
-        w->cfg->edit_upto,
-        p36_engine_has_vision(w->engine));
+    char *reminder = p36_engine_is_inkling2(w->engine) ?
+        agent_build_inkling2_system_prompt(NULL, NULL) :
+        agent_build_system_prompt_reminder(
+            w->cfg->edit_upto,
+            p36_engine_has_vision(w->engine));
     agent_publish_system_status(w, "Re-injecting system prompt reminder...");
     agent_trace(w, "system prompt reminder injected at transcript=%d",
                 w->transcript.len);

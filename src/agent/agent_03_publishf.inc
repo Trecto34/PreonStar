@@ -414,6 +414,7 @@ static void agent_qwen_tool_parse(agent_qwen_tool_parser *p) {
             tc.name = xstrdup(name);
             const p36_jv *args_jv = p36_jv_get(src, "arguments");
             if (!args_jv) args_jv = p36_jv_get(src, "parameters");
+            if (!args_jv) args_jv = p36_jv_get(src, "args");
             p36_jv *parsed_args = NULL;
             if (args_jv) {
                 char arg_scratch[64];

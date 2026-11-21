@@ -2254,6 +2254,87 @@ static void test_agt_a_remote_clears_error(void) {
     test_worker_free(&w);
 }
 
+static void test_inkling2_agent_protocol(void) {
+    char *decl0 = agent_build_inkling2_tool_declare(false);
+    AGENT_TEST_ASSERT(decl0 != NULL);
+    AGENT_TEST_ASSERT(strncmp(decl0, "<|message_system|>tool_declare<|content_xml|>[", 46) == 0);
+    AGENT_TEST_ASSERT(strstr(decl0, "\"name\":\"bash\"") != NULL);
+    AGENT_TEST_ASSERT(strstr(decl0, "\"name\":\"view_image\"") == NULL);
+    AGENT_TEST_ASSERT(strstr(decl0, "]<|end_message|>") != NULL);
+    /* Verify the inner JSON array parses cleanly. */
+    size_t d0_len = strlen(decl0);
+    char *arr0 = xstrndup(decl0 + 45, d0_len - 45 - 15);
+    p36_jv *jv0 = p36_jv_parse(arr0);
+    AGENT_TEST_ASSERT(jv0 != NULL && p36_jv_count(jv0) == 11);
+    p36_jv_free(jv0);
+    free(arr0);
+    free(decl0);
+
+    char *decl1 = agent_build_inkling2_tool_declare(true);
+    AGENT_TEST_ASSERT(decl1 != NULL && strstr(decl1, "\"name\":\"view_image\"") != NULL);
+    size_t d1_len = strlen(decl1);
+    char *arr1 = xstrndup(decl1 + 45, d1_len - 45 - 15);
+    p36_jv *jv1 = p36_jv_parse(arr1);
+    AGENT_TEST_ASSERT(jv1 != NULL && p36_jv_count(jv1) == 12);
+    p36_jv_free(jv1);
+    free(arr1);
+    free(decl1);
+
+    /* Streaming translation + JSON "args" tool parsing (split in 3-byte chunks). */
+    const char *sample =
+        "<|message_model|><|content_thinking|>Need to run echo.<|end_message|>"
+        "<|message_model|><|content_text|>Running command.<|end_message|>"
+        "<|message_model|>bash<|content_invoke_tool_json|>"
+        "{\"name\":\"bash\",\"args\":{\"command\":\"echo inkling_ok\"}}"
+        "<|end_message|>";
+    agent_worker w = {0};
+    pthread_mutex_init(&w.mu, NULL);
+    w.wake_fd[0] = w.wake_fd[1] = -1;
+    agent_token_renderer renderer = {
+        .worker = &w,
+        .format_thinking = true,
+        .last_output_newline = true,
+    };
+    agent_qwen_tool_parser parser = {.state = AGENT_QWEN_TOOL_SEARCH};
+    agent_stream_renderer stream = {
+        .renderer = &renderer,
+        .parser = &parser,
+        .inkling2 = true,
+    };
+    size_t slen = strlen(sample);
+    for (size_t off = 0; off < slen; off += 3) {
+        size_t chunk = slen - off < 3 ? slen - off : 3;
+        agent_stream_text(&stream, sample + off, chunk, false);
+    }
+    agent_stream_text(&stream, NULL, 0, true);
+    renderer_finish(&renderer);
+    AGENT_TEST_ASSERT(parser.state == AGENT_QWEN_TOOL_DONE);
+    AGENT_TEST_ASSERT(parser.calls.len == 1);
+    AGENT_TEST_ASSERT(parser.calls.v[0].name && !strcmp(parser.calls.v[0].name, "bash"));
+    const char *cmd = agent_tool_arg_value(&parser.calls.v[0], "command");
+    AGENT_TEST_ASSERT(cmd && !strcmp(cmd, "echo inkling_ok"));
+    AGENT_TEST_ASSERT(w.out && strstr(w.out, "Running command.") != NULL);
+    AGENT_TEST_ASSERT(w.out && strstr(w.out, "<|message_model|>") == NULL);
+    agent_qwen_tool_parser_free(&parser);
+    free(w.out);
+    pthread_mutex_destroy(&w.mu);
+
+    /* Session title & history markers for Inkling-2 transcripts. */
+    const char *tx =
+        "<|message_system|><|content_text|>sys<|end_message|>"
+        "<|message_user|><|content_text|>Fix the build<|end_message|>"
+        "<|message_model|><|content_text|>Done.<|end_message|>"
+        "<|content_model_end_sampling|>";
+    char *title = agent_session_title_from_text(tx, strlen(tx), 0);
+    AGENT_TEST_ASSERT(title && !strcmp(title, "Fix the build"));
+    free(title);
+
+    agent_history_mark mk = AGENT_HISTORY_MARK_EOS;
+    size_t mlen = 0;
+    const char *hit = agent_history_next_marker(tx, tx + strlen(tx), &mk, &mlen);
+    AGENT_TEST_ASSERT(hit != NULL && mk == AGENT_HISTORY_MARK_USER && mlen == 32);
+}
+
 int main(int argc, char **argv) {
     p36_cli_expand_long_equals(&argc, &argv, "p36_agent_test");
     if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
@@ -2335,6 +2416,7 @@ int main(int argc, char **argv) {
     test_unicode_output_and_footer();
     test_footer_only_updates();
     test_bash_noninteractive();
+    test_inkling2_agent_protocol();
     if (agent_test_failures) {
         fprintf(stderr, "p36-agent tests: %d failure(s)\n",
                 agent_test_failures);

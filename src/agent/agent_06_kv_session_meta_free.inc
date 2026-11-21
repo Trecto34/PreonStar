@@ -841,14 +841,25 @@ static char *agent_session_title_from_text(const char *text, size_t text_len,
                                            size_t max_bytes) {
     static const char user_mark[] = "<|im_start|>user\n";
     static const char assistant_mark[] = "<|im_start|>assistant\n";
+    static const char ink_user_mark[] = "<|message_user|><|content_text|>";
+    static const char ink_end_mark[] = "<|end_message|>";
     const char *p = text ? strstr(text, user_mark) : NULL;
+    if (p) {
+        p += strlen(user_mark);
+        const char *end = text + text_len;
+        const char *assistant = strstr(p, assistant_mark);
+        const char *next_user = strstr(p, user_mark);
+        if (assistant && assistant < end) end = assistant;
+        if (next_user && next_user < end) end = next_user;
+        return agent_session_title_from_span(p, end, max_bytes,
+                                             "(empty user prompt)");
+    }
+    p = text ? strstr(text, ink_user_mark) : NULL;
     if (!p) return xstrdup("(no user prompt)");
-    p += strlen(user_mark);
+    p += strlen(ink_user_mark);
     const char *end = text + text_len;
-    const char *assistant = strstr(p, assistant_mark);
-    const char *next_user = strstr(p, user_mark);
-    if (assistant && assistant < end) end = assistant;
-    if (next_user && next_user < end) end = next_user;
+    const char *msg_end = strstr(p, ink_end_mark);
+    if (msg_end && msg_end < end) end = msg_end;
     return agent_session_title_from_span(p, end, max_bytes,
                                          "(empty user prompt)");
 }

@@ -190,7 +190,9 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         }
 
         bool use_color = isatty(STDOUT_FILENO) != 0;
-        bool in_think = continuing_assistant ? resume_in_think : p36_think_mode_enabled(think_mode);
+        const bool is_inkling2 = p36_engine_is_inkling2(w->engine);
+        bool in_think = continuing_assistant ? resume_in_think :
+            (is_inkling2 ? false : p36_think_mode_enabled(think_mode));
         int thinking_tokens = continuing_assistant ? carried_thinking_tokens : 0;
         if (!continuing_assistant) memset(&thinking_repetition, 0, sizeof(thinking_repetition));
         resume_assistant = false;
@@ -208,6 +210,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             .renderer = &renderer,
             .parser = &qwen_tool,
             .in_think = in_think,
+            .inkling2 = is_inkling2,
         };
         agent_edit_upto_forcer upto_forcer = {0};
         bool got_tool = false;
@@ -235,7 +238,8 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         pthread_mutex_unlock(&w->mu);
 
         bool status_greedy_sampling = false;
-        int think_close_id = agent_special_token_id(w->engine, "</think>");
+        int think_close_id = agent_special_token_id(
+            w->engine, is_inkling2 ? "<|end_message|>" : "</think>");
         int think_soft_close_start = agent_think_soft_close_start(
             think_budget);
         agent_trace(w, "active_frequency_penalty=%.3f",
@@ -572,7 +576,8 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 agent_tool_observation_puts(&observation,
                     "Close thinking with </think> before retrying the tool call.\n");
             agent_tool_observation_puts(
-                &observation, p36_engine_chat_template(w->engine) ?
+                &observation, is_inkling2 ? agent_inkling2_tool_syntax_reminder :
+                p36_engine_chat_template(w->engine) ?
                 agent_json_tool_syntax_reminder : agent_qwen_tool_syntax_reminder);
         } else {
             agent_tool_observation_free(&observation);

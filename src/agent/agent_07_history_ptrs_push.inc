@@ -25,29 +25,34 @@ static const char *agent_memmem(const char *hay, size_t hay_len,
 static const char *agent_history_next_marker(const char *p, const char *end,
                                              agent_history_mark *mark,
                                              size_t *mark_len) {
-    static const char user_mark[] = "<|im_start|>user\n";
-    static const char assistant_mark[] = "<|im_start|>assistant\n";
-    static const char eos_mark[] = "<|im_end|>\n";
-    const char *u = agent_memmem(p, (size_t)(end - p),
-                                 user_mark, sizeof(user_mark) - 1);
-    const char *a = agent_memmem(p, (size_t)(end - p),
-                                 assistant_mark, sizeof(assistant_mark) - 1);
-    const char *e = agent_memmem(p, (size_t)(end - p),
-                                 eos_mark, sizeof(eos_mark) - 1);
-    if (!u && !a && !e) return NULL;
-    if (u && (!a || u < a) && (!e || u < e)) {
-        if (mark) *mark = AGENT_HISTORY_MARK_USER;
-        if (mark_len) *mark_len = sizeof(user_mark) - 1;
-        return u;
+    static const struct {
+        const char *str;
+        size_t len;
+        agent_history_mark mark;
+    } markers[] = {
+        {"<|im_start|>user\n", 17, AGENT_HISTORY_MARK_USER},
+        {"<|im_start|>assistant\n", 22, AGENT_HISTORY_MARK_ASSISTANT},
+        {"<|im_end|>\n", 11, AGENT_HISTORY_MARK_EOS},
+        {"<|message_user|><|content_text|>", 32, AGENT_HISTORY_MARK_USER},
+        {"<|message_model|>", 17, AGENT_HISTORY_MARK_ASSISTANT},
+        {"<|content_model_end_sampling|>", 30, AGENT_HISTORY_MARK_EOS},
+    };
+    const char *best = NULL;
+    size_t best_len = 0;
+    agent_history_mark best_mark = AGENT_HISTORY_MARK_EOS;
+    for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); i++) {
+        const char *hit = agent_memmem(p, (size_t)(end - p),
+                                       markers[i].str, markers[i].len);
+        if (hit && (!best || hit < best)) {
+            best = hit;
+            best_len = markers[i].len;
+            best_mark = markers[i].mark;
+        }
     }
-    if (a && (!e || a < e)) {
-        if (mark) *mark = AGENT_HISTORY_MARK_ASSISTANT;
-        if (mark_len) *mark_len = sizeof(assistant_mark) - 1;
-        return a;
-    }
-    if (mark) *mark = AGENT_HISTORY_MARK_EOS;
-    if (mark_len) *mark_len = sizeof(eos_mark) - 1;
-    return e;
+    if (!best) return NULL;
+    if (mark) *mark = best_mark;
+    if (mark_len) *mark_len = best_len;
+    return best;
 }
 
 static void agent_history_trim(const char **p, const char **end) {
@@ -297,6 +302,7 @@ static void agent_history_render_assistant(agent_worker *w,
         .renderer = &renderer,
         .parser = &qwen_tool,
         .replay = true,
+        .inkling2 = p36_engine_is_inkling2(w->engine),
     };
 
     /* Dry-run replay: the same streaming projection hides Qwen tool and renders

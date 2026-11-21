@@ -545,8 +545,12 @@ void p36_chat_append_message(p36_engine *e, p36_tokens *tokens, const char *role
                 p36_tokenize_rendered_chat(e, text, tokens);
                 p36_tokenize_rendered_chat(e, "<|end_message|>", tokens);
             }
-        } else if (!strcmp(role, "tool") || !strcmp(role, "function")) {
-            p36_tokenize_rendered_chat(e, "<|message_tool|>unknown<|content_text|>", tokens);
+        } else if (!strcmp(role, "tool") || !strcmp(role, "function") ||
+                   !strncmp(role, "tool:", 5)) {
+            const char *fn = !strncmp(role, "tool:", 5) && role[5] ? role + 5 : "unknown";
+            p36_tokenize_rendered_chat(e, "<|message_tool|>", tokens);
+            p36_tokenize_rendered_chat(e, fn, tokens);
+            p36_tokenize_rendered_chat(e, "<|content_text|>", tokens);
             p36_tokenize_rendered_chat(e, text, tokens);
             p36_tokenize_rendered_chat(e, "<|end_message|>", tokens);
         } else if (!strcmp(role, "assistant")) {
@@ -599,7 +603,34 @@ int p36_chat_append_multimodal_message(p36_engine *e, p36_tokens *tokens,
         p36_chat_append_message(e, tokens, role, parts[0]);
         return 1;
     }
-    bool tool = !strcmp(role, "tool");
+    bool tool = !strcmp(role, "tool") || !strncmp(role, "tool:", 5);
+    if (e->variant == P36_VARIANT_INKLING2_LOOP) {
+        const char *fn = !strncmp(role, "tool:", 5) && role[5] ? role + 5 : "unknown";
+        for (size_t i = 0; i <= image_count; i++) {
+            if (parts[i] && parts[i][0]) {
+                if (tool) {
+                    p36_tokenize_rendered_chat(e, "<|message_tool|>", tokens);
+                    p36_tokenize_rendered_chat(e, fn, tokens);
+                } else {
+                    p36_tokenize_rendered_chat(e, "<|message_user|>", tokens);
+                }
+                p36_tokenize_rendered_chat(e, "<|content_text|>", tokens);
+                p36_tokenize_rendered_chat(e, parts[i], tokens);
+                p36_tokenize_rendered_chat(e, "<|end_message|>", tokens);
+            }
+            if (i < image_count) {
+                if (tool) {
+                    p36_tokenize_rendered_chat(e, "<|message_tool|>", tokens);
+                    p36_tokenize_rendered_chat(e, fn, tokens);
+                } else {
+                    p36_tokenize_rendered_chat(e, "<|message_user|>", tokens);
+                }
+                if (!p36_prompt_append_vision(e, tokens, &spans[i], &images[i], err, errlen))
+                    return 0;
+            }
+        }
+        return 1;
+    }
     chat_append_open_role(e, tokens, tool ? "user" : role);
     if (tool) p36_tokenize_rendered_chat(e, "<tool_response>\n", tokens);
     for (size_t i = 0; i <= image_count; i++) {
@@ -621,6 +652,16 @@ int p36_chat_append_vision_message(p36_engine *e, p36_tokens *tokens,
                                     char *err, size_t errlen) {
     if (!e || !tokens || !span || !embedding) return 0;
     char *text = p36_chat_content_text(content, true);
+    if (e->variant == P36_VARIANT_INKLING2_LOOP) {
+        if (text[0]) {
+            p36_tokenize_rendered_chat(e, "<|message_user|><|content_text|>", tokens);
+            p36_tokenize_rendered_chat(e, text, tokens);
+            p36_tokenize_rendered_chat(e, "<|end_message|>", tokens);
+        }
+        free(text);
+        p36_tokenize_rendered_chat(e, "<|message_user|>", tokens);
+        return p36_prompt_append_vision(e, tokens, span, embedding, err, errlen) ? 1 : 0;
+    }
     chat_append_open_role(e, tokens, role ? role : "user");
     if (text[0]) p36_tokenize_rendered_chat(e, text, tokens);
     free(text);
