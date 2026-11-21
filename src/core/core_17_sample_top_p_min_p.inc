@@ -420,12 +420,19 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
         p36_engine_close(e);
         return 1;
     }
-    e->routed_quant_bits = p36_quant_bits_from_type(
-        P36_MODEL_DENSE ? e->weights.layer[0].ffn_gate_shexp->type :
-                          e->weights.layer[0].ffn_gate_exps->type);
-    e->expert_weights_scale = 1.0f;
-    if (!model_get_f32_compat(&e->model, "qwen35moe.expert_weights_scale", &e->expert_weights_scale))
-        model_get_f32_compat(&e->model, "clover_moe.expert_weights_scale", &e->expert_weights_scale);
+    if (e->variant == P36_VARIANT_INKLING2_LOOP) {
+        if (!p36_inkling2_init_engine(e)) {
+            p36_engine_close(e);
+            return 1;
+        }
+    } else {
+        e->routed_quant_bits = p36_quant_bits_from_type(
+            P36_MODEL_DENSE ? e->weights.layer[0].ffn_gate_shexp->type :
+                              e->weights.layer[0].ffn_gate_exps->type);
+        e->expert_weights_scale = 1.0f;
+        if (!model_get_f32_compat(&e->model, "qwen35moe.expert_weights_scale", &e->expert_weights_scale))
+            model_get_f32_compat(&e->model, "clover_moe.expert_weights_scale", &e->expert_weights_scale);
+    }
     e->mtp_expert_weights_scale = e->expert_weights_scale;
     if (e->variant == P36_VARIANT_CLOVER_35B_A3B) {
         uint32_t bs = 32;
@@ -601,6 +608,8 @@ void p36_engine_close(p36_engine *e) {
     model_close(&e->model);
     free(e->directional_steering_file);
     free(e->chat_template);
+    free(e->ink_hparams);
+    free(e->ink_weights);
     p36_ssd_memory_lock_release(&e->simulated_memory);
     free(e);
 }
@@ -699,12 +708,14 @@ const char *p36_engine_model_name(p36_engine *e) {
     if (e && e->kat_coder) return "kat-coder-v2.5-dev";
     if (e && e->variant == P36_VARIANT_27B) return "qwen3.6-27b";
     if (e && e->variant == P36_VARIANT_CLOVER_35B_A3B) return "clover-35b-a3b";
+    if (e && e->variant == P36_VARIANT_INKLING2_LOOP) return "inkling-2-mini";
     return "qwen3.6-35b-a3b";
 }
 
 int p36_engine_model_id(p36_engine *e) {
     if (e && e->kat_coder) return 2;
     if (e && e->variant == P36_VARIANT_CLOVER_35B_A3B) return 4;
+    if (e && e->variant == P36_VARIANT_INKLING2_LOOP) return 5;
     return e && e->variant == P36_VARIANT_27B ? 3 : 1;
 }
 

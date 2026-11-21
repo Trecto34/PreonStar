@@ -1229,6 +1229,10 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
     s->logits_stale = false;
     e = s->engine;
     rt = (p36_vulkan_runtime *)s->runtime;
+    if (e->variant == P36_VARIANT_INKLING2_LOOP) {
+        return p36_forward_tokens_inkling2_vulkan(s, tokens, embeddings, n_tok, pos0,
+                                                  logits_out, logits_all_rows);
+    }
     if (n_tok > rt->prefill_cap) return false;
     p36_gpu_stream_expert_cache_note_tokens(n_tok);
     /* Embed into the host-only stage, then a queued device copy into the

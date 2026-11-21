@@ -1,0 +1,169 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Inkling-2-Mini Split-K + GQA-3 FlashAttention decode (n_tok == 1, head_dim == 128, F16 KV).
+ * Each workgroup handles 1 KV head (ALL 3 GQA query heads simultaneously!) and 1 K-split.
+ * Reads cache_k, cache_v (as f16vec4), and rel_bias ONCE per 3 query heads.
+ * 256 threads = 8 half-waves of 32 lanes (each 32-lane half-wave owns 1 KV pos, 4 dims/lane).
+ * Dispatch: (n_head_kv = 8, n_splits, 1).
+ * If n_splits == 1: writes final gated output directly to out_buf.
+ * If n_splits > 1:  writes partials (m, l, O[128]) per (h, split) to part_buf. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer QBuf { vec4 q_buf[]; };
+layout(set = 0, binding = 1) readonly buffer RBuf { float r_buf[]; };
+layout(set = 0, binding = 2) readonly buffer RelBias { float rel_bias[]; };
+layout(set = 0, binding = 3) readonly buffer Sinks { float sinks[]; };
+layout(set = 0, binding = 4) readonly buffer GateBuf { vec4 gate_buf[]; };
+layout(set = 0, binding = 5) readonly buffer CacheK { f16vec4 cache_k[]; };
+layout(set = 0, binding = 6) readonly buffer CacheV { f16vec4 cache_v[]; };
+layout(set = 0, binding = 7) writeonly buffer OutBuf { vec4 out_buf[]; };
+layout(set = 0, binding = 8) writeonly buffer PartBuf { float part_buf[]; };
+
+layout(push_constant) uniform Push {
+    uint n_head;
+    uint n_head_kv;
+    uint pos;
+    uint kv_cap;
+    uint is_swa;
+    uint rel_extent;
+    uint n_splits;
+    float scale;
+} pc;
+
+shared float sh_m[3][8];
+shared float sh_l[3][8];
+shared vec4 sh_o[3][8][32];
+
+float sum32(float v) {
+    v += subgroupShuffleXor(v, 16u);
+    v += subgroupShuffleXor(v, 8u);
+    v += subgroupShuffleXor(v, 4u);
+    v += subgroupShuffleXor(v, 2u);
+    v += subgroupShuffleXor(v, 1u);
+    return v;
+}
+
+float sum16(float v) {
+    v += subgroupShuffleXor(v, 8u);
+    v += subgroupShuffleXor(v, 4u);
+    v += subgroupShuffleXor(v, 2u);
+    v += subgroupShuffleXor(v, 1u);
+    return v;
+}
+
+void main(void) {
+    uint kvh = gl_WorkGroupID.x;
+    uint split = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    uint hw = tid >> 5u;       /* 0..7 half-wave */
+    uint lane = tid & 31u;     /* 0..31: 4 dims per lane -> 128 dims total */
+
+    uint h0 = kvh * 3u;
+    vec4 q0 = q_buf[(h0 + 0u) * 32u + lane];
+    vec4 q1 = q_buf[(h0 + 1u) * 32u + lane];
+    vec4 q2 = q_buf[(h0 + 2u) * 32u + lane];
+
+    float r0 = (lane < 16u) ? r_buf[(h0 + 0u) * 16u + lane] : 0.0;
+    float r1 = (lane < 16u) ? r_buf[(h0 + 1u) * 16u + lane] : 0.0;
+    float r2 = (lane < 16u) ? r_buf[(h0 + 2u) * 16u + lane] : 0.0;
+
+    uint k_start_all = (pc.is_swa != 0u && pc.pos >= pc.kv_cap) ? (pc.pos - pc.kv_cap + 1u) : 0u;
+    uint k_end_all = pc.pos + 1u;
+    uint k_total = k_end_all - k_start_all;
+    uint k_per = (k_total + pc.n_splits - 1u) / pc.n_splits;
+    uint k_begin = k_start_all + split * k_per;
+    uint k_end = min(k_begin + k_per, k_end_all);
+
+    bool is_sink_owner = (split == 0u && hw == 0u);
+    float m0 = is_sink_owner ? sinks[h0 + 0u] : -1.0e30;
+    float m1 = is_sink_owner ? sinks[h0 + 1u] : -1.0e30;
+    float m2 = is_sink_owner ? sinks[h0 + 2u] : -1.0e30;
+    float l0 = is_sink_owner ? 1.0 : 0.0;
+    float l1 = is_sink_owner ? 1.0 : 0.0;
+    float l2 = is_sink_owner ? 1.0 : 0.0;
+    vec4 o0 = vec4(0.0);
+    vec4 o1 = vec4(0.0);
+    vec4 o2 = vec4(0.0);
+
+    uint mask = pc.kv_cap - 1u;
+    for (uint k = k_begin + hw; k < k_end; k += 8u) {
+        uint slot = (pc.is_swa != 0u) ? (k & mask) : k;
+        uint kv_base = (slot * pc.n_head_kv + kvh) * 32u + lane;
+        vec4 kv = vec4(cache_k[kv_base]);
+
+        float s0 = sum32(dot(q0, kv)) * pc.scale;
+        float s1 = sum32(dot(q1, kv)) * pc.scale;
+        float s2 = sum32(dot(q2, kv)) * pc.scale;
+
+        uint dist = pc.pos - k;
+        if (dist < pc.rel_extent) {
+            float rb = (lane < 16u) ? rel_bias[dist * 16u + lane] : 0.0;
+            float b0 = sum16(r0 * rb);
+            float b1 = sum16(r1 * rb);
+            float b2 = sum16(r2 * rb);
+            /* Broadcast lane 0 of half-wave to lanes 16..31 */
+            s0 += subgroupShuffle(b0, (hw & 1u) * 32u);
+            s1 += subgroupShuffle(b1, (hw & 1u) * 32u);
+            s2 += subgroupShuffle(b2, (hw & 1u) * 32u);
+        }
+
+        vec4 vv = vec4(cache_v[kv_base]);
+
+        float mn0 = max(m0, s0); float a0 = exp(m0 - mn0); float p0 = exp(s0 - mn0);
+        o0 = o0 * a0 + vv * p0; l0 = l0 * a0 + p0; m0 = mn0;
+
+        float mn1 = max(m1, s1); float a1 = exp(m1 - mn1); float p1 = exp(s1 - mn1);
+        o1 = o1 * a1 + vv * p1; l1 = l1 * a1 + p1; m1 = mn1;
+
+        float mn2 = max(m2, s2); float a2 = exp(m2 - mn2); float p2 = exp(s2 - mn2);
+        o2 = o2 * a2 + vv * p2; l2 = l2 * a2 + p2; m2 = mn2;
+    }
+
+    if (lane == 0u) {
+        sh_m[0][hw] = m0; sh_l[0][hw] = l0;
+        sh_m[1][hw] = m1; sh_l[1][hw] = l1;
+        sh_m[2][hw] = m2; sh_l[2][hw] = l2;
+    }
+    sh_o[0][hw][lane] = o0;
+    sh_o[1][hw][lane] = o1;
+    sh_o[2][hw][lane] = o2;
+    barrier();
+
+    /* Merge 8 half-waves across 3 heads using first 3 half-waves (threads 0..95) */
+    if (hw < 3u) {
+        float ma = -1.0e30;
+        [[unroll]] for (uint i = 0u; i < 8u; i++) ma = max(ma, sh_m[hw][i]);
+        float la = 0.0;
+        vec4 oa = vec4(0.0);
+        [[unroll]] for (uint i = 0u; i < 8u; i++) {
+            float w = (sh_l[hw][i] > 0.0) ? exp(sh_m[hw][i] - ma) : 0.0;
+            la += sh_l[hw][i] * w;
+            oa += sh_o[hw][i][lane] * w;
+        }
+        uint h = h0 + hw;
+        if (pc.n_splits == 1u) {
+            vec4 y = oa * (1.0 / la);
+            vec4 g = 1.0 / (1.0 + exp(-gate_buf[h * 32u + lane]));
+            out_buf[h * 32u + lane] = y * g;
+        } else {
+            /* PartBuf layout: [n_head, n_splits, 130] -> [m, l, O[0..127]] */
+            uint pbase = (h * pc.n_splits + split) * 130u;
+            if (lane == 0u) {
+                part_buf[pbase + 0u] = ma;
+                part_buf[pbase + 1u] = la;
+            }
+            part_buf[pbase + 2u + lane * 4u + 0u] = oa.x;
+            part_buf[pbase + 2u + lane * 4u + 1u] = oa.y;
+            part_buf[pbase + 2u + lane * 4u + 2u] = oa.z;
+            part_buf[pbase + 2u + lane * 4u + 3u] = oa.w;
+        }
+    }
+}

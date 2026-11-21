@@ -30,6 +30,7 @@ int p36_session_power(p36_session *s) {
 static bool p36_session_reserve_kv(p36_session *s, uint32_t need,
                                    uint32_t rows) {
     if (!s || need > (uint32_t)s->ctx_size) return false;
+    if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) return true;
 #ifdef P36_NO_GPU
     (void)rows;
 #endif

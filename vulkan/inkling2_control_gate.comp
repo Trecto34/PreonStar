@@ -1,0 +1,91 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Fused loop controller gate:
+ *   f = tanh(loop_forget @ h)
+ *   g = tanh(loop_gain   @ h)
+ *   out = (1 - f) * cur + g * msg
+ * Decode (n_tok == 1): 4 rows per wave64, 16 coalesced vec4 lanes per row (576 WGs).
+ * Prefill (n_tok > 1): 64 cols x 16 tokens per WG, loading wf/wg once per 16 tokens. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer ForgetW { vec4 wf[]; };
+layout(set = 0, binding = 1) readonly buffer GainW { vec4 wg[]; };
+layout(set = 0, binding = 2) readonly buffer H { vec4 hv[]; };
+layout(set = 0, binding = 3) readonly buffer Cur { float cur[]; };
+layout(set = 0, binding = 4) readonly buffer Msg { float msg[]; };
+layout(set = 0, binding = 5) writeonly buffer Out { float out_buf[]; };
+
+layout(push_constant) uniform Push {
+    uint n_embd;
+    uint rank;
+    uint n_tok;
+} pc;
+
+shared vec4 sh_h[16][16];
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint r4 = pc.rank >> 2u; /* 16 */
+
+    if (pc.n_tok == 1u) {
+        /* 4 output rows per wave64, 16 lanes per row -> 100% coalesced vec4 loads */
+        uint row = gl_WorkGroupID.x * 4u + (tid >> 4u);
+        uint k = tid & 15u;
+        vec4 vh = hv[k];
+        uint widx = row * r4 + k;
+        float f = dot(wf[widx], vh);
+        float g = dot(wg[widx], vh);
+        f += subgroupShuffleXor(f, 8u); g += subgroupShuffleXor(g, 8u);
+        f += subgroupShuffleXor(f, 4u); g += subgroupShuffleXor(g, 4u);
+        f += subgroupShuffleXor(f, 2u); g += subgroupShuffleXor(g, 2u);
+        f += subgroupShuffleXor(f, 1u); g += subgroupShuffleXor(g, 1u);
+        if (k == 0u && row < pc.n_embd) {
+            out_buf[row] = (1.0 - tanh(f)) * cur[row] + tanh(g) * msg[row];
+        }
+        return;
+    }
+
+    /* Prefill: 64 cols x up to 16 tokens per WG */
+    uint col = gl_WorkGroupID.x * 64u + tid;
+    uint t0 = gl_WorkGroupID.y * 16u;
+    uint nt = min(16u, pc.n_tok - t0);
+
+    /* 64 threads cooperatively load up to 16 tokens x 16 vec4s = 256 vec4s */
+    for (uint i = tid; i < nt * 16u; i += 64u) {
+        uint lt = i >> 4u;
+        uint lk = i & 15u;
+        sh_h[lt][lk] = hv[(t0 + lt) * r4 + lk];
+    }
+    barrier();
+
+    if (col >= pc.n_embd) return;
+
+    float f_acc[16];
+    float g_acc[16];
+    [[unroll]] for (uint t = 0u; t < 16u; t++) {
+        f_acc[t] = 0.0;
+        g_acc[t] = 0.0;
+    }
+
+    uint w_base = col * r4;
+    for (uint k = 0u; k < r4; k++) {
+        vec4 fw = wf[w_base + k];
+        vec4 gw = wg[w_base + k];
+        for (uint t = 0u; t < nt; t++) {
+            vec4 vh = sh_h[t][k];
+            f_acc[t] = fma(fw.x, vh.x, fma(fw.y, vh.y, fma(fw.z, vh.z, fma(fw.w, vh.w, f_acc[t]))));
+            g_acc[t] = fma(gw.x, vh.x, fma(gw.y, vh.y, fma(gw.z, vh.z, fma(gw.w, vh.w, g_acc[t]))));
+        }
+    }
+
+    for (uint t = 0u; t < nt; t++) {
+        uint idx = (t0 + t) * pc.n_embd + col;
+        out_buf[idx] = (1.0 - tanh(f_acc[t])) * cur[idx] + tanh(g_acc[t]) * msg[idx];
+    }
+}

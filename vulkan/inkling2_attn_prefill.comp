@@ -1,0 +1,153 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Inkling-2-Mini GQA-3 FlashAttention prefill (head_dim == 128, F16 KV, BK == 32).
+ * 1 workgroup owns 1 KV head (ALL 3 GQA query heads!) x 8 query tokens (8 half-waves of 32 lanes).
+ * Reads K, V (as f16vec4 into LDS) and rel_bias ONCE across all 3 query heads!
+ * Dispatch: (n_head_kv = 8, ceil(n_tok / 8), 1). */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer QBuf { vec4 q_buf[]; };
+layout(set = 0, binding = 1) readonly buffer RBuf { float r_buf[]; };
+layout(set = 0, binding = 2) readonly buffer RelBias { float rel_bias[]; };
+layout(set = 0, binding = 3) readonly buffer Sinks { float sinks[]; };
+layout(set = 0, binding = 4) readonly buffer GateBuf { vec4 gate_buf[]; };
+layout(set = 0, binding = 5) readonly buffer CacheK { f16vec4 cache_k[]; };
+layout(set = 0, binding = 6) readonly buffer CacheV { f16vec4 cache_v[]; };
+layout(set = 0, binding = 7) writeonly buffer OutBuf { vec4 out_buf[]; };
+
+layout(push_constant) uniform Push {
+    uint n_head;
+    uint n_head_kv;
+    uint n_tok;
+    uint pos0;
+    uint kv_cap;
+    uint is_swa;
+    uint rel_extent;
+    float scale;
+} pc;
+
+const uint BK = 32u;
+shared f16vec4 sh_k[BK][32];
+shared f16vec4 sh_v[BK][32];
+
+float sum32(float v) {
+    v += subgroupShuffleXor(v, 16u);
+    v += subgroupShuffleXor(v, 8u);
+    v += subgroupShuffleXor(v, 4u);
+    v += subgroupShuffleXor(v, 2u);
+    v += subgroupShuffleXor(v, 1u);
+    return v;
+}
+
+float sum16(float v) {
+    v += subgroupShuffleXor(v, 8u);
+    v += subgroupShuffleXor(v, 4u);
+    v += subgroupShuffleXor(v, 2u);
+    v += subgroupShuffleXor(v, 1u);
+    return v;
+}
+
+void main(void) {
+    uint kvh = gl_WorkGroupID.x;
+    uint t0 = gl_WorkGroupID.y * 8u;
+    uint tid = gl_LocalInvocationID.x;
+    uint hw = tid >> 5u;       /* 0..7: query token within tile */
+    uint lane = tid & 31u;     /* 0..31: 4 dims per lane */
+    uint t = t0 + hw;
+    bool active_t = (t < pc.n_tok);
+
+    uint h0 = kvh * 3u;
+    uint q_pos = pc.pos0 + t;
+
+    vec4 q0 = active_t ? q_buf[(t * pc.n_head + h0 + 0u) * 32u + lane] : vec4(0.0);
+    vec4 q1 = active_t ? q_buf[(t * pc.n_head + h0 + 1u) * 32u + lane] : vec4(0.0);
+    vec4 q2 = active_t ? q_buf[(t * pc.n_head + h0 + 2u) * 32u + lane] : vec4(0.0);
+
+    float r0 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 0u) * 16u + lane] : 0.0;
+    float r1 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 1u) * 16u + lane] : 0.0;
+    float r2 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 2u) * 16u + lane] : 0.0;
+
+    float m0 = active_t ? sinks[t * pc.n_head + h0 + 0u] : -1.0e30;
+    float m1 = active_t ? sinks[t * pc.n_head + h0 + 1u] : -1.0e30;
+    float m2 = active_t ? sinks[t * pc.n_head + h0 + 2u] : -1.0e30;
+    float l0 = active_t ? 1.0 : 0.0;
+    float l1 = active_t ? 1.0 : 0.0;
+    float l2 = active_t ? 1.0 : 0.0;
+    vec4 o0 = vec4(0.0);
+    vec4 o1 = vec4(0.0);
+    vec4 o2 = vec4(0.0);
+
+    uint t_last = min(t0 + 7u, pc.n_tok - 1u);
+    uint k_end_tile = pc.pos0 + t_last + 1u;
+    uint k_min_tile = (pc.is_swa != 0u && (pc.pos0 + t0) >= pc.kv_cap)
+                    ? (pc.pos0 + t0 - pc.kv_cap + 1u) : 0u;
+    uint my_k_start = (pc.is_swa != 0u && q_pos >= pc.kv_cap)
+                    ? (q_pos - pc.kv_cap + 1u) : 0u;
+    uint mask = pc.kv_cap - 1u;
+    uint bcast_lane = (hw & 1u) * 32u;
+
+    /* 256 threads load 32 rows x 32 f16vec4 = 1024 f16vec4s -> 4 f16vec4s per thread */
+    for (uint kb = k_min_tile; kb < k_end_tile; kb += BK) {
+        [[unroll]] for (uint r = 0u; r < 4u; r++) {
+            uint row = hw + r * 8u;
+            uint k_idx = kb + row;
+            if (k_idx < k_end_tile) {
+                uint slot = (pc.is_swa != 0u) ? (k_idx & mask) : k_idx;
+                uint kv_base = (slot * pc.n_head_kv + kvh) * 32u + lane;
+                sh_k[row][lane] = cache_k[kv_base];
+                sh_v[row][lane] = cache_v[kv_base];
+            }
+        }
+        barrier();
+
+        if (active_t) {
+            uint j_end = min(BK, k_end_tile - kb);
+            for (uint j = 0u; j < j_end; j++) {
+                uint k_pos = kb + j;
+                if (k_pos < my_k_start || k_pos > q_pos) continue;
+
+                vec4 kv = vec4(sh_k[j][lane]);
+                float s0 = sum32(dot(q0, kv)) * pc.scale;
+                float s1 = sum32(dot(q1, kv)) * pc.scale;
+                float s2 = sum32(dot(q2, kv)) * pc.scale;
+
+                uint dist = q_pos - k_pos;
+                if (dist < pc.rel_extent) {
+                    float rb = (lane < 16u) ? rel_bias[dist * 16u + lane] : 0.0;
+                    s0 += subgroupShuffle(sum16(r0 * rb), bcast_lane);
+                    s1 += subgroupShuffle(sum16(r1 * rb), bcast_lane);
+                    s2 += subgroupShuffle(sum16(r2 * rb), bcast_lane);
+                }
+
+                vec4 vv = vec4(sh_v[j][lane]);
+
+                float mn0 = max(m0, s0); float a0 = exp(m0 - mn0); float p0 = exp(s0 - mn0);
+                o0 = o0 * a0 + vv * p0; l0 = l0 * a0 + p0; m0 = mn0;
+
+                float mn1 = max(m1, s1); float a1 = exp(m1 - mn1); float p1 = exp(s1 - mn1);
+                o1 = o1 * a1 + vv * p1; l1 = l1 * a1 + p1; m1 = mn1;
+
+                float mn2 = max(m2, s2); float a2 = exp(m2 - mn2); float p2 = exp(s2 - mn2);
+                o2 = o2 * a2 + vv * p2; l2 = l2 * a2 + p2; m2 = mn2;
+            }
+        }
+        barrier();
+    }
+
+    if (active_t) {
+        uint ob0 = (t * pc.n_head + h0 + 0u) * 32u + lane;
+        uint ob1 = (t * pc.n_head + h0 + 1u) * 32u + lane;
+        uint ob2 = (t * pc.n_head + h0 + 2u) * 32u + lane;
+        out_buf[ob0] = (o0 * (1.0 / l0)) * (1.0 / (1.0 + exp(-gate_buf[ob0])));
+        out_buf[ob1] = (o1 * (1.0 / l1)) * (1.0 / (1.0 + exp(-gate_buf[ob1])));
+        out_buf[ob2] = (o2 * (1.0 / l2)) * (1.0 / (1.0 + exp(-gate_buf[ob2])));
+    }
+}

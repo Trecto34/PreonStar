@@ -1,0 +1,195 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Routed MoE down prefill GEMM for Inkling-2-Mini (IQ4_NL / Q5_0, block=32).
+ * Tile: BM = 128 output rows x SLOT_TILE = 32 routed slots, BK = 32 (KK = 8 f16vec4).
+ * 256 threads (16x16 grid: each thread computes 8 rows x 2 slots, with hi_live skip).
+ * IQ4_NL LUT staged in shared memory for single-instruction LDS lookup. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint16_t w[]; };
+layout(set = 0, binding = 1) readonly buffer Act { vec4 xv[]; };
+layout(set = 0, binding = 2) readonly buffer Tiles { uint tiles[]; };
+layout(set = 0, binding = 3) writeonly buffer Output { float y[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint in_dim;
+    uint blocks;    /* in_dim / 32 = 36 */
+    uint n_used;    /* 8 */
+} pc;
+
+const uint SLOT_TILE = 32u;
+const uint TILE_WORDS = 1u + SLOT_TILE;
+const uint INVALID = 0xffffffffu;
+const uint BM = 128u;
+const uint KK = 8u;
+#define P36_SWZ(i) (((i) >> 1u) & 7u)
+
+#ifdef P36_MOE_IQ4NL
+const uint BLOCK_U16 = 9u;
+const float16_t IQ4NL_INIT[16] = float16_t[16](
+    float16_t(-127.0), float16_t(-104.0), float16_t(-83.0), float16_t(-65.0),
+    float16_t(-49.0),  float16_t(-35.0),  float16_t(-22.0), float16_t(-10.0),
+    float16_t(1.0),    float16_t(13.0),   float16_t(25.0),  float16_t(38.0),
+    float16_t(53.0),   float16_t(69.0),   float16_t(89.0),  float16_t(113.0)
+);
+shared float16_t sh_lut[16];
+#elif defined(P36_MOE_Q5_0)
+const uint BLOCK_U16 = 11u;
+#else
+#error "Define P36_MOE_IQ4NL or P36_MOE_Q5_0"
+#endif
+
+shared f16vec4 Aw[BM][KK];
+shared float Dw[BM];
+shared f16vec4 Bs[SLOT_TILE][KK];
+shared uint sh_slot[SLOT_TILE];
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint row0 = gl_WorkGroupID.x * BM;
+    uint tile_base = gl_WorkGroupID.y * TILE_WORDS;
+    uint expert = tiles[tile_base];
+    if (expert == INVALID) return;
+
+    if (tid < SLOT_TILE) {
+        sh_slot[tid] = tiles[tile_base + 1u + tid];
+    }
+#ifdef P36_MOE_IQ4NL
+    if (tid < 16u) sh_lut[tid] = IQ4NL_INIT[tid];
+#endif
+    barrier();
+
+    bool hi_live = false;
+    for (uint j = 16u; j < SLOT_TILE; j++) hi_live = hi_live || (sh_slot[j] != INVALID);
+
+    uint sl = tid & 15u;       /* 0..15 -> slots sl and sl+16 */
+    uint ry = tid >> 4u;       /* 0..15 -> 8 rows: ry + 16*i */
+
+    float acc0[8];
+    float acc1[8];
+    [[unroll]] for (uint i = 0u; i < 8u; i++) {
+        acc0[i] = 0.0;
+        acc1[i] = 0.0;
+    }
+
+    uint exp_u16 = expert * pc.out_dim * pc.blocks * BLOCK_U16;
+    uint row_u16 = pc.blocks * BLOCK_U16;
+    uint in_v4 = pc.in_dim >> 2u;
+
+    /* Weight loader: 256 threads -> 128 rows x 2 halves (lc = 0, 1) */
+    uint lr = tid >> 1u;       /* 0..127 row */
+    uint lc = tid & 1u;        /* 0..1: 2 uint32 words = 4 f16vec4s */
+    uint sa = P36_SWZ(lr);
+    uint b_slot = tid >> 3u;   /* 0..31 */
+    uint b_kk = tid & 7u;      /* 0..7 */
+    uint b_swz = b_kk ^ P36_SWZ(b_slot);
+    uint sl_b = sh_slot[b_slot];
+    bool live_b = (sl_b != INVALID);
+    uint b_base = live_b ? (sl_b * in_v4 + b_kk) : 0u;
+
+    uint swz_sl = P36_SWZ(sl);
+    uint swz_ry = P36_SWZ(ry);
+
+    for (uint b = 0u; b < pc.blocks; b++) {
+        uint boff = exp_u16 + (row0 + lr) * row_u16 + b * BLOCK_U16;
+        if (lc == 0u) {
+            Dw[lr] = unpackHalf2x16(uint(w[boff])).x;
+        }
+#ifdef P36_MOE_IQ4NL
+        uint q0 = uint(w[boff + 1u + lc * 4u]) | (uint(w[boff + 2u + lc * 4u]) << 16u);
+        uint q1 = uint(w[boff + 3u + lc * 4u]) | (uint(w[boff + 4u + lc * 4u]) << 16u);
+        Aw[lr][(lc * 2u     ) ^ sa] = f16vec4(sh_lut[(q0      ) & 15u], sh_lut[(q0 >>  8u) & 15u],
+                                              sh_lut[(q0 >> 16u) & 15u], sh_lut[(q0 >> 24u) & 15u]);
+        Aw[lr][(lc * 2u + 1u) ^ sa] = f16vec4(sh_lut[(q1      ) & 15u], sh_lut[(q1 >>  8u) & 15u],
+                                              sh_lut[(q1 >> 16u) & 15u], sh_lut[(q1 >> 24u) & 15u]);
+        Aw[lr][(4u + lc * 2u     ) ^ sa] = f16vec4(sh_lut[(q0 >>  4u) & 15u], sh_lut[(q0 >> 12u) & 15u],
+                                                   sh_lut[(q0 >> 20u) & 15u], sh_lut[(q0 >> 28u) & 15u]);
+        Aw[lr][(4u + lc * 2u + 1u) ^ sa] = f16vec4(sh_lut[(q1 >>  4u) & 15u], sh_lut[(q1 >> 12u) & 15u],
+                                                   sh_lut[(q1 >> 20u) & 15u], sh_lut[(q1 >> 28u) & 15u]);
+#elif defined(P36_MOE_Q5_0)
+        uint qh = uint(w[boff + 1u]) | (uint(w[boff + 2u]) << 16u);
+        uint q0 = uint(w[boff + 3u + lc * 4u]) | (uint(w[boff + 4u + lc * 4u]) << 16u);
+        uint q1 = uint(w[boff + 5u + lc * 4u]) | (uint(w[boff + 6u + lc * 4u]) << 16u);
+        uint sh = lc * 8u;
+        Aw[lr][(lc * 2u     ) ^ sa] = f16vec4(
+            float16_t(int(((q0      ) & 15u) | (((qh >> (sh     )) & 1u) << 4u)) - 16),
+            float16_t(int(((q0 >>  8u) & 15u) | (((qh >> (sh + 1u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q0 >> 16u) & 15u) | (((qh >> (sh + 2u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q0 >> 24u) & 15u) | (((qh >> (sh + 3u)) & 1u) << 4u)) - 16));
+        Aw[lr][(lc * 2u + 1u) ^ sa] = f16vec4(
+            float16_t(int(((q1      ) & 15u) | (((qh >> (sh + 4u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q1 >>  8u) & 15u) | (((qh >> (sh + 5u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q1 >> 16u) & 15u) | (((qh >> (sh + 6u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q1 >> 24u) & 15u) | (((qh >> (sh + 7u)) & 1u) << 4u)) - 16));
+        uint sh2 = 16u + sh;
+        Aw[lr][(4u + lc * 2u     ) ^ sa] = f16vec4(
+            float16_t(int(((q0 >>  4u) & 15u) | (((qh >> (sh2     )) & 1u) << 4u)) - 16),
+            float16_t(int(((q0 >> 12u) & 15u) | (((qh >> (sh2 + 1u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q0 >> 20u) & 15u) | (((qh >> (sh2 + 2u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q0 >> 28u) & 15u) | (((qh >> (sh2 + 3u)) & 1u) << 4u)) - 16));
+        Aw[lr][(4u + lc * 2u + 1u) ^ sa] = f16vec4(
+            float16_t(int(((q1 >>  4u) & 15u) | (((qh >> (sh2 + 4u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q1 >> 12u) & 15u) | (((qh >> (sh2 + 5u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q1 >> 20u) & 15u) | (((qh >> (sh2 + 6u)) & 1u) << 4u)) - 16),
+            float16_t(int(((q1 >> 28u) & 15u) | (((qh >> (sh2 + 7u)) & 1u) << 4u)) - 16));
+#endif
+        Bs[b_slot][b_swz] = live_b ? f16vec4(xv[b_base + b * 8u]) : f16vec4(0.0hf);
+        barrier();
+
+        f16vec2 p0[8];
+        f16vec2 p1[8];
+        [[unroll]] for (uint i = 0u; i < 8u; i++) {
+            p0[i] = f16vec2(0.0hf);
+            p1[i] = f16vec2(0.0hf);
+        }
+
+        if (hi_live) {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk = kk ^ swz_ry ^ swz_sl;
+                f16vec4 bv0 = Bs[sl][bk];
+                f16vec4 bv1 = Bs[sl + 16u][bk];
+                [[unroll]] for (uint i = 0u; i < 8u; i++) {
+                    f16vec4 av = Aw[ry + 16u * i][kk];
+                    p0[i] = fma(av.xy, bv0.xy, p0[i]);
+                    p0[i] = fma(av.zw, bv0.zw, p0[i]);
+                    p1[i] = fma(av.xy, bv1.xy, p1[i]);
+                    p1[i] = fma(av.zw, bv1.zw, p1[i]);
+                }
+            }
+            [[unroll]] for (uint i = 0u; i < 8u; i++) {
+                float d = Dw[ry + 16u * i];
+                acc0[i] += d * (float(p0[i].x) + float(p0[i].y));
+                acc1[i] += d * (float(p1[i].x) + float(p1[i].y));
+            }
+        } else {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk = kk ^ swz_ry ^ swz_sl;
+                f16vec4 bv0 = Bs[sl][bk];
+                [[unroll]] for (uint i = 0u; i < 8u; i++) {
+                    f16vec4 av = Aw[ry + 16u * i][kk];
+                    p0[i] = fma(av.xy, bv0.xy, p0[i]);
+                    p0[i] = fma(av.zw, bv0.zw, p0[i]);
+                }
+            }
+            [[unroll]] for (uint i = 0u; i < 8u; i++) {
+                float d = Dw[ry + 16u * i];
+                acc0[i] += d * (float(p0[i].x) + float(p0[i].y));
+            }
+        }
+        barrier();
+    }
+
+    uint s0 = sh_slot[sl];
+    uint s1 = hi_live ? sh_slot[sl + 16u] : INVALID;
+    [[unroll]] for (uint i = 0u; i < 8u; i++) {
+        uint row = row0 + ry + 16u * i;
+        if (s0 != INVALID) y[s0 * pc.out_dim + row] = acc0[i];
+        if (s1 != INVALID) y[s1 * pc.out_dim + row] = acc1[i];
+    }
+}

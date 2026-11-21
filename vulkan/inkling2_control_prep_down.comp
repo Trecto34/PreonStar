@@ -1,0 +1,54 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Fused decode (n_tok == 1) control_prep + loop_down matmul:
+ *   h[row] = dot(W_down[row, 0..D-1], rms(cur)) + dot(W_down[row, D..2D-1], rms(msg))
+ * Because cur and msg are only 9 KB each (L1-resident), computing inv_rms_c and
+ * inv_rms_m alongside the dot product in ONE pass eliminates control_prep + barrier
+ * + 18 KB DRAM write/read!
+ * Dispatch: (rank = 64, 1, 1), local_size_x = 64 (1 wave64 per row, zero barriers). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer DownW { vec4 wd[]; };
+layout(set = 0, binding = 1) readonly buffer Cur { vec4 cur[]; };
+layout(set = 0, binding = 2) readonly buffer Msg { vec4 msg[]; };
+layout(set = 0, binding = 3) writeonly buffer OutH { float h[]; };
+
+layout(push_constant) uniform Push {
+    uint n_embd;   /* 2304 */
+} pc;
+
+void main(void) {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint d4 = pc.n_embd >> 2u;      /* 576 = 9 * 64 */
+    uint w_base_c = row * (2u * d4);
+    uint w_base_m = w_base_c + d4;
+
+    float sum_cc = 0.0;
+    float sum_mm = 0.0;
+    float dot_c = 0.0;
+    float dot_m = 0.0;
+
+    [[unroll]] for (uint c = 0u; c < 9u; c++) {
+        uint idx = c * 64u + tid;
+        vec4 vc = cur[idx];
+        vec4 vm = msg[idx];
+        sum_cc += dot(vc, vc);
+        sum_mm += dot(vm, vm);
+        dot_c += dot(vc, wd[w_base_c + idx]);
+        dot_m += dot(vm, wd[w_base_m + idx]);
+    }
+
+    float inv_c = inversesqrt(subgroupAdd(sum_cc) / float(pc.n_embd) + 1.0e-6);
+    float inv_m = inversesqrt(subgroupAdd(sum_mm) / float(pc.n_embd) + 1.0e-6);
+    float total = subgroupAdd(dot_c) * inv_c + subgroupAdd(dot_m) * inv_m;
+
+    if (tid == 0u) {
+        h[row] = total;
+    }
+}

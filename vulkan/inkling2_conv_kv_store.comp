@@ -1,0 +1,104 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Fused K/V short-conv (l_cache=4, optional dynamic taps) + K L2-clip +
+ * V RMSNorm + F16 KV cache store for Inkling-2-Mini.
+ * Replaces 3 dispatches (conv_k, conv_v, clip_kv) with 1 dispatch!
+ * Each workgroup (1 wave64) owns 1 KV head (128 dims = 2 dims/lane) and loops
+ * over t = 0..n_tok-1 keeping the 3-slot conv history in registers.
+ * Dispatch: (n_head_kv = 8, 1, 1). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer KBuf { float k_in[]; };
+layout(set = 0, binding = 1) readonly buffer VBuf { float v_in[]; };
+layout(set = 0, binding = 2) readonly buffer KWeight { vec4 kw[]; };
+layout(set = 0, binding = 3) readonly buffer VWeight { vec4 vw[]; };
+layout(set = 0, binding = 4) buffer KState { float ks[]; };
+layout(set = 0, binding = 5) buffer VState { float vs[]; };
+layout(set = 0, binding = 6) readonly buffer KDyn { vec4 kdyn[]; };
+layout(set = 0, binding = 7) readonly buffer VDyn { vec4 vdyn[]; };
+layout(set = 0, binding = 8) writeonly buffer CacheK { float16_t cache_k[]; };
+layout(set = 0, binding = 9) writeonly buffer CacheV { float16_t cache_v[]; };
+
+layout(push_constant) uniform Push {
+    uint n_head_kv;
+    uint n_tok;
+    uint pos0;
+    uint kv_cap;
+    uint is_swa;
+    uint has_dyn;
+    float inv_scale;
+    float qk_clip;
+} pc;
+
+void main(void) {
+    uint h = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint C = pc.n_head_kv * 128u;
+    uint c0 = h * 128u + tid;
+    uint c1 = c0 + 64u;
+
+    vec4 kw0 = kw[c0], kw1 = kw[c1];
+    vec4 vw0 = vw[c0], vw1 = vw[c1];
+
+    float ks0_0 = ks[c0], ks1_0 = ks[C + c0], ks2_0 = ks[2u * C + c0];
+    float ks0_1 = ks[c1], ks1_1 = ks[C + c1], ks2_1 = ks[2u * C + c1];
+    float vs0_0 = vs[c0], vs1_0 = vs[C + c0], vs2_0 = vs[2u * C + c0];
+    float vs0_1 = vs[c1], vs1_1 = vs[C + c1], vs2_1 = vs[2u * C + c1];
+
+    uint mask = pc.kv_cap - 1u;
+
+    for (uint t = 0u; t < pc.n_tok; t++) {
+        uint base = t * C;
+        float kx0 = k_in[base + c0];
+        float kx1 = k_in[base + c1];
+        float vx0 = v_in[base + c0];
+        float vx1 = v_in[base + c1];
+
+        float ka0 = ks0_0 * kw0.x + ks1_0 * kw0.y + ks2_0 * kw0.z + kx0 * kw0.w;
+        float ka1 = ks0_1 * kw1.x + ks1_1 * kw1.y + ks2_1 * kw1.z + kx1 * kw1.w;
+        float va0 = vs0_0 * vw0.x + vs1_0 * vw0.y + vs2_0 * vw0.z + vx0 * vw0.w;
+        float va1 = vs0_1 * vw1.x + vs1_1 * vw1.y + vs2_1 * vw1.z + vx1 * vw1.w;
+
+        if (pc.has_dyn != 0u) {
+            vec4 kd = kdyn[t * pc.n_head_kv + h];
+            vec4 vd = vdyn[t * pc.n_head_kv + h];
+            ka0 += kx0 * kd.x + ks2_0 * kd.y + ks1_0 * kd.z + ks0_0 * kd.w;
+            ka1 += kx1 * kd.x + ks2_1 * kd.y + ks1_1 * kd.z + ks0_1 * kd.w;
+            va0 += vx0 * vd.x + vs2_0 * vd.y + vs1_0 * vd.z + vs0_0 * vd.w;
+            va1 += vx1 * vd.x + vs2_1 * vd.y + vs1_1 * vd.z + vs0_1 * vd.w;
+        }
+
+        float ko0 = (kx0 + ka0) * pc.inv_scale;
+        float ko1 = (kx1 + ka1) * pc.inv_scale;
+        float vo0 = (vx0 + va0) * pc.inv_scale;
+        float vo1 = (vx1 + va1) * pc.inv_scale;
+
+        ks0_0 = ks1_0; ks1_0 = ks2_0; ks2_0 = kx0;
+        ks0_1 = ks1_1; ks1_1 = ks2_1; ks2_1 = kx1;
+        vs0_0 = vs1_0; vs1_0 = vs2_0; vs2_0 = vx0;
+        vs0_1 = vs1_1; vs1_1 = vs2_1; vs2_1 = vx1;
+
+        float knorm = sqrt(subgroupAdd(ko0 * ko0 + ko1 * ko1)) + 1.0e-6;
+        float kf = clamp(pc.qk_clip / knorm, 0.0, 1.0);
+        float v_inv = inversesqrt(subgroupAdd(vo0 * vo0 + vo1 * vo1) / 128.0 + 1.0e-6);
+
+        uint pos = pc.pos0 + t;
+        uint slot = (pc.is_swa != 0u) ? (pos & mask) : pos;
+        uint kv_base = (slot * pc.n_head_kv + h) * 128u;
+        cache_k[kv_base + tid] = float16_t(ko0 * kf);
+        cache_k[kv_base + tid + 64u] = float16_t(ko1 * kf);
+        cache_v[kv_base + tid] = float16_t(vo0 * v_inv);
+        cache_v[kv_base + tid + 64u] = float16_t(vo1 * v_inv);
+    }
+
+    ks[c0] = ks0_0; ks[C + c0] = ks1_0; ks[2u * C + c0] = ks2_0;
+    ks[c1] = ks0_1; ks[C + c1] = ks1_1; ks[2u * C + c1] = ks2_1;
+    vs[c0] = vs0_0; vs[C + c0] = vs1_0; vs[2u * C + c0] = vs2_0;
+    vs[c1] = vs0_1; vs[C + c1] = vs1_1; vs[2u * C + c1] = vs2_1;
+}

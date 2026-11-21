@@ -1,0 +1,46 @@
+#version 460
+
+/* Combines Split-K FlashAttention decode partials and applies fused sigmoid output gate.
+ * Dispatch: (n_head = 24, 1, 1), local_size_x = 32 (4 dims/lane = 128 dims). */
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer PartBuf { float part_buf[]; };
+layout(set = 0, binding = 1) readonly buffer GateBuf { vec4 gate_buf[]; };
+layout(set = 0, binding = 2) writeonly buffer OutBuf { vec4 out_buf[]; };
+
+layout(push_constant) uniform Push {
+    uint n_splits;
+} pc;
+
+void main(void) {
+    uint h = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+
+    float m_all = -1.0e30;
+    for (uint s = 0u; s < pc.n_splits; s++) {
+        uint pbase = (h * pc.n_splits + s) * 130u;
+        float ms = part_buf[pbase + 0u];
+        float ls = part_buf[pbase + 1u];
+        if (ls > 0.0) m_all = max(m_all, ms);
+    }
+
+    float l_all = 0.0;
+    vec4 o_all = vec4(0.0);
+    for (uint s = 0u; s < pc.n_splits; s++) {
+        uint pbase = (h * pc.n_splits + s) * 130u;
+        float ms = part_buf[pbase + 0u];
+        float ls = part_buf[pbase + 1u];
+        if (ls > 0.0) {
+            float w = exp(ms - m_all);
+            l_all += ls * w;
+            uint ob = pbase + 2u + lane * 4u;
+            vec4 os = vec4(part_buf[ob], part_buf[ob + 1u], part_buf[ob + 2u], part_buf[ob + 3u]);
+            o_all += os * w;
+        }
+    }
+
+    vec4 y = o_all * (1.0 / l_all);
+    vec4 g = 1.0 / (1.0 + exp(-gate_buf[h * 32u + lane]));
+    out_buf[h * 32u + lane] = y * g;
+}

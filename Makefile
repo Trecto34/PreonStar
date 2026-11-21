@@ -246,7 +246,107 @@ VULKAN_SHADERS := \
 	vulkan/moe_down_gemm_q3k_t16.spv \
 	vulkan/moe_down_route_reduce.spv \
 	vulkan/moe_down_route_reduce_tail.spv \
-	vulkan/ffn_tail.spv
+	vulkan/ffn_tail.spv \
+	vulkan/inkling2_mix.spv \
+	vulkan/inkling2_control_prep.spv \
+	vulkan/inkling2_control_prep_down.spv \
+	vulkan/inkling2_control_gate.spv \
+	vulkan/inkling2_conv.spv \
+	vulkan/inkling2_conv_kv_store.spv \
+	vulkan/inkling2_clip_norm.spv \
+	vulkan/inkling2_rms_norm_q8k.spv \
+	vulkan/inkling2_router_topk.spv \
+	vulkan/inkling2_softcap.spv \
+	vulkan/inkling2_attn_decode.spv \
+	vulkan/inkling2_attn_combine.spv \
+	vulkan/inkling2_attn_prefill.spv \
+	vulkan/inkling2_moe_down_decode_iq4nl.spv \
+	vulkan/inkling2_moe_down_decode_q5_0.spv \
+	vulkan/inkling2_moe_down_gemm_iq4nl.spv \
+	vulkan/inkling2_moe_down_gemm_q5_0.spv \
+	vulkan/inkling2_moe_gate_up_decode_iq2xxs.spv \
+	vulkan/inkling2_moe_gate_up_decode_iq2s.spv \
+	vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv \
+	vulkan/inkling2_moe_gate_up_decode_iq3s.spv \
+	vulkan/inkling2_moe_gate_up_gemm_iq2xxs.spv \
+	vulkan/inkling2_moe_gate_up_gemm_iq2s.spv \
+	vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv \
+	vulkan/inkling2_moe_gate_up_gemm_iq3s.spv
+
+vulkan/inkling2_mix.spv: vulkan/inkling2_mix.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_control_prep.spv: vulkan/inkling2_control_prep.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_control_prep_down.spv: vulkan/inkling2_control_prep_down.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_control_gate.spv: vulkan/inkling2_control_gate.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_conv.spv: vulkan/inkling2_conv.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_conv_kv_store.spv: vulkan/inkling2_conv_kv_store.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_clip_norm.spv: vulkan/inkling2_clip_norm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_rms_norm_q8k.spv: vulkan/inkling2_rms_norm_q8k.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_router_topk.spv: vulkan/inkling2_router_topk.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_softcap.spv: vulkan/inkling2_softcap.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_attn_decode.spv: vulkan/inkling2_attn_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_attn_combine.spv: vulkan/inkling2_attn_combine.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_attn_prefill.spv: vulkan/inkling2_attn_prefill.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_moe_down_decode_iq4nl.spv: vulkan/inkling2_moe_down_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ4NL -o $@ $<
+
+vulkan/inkling2_moe_down_decode_q5_0.spv: vulkan/inkling2_moe_down_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q5_0 -o $@ $<
+
+vulkan/inkling2_moe_down_gemm_iq4nl.spv: vulkan/inkling2_moe_down_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ4NL -o $@ $<
+
+vulkan/inkling2_moe_down_gemm_q5_0.spv: vulkan/inkling2_moe_down_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q5_0 -o $@ $<
+
+vulkan/inkling2_moe_gate_up_decode_iq2xxs.spv: vulkan/inkling2_moe_gate_up_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ2XXS -o $@ $<
+
+vulkan/inkling2_moe_gate_up_decode_iq2s.spv: vulkan/inkling2_moe_gate_up_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ2S -o $@ $<
+
+vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv: vulkan/inkling2_moe_gate_up_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3XXS -o $@ $<
+
+vulkan/inkling2_moe_gate_up_decode_iq3s.spv: vulkan/inkling2_moe_gate_up_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3S -o $@ $<
+
+vulkan/inkling2_moe_gate_up_gemm_iq2xxs.spv: vulkan/inkling2_moe_gate_up_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ2XXS -o $@ $<
+
+vulkan/inkling2_moe_gate_up_gemm_iq2s.spv: vulkan/inkling2_moe_gate_up_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ2S -o $@ $<
+
+vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv: vulkan/inkling2_moe_gate_up_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3XXS -o $@ $<
+
+vulkan/inkling2_moe_gate_up_gemm_iq3s.spv: vulkan/inkling2_moe_gate_up_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3S -o $@ $<
 
 vulkan/moe_matvec_fast.spv: vulkan/moe_matvec_fast.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<

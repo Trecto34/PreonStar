@@ -23,3 +23,4 @@
 #include "vk_11_conv_silu_rows.inc"
 #include "vk_12_attn_host_rows.inc"
 #include "vk_13_moe_build_tiles.inc"
+#include "vk_14_inkling2.inc"

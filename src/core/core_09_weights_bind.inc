@@ -1,5 +1,11 @@
 static void weights_bind(p36_weights *w, const p36_model *m) {
     memset(w, 0, sizeof(*w));
+    if (g_p36_shape.variant == P36_VARIANT_INKLING2_LOOP) {
+        w->token_embd = required_tensor(m, "token_embd.weight");
+        w->output_norm = required_tensor(m, "output_norm.weight");
+        w->output = required_tensor(m, "output.weight");
+        return;
+    }
     w->token_embd = required_tensor(m, "token_embd.weight");
     w->output_norm = required_tensor(m, "output_norm.weight");
     w->output = required_tensor(m, "output.weight");

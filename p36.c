@@ -22,6 +22,7 @@
 #include "core_10_hadamard_width_index.inc"
 #include "core_11_hadamard_fwht_host.inc"
 #include "core_12_cpu_runtime_free.inc"
+#include "core_inkling2.inc"
 #include "core_13_apply_rope_axes.inc"
 #include "core_14_forward_full_attn_batch.inc"
 #include "core_15_forward_tokens_cpu.inc"

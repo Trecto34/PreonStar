@@ -305,6 +305,12 @@ static void bpe_tokenize_text(const p36_vocab *vocab, const char *text, token_ve
     }
 }
 
+static int vocab_lookup_opt(const p36_vocab *vocab, const char *text) {
+    int token = -1;
+    if (!table_get(&vocab->token_to_id, text, strlen(text), &token)) return -1;
+    return token;
+}
+
 static int vocab_lookup(const p36_vocab *vocab, const char *text) {
     int token = -1;
     if (!table_get(&vocab->token_to_id, text, strlen(text), &token)) {
@@ -359,17 +365,31 @@ static void vocab_load(p36_vocab *vocab, const p36_model *model) {
         if (!cursor_string(&c, &merge)) p36_die(c.error);
         table_put(&vocab->merge_rank, merge, (int)i);
     }
-    vocab->bos_id = (int)required_u32(model, "tokenizer.ggml.bos_token_id");
+    {
+        uint32_t bos_u32 = 0;
+        vocab->bos_id = model_get_u32(model, "tokenizer.ggml.bos_token_id", &bos_u32) ? (int)bos_u32 : -1;
+    }
     vocab->eos_id = (int)required_u32(model, "tokenizer.ggml.eos_token_id");
     vocab->add_bos = model_get_bool(model, "tokenizer.ggml.add_bos_token", &vocab->add_bos) ? vocab->add_bos : false;
-    vocab->im_start_id = vocab_lookup(vocab, "<|im_start|>");
-    vocab->im_end_id = vocab_lookup(vocab, "<|im_end|>");
-    vocab->think_start_id = vocab_lookup(vocab, "<think>");
-    vocab->think_end_id = vocab_lookup(vocab, "</think>");
-    vocab->vision_start_id = vocab_lookup(vocab, "<|vision_start|>");
-    vocab->vision_end_id = vocab_lookup(vocab, "<|vision_end|>");
-    vocab->image_pad_id = vocab_lookup(vocab, "<|image_pad|>");
-    vocab->video_pad_id = vocab_lookup(vocab, "<|video_pad|>");
+    if (g_p36_shape.variant == P36_VARIANT_INKLING2_LOOP) {
+        vocab->im_start_id = vocab_lookup_opt(vocab, "<|im_start|>");
+        vocab->im_end_id = vocab_lookup_opt(vocab, "<|im_end|>");
+        vocab->think_start_id = vocab_lookup_opt(vocab, "<think>");
+        vocab->think_end_id = vocab_lookup_opt(vocab, "</think>");
+        vocab->vision_start_id = vocab_lookup_opt(vocab, "<|vision_start|>");
+        vocab->vision_end_id = vocab_lookup_opt(vocab, "<|vision_end|>");
+        vocab->image_pad_id = vocab_lookup_opt(vocab, "<|image_pad|>");
+        vocab->video_pad_id = vocab_lookup_opt(vocab, "<|video_pad|>");
+    } else {
+        vocab->im_start_id = vocab_lookup(vocab, "<|im_start|>");
+        vocab->im_end_id = vocab_lookup(vocab, "<|im_end|>");
+        vocab->think_start_id = vocab_lookup(vocab, "<think>");
+        vocab->think_end_id = vocab_lookup(vocab, "</think>");
+        vocab->vision_start_id = vocab_lookup(vocab, "<|vision_start|>");
+        vocab->vision_end_id = vocab_lookup(vocab, "<|vision_end|>");
+        vocab->image_pad_id = vocab_lookup(vocab, "<|image_pad|>");
+        vocab->video_pad_id = vocab_lookup(vocab, "<|video_pad|>");
+    }
 }
 
 static void vocab_free(p36_vocab *vocab) {

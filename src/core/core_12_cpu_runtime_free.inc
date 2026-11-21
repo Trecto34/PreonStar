@@ -294,10 +294,15 @@ static bool p36_gpu_tensor_matmul_dense_q8_scaled(const p36_model *m,
                                                      in_dim, out_dim, n_tok, scale);
 }
 
+static bool p36_inkling2_vulkan_runtime_reset(p36_vulkan_runtime *rt);
+static void p36_inkling2_vulkan_runtime_free(p36_vulkan_runtime *rt);
+static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint32_t prefill_cap);
+
 static bool p36_vulkan_runtime_reset(p36_vulkan_runtime *rt) {
     uint64_t state_dim = (uint64_t)P36_N_SSM_STATE * P36_N_SSM_STATE * P36_N_SSM_DT_RANK;
     uint64_t state_bytes;
     if (!rt) return false;
+    if (rt->ink) return p36_inkling2_vulkan_runtime_reset(rt);
     rt->inp_q8_valid = false;
     state_bytes = state_dim * (rt->recur_state_f16 ? sizeof(uint16_t) : sizeof(float));
     if (!p36_gpu_tensor_zero(rt->hidden) || !p36_gpu_tensor_zero(rt->next_hidden)) return false;
@@ -312,6 +317,10 @@ static bool p36_vulkan_runtime_reset(p36_vulkan_runtime *rt) {
 
 static void p36_vulkan_runtime_free(p36_vulkan_runtime *rt) {
     if (!rt) return;
+    if (rt->ink) {
+        p36_inkling2_vulkan_runtime_free(rt);
+        return;
+    }
     for (uint32_t il = 0; il < P36_N_LAYER; il++) {
         p36_gpu_tensor_free(rt->full[il].k);
         p36_gpu_tensor_free(rt->full[il].v);
@@ -390,6 +399,9 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
     uint64_t hist_rows;
     uint32_t kv_cap;
     if (ctx_size <= 0 || !p36_gpu_init()) return NULL;
+    if (g_p36_shape.variant == P36_VARIANT_INKLING2_LOOP) {
+        return p36_inkling2_vulkan_runtime_create(ctx_size, prefill_cap);
+    }
     uint32_t k_row_bytes = p36_kv_cache_row_bytes(cache_type_k, P36_N_HEAD_KV * P36_N_HEAD_DIM);
     uint32_t v_row_bytes = p36_kv_cache_row_bytes(cache_type_v, P36_N_HEAD_KV * P36_N_VALUE_DIM);
     if (!k_row_bytes || !v_row_bytes) return NULL;

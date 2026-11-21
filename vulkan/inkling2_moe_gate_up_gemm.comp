@@ -1,0 +1,351 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Inkling-2-Mini single-tensor MoE gate_up + SITU prefill GEMM.
+ * Tile: BM = 64 mid rows x SLOT_TILE = 32 routed slots, swizzled f16vec4 LDS.
+ * Optimizations:
+ *  - LDS grid staging for IQ2_XXS (2 KiB), IQ3_XXS (1 KiB), IQ3_S (2 KiB).
+ *  - IQ2_S bakes 16-elem sub-scale into Ag/Au -> unified single kk=0..7 FMA loop.
+ *  - Aligned uint16_t loads for IQ3_XXS / IQ3_S (halving w_u8 shifts).
+ *  - Separate hi_live / lo-only FMA loops (zero inner-loop branch overhead).
+ * Compile with one of: P36_MOE_IQ2XXS, P36_MOE_IQ2S, P36_MOE_IQ3XXS, P36_MOE_IQ3S. */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint16_t w[]; };
+layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
+layout(set = 0, binding = 2) readonly buffer Tiles { uint tiles[]; };
+layout(set = 0, binding = 3) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 4) readonly buffer Tables { uint tables[]; };
+
+layout(push_constant) uniform Push {
+    uint mid_dim;
+    uint blocks;
+    uint n_used;
+    float situ_beta;
+    float inv_beta;
+    float situ_lb;
+    float inv_lb;
+} pc;
+
+const uint IQ2_U16 = 33u;
+const uint IQ2S_BYTES = 82u;
+const uint IQ3XXS_BYTES = 98u;
+const uint IQ3S_BYTES = 110u;
+const uint TAB_KSIGNS = 512u;
+const uint TAB_IQ2S = 544u;
+const uint TAB_IQ3S_GRID = 2592u;
+const uint TAB_IQ3XXS_GRID = 3104u;
+
+const uint SLOT_TILE = 32u;
+const uint TILE_WORDS = 1u + SLOT_TILE;
+const uint INVALID = 0xffffffffu;
+const uint BM = 64u;
+const uint KK = 8u;
+#define P36_SWZ(i) (((i) >> 1u) & 7u)
+
+uint w_u8(uint off) {
+    return (uint(w[off >> 1u]) >> (8u * (off & 1u))) & 255u;
+}
+
+#ifdef P36_MOE_IQ2XXS
+shared uint sh_grid[512];
+#elif defined(P36_MOE_IQ3XXS)
+shared uint sh_grid[256];
+shared uint sh_ksigns[32];
+#elif defined(P36_MOE_IQ3S)
+shared uint sh_grid[512];
+#endif
+shared f16vec4 Ag[BM][KK];
+shared f16vec4 Au[BM][KK];
+shared f16vec4 Bs[SLOT_TILE][KK];
+shared float Dg[BM];
+shared float Du[BM];
+shared uint sh_slot[SLOT_TILE];
+shared uint sh_x4[SLOT_TILE];
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint row0 = gl_WorkGroupID.x * BM;
+    uint tile_base = gl_WorkGroupID.y * TILE_WORDS;
+    uint expert = tiles[tile_base];
+    if (expert == INVALID) return;
+
+    if (tid < SLOT_TILE) {
+        uint slot = tiles[tile_base + 1u + tid];
+        sh_slot[tid] = slot;
+        sh_x4[tid] = (slot != INVALID ? slot / pc.n_used : 0u) * pc.blocks * 64u;
+    }
+#ifdef P36_MOE_IQ2XXS
+    for (uint i = tid; i < 512u; i += 256u) sh_grid[i] = tables[i];
+#elif defined(P36_MOE_IQ3XXS)
+    sh_grid[tid] = tables[TAB_IQ3XXS_GRID + tid];
+    if (tid < 32u) sh_ksigns[tid] = tables[TAB_KSIGNS + tid];
+#elif defined(P36_MOE_IQ3S)
+    for (uint i = tid; i < 512u; i += 256u) sh_grid[i] = tables[TAB_IQ3S_GRID + i];
+#endif
+    barrier();
+
+    uint ar = tid >> 2u;
+    uint sub = tid & 3u;
+    uint row = row0 + ar;
+    uint exp_row0 = expert * (2u * pc.mid_dim);
+    uint g_row = exp_row0 + (row < pc.mid_dim ? row : 0u);
+    uint u_row = exp_row0 + pc.mid_dim + (row < pc.mid_dim ? row : 0u);
+
+#ifdef P36_MOE_IQ2XXS
+    uint gbase_u16 = g_row * pc.blocks * IQ2_U16;
+    uint ubase_u16 = u_row * pc.blocks * IQ2_U16;
+#elif defined(P36_MOE_IQ2S)
+    uint gbase_bytes = g_row * pc.blocks * IQ2S_BYTES;
+    uint ubase_bytes = u_row * pc.blocks * IQ2S_BYTES;
+#elif defined(P36_MOE_IQ3XXS)
+    uint gbase_bytes = g_row * pc.blocks * IQ3XXS_BYTES;
+    uint ubase_bytes = u_row * pc.blocks * IQ3XXS_BYTES;
+#elif defined(P36_MOE_IQ3S)
+    uint gbase_bytes = g_row * pc.blocks * IQ3S_BYTES;
+    uint ubase_bytes = u_row * pc.blocks * IQ3S_BYTES;
+#endif
+
+    uint bc = tid >> 3u;
+    uint bkk = tid & 7u;
+    uint sl = tid & 15u;
+    uint ry = tid >> 4u;
+
+    float accg[4][2];
+    float accu[4][2];
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        accg[i][0] = 0.0; accg[i][1] = 0.0;
+        accu[i][0] = 0.0; accu[i][1] = 0.0;
+    }
+
+    uint sa = P36_SWZ(ar);
+    uint a_k0 = (sub * 2u) ^ sa;
+    uint a_k1 = (sub * 2u + 1u) ^ sa;
+    uint sbit = 7u * sub;
+    uint sub_word = sub >> 1u;
+    uint sub_shift = 8u * (sub & 1u);
+
+    bool hi_live = false;
+    for (uint j = 16u; j < SLOT_TILE; j++) hi_live = hi_live || sh_slot[j] != INVALID;
+    bool live_b = (bc < SLOT_TILE) && (sh_slot[bc] != INVALID);
+    uint b_k = (bc < SLOT_TILE) ? (bkk ^ P36_SWZ(bc)) : 0u;
+    uint b_base = (bc < SLOT_TILE && live_b) ? (sh_x4[bc] + bkk) : 0u;
+
+    uint swz_sl = P36_SWZ(sl);
+    uint swz_ry = P36_SWZ(ry);
+    uint arow[4];
+    [[unroll]] for (uint i = 0u; i < 4u; i++) arow[i] = ry + 16u * i;
+
+    uint n_kb = pc.blocks * 8u;
+    for (uint kb = 0u; kb < n_kb; kb++) {
+        uint sb = kb >> 3u;
+        uint ib32 = kb & 7u;
+
+#ifdef P36_MOE_IQ2XXS
+        {
+            uint gb = gbase_u16 + sb * IQ2_U16;
+            uint ub = ubase_u16 + sb * IQ2_U16;
+            uint gq = gb + 1u + (ib32 << 2u);
+            uint uq = ub + 1u + (ib32 << 2u);
+            uint gss = uint(w[gq + 2u]) | (uint(w[gq + 3u]) << 16u);
+            uint uss = uint(w[uq + 2u]) | (uint(w[uq + 3u]) << 16u);
+            uint gqs = (uint(w[gq + sub_word]) >> sub_shift) & 255u;
+            uint uqs = (uint(w[uq + sub_word]) >> sub_shift) & 255u;
+            uint gsign = bitfieldExtract(gss, int(sbit), 7);
+            vec4 g0 = vec4(unpack8(sh_grid[gqs * 2u]));
+            vec4 g1 = vec4(unpack8(sh_grid[gqs * 2u + 1u]));
+            g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (bitCount(gsign) & 1) != 0));
+            Ag[ar][a_k0] = f16vec4(g0 * 0.015625);
+            Ag[ar][a_k1] = f16vec4(g1 * 0.015625);
+            uint usign = bitfieldExtract(uss, int(sbit), 7);
+            vec4 u0 = vec4(unpack8(sh_grid[uqs * 2u]));
+            vec4 u1 = vec4(unpack8(sh_grid[uqs * 2u + 1u]));
+            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
+            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (bitCount(usign) & 1) != 0));
+            Au[ar][a_k0] = f16vec4(u0 * 0.015625);
+            Au[ar][a_k1] = f16vec4(u1 * 0.015625);
+            if (sub == 0u) {
+                Dg[ar] = unpackHalf2x16(uint(w[gb])).x * 16.0 * (0.5 + float(gss >> 28u));
+                Du[ar] = unpackHalf2x16(uint(w[ub])).x * 16.0 * (0.5 + float(uss >> 28u));
+            }
+        }
+#elif defined(P36_MOE_IQ2S)
+        {
+            uint gbb = gbase_bytes + sb * IQ2S_BYTES;
+            uint ubb = ubase_bytes + sb * IQ2S_BYTES;
+            uint gsc_b = w_u8(gbb + 74u + ib32);
+            uint usc_b = w_u8(ubb + 74u + ib32);
+            uint gnib = sub < 2u ? (gsc_b & 15u) : (gsc_b >> 4u);
+            uint unib = sub < 2u ? (usc_b & 15u) : (usc_b >> 4u);
+            float gsc = (0.5 + float(gnib)) * 0.015625;
+            float usc = (0.5 + float(unib)) * 0.015625;
+            uint gsh = (8u - 2u * sub) & 31u;
+            uint gentry = w_u8(gbb + 2u + 4u * ib32 + sub) | ((w_u8(gbb + 66u + ib32) << gsh) & 0x300u);
+            uint uentry = w_u8(ubb + 2u + 4u * ib32 + sub) | ((w_u8(ubb + 66u + ib32) << gsh) & 0x300u);
+            uint gsign = w_u8(gbb + 34u + 4u * ib32 + sub);
+            uint usign = w_u8(ubb + 34u + 4u * ib32 + sub);
+            vec4 g0 = vec4(unpack8(tables[TAB_IQ2S + gentry * 2u]));
+            vec4 g1 = vec4(unpack8(tables[TAB_IQ2S + gentry * 2u + 1u]));
+            g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (gsign & 128u) != 0u));
+            Ag[ar][a_k0] = f16vec4(g0 * gsc);
+            Ag[ar][a_k1] = f16vec4(g1 * gsc);
+            vec4 u0 = vec4(unpack8(tables[TAB_IQ2S + uentry * 2u]));
+            vec4 u1 = vec4(unpack8(tables[TAB_IQ2S + uentry * 2u + 1u]));
+            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
+            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (usign & 128u) != 0u));
+            Au[ar][a_k0] = f16vec4(u0 * usc);
+            Au[ar][a_k1] = f16vec4(u1 * usc);
+            if (sub == 0u && ib32 == 0u) {
+                Dg[ar] = unpackHalf2x16(uint(w[gbb >> 1u])).x * 16.0;
+                Du[ar] = unpackHalf2x16(uint(w[ubb >> 1u])).x * 16.0;
+            }
+        }
+#elif defined(P36_MOE_IQ3XXS)
+        {
+            uint gbb = gbase_bytes + sb * IQ3XXS_BYTES;
+            uint ubb = ubase_bytes + sb * IQ3XXS_BYTES;
+            uint gaux_h = (gbb + 66u + 4u * ib32) >> 1u;
+            uint uaux_h = (ubb + 66u + 4u * ib32) >> 1u;
+            uint gaux = uint(w[gaux_h]) | (uint(w[gaux_h + 1u]) << 16u);
+            uint uaux = uint(w[uaux_h]) | (uint(w[uaux_h + 1u]) << 16u);
+            uint gsi = (gaux >> sbit) & 127u;
+            uint usi = (uaux >> sbit) & 127u;
+            uint gsign = (sh_ksigns[gsi >> 2u] >> (8u * (gsi & 3u))) & 255u;
+            uint usign = (sh_ksigns[usi >> 2u] >> (8u * (usi & 3u))) & 255u;
+            uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+            uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+            vec4 g0 = vec4(unpack8(sh_grid[ge01 & 255u]));
+            vec4 g1 = vec4(unpack8(sh_grid[ge01 >> 8u]));
+            vec4 u0 = vec4(unpack8(sh_grid[ue01 & 255u]));
+            vec4 u1 = vec4(unpack8(sh_grid[ue01 >> 8u]));
+            g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (gsign & 128u) != 0u));
+            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
+            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (usign & 128u) != 0u));
+            Ag[ar][a_k0] = f16vec4(g0);
+            Ag[ar][a_k1] = f16vec4(g1);
+            Au[ar][a_k0] = f16vec4(u0);
+            Au[ar][a_k1] = f16vec4(u1);
+            if (sub == 0u) {
+                Dg[ar] = unpackHalf2x16(uint(w[gbb >> 1u])).x * 0.25 * float(2u * (gaux >> 28u) + 1u);
+                Du[ar] = unpackHalf2x16(uint(w[ubb >> 1u])).x * 0.25 * float(2u * (uaux >> 28u) + 1u);
+            }
+        }
+#elif defined(P36_MOE_IQ3S)
+        {
+            uint gbb = gbase_bytes + sb * IQ3S_BYTES;
+            uint ubb = ubase_bytes + sb * IQ3S_BYTES;
+            uint gqh = w_u8(gbb + 66u + ib32);
+            uint uqh = w_u8(ubb + 66u + ib32);
+            uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+            uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+            uint ge0 = (ge01 & 255u) | (((gqh >> (2u * sub)) & 1u) << 8u);
+            uint ge1 = (ge01 >> 8u)  | (((gqh >> (2u * sub + 1u)) & 1u) << 8u);
+            uint ue0 = (ue01 & 255u) | (((uqh >> (2u * sub)) & 1u) << 8u);
+            uint ue1 = (ue01 >> 8u)  | (((uqh >> (2u * sub + 1u)) & 1u) << 8u);
+            vec4 g0 = vec4(unpack8(sh_grid[ge0]));
+            vec4 g1 = vec4(unpack8(sh_grid[ge1]));
+            vec4 u0 = vec4(unpack8(sh_grid[ue0]));
+            vec4 u1 = vec4(unpack8(sh_grid[ue1]));
+            uint gsgn = w_u8(gbb + 74u + 4u * ib32 + sub);
+            uint usgn = w_u8(ubb + 74u + 4u * ib32 + sub);
+            g0 = mix(g0, -g0, bvec4((gsgn & 1u) != 0u, (gsgn & 2u) != 0u, (gsgn & 4u) != 0u, (gsgn & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((gsgn & 16u) != 0u, (gsgn & 32u) != 0u, (gsgn & 64u) != 0u, (gsgn & 128u) != 0u));
+            u0 = mix(u0, -u0, bvec4((usgn & 1u) != 0u, (usgn & 2u) != 0u, (usgn & 4u) != 0u, (usgn & 8u) != 0u));
+            u1 = mix(u1, -u1, bvec4((usgn & 16u) != 0u, (usgn & 32u) != 0u, (usgn & 64u) != 0u, (usgn & 128u) != 0u));
+            Ag[ar][a_k0] = f16vec4(g0);
+            Ag[ar][a_k1] = f16vec4(g1);
+            Au[ar][a_k0] = f16vec4(u0);
+            Au[ar][a_k1] = f16vec4(u1);
+            if (sub == 0u) {
+                uint gscb = w_u8(gbb + 106u + (ib32 >> 1u));
+                uint uscb = w_u8(ubb + 106u + (ib32 >> 1u));
+                uint gnib = (ib32 & 1u) != 0u ? (gscb >> 4u) : (gscb & 15u);
+                uint unib = (ib32 & 1u) != 0u ? (uscb >> 4u) : (uscb & 15u);
+                Dg[ar] = unpackHalf2x16(uint(w[gbb >> 1u])).x * float(2u * gnib + 1u);
+                Du[ar] = unpackHalf2x16(uint(w[ubb >> 1u])).x * float(2u * unib + 1u);
+            }
+        }
+#endif
+
+        if (bc < SLOT_TILE) {
+            Bs[bc][b_k] = live_b ? f16vec4(xv[b_base + kb * 8u]) : f16vec4(0.0hf);
+        }
+        barrier();
+
+        f16vec2 pkg[4][2];
+        f16vec2 pku[4][2];
+        [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            pkg[i][0] = f16vec2(0.0hf); pkg[i][1] = f16vec2(0.0hf);
+            pku[i][0] = f16vec2(0.0hf); pku[i][1] = f16vec2(0.0hf);
+        }
+
+        if (hi_live) {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk = kk ^ swz_ry ^ swz_sl;
+                f16vec4 bv0 = Bs[sl][bk];
+                f16vec4 bv1 = Bs[sl + 16u][bk];
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    f16vec4 ag = Ag[arow[i]][kk];
+                    f16vec4 au = Au[arow[i]][kk];
+                    pkg[i][0] = fma(ag.xy, bv0.xy, pkg[i][0]); pkg[i][0] = fma(ag.zw, bv0.zw, pkg[i][0]);
+                    pku[i][0] = fma(au.xy, bv0.xy, pku[i][0]); pku[i][0] = fma(au.zw, bv0.zw, pku[i][0]);
+                    pkg[i][1] = fma(ag.xy, bv1.xy, pkg[i][1]); pkg[i][1] = fma(ag.zw, bv1.zw, pkg[i][1]);
+                    pku[i][1] = fma(au.xy, bv1.xy, pku[i][1]); pku[i][1] = fma(au.zw, bv1.zw, pku[i][1]);
+                }
+            }
+            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                float dg = Dg[arow[i]];
+                float du = Du[arow[i]];
+                accg[i][0] += dg * (float(pkg[i][0].x) + float(pkg[i][0].y));
+                accu[i][0] += du * (float(pku[i][0].x) + float(pku[i][0].y));
+                accg[i][1] += dg * (float(pkg[i][1].x) + float(pkg[i][1].y));
+                accu[i][1] += du * (float(pku[i][1].x) + float(pku[i][1].y));
+            }
+        } else {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk = kk ^ swz_ry ^ swz_sl;
+                f16vec4 bv0 = Bs[sl][bk];
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    f16vec4 ag = Ag[arow[i]][kk];
+                    f16vec4 au = Au[arow[i]][kk];
+                    pkg[i][0] = fma(ag.xy, bv0.xy, pkg[i][0]); pkg[i][0] = fma(ag.zw, bv0.zw, pkg[i][0]);
+                    pku[i][0] = fma(au.xy, bv0.xy, pku[i][0]); pku[i][0] = fma(au.zw, bv0.zw, pku[i][0]);
+                }
+            }
+            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                float dg = Dg[arow[i]];
+                float du = Du[arow[i]];
+                accg[i][0] += dg * (float(pkg[i][0].x) + float(pkg[i][0].y));
+                accu[i][0] += du * (float(pku[i][0].x) + float(pku[i][0].y));
+            }
+        }
+        barrier();
+    }
+
+    uint s0 = sh_slot[sl];
+    uint s1 = hi_live ? sh_slot[sl + 16u] : INVALID;
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        uint out_row = row0 + arow[i];
+        if (out_row >= pc.mid_dim) continue;
+        if (s0 != INVALID) {
+            float g = accg[i][0], u = accu[i][0];
+            y[s0 * pc.mid_dim + out_row] =
+                (pc.situ_beta * tanh(g * pc.inv_beta) / (1.0 + exp(-g))) *
+                (pc.situ_lb * tanh(u * pc.inv_lb));
+        }
+        if (s1 != INVALID) {
+            float g = accg[i][1], u = accu[i][1];
+            y[s1 * pc.mid_dim + out_row] =
+                (pc.situ_beta * tanh(g * pc.inv_beta) / (1.0 + exp(-g))) *
+                (pc.situ_lb * tanh(u * pc.inv_lb));
+        }
+    }
+}

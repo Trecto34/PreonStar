@@ -1,0 +1,41 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Builds [rms(cur, 1e-6); rms(msg, 1e-6)] of width 2 * n_embd per token.
+ * One wave64 per token, zero barriers. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Cur { float cur[]; };
+layout(set = 0, binding = 1) readonly buffer Msg { float msg[]; };
+layout(set = 0, binding = 2) writeonly buffer Out { float out_buf[]; };
+
+layout(push_constant) uniform Push {
+    uint n_embd;
+} pc;
+
+void main(void) {
+    uint tok = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint n_embd = pc.n_embd;
+    uint in_base = tok * n_embd;
+    uint out_base = tok * (2u * n_embd);
+
+    float sum_c = 0.0;
+    float sum_m = 0.0;
+    for (uint i = tid; i < n_embd; i += 64u) {
+        float vc = cur[in_base + i];
+        float vm = msg[in_base + i];
+        sum_c += vc * vc;
+        sum_m += vm * vm;
+    }
+    float inv_c = inversesqrt(subgroupAdd(sum_c) / float(n_embd) + 1.0e-6);
+    float inv_m = inversesqrt(subgroupAdd(sum_m) / float(n_embd) + 1.0e-6);
+
+    for (uint i = tid; i < n_embd; i += 64u) {
+        out_buf[out_base + i] = cur[in_base + i] * inv_c;
+        out_buf[out_base + n_embd + i] = msg[in_base + i] * inv_m;
+    }
+}

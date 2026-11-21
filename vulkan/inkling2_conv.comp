@@ -1,0 +1,59 @@
+#version 460
+
+/* Causal short convolution (l_cache = 4) with residual + optional dynamic
+ * per-head taps + optional post-conv residual add.
+ * state layout: [3, n_channels] where slot 0 is oldest (t-3), slot 2 is t-1.
+ * Safe in-place (out == cur). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Cur { float cur[]; };
+layout(set = 0, binding = 1) readonly buffer Weight { vec4 w[]; };
+layout(set = 0, binding = 2) buffer State { float state[]; };
+layout(set = 0, binding = 3) readonly buffer Dyn { vec4 dyn[]; };
+layout(set = 0, binding = 4) readonly buffer Res { float res[]; };
+layout(set = 0, binding = 5) writeonly buffer Out { float out_buf[]; };
+
+layout(push_constant) uniform Push {
+    uint n_channels;
+    uint n_tok;
+    uint has_dyn;
+    uint n_heads;
+    uint head_dim;
+    uint has_res;
+    float inv_scale;
+} pc;
+
+void main(void) {
+    uint c = gl_GlobalInvocationID.x;
+    if (c >= pc.n_channels) return;
+
+    vec4 kw = w[c];
+    float s0 = state[c];
+    float s1 = state[pc.n_channels + c];
+    float s2 = state[2u * pc.n_channels + c];
+    uint head = pc.has_dyn != 0u ? (c / pc.head_dim) : 0u;
+
+    for (uint t = 0u; t < pc.n_tok; t++) {
+        uint idx = t * pc.n_channels + c;
+        float x3 = cur[idx];
+        float acc = s0 * kw.x + s1 * kw.y + s2 * kw.z + x3 * kw.w;
+        if (pc.has_dyn != 0u) {
+            vec4 dt = dyn[t * pc.n_heads + head];
+            /* lag 0 -> x3, lag 1 -> s2, lag 2 -> s1, lag 3 -> s0 */
+            acc += x3 * dt.x + s2 * dt.y + s1 * dt.z + s0 * dt.w;
+        }
+        float y = (x3 + acc) * pc.inv_scale;
+        if (pc.has_res != 0u) {
+            y += res[idx];
+        }
+        out_buf[idx] = y;
+        s0 = s1;
+        s1 = s2;
+        s2 = x3;
+    }
+
+    state[c] = s0;
+    state[pc.n_channels + c] = s1;
+    state[2u * pc.n_channels + c] = s2;
+}

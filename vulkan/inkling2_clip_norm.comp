@@ -1,0 +1,54 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Fused Q clip (dim=128) + R clip (dim=16) + optional tau(pos) log-scale in ONE dispatch!
+ * Dispatch: (n_head = 24, n_tok, 1), local_size_x = 64 (1 wave64 per head, zero barriers). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer QBuf { float q_buf[]; };
+layout(set = 0, binding = 1) buffer RBuf { float r_buf[]; };
+layout(set = 0, binding = 2) readonly buffer QScale { float q_scale[]; };
+layout(set = 0, binding = 3) readonly buffer RScale { float r_scale[]; };
+
+layout(push_constant) uniform Push {
+    uint n_heads;
+    uint pos0;
+    uint use_tau;
+    float qk_clip;
+    float rel_clip;
+    float log_floor;
+    float log_alpha;
+} pc;
+
+void main(void) {
+    uint h = gl_WorkGroupID.x;
+    uint t = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+
+    float tau = 1.0;
+    if (pc.use_tau != 0u) {
+        float r = max(1.0, float(pc.pos0 + t + 1u) / pc.log_floor);
+        tau = 1.0 + pc.log_alpha * log(r);
+    }
+
+    /* Q clip: head_dim = 128, 2 floats/lane */
+    uint qb = (t * pc.n_heads + h) * 128u;
+    float q0 = q_buf[qb + tid] * q_scale[h * 128u + tid];
+    float q1 = q_buf[qb + tid + 64u] * q_scale[h * 128u + tid + 64u];
+    float qnorm = sqrt(subgroupAdd(q0 * q0 + q1 * q1)) + 1.0e-6;
+    float qf = clamp(pc.qk_clip / qnorm, 0.0, 1.0) * tau;
+    q_buf[qb + tid] = q0 * qf;
+    q_buf[qb + tid + 64u] = q1 * qf;
+
+    /* R clip: n_rel = 16, active lanes 0..15 */
+    uint rb = (t * pc.n_heads + h) * 16u;
+    float rv = (tid < 16u) ? (r_buf[rb + tid] * r_scale[h * 16u + tid]) : 0.0;
+    float rnorm = sqrt(subgroupAdd(rv * rv)) + 1.0e-6;
+    float rf = clamp(pc.rel_clip / rnorm, 0.0, 1.0) * tau;
+    if (tid < 16u) {
+        r_buf[rb + tid] = rv * rf;
+    }
+}

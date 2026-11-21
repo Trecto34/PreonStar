@@ -1,0 +1,65 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/* Single-wave64 zero-barrier MoE router for Inkling-2-Mini:
+ *   n_expert = 128, top_k = 8, sigmoid gating + exp_probs_b bias for selection,
+ *   unbiased sigmoid probs normalized by (sum + 1e-20) * expert_weights_scale. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Logits { float logits[]; };
+layout(set = 0, binding = 1) readonly buffer Bias { float bias[]; };
+layout(set = 0, binding = 2) writeonly buffer Selected { uint selected[]; };
+layout(set = 0, binding = 3) writeonly buffer Weights { float weights[]; };
+
+layout(push_constant) uniform Push {
+    uint n_expert;
+    uint n_used;
+    uint has_bias;
+    float weight_scale;
+} pc;
+
+void main(void) {
+    uint tok = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = tok * pc.n_expert;
+
+    uint e0 = tid;
+    uint e1 = tid + 64u;
+    float p0 = 1.0 / (1.0 + exp(-logits[base + e0]));
+    float p1 = 1.0 / (1.0 + exp(-logits[base + e1]));
+    float s0 = p0 + (pc.has_bias != 0u ? bias[e0] : 0.0);
+    float s1 = p1 + (pc.has_bias != 0u ? bias[e1] : 0.0);
+
+    uint best_ids[8];
+    float best_ps[8];
+    float sum_p = 0.0;
+
+    for (uint k = 0u; k < pc.n_used; k++) {
+        float lmax = max(s0, s1);
+        float gmax = subgroupMax(lmax);
+        uint cand = 0xffffffffu;
+        if (s0 == gmax) cand = e0;
+        else if (s1 == gmax) cand = e1;
+        uint win = subgroupMin(cand);
+
+        float win_p = (win == e0) ? p0 : ((win == e1) ? p1 : 0.0);
+        win_p = subgroupAdd(win_p);
+
+        best_ids[k] = win;
+        best_ps[k] = win_p;
+        sum_p += win_p;
+
+        if (win == e0) s0 = -1.0e30;
+        if (win == e1) s1 = -1.0e30;
+    }
+
+    if (tid < pc.n_used) {
+        float norm = pc.weight_scale / (sum_p + 1.0e-20);
+        uint out_idx = tok * pc.n_used + tid;
+        selected[out_idx] = best_ids[tid];
+        weights[out_idx] = best_ps[tid] * norm;
+    }
+}

@@ -24,6 +24,7 @@ enum {
     P36_VK_QK8_0 = 32,
     P36_VK_TENSOR_F32     = 0,
     P36_VK_TENSOR_F16     = 1,
+    P36_VK_TENSOR_Q5_0    = 6,
     P36_VK_TENSOR_Q2_K    = 10,
     P36_VK_TENSOR_Q3_K    = 11,
     P36_VK_TENSOR_Q4_K    = 12,
@@ -95,6 +96,7 @@ typedef struct p36_vk_weight {
 } p36_vk_weight;
 
 static p36_vk_kernel p36_gdn_front;
+static void p36_vk_inkling2_cleanup_unlocked(void);
 
 typedef struct p36_vk_packed_weight {
     const void *source;

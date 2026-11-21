@@ -95,6 +95,7 @@ typedef enum {
     P36_VARIANT_35B_A3B,
     P36_VARIANT_27B,
     P36_VARIANT_CLOVER_35B_A3B,
+    P36_VARIANT_INKLING2_LOOP,
 } p36_variant;
 
 typedef struct {
@@ -203,6 +204,32 @@ static const p36_shape P36_SHAPE_27B = {
     .dense = true,
 };
 
+static const p36_shape P36_SHAPE_INKLING2_MINI = {
+    .name = "Inkling-2-Mini",
+    .arch = "inkling2_loop",
+    .variant = P36_VARIANT_INKLING2_LOOP,
+    .n_layer = 24,
+    .n_embd = 2304,
+    .n_vocab = 200058,
+    .n_tensor = 704,
+    .ctx_train = 1048576,
+    .n_head = 24,
+    .n_head_kv = 8,
+    .n_head_dim = 128,
+    .n_value_dim = 128,
+    .n_rot = 0,
+    .n_expert = 128,
+    .n_expert_used = 8,
+    .n_ff_exp = 1152,
+    .n_ff_shared = 0,
+    .n_ssm_conv = 4,
+    .n_ssm_state = 1,
+    .n_ssm_group = 1,
+    .n_ssm_dt_rank = 1,
+    .n_ssm_inner = 3072,
+    .full_attention_interval = 6,
+};
+
 static p36_shape g_p36_shape = {
     .name = "Qwen 3.6 35B A3B",
     .arch = "qwen35moe",
@@ -301,6 +328,7 @@ typedef struct {
 static const gguf_type_info gguf_types[] = {
     [0]  = {"f32", 1, 4},
     [1]  = {"f16", 1, 2},
+    [6]  = {"q5_0", 32, 22},
     [8]  = {"q8_0", 32, 34},
     [10] = {"q2_k", 256, 84},
     [11] = {"q3_k", 256, 110},
@@ -329,6 +357,7 @@ enum {
     P36_TENSOR_F16 = 1,
     P36_TENSOR_Q4_0 = 2,
     P36_TENSOR_Q4_1 = 3,
+    P36_TENSOR_Q5_0 = 6,
     P36_TENSOR_Q8_0 = 8,
     P36_TENSOR_Q2_K = 10,
     P36_TENSOR_Q3_K = 11,
@@ -688,6 +717,8 @@ struct p36_engine {
     int32_t clover_mask_token_id;
     bool clover_coreset_enabled;
     float clover_coreset_top_p;
+    void *ink_hparams;
+    void *ink_weights;
 };
 
 struct p36_session {
@@ -914,6 +945,7 @@ typedef struct {
     p36_gpu_tensor *mtp_head;
     p36_gpu_tensor *mtp_logits;
     bool mtp_enabled;
+    void *ink;
 } p36_vulkan_runtime;
 #endif
 
@@ -1059,7 +1091,8 @@ static uint32_t p36_engine_clamp_prefill_cap(uint32_t cap) {
     static int warned;
     if (!p36_gpu_device_is_gfx1013()) return cap;
     if (getenv("P36_VK_PREFILL_CHUNK_UNSAFE")) return cap;
-    uint32_t limit = (P36_N_HEAD_KV && (P36_N_HEAD / P36_N_HEAD_KV) == 8u) ? 1024u : 256u;
+    uint32_t limit = (g_p36_shape.variant == P36_VARIANT_INKLING2_LOOP) ? 1024u :
+                     ((P36_N_HEAD_KV && (P36_N_HEAD / P36_N_HEAD_KV) == 8u) ? 1024u : 256u);
     if (cap <= limit) return cap;
     if (!warned) {
         warned = 1;
@@ -1086,6 +1119,7 @@ static uint32_t p36_engine_gpu_prefill_cap(const p36_engine *e) {
 #endif
     uint32_t cap;
     if (e->prefill_cap_override) cap = e->prefill_cap_override;
+    else if (e->variant == P36_VARIANT_INKLING2_LOOP && !getenv("P36_VK_PREFILL_CHUNK")) cap = 512;
     else if (e->ssd_streaming && !getenv("P36_VK_PREFILL_CHUNK")) cap = 512;
     else cap = p36_default_gpu_prefill_cap();
     return p36_engine_clamp_prefill_cap(cap);

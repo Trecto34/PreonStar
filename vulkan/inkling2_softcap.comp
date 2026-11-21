@@ -1,0 +1,19 @@
+#version 460
+
+/* Final logit softcapping: y[i] = cap * tanh(y[i] / cap). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer Logits { float y[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    float cap;
+    float inv_cap;
+} pc;
+
+void main(void) {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    y[i] = pc.cap * tanh(y[i] * pc.inv_cap);
+}
