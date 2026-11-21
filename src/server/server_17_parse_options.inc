@@ -4803,6 +4803,14 @@ static void test_inkling2_prompt_and_tool_round(void) {
     TEST_ASSERT(strstr(stripped.ptr, "<|content_thinking|>") == NULL);
     TEST_ASSERT(strstr(stripped.ptr, "<|content_invoke_tool_json|>") != NULL);
 
+    /* Default server thinking_budget reserve scales with max_tokens and caps reserve at 4096 */
+    TEST_ASSERT(server_default_thinking_budget(16) == 0);
+    TEST_ASSERT(server_default_thinking_budget(64) == 43);
+    TEST_ASSERT(server_default_thinking_budget(4096) == 2731);
+    TEST_ASSERT(server_default_thinking_budget(8192) == 5462);
+    TEST_ASSERT(server_default_thinking_budget(16384) == 12288);
+    TEST_ASSERT(server_default_thinking_budget(65536) == 61440);
+
     buf_free(&stripped);
     buf_free(&ckpt);
     free(suffix);

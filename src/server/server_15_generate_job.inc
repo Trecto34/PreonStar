@@ -1,3 +1,16 @@
+/* When a thinking-enabled chat request omits thinking_budget, reserve headroom
+ * inside max_tokens for the final answer or tool call so a reasoning loop
+ * cannot consume 100% of max_tokens and end with finish_reason=length and
+ * empty content.  Pass thinking_budget=-1 to disable the automatic cap. */
+static int server_default_thinking_budget(int max_tokens) {
+    if (max_tokens < 32) return 0;
+    int reserve = max_tokens / 3;
+    if (reserve > 4096) reserve = 4096;
+    if (reserve < 16) reserve = 16;
+    int budget = max_tokens - reserve;
+    return budget > 0 ? budget : 0;
+}
+
 static void generate_job(server *s, server_slot *slot, job *j) {
     char err[160];
     err[0] = '\0';
@@ -242,8 +255,22 @@ static void generate_job(server *s, server_slot *slot, job *j) {
      * execution boundary at the first complete tool call. */
     agent_action_leak *leak = calloc(1, sizeof(*leak));
     int thinking_tokens = 0;
+    int effective_thinking_budget = j->req.thinking_budget;
+    bool effective_thinking_budget_hard = j->req.thinking_budget_hard;
+    if (effective_thinking_budget == 0 && j->req.kind == REQ_CHAT &&
+        p36_think_mode_enabled(j->req.think_mode)) {
+        effective_thinking_budget = server_default_thinking_budget(max_tokens);
+        effective_thinking_budget_hard = effective_thinking_budget > 0;
+        if (effective_thinking_budget > 0) {
+            trace_event(s, trace_id,
+                        "auto thinking_budget=%d (reserve=%d of max_tokens=%d)",
+                        effective_thinking_budget,
+                        max_tokens - effective_thinking_budget,
+                        max_tokens);
+        }
+    }
     int think_close_id = -1;
-    if (j->req.thinking_budget > 0) {
+    if (effective_thinking_budget > 0) {
         p36_tokens close = {0};
         p36_tokenize_rendered_chat(s->engine,
                                    j->req.inkling2 ? "<|end_message|>" : "</think>",
@@ -301,13 +328,13 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             in_tool_call && !qwen_tool_decode_state_uses_payload_sampling(qwen_tool_state) ?
             0 : j->req.n_bias};
         int close_rank = 0;
-        const bool hard_think_close = think_close_id >= 0 && j->req.thinking_budget_hard &&
-            p36_session_in_think(slot->session) && thinking_tokens >= j->req.thinking_budget;
+        const bool hard_think_close = think_close_id >= 0 && effective_thinking_budget_hard &&
+            p36_session_in_think(slot->session) && thinking_tokens >= effective_thinking_budget;
         if (!hard_think_close && think_close_id >= 0 && p36_session_in_think(slot->session)) {
-            /* A hard budget (top-level thinking_budget) follows the local agent's
-             * schedule: soft </think> bias from 75% of the budget, forced at 100%. */
-            const int hb = j->req.thinking_budget;
-            const bool hard = j->req.thinking_budget_hard;
+            /* A hard budget (top-level thinking_budget or server auto-reserve) follows
+             * the local agent's schedule: soft close bias from 75%, forced at 100%. */
+            const int hb = effective_thinking_budget;
+            const bool hard = effective_thinking_budget_hard;
             const int soft_start = hard ? (hb <= 1 ? hb : (int)(((int64_t)hb * 3) / 4)) : hb;
             const int basis = hard ? thinking_tokens : completion;
             int limit = p36_think_close_rank_limit(basis, soft_start);
