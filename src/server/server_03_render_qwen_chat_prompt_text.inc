@@ -281,25 +281,8 @@ static __attribute__((unused)) char *render_jinja_chat_prompt_text(
                                               NULL, err, errlen);
 }
 
-static const char *inkling2_effort_level_str(p36_think_mode think_mode, bool thinking,
-                                             bool has_tools, bool budget_exceeded) {
+static const char *inkling2_effort_level_str(p36_think_mode think_mode, bool thinking) {
     if (!thinking || think_mode == P36_THINK_NONE) return "0";
-    if (budget_exceeded) return "0.2";
-    if (has_tools) {
-        /* 40 of Inkling-2-Mini's 48 logical layers use a 1024-token SWA window.
-         * Keeping per-turn tool-loop reasoning around 150-300 tokens (effort
-         * 0.1..0.3) ensures the recent user instructions, tool calls, and tool
-         * outputs remain inside the 1024-token SWA horizon when selecting the
-         * next tool invocation. */
-        switch (think_mode) {
-        case P36_THINK_LOW: return "0.1";
-        case P36_THINK_MEDIUM: return "0.2";
-        case P36_THINK_HIGH: return "0.3";
-        case P36_THINK_XHIGH:
-        case P36_THINK_MAX: return "0.5";
-        default: return "0.3";
-        }
-    }
     switch (think_mode) {
     case P36_THINK_LOW: return "0.2";
     case P36_THINK_MEDIUM: return "0.7";
@@ -432,17 +415,7 @@ static char *render_inkling2_chat_prompt_text(const chat_msgs *msgs,
                                               bool preserve_thinking) {
     bool thinking = p36_think_mode_enabled(think_mode);
     apply_chat_thinking_controls(msgs, &thinking);
-    bool has_tools = tool_schemas && tool_schemas[0];
-    bool budget_exceeded = false;
-    if (msgs) {
-        for (int i = 0; i < msgs->len; i++) {
-            if (msgs->v[i].content && strstr(msgs->v[i].content, "[thinking budget exceeded]")) {
-                budget_exceeded = true;
-                break;
-            }
-        }
-    }
-    const char *effort = inkling2_effort_level_str(think_mode, thinking, has_tools, budget_exceeded);
+    const char *effort = inkling2_effort_level_str(think_mode, thinking);
     int last_query = last_chat_query(msgs);
     int failures = 0;
     bool effort_emitted = false;

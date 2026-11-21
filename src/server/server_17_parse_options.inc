@@ -4745,7 +4745,7 @@ static void test_inkling2_prompt_and_tool_round(void) {
         "\"parameters\":{\"type\":\"object\"},\"type\":\"function\"}]"
         "<|end_message|>"
         "<|message_system|><|content_text|>You are a coding agent.<|end_message|>"
-        "<|message_system|><|content_text|>Thinking effort level: 0.3<|end_message|>"
+        "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|>"
         "<|message_user|><|content_text|>List files<|end_message|>";
     TEST_ASSERT(r1.prompt_text && !strcmp(r1.prompt_text, want_turn1));
 
