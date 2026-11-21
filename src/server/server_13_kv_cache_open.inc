@@ -609,10 +609,21 @@ static void strip_assistant_reasoning_blocks(buf *out, const char *text, size_t 
     static const char assistant[] = "<|im_start|>assistant\n";
     static const char open_tag[] = "<think>\n";
     static const char close_tag[] = "</think>";
+    static const char ink_open[] = "<|message_model|><|content_thinking|>";
+    static const char ink_close[] = "<|end_message|>";
     const char *p = text;
     const char *end = text + len;
     while (p < end) {
-        const char *block = strstr(p, "<|im_start|>assistant\n<think>\n");
+        const char *qwen_block = strstr(p, "<|im_start|>assistant\n<think>\n");
+        const char *ink_block = strstr(p, ink_open);
+        if (ink_block && (!qwen_block || ink_block < qwen_block)) {
+            buf_append(out, p, (size_t)(ink_block - p));
+            const char *body = ink_block + strlen(ink_open);
+            const char *close_at = strstr(body, ink_close);
+            p = close_at ? close_at + strlen(ink_close) : end;
+            continue;
+        }
+        const char *block = qwen_block;
         if (!block) break;
         const char *body = block + strlen(assistant) + strlen(open_tag);
         const char *close_at = strstr(body, close_tag);
@@ -660,7 +671,8 @@ static int live_text_prefix_prompt(server *s, server_slot *slot,
             /* If the client sent the reasoning back, the suffix would restart
              * the think block and duplicate the reasoning already in the live
              * graph; leave that case to the cold path. */
-            strncmp(req->prompt_text + stripped.len, "<think>", 7) != 0)
+            strncmp(req->prompt_text + stripped.len, "<think>", 7) != 0 &&
+            strncmp(req->prompt_text + stripped.len, "<|message_model|><|content_thinking|>", 37) != 0)
             suffix = req->prompt_text + stripped.len;
     }
     if (!suffix) {

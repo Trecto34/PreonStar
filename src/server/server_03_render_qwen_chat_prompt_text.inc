@@ -267,7 +267,8 @@ static char *render_jinja_chat_prompt_text_keep(const char *chat_template,
     return rendered;
 }
 
-static char *render_jinja_chat_prompt_text(const char *chat_template,
+static __attribute__((unused)) char *render_jinja_chat_prompt_text(
+                                           const char *chat_template,
                                            const chat_msgs *msgs,
                                            const char *tool_schemas,
                                            p36_think_mode think_mode,
@@ -278,6 +279,245 @@ static char *render_jinja_chat_prompt_text(const char *chat_template,
     return render_jinja_chat_prompt_text_keep(chat_template, msgs, tool_schemas, think_mode,
                                               preserve_thinking, kwargs, kwarg_count,
                                               NULL, err, errlen);
+}
+
+static const char *inkling2_effort_level_str(p36_think_mode think_mode, bool thinking) {
+    if (!thinking || think_mode == P36_THINK_NONE) return "0";
+    switch (think_mode) {
+    case P36_THINK_LOW: return "0.2";
+    case P36_THINK_MEDIUM: return "0.7";
+    case P36_THINK_HIGH: return "0.9";
+    case P36_THINK_XHIGH:
+    case P36_THINK_MAX: return "0.99";
+    default: return "0.9";
+    }
+}
+
+static void append_inkling2_one_tool_schema(buf *out, const char *line, size_t len) {
+    char *copy = xstrndup(line, len);
+    const char *p = copy;
+    char *name = NULL;
+    char *desc = NULL;
+    char *params = NULL;
+    json_ws(&p);
+    if (*p == '{') {
+        p++;
+        json_ws(&p);
+        while (*p && *p != '}') {
+            char *key = NULL;
+            if (!json_string(&p, &key)) { free(key); break; }
+            json_ws(&p);
+            if (*p != ':') { free(key); break; }
+            p++;
+            if (!strcmp(key, "name")) {
+                if (!json_string_replace(&p, &name)) { free(key); break; }
+            } else if (!strcmp(key, "description")) {
+                if (!json_string_replace(&p, &desc)) { free(key); break; }
+            } else if (!strcmp(key, "parameters") || !strcmp(key, "input_schema")) {
+                if (!json_raw_value_replace(&p, &params)) { free(key); break; }
+            } else if (!json_skip_value(&p)) {
+                free(key);
+                break;
+            }
+            free(key);
+            json_ws(&p);
+            if (*p == ',') p++;
+            json_ws(&p);
+        }
+    }
+    if (name) {
+        buf_putc(out, '{');
+        bool wrote = false;
+        if (desc) {
+            buf_puts(out, "\"description\":");
+            json_escape(out, desc);
+            wrote = true;
+        }
+        if (wrote) buf_putc(out, ',');
+        buf_puts(out, "\"name\":");
+        json_escape(out, name);
+        if (params && params[0]) {
+            char *minified = json_minify(params);
+            buf_puts(out, ",\"parameters\":");
+            buf_puts(out, minified ? minified : params);
+            free(minified);
+        }
+        buf_puts(out, ",\"type\":\"function\"}");
+    } else {
+        buf_append(out, line, len);
+    }
+    free(name);
+    free(desc);
+    free(params);
+    free(copy);
+}
+
+static void append_inkling2_tools_prompt_text(buf *b, const char *tool_schemas) {
+    if (!tool_schemas || !tool_schemas[0]) return;
+    buf_puts(b, "<|message_system|>tool_declare<|content_xml|>[");
+    const char *p = tool_schemas;
+    bool first = true;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len > 0) {
+            if (!first) buf_putc(b, ',');
+            append_inkling2_one_tool_schema(b, p, len);
+            first = false;
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    buf_puts(b, "]<|end_message|>");
+}
+
+static void append_inkling2_tool_calls_text(buf *b, const tool_calls *calls) {
+    if (!calls || calls->len == 0) return;
+    if (calls->raw_tool_text &&
+        !strncmp(calls->raw_tool_text, "<|message_model|>", 17)) {
+        buf_puts(b, calls->raw_tool_text);
+        return;
+    }
+    for (int i = 0; i < calls->len; i++) {
+        const tool_call *tc = &calls->v[i];
+        const char *name = tc->name ? tc->name : "";
+        buf_puts(b, "<|message_model|>");
+        buf_puts(b, name);
+        buf_puts(b, "<|content_invoke_tool_json|>{\"name\":");
+        json_escape(b, name);
+        buf_puts(b, ",\"args\":");
+        append_json_object_or_empty(b, tc->arguments);
+        buf_puts(b, "}<|end_message|>");
+    }
+}
+
+static const char *find_inkling2_tool_name_by_id(const chat_msgs *msgs, int upto,
+                                                 const char *tool_call_id) {
+    if (!msgs || !tool_call_id || !tool_call_id[0]) return "unknown";
+    if (upto > msgs->len) upto = msgs->len;
+    for (int i = upto - 1; i >= 0; i--) {
+        const chat_msg *m = &msgs->v[i];
+        if (strcmp(m->role, "assistant")) continue;
+        for (int k = 0; k < m->calls.len; k++) {
+            const tool_call *tc = &m->calls.v[k];
+            if (tc->id && !strcmp(tc->id, tool_call_id) &&
+                tc->name && tc->name[0]) {
+                return tc->name;
+            }
+        }
+    }
+    return "unknown";
+}
+
+static char *render_inkling2_chat_prompt_text(const chat_msgs *msgs,
+                                              const char *tool_schemas,
+                                              p36_think_mode think_mode,
+                                              bool preserve_thinking) {
+    bool thinking = p36_think_mode_enabled(think_mode);
+    apply_chat_thinking_controls(msgs, &thinking);
+    const char *effort = inkling2_effort_level_str(think_mode, thinking);
+    int last_query = last_chat_query(msgs);
+    int failures = 0;
+    bool effort_emitted = false;
+
+    buf out = {0};
+    if (tool_schemas && tool_schemas[0]) {
+        append_inkling2_tools_prompt_text(&out, tool_schemas);
+    }
+
+    for (int i = 0; i < msgs->len; i++) {
+        const chat_msg *m = &msgs->v[i];
+        if (role_is_system(m->role)) {
+            char *content = chat_content_text(m->content, true, &thinking);
+            if (text_has_trimmed_content(content)) {
+                buf_puts(&out, "<|message_system|><|content_text|>");
+                buf_puts(&out, content);
+                buf_puts(&out, "<|end_message|>");
+            }
+            free(content);
+            continue;
+        }
+        if (!effort_emitted) {
+            buf_puts(&out, "<|message_system|><|content_text|>Thinking effort level: ");
+            buf_puts(&out, effort);
+            buf_puts(&out, "<|end_message|>");
+            effort_emitted = true;
+        }
+        if (!strcmp(m->role, "user")) {
+            if (m->result_count > 0 && !m->other_content) {
+                const char *cursor = m->content ? m->content : "";
+                for (size_t k = 0; k < m->result_count; k++) {
+                    const char *open = strstr(cursor, "<tool_response>\n");
+                    const char *close = open ? strstr(open + 16, "\n</tool_response>") : NULL;
+                    char *raw = (open && close)
+                        ? xstrndup(open + 16, (size_t)(close - (open + 16)))
+                        : chat_content_text(cursor, false, NULL);
+                    if (open && close) cursor = close + 17;
+                    failures = tool_response_is_error(raw) ? failures + 1 : 0;
+                    const char *fn_name = find_inkling2_tool_name_by_id(msgs, i, m->result_ids[k]);
+                    buf_puts(&out, "<|message_tool|>");
+                    buf_puts(&out, fn_name);
+                    buf_puts(&out, "<|content_text|>");
+                    buf_puts(&out, raw);
+                    append_tool_error_warning(&out, failures);
+                    buf_puts(&out, "<|end_message|>");
+                    free(raw);
+                }
+            } else {
+                char *content = chat_content_text(m->content, true, &thinking);
+                failures = 0;
+                buf_puts(&out, "<|message_user|><|content_text|>");
+                buf_puts(&out, content);
+                buf_puts(&out, "<|end_message|>");
+                free(content);
+            }
+        } else if (!strcmp(m->role, "tool") || !strcmp(m->role, "function")) {
+            char *content = chat_content_text(m->content, false, NULL);
+            failures = tool_response_is_error(content) ? failures + 1 : 0;
+            const char *fn_name = find_inkling2_tool_name_by_id(msgs, i, m->tool_call_id);
+            buf_puts(&out, "<|message_tool|>");
+            buf_puts(&out, fn_name);
+            buf_puts(&out, "<|content_text|>");
+            buf_puts(&out, content);
+            append_tool_error_warning(&out, failures);
+            buf_puts(&out, "<|end_message|>");
+            free(content);
+        } else if (!strcmp(m->role, "assistant")) {
+            char *reasoning = NULL;
+            char *content = assistant_message_parts(m, &reasoning);
+            bool keep_reasoning = (preserve_thinking || i > last_query) &&
+                                  text_has_trimmed_content(reasoning);
+            bool content_nonempty = text_has_trimmed_content(content);
+            if (keep_reasoning) {
+                buf_puts(&out, "<|message_model|><|content_thinking|>");
+                buf_puts(&out, reasoning);
+                buf_puts(&out, "<|end_message|>");
+            }
+            if (content_nonempty || (!keep_reasoning && m->calls.len == 0)) {
+                buf_puts(&out, "<|message_model|><|content_text|>");
+                buf_puts(&out, content);
+                buf_puts(&out, "<|end_message|>");
+            }
+            append_inkling2_tool_calls_text(&out, &m->calls);
+            buf_puts(&out, "<|content_model_end_sampling|>");
+            free(reasoning);
+            free(content);
+        } else {
+            char *content = chat_content_text(m->content, false, NULL);
+            buf_puts(&out, "<|message_user|><|content_text|>[");
+            buf_puts(&out, m->role);
+            buf_puts(&out, "]: ");
+            buf_puts(&out, content);
+            buf_puts(&out, "<|end_message|>");
+            free(content);
+        }
+    }
+    if (!effort_emitted) {
+        buf_puts(&out, "<|message_system|><|content_text|>Thinking effort level: ");
+        buf_puts(&out, effort);
+        buf_puts(&out, "<|end_message|>");
+    }
+    return buf_take(&out);
 }
 
 static char *render_chat_prompt_text_profile(const chat_msgs *msgs,
@@ -317,6 +557,10 @@ static char *render_request_chat_prompt_text(request *r,
                                                   r->think_mode, r->preserve_thinking,
                                                   r->tmpl_kwargs, r->tmpl_kwarg_count,
                                                   &r->tmpl_conv, err, errlen);
+    }
+    if (r->inkling2) {
+        return render_inkling2_chat_prompt_text(msgs, tool_schemas,
+                                                r->think_mode, r->preserve_thinking);
     }
     return render_chat_prompt_text_model(msgs, tool_schemas, &r->tool_orders,
                                          r->think_mode, r->kat_coder, r->qwen38,

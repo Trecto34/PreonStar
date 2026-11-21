@@ -735,6 +735,10 @@ bool p36_engine_is_kat_coder(p36_engine *e) {
     return e && e->kat_coder;
 }
 
+bool p36_engine_is_inkling2(p36_engine *e) {
+    return e && e->variant == P36_VARIANT_INKLING2_LOOP;
+}
+
 const char *p36_engine_chat_template(p36_engine *e) {
     return e ? e->chat_template : NULL;
 }

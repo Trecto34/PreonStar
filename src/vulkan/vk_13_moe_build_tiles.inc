@@ -505,7 +505,7 @@ bool q2_family = weight_type == P36_VK_TENSOR_Q2_0 ||
                             (uint32_t)blocks, (uint32_t)row_bytes, scale,
                         };
                         ok = p36_vk_run_unlocked(op, small, bindings, &spush, sizeof(spush),
-                                                 ((uint32_t)out_dim + 3u) / 4u, 1, 1);
+                                                 ((uint32_t)out_dim + 1u) / 2u, 1, 1);
                     }
                     pthread_mutex_unlock(&p36_vk_mu);
                     return ok;

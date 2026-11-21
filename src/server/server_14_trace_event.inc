@@ -146,6 +146,10 @@ static void thinking_state_feed(thinking_state *st, const char *p, size_t len) {
 
 static thinking_state thinking_state_from_prompt(const request *r) {
     thinking_state st = {0};
+    if (r && r->inkling2 && r->kind == REQ_CHAT) {
+        st.inside = p36_think_mode_enabled(r->think_mode);
+        return st;
+    }
     if (r && r->prompt_text) {
         thinking_state_feed(&st, r->prompt_text, strlen(r->prompt_text));
     } else if (r && p36_think_mode_enabled(r->think_mode)) {
@@ -174,7 +178,7 @@ static int server_eval_token(server *s, server_slot *slot, int token,
 static bool should_canonicalize_thinking_checkpoint(const request *r,
                                                     const thinking_state *thinking,
                                                     const char *finish) {
-    if (!r || r->kind != REQ_CHAT) return false;
+    if (!r || r->kind != REQ_CHAT || r->inkling2) return false;
     if (!r->kat_coder && !p36_think_mode_enabled(r->think_mode)) {
         /* When history keeps the empty think block, the live graph already
          * matches what the next turn will render.  Canonicalizing would strip
@@ -560,6 +564,21 @@ static void server_progress_cb(void *ud, const char *event, int current, int tot
 static char *build_tool_checkpoint_suffix(const request *r, const char *content,
                                           const char *reasoning, const tool_calls *calls) {
     buf suffix = {0};
+    if (r && r->inkling2) {
+        if (p36_think_mode_enabled(r->think_mode) && text_has_trimmed_content(reasoning)) {
+            buf_puts(&suffix, "<|message_model|><|content_thinking|>");
+            buf_puts_trimmed(&suffix, reasoning);
+            buf_puts(&suffix, "<|end_message|>");
+        }
+        if (text_has_trimmed_content(content)) {
+            buf_puts(&suffix, "<|message_model|><|content_text|>");
+            buf_puts_trimmed(&suffix, content);
+            buf_puts(&suffix, "<|end_message|>");
+        }
+        append_inkling2_tool_calls_text(&suffix, calls);
+        buf_puts(&suffix, "<|content_model_end_sampling|>");
+        return buf_take(&suffix);
+    }
     if (r && r->kat_coder) {
         if (p36_think_mode_enabled(r->think_mode)) {
             buf_puts_trimmed(&suffix, reasoning);
@@ -971,15 +990,39 @@ static int system_boundary_tokens(const p36_tokens *t, int im_start, int system_
     return 0;
 }
 
+static int inkling2_system_boundary_tokens(const p36_tokens *t, int sys_start, int msg_end) {
+    if (!t || t->len < 4 || t->v[0] != sys_start) return 0;
+    int last_end = 0;
+    int i = 0;
+    while (i < t->len && t->v[i] == sys_start) {
+        i++;
+        while (i < t->len && t->v[i] != msg_end) i++;
+        if (i >= t->len) break;
+        i++; /* include <|end_message|> */
+        if (i < t->len) last_end = i;
+    }
+    return last_end;
+}
+
 static int request_system_boundary(server *s, const request *r) {
-    p36_tokens head = {0}, tail = {0};
-    p36_tokenize_rendered_chat(s->engine, "<|im_start|>system\n", &head);
-    p36_tokenize_rendered_chat(s->engine, "<|im_end|>\n", &tail);
     int n = 0;
-    if (head.len == 3 && tail.len == 2)
-        n = system_boundary_tokens(&r->prompt, head.v[0], head.v[1], tail.v[0], tail.v[1]);
-    p36_tokens_free(&head);
-    p36_tokens_free(&tail);
+    if (r && r->inkling2) {
+        p36_tokens head = {0}, tail = {0};
+        p36_tokenize_rendered_chat(s->engine, "<|message_system|>", &head);
+        p36_tokenize_rendered_chat(s->engine, "<|end_message|>", &tail);
+        if (head.len == 1 && tail.len == 1)
+            n = inkling2_system_boundary_tokens(&r->prompt, head.v[0], tail.v[0]);
+        p36_tokens_free(&head);
+        p36_tokens_free(&tail);
+    } else {
+        p36_tokens head = {0}, tail = {0};
+        p36_tokenize_rendered_chat(s->engine, "<|im_start|>system\n", &head);
+        p36_tokenize_rendered_chat(s->engine, "<|im_end|>\n", &tail);
+        if (head.len == 3 && tail.len == 2)
+            n = system_boundary_tokens(&r->prompt, head.v[0], head.v[1], tail.v[0], tail.v[1]);
+        p36_tokens_free(&head);
+        p36_tokens_free(&tail);
+    }
     /* Land on a prefill-chunk multiple.  A cold prompt prefills in fixed chunks
      * from position 0; a checkpoint inside a chunk would split that schedule
      * differently and the restored state would differ in the last bits (greedy

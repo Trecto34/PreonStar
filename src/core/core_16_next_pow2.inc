@@ -372,10 +372,10 @@ static void vocab_load(p36_vocab *vocab, const p36_model *model) {
     vocab->eos_id = (int)required_u32(model, "tokenizer.ggml.eos_token_id");
     vocab->add_bos = model_get_bool(model, "tokenizer.ggml.add_bos_token", &vocab->add_bos) ? vocab->add_bos : false;
     if (g_p36_shape.variant == P36_VARIANT_INKLING2_LOOP) {
-        vocab->im_start_id = vocab_lookup_opt(vocab, "<|im_start|>");
-        vocab->im_end_id = vocab_lookup_opt(vocab, "<|im_end|>");
-        vocab->think_start_id = vocab_lookup_opt(vocab, "<think>");
-        vocab->think_end_id = vocab_lookup_opt(vocab, "</think>");
+        vocab->im_start_id = vocab_lookup_opt(vocab, "<|message_model|>");
+        vocab->im_end_id = vocab_lookup_opt(vocab, "<|end_message|>");
+        vocab->think_start_id = vocab_lookup_opt(vocab, "<|content_thinking|>");
+        vocab->think_end_id = vocab_lookup_opt(vocab, "<|end_message|>");
         vocab->vision_start_id = vocab_lookup_opt(vocab, "<|vision_start|>");
         vocab->vision_end_id = vocab_lookup_opt(vocab, "<|vision_end|>");
         vocab->image_pad_id = vocab_lookup_opt(vocab, "<|image_pad|>");
@@ -520,10 +520,47 @@ void p36_chat_append_max_effort_prefix(p36_engine *e, p36_tokens *tokens) {
     bpe_tokenize_text(&e->vocab, P36_REASONING_EFFORT_MAX_PREFIX, tokens);
 }
 
+static const char *p36_inkling2_effort_level(p36_think_mode mode) {
+    switch (mode) {
+    case P36_THINK_NONE: return "0";
+    case P36_THINK_LOW: return "0.2";
+    case P36_THINK_MEDIUM: return "0.7";
+    case P36_THINK_HIGH: return "0.9";
+    case P36_THINK_XHIGH:
+    case P36_THINK_MAX: return "0.99";
+    }
+    return "0.9";
+}
+
 void p36_chat_append_message(p36_engine *e, p36_tokens *tokens, const char *role, const char *content) {
     if (!role) role = "user";
     if (!content) content = "";
     if (!strcmp(role, "developer")) role = "system";
+    if (e && e->variant == P36_VARIANT_INKLING2_LOOP) {
+        bool controls = !strcmp(role, "system") || !strcmp(role, "user");
+        char *text = p36_chat_content_text(content, controls);
+        if (!strcmp(role, "system")) {
+            if (text[0]) {
+                p36_tokenize_rendered_chat(e, "<|message_system|><|content_text|>", tokens);
+                p36_tokenize_rendered_chat(e, text, tokens);
+                p36_tokenize_rendered_chat(e, "<|end_message|>", tokens);
+            }
+        } else if (!strcmp(role, "tool") || !strcmp(role, "function")) {
+            p36_tokenize_rendered_chat(e, "<|message_tool|>unknown<|content_text|>", tokens);
+            p36_tokenize_rendered_chat(e, text, tokens);
+            p36_tokenize_rendered_chat(e, "<|end_message|>", tokens);
+        } else if (!strcmp(role, "assistant")) {
+            p36_tokenize_rendered_chat(e, "<|message_model|><|content_text|>", tokens);
+            p36_tokenize_rendered_chat(e, text, tokens);
+            p36_tokenize_rendered_chat(e, "<|end_message|><|content_model_end_sampling|>", tokens);
+        } else {
+            p36_tokenize_rendered_chat(e, "<|message_user|><|content_text|>", tokens);
+            p36_tokenize_rendered_chat(e, text, tokens);
+            p36_tokenize_rendered_chat(e, "<|end_message|>", tokens);
+        }
+        free(text);
+        return;
+    }
     if (!strcmp(role, "tool") || !strcmp(role, "function")) {
         char *text = p36_chat_content_text(content, false);
         chat_append_open_role(e, tokens, "user");
@@ -594,6 +631,7 @@ int p36_chat_append_vision_message(p36_engine *e, p36_tokens *tokens,
 }
 
 void p36_chat_append_assistant_prefix(p36_engine *e, p36_tokens *tokens, p36_think_mode think_mode) {
+    if (e && e->variant == P36_VARIANT_INKLING2_LOOP) return;
     chat_append_open_role(e, tokens, "assistant");
     if (think_mode == P36_THINK_NONE) {
         p36_tokenize_rendered_chat(e, "<think>\n\n</think>\n\n", tokens);
@@ -610,6 +648,19 @@ void p36_encode_chat_prompt(p36_engine *e, const char *system, const char *promp
     p36_chat_apply_thinking_control(prompt, &thinking);
     if (!thinking) think_mode = P36_THINK_NONE;
     else if (think_mode == P36_THINK_NONE) think_mode = P36_THINK_HIGH;
+    if (e && e->variant == P36_VARIANT_INKLING2_LOOP && !e->chat_template) {
+        p36_chat_begin(e, out);
+        if (system && system[0]) {
+            p36_chat_append_message(e, out, "system", system);
+        }
+        char effort_msg[128];
+        snprintf(effort_msg, sizeof(effort_msg),
+                 "<|message_system|><|content_text|>Thinking effort level: %s<|end_message|>",
+                 p36_inkling2_effort_level(think_mode));
+        p36_tokenize_rendered_chat(e, effort_msg, out);
+        p36_chat_append_message(e, out, "user", prompt ? prompt : "");
+        return;
+    }
     if (e && e->chat_template) {
         p36_jinja_message msgs[2] = {0};
         size_t n_msgs = 0;

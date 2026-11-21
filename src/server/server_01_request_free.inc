@@ -439,7 +439,7 @@ static bool parse_function_call(const char **p, tool_call *tc) {
                 free(key);
                 goto bad;
             }
-        } else if (!strcmp(key, "arguments")) {
+        } else if (!strcmp(key, "arguments") || !strcmp(key, "args")) {
             json_ws(p);
             if (**p == '"') {
                 if (!json_string_replace(p, &tc->arguments)) {

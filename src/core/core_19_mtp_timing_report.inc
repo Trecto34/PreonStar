@@ -800,6 +800,17 @@ uint64_t p36_session_payload_bytes(p36_session *s) {
     uint64_t bytes = (uint64_t)(typed ? P36_PAYLOAD_U32_FIELDS_TYPED_KV : P36_PAYLOAD_U32_FIELDS) * sizeof(uint32_t);
     bytes += (uint64_t)rows * sizeof(int32_t);
     bytes += (uint64_t)P36_N_VOCAB * sizeof(float);
+    if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) {
+        uint32_t swa_cap = 1024u;
+        uint32_t swa_rows = rows < swa_cap ? rows : swa_cap;
+        uint64_t conv_layer_bytes = (2ull * 3ull * 1024ull + 2ull * 3ull * 2304ull) * sizeof(float);
+        for (uint32_t il = 0; il < 48u; il++) {
+            bool is_swa = ((il % 6u) != 5u);
+            uint32_t kv_rows = is_swa ? swa_rows : rows;
+            bytes += sizeof(uint32_t) + 2ull * (uint64_t)kv_rows * 1024ull * sizeof(uint16_t) + conv_layer_bytes;
+        }
+        return bytes;
+    }
     for (uint32_t il = 0; il < P36_N_LAYER; il++) {
         if (p36_layer_is_full_attention(il)) {
             bytes += sizeof(uint32_t) +
@@ -998,6 +1009,32 @@ int p36_session_save_payload(p36_session *s, FILE *fp, char *err, size_t errlen)
                                         err, errlen) != 0) {
         return 1;
     }
+    if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) {
+        p36_inkling2_runtime *ink = (p36_inkling2_runtime *)rt->ink;
+        if (!ink) return p36_unsupported_runtime(err, errlen);
+        const uint64_t conv_kv_bytes = 3ull * 1024ull * sizeof(float);
+        const uint64_t conv_post_bytes = 3ull * 2304ull * sizeof(float);
+        for (uint32_t il = 0; il < ink->n_logical; il++) {
+            uint32_t kv_rows = ink->is_swa_logical[il]
+                ? (rows < ink->swa_kv_cap ? rows : ink->swa_kv_cap)
+                : rows;
+            uint32_t cap = ink->is_swa_logical[il] ? ink->swa_kv_cap : ink->full_kv_cap;
+            if (!ink->kv_k[il] || !ink->kv_v[il] || cap < kv_rows) {
+                p36_payload_set_err(err, errlen, "Vulkan Inkling2 KV cache is shorter than checkpoint");
+                return 1;
+            }
+            uint64_t kv_bytes = (uint64_t)kv_rows * 1024ull * sizeof(uint16_t);
+            if (p36_payload_write_u32(fp, kv_rows, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->kv_k[il], kv_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->kv_v[il], kv_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->conv_k[il], conv_kv_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->conv_v[il], conv_kv_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->conv_attn_post[il], conv_post_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->conv_ffn_post[il], conv_post_bytes, err, errlen) != 0)
+                return 1;
+        }
+        return 0;
+    }
     for (uint32_t il = 0; il < P36_N_LAYER; il++) {
         if (p36_layer_is_full_attention(il)) {
             p36_vulkan_full_attn_cache *c = &rt->full[il];
@@ -1161,25 +1198,52 @@ static int p36_session_load_payload_impl(p36_session *s, FILE *fp, uint64_t payl
                                     &remaining, err, errlen) != 0) return 1;
         s->logits_host_valid = false;
         s->gpu_top2_valid = false;
-        for (uint32_t il = 0; il < P36_N_LAYER; il++) {
-            if (p36_layer_is_full_attention(il)) {
-                uint32_t rows = 0;
-                p36_vulkan_full_attn_cache *c = &rt->full[il];
-                if (p36_payload_read_u32(fp, &rows, &remaining, err, errlen) != 0) return 1;
-                if (rows != n_tokens || rows > c->cap) {
-                    p36_payload_set_err(err, errlen, "KV checkpoint full-attention length mismatch");
+        if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) {
+            p36_inkling2_runtime *ink = (p36_inkling2_runtime *)rt->ink;
+            if (!ink) return p36_unsupported_runtime(err, errlen);
+            const uint64_t conv_kv_bytes = 3ull * 1024ull * sizeof(float);
+            const uint64_t conv_post_bytes = 3ull * 2304ull * sizeof(float);
+            for (uint32_t il = 0; il < ink->n_logical; il++) {
+                uint32_t expected_rows = ink->is_swa_logical[il]
+                    ? (n_tokens < ink->swa_kv_cap ? n_tokens : ink->swa_kv_cap)
+                    : n_tokens;
+                uint32_t cap = ink->is_swa_logical[il] ? ink->swa_kv_cap : ink->full_kv_cap;
+                uint32_t kv_rows = 0;
+                if (p36_payload_read_u32(fp, &kv_rows, &remaining, err, errlen) != 0) return 1;
+                if (kv_rows != expected_rows || kv_rows > cap) {
+                    p36_payload_set_err(err, errlen, "KV checkpoint Inkling2 KV length mismatch");
                     return 1;
                 }
-                if (p36_payload_read_tensor(c->k, fp, p36_full_k_bytes(rows, c->type_k), &remaining, err, errlen) != 0 ||
-                    p36_payload_read_tensor(c->v, fp, p36_full_v_bytes(rows, c->type_v), &remaining, err, errlen) != 0)
+                uint64_t kv_bytes = (uint64_t)kv_rows * 1024ull * sizeof(uint16_t);
+                if (p36_payload_read_tensor(ink->kv_k[il], fp, kv_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->kv_v[il], fp, kv_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->conv_k[il], fp, conv_kv_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->conv_v[il], fp, conv_kv_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->conv_attn_post[il], fp, conv_post_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->conv_ffn_post[il], fp, conv_post_bytes, &remaining, err, errlen) != 0)
                     return 1;
-            } else {
-                p36_vulkan_recurrent_cache *c = &rt->recurrent[il];
-                if (p36_payload_read_tensor(c->conv, fp, p36_recurrent_conv_bytes(), &remaining, err, errlen) != 0 ||
-                    p36_payload_read_recurrent_state(c->state, fp,
-                                                     rt->recur_state_f16,
-                                                     &remaining, err, errlen) != 0)
-                    return 1;
+            }
+        } else {
+            for (uint32_t il = 0; il < P36_N_LAYER; il++) {
+                if (p36_layer_is_full_attention(il)) {
+                    uint32_t rows = 0;
+                    p36_vulkan_full_attn_cache *c = &rt->full[il];
+                    if (p36_payload_read_u32(fp, &rows, &remaining, err, errlen) != 0) return 1;
+                    if (rows != n_tokens || rows > c->cap) {
+                        p36_payload_set_err(err, errlen, "KV checkpoint full-attention length mismatch");
+                        return 1;
+                    }
+                    if (p36_payload_read_tensor(c->k, fp, p36_full_k_bytes(rows, c->type_k), &remaining, err, errlen) != 0 ||
+                        p36_payload_read_tensor(c->v, fp, p36_full_v_bytes(rows, c->type_v), &remaining, err, errlen) != 0)
+                        return 1;
+                } else {
+                    p36_vulkan_recurrent_cache *c = &rt->recurrent[il];
+                    if (p36_payload_read_tensor(c->conv, fp, p36_recurrent_conv_bytes(), &remaining, err, errlen) != 0 ||
+                        p36_payload_read_recurrent_state(c->state, fp,
+                                                         rt->recur_state_f16,
+                                                         &remaining, err, errlen) != 0)
+                        return 1;
+                }
             }
         }
 #endif

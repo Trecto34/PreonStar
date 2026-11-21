@@ -4720,7 +4720,104 @@ static void test_jinja_tool_checkpoint_is_prefix_of_next_request(void) {
     request_free(&r2);
 }
 
+static void test_inkling2_prompt_and_tool_round(void) {
+    chat_msgs msgs = {0};
+    chat_msgs_push(&msgs, (chat_msg){.role = xstrdup("system"),
+                                     .content = xstrdup("You are a coding agent.")});
+    chat_msgs_push(&msgs, (chat_msg){.role = xstrdup("user"),
+                                     .content = xstrdup("List files")});
+    const char *tools_json =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"bash\","
+        "\"description\":\"Run shell\",\"parameters\":{\"type\":\"object\"}}}]";
+    const char *tp = tools_json;
+    char *tool_schemas = NULL;
+    tool_schema_orders orders = {0};
+    TEST_ASSERT(parse_tools_value(&tp, &tool_schemas, &orders));
+
+    request r1;
+    request_init(&r1, REQ_CHAT, 128);
+    r1.inkling2 = true;
+    r1.think_mode = P36_THINK_HIGH;
+    r1.prompt_text = render_request_chat_prompt_text(&r1, &msgs, tool_schemas, NULL, 0);
+    const char *want_turn1 =
+        "<|message_system|>tool_declare<|content_xml|>"
+        "[{\"description\":\"Run shell\",\"name\":\"bash\","
+        "\"parameters\":{\"type\":\"object\"},\"type\":\"function\"}]"
+        "<|end_message|>"
+        "<|message_system|><|content_text|>You are a coding agent.<|end_message|>"
+        "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|>"
+        "<|message_user|><|content_text|>List files<|end_message|>";
+    TEST_ASSERT(r1.prompt_text && !strcmp(r1.prompt_text, want_turn1));
+
+    /* Parse translated Inkling-2 tool call output with "args" key */
+    char *parsed_content = NULL;
+    char *parsed_reasoning = NULL;
+    tool_calls parsed_calls = {0};
+    const char *translated =
+        "I should run ls.</think>\n\n\n<tool_call>\n"
+        "{\"name\":\"bash\",\"args\":{\"command\":\"ls -la\"}}\n</tool_call>";
+    TEST_ASSERT(parse_generated_message_ex(translated, true,
+                                           &parsed_content, &parsed_reasoning,
+                                           &parsed_calls));
+    TEST_ASSERT(parsed_reasoning && !strcmp(parsed_reasoning, "I should run ls."));
+    TEST_ASSERT(parsed_content && !strcmp(parsed_content, ""));
+    TEST_ASSERT(parsed_calls.len == 1);
+    TEST_ASSERT(parsed_calls.v[0].name && !strcmp(parsed_calls.v[0].name, "bash"));
+    TEST_ASSERT(parsed_calls.v[0].arguments && !strcmp(parsed_calls.v[0].arguments, "{\"command\":\"ls -la\"}"));
+
+    free(parsed_calls.raw_tool_text);
+    parsed_calls.raw_tool_text = NULL;
+    buf ink_raw = {0};
+    append_inkling2_tool_calls_text(&ink_raw, &parsed_calls);
+    parsed_calls.raw_tool_text = buf_take(&ink_raw);
+
+    char *suffix = build_tool_checkpoint_suffix(&r1, parsed_content, parsed_reasoning, &parsed_calls);
+    buf ckpt = {0};
+    buf_puts(&ckpt, r1.prompt_text);
+    buf_puts(&ckpt, suffix);
+
+    /* Turn 2: assistant turn + tool response must have ckpt as exact byte prefix */
+    chat_msg a1 = {.role = xstrdup("assistant"),
+                   .content = xstrdup(""),
+                   .reasoning = xstrdup("I should run ls.")};
+    tool_calls_push(&a1.calls, (tool_call){.id = xstrdup("call_1"),
+                                           .name = xstrdup("bash"),
+                                           .arguments = xstrdup("{\"command\":\"ls -la\"}")});
+    chat_msgs_push(&msgs, a1);
+    chat_msgs_push(&msgs, (chat_msg){.role = xstrdup("tool"),
+                                     .content = xstrdup("Makefile\np36.c"),
+                                     .tool_call_id = xstrdup("call_1")});
+    request r2;
+    request_init(&r2, REQ_CHAT, 128);
+    r2.inkling2 = true;
+    r2.think_mode = P36_THINK_HIGH;
+    r2.prompt_text = render_request_chat_prompt_text(&r2, &msgs, tool_schemas, NULL, 0);
+    TEST_ASSERT(r2.prompt_text && strlen(r2.prompt_text) > ckpt.len &&
+                !strncmp(r2.prompt_text, ckpt.ptr, ckpt.len));
+    TEST_ASSERT(strstr(r2.prompt_text + ckpt.len,
+                       "<|message_tool|>bash<|content_text|>Makefile\np36.c<|end_message|>") != NULL);
+
+    /* Stripping reasoning blocks also works on Inkling-2 format */
+    buf stripped = {0};
+    strip_assistant_reasoning_blocks(&stripped, ckpt.ptr, ckpt.len);
+    TEST_ASSERT(strstr(stripped.ptr, "<|content_thinking|>") == NULL);
+    TEST_ASSERT(strstr(stripped.ptr, "<|content_invoke_tool_json|>") != NULL);
+
+    buf_free(&stripped);
+    buf_free(&ckpt);
+    free(suffix);
+    free(parsed_content);
+    free(parsed_reasoning);
+    tool_calls_free(&parsed_calls);
+    free(tool_schemas);
+    tool_schema_orders_free(&orders);
+    chat_msgs_free(&msgs);
+    request_free(&r1);
+    request_free(&r2);
+}
+
 static void p36_server_unit_tests_run(void) {
+    test_inkling2_prompt_and_tool_round();
     test_anthropic_live_stream_normal_golden();
     test_anthropic_live_stream_incomplete_tool_in_thinking_terminates();
     test_jinja_chat_template_and_json_tool_call();

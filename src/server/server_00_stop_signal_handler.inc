@@ -857,6 +857,7 @@ typedef struct {
     bool has_tools;
     bool kat_coder;
     bool qwen38;
+    bool inkling2;
     const char *chat_template;
     p36_jinja_kwarg *tmpl_kwargs;  /* unrecognized chat_template_kwargs, owned */
     size_t tmpl_kwarg_count;
@@ -985,6 +986,7 @@ static void request_set_model_profile(request *r, p36_engine *e) {
     r->model = xstrdup(p36_engine_model_name(e));
     r->kat_coder = p36_engine_is_kat_coder(e);
     r->qwen38 = p36_engine_is_qwen38(e);
+    r->inkling2 = p36_engine_is_inkling2(e);
     r->chat_template = p36_engine_chat_template(e);
     if (r->kat_coder) r->presence_penalty = 1.5f;
 }

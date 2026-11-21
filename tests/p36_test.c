@@ -4054,9 +4054,9 @@ static void test_pq2_0_native_128(void) {
         NBLK = 4,
         in_dim = BLK * NBLK,       /* 512, 2 q8_K blocks */
         out_dim = 8,
-        N_TOK = 4,
+        N_TOK = 5,
     };
-    static const uint32_t token_counts[N_TOK] = {1u, 2u, 5u, 8u};
+    static const uint32_t token_counts[N_TOK] = {1u, 2u, 5u, 8u, 32u};
     /* Distinct, both signs, none a multiple of another: a paired-repack read
      * (block 0/1 or 2/3 equal) moves the answer far more than any rounding. */
     static const float scales[NBLK] = {0.8125f, -1.1875f, 1.5625f, 0.4375f};
@@ -4136,7 +4136,7 @@ static void test_pq2_0_native_128(void) {
             const uint8_t *row_ptr = (const uint8_t *)weights + (uint64_t)r * row_bytes;
             TEST_ASSERT(p36_quant_dequantize(142u, row_ptr, dequant, in_dim));
             for (tok = 0; tok < tokens; tok++) {
-                if (tokens == 1u) {
+                if (tokens <= 16u) {
                     double sum = 0.0;
                     for (i = 0; i < in_dim; i++)
                         sum += (double)dequant[i] * x_ref[(uint64_t)tok * in_dim + i];
@@ -4168,7 +4168,8 @@ static void test_pq2_0_native_128(void) {
             TEST_ASSERT(max_abs < 1.0e-5);
             decode_checks++;
         } else {
-            TEST_ASSERT(max_abs == 0.0);
+            if (tokens <= 16u) TEST_ASSERT(max_abs < 1.0e-5);
+            else TEST_ASSERT(max_abs == 0.0);
             mmq_checks++;
             /* Forced-equal block scales must change the MMQ result: proof the
              * kernel really consumes an independent scale per 128-block. */

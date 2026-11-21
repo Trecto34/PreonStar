@@ -245,10 +245,21 @@ static void generate_job(server *s, server_slot *slot, job *j) {
     int think_close_id = -1;
     if (j->req.thinking_budget > 0) {
         p36_tokens close = {0};
-        p36_tokenize_rendered_chat(s->engine, "</think>", &close);
+        p36_tokenize_rendered_chat(s->engine,
+                                   j->req.inkling2 ? "<|end_message|>" : "</think>",
+                                   &close);
         if (close.len == 1) think_close_id = close.v[0];
         p36_tokens_free(&close);
     }
+    enum {
+        INK_OUT_IDLE = 0,
+        INK_OUT_AFTER_MSG_MODEL,
+        INK_OUT_IN_THINKING,
+        INK_OUT_IN_TEXT,
+        INK_OUT_IN_TOOL_JSON,
+    } ink_state = INK_OUT_IDLE;
+    bool ink_think_open = j->req.inkling2 && j->req.kind == REQ_CHAT &&
+                          p36_think_mode_enabled(j->req.think_mode);
     const bool thinking_gates_tool_markers = p36_think_mode_enabled(j->req.think_mode);
     bool tool_scan_waiting_for_think_close =
         thinking_gates_tool_markers && thinking.inside;
@@ -385,6 +396,58 @@ static void generate_job(server *s, server_slot *slot, job *j) {
             p36_tokens_push(&generated_tokens, token);
 
             trace_piece(s, trace_id, piece, piece_len);
+            if (j->req.inkling2 && j->req.kind == REQ_CHAT) {
+                const char *emit_str = NULL;
+                if (piece_len == 17 && !memcmp(piece, "<|message_model|>", 17)) {
+                    ink_state = INK_OUT_AFTER_MSG_MODEL;
+                    emit_str = "";
+                } else if (ink_state == INK_OUT_AFTER_MSG_MODEL) {
+                    if (piece_len == 20 && !memcmp(piece, "<|content_thinking|>", 20)) {
+                        ink_state = INK_OUT_IN_THINKING;
+                        if (!ink_think_open) {
+                            emit_str = "<think>";
+                            ink_think_open = true;
+                        } else {
+                            emit_str = "";
+                        }
+                    } else if (piece_len == 16 && !memcmp(piece, "<|content_text|>", 16)) {
+                        ink_state = INK_OUT_IN_TEXT;
+                        if (ink_think_open) {
+                            emit_str = "</think>\n\n";
+                            ink_think_open = false;
+                        } else {
+                            emit_str = "";
+                        }
+                    } else if (piece_len == 28 &&
+                               !memcmp(piece, "<|content_invoke_tool_json|>", 28)) {
+                        ink_state = INK_OUT_IN_TOOL_JSON;
+                        if (ink_think_open) {
+                            emit_str = "</think>\n\n<tool_call>\n";
+                            ink_think_open = false;
+                        } else {
+                            emit_str = "\n<tool_call>\n";
+                        }
+                    } else {
+                        /* Function name prefix token(s) before <|content_invoke_tool_json|> */
+                        emit_str = "";
+                    }
+                } else if (piece_len == 15 && !memcmp(piece, "<|end_message|>", 15)) {
+                    if (ink_state == INK_OUT_IN_THINKING || ink_think_open) {
+                        emit_str = "</think>\n\n";
+                        ink_think_open = false;
+                    } else if (ink_state == INK_OUT_IN_TOOL_JSON) {
+                        emit_str = "\n</tool_call>";
+                    } else {
+                        emit_str = "";
+                    }
+                    ink_state = INK_OUT_IDLE;
+                }
+                if (emit_str) {
+                    free(piece);
+                    piece = xstrdup(emit_str);
+                    piece_len = strlen(emit_str);
+                }
+            }
             buf_append(&text, piece, piece_len);
             bool was_thinking = thinking.inside;
             if (!qwen_tool_decode_state_is_tool(qwen_tool_tracker.decode))
@@ -632,10 +695,17 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         if (parsed_calls.len) {
             if (openai_live_chat) apply_openai_stream_tool_ids(&parsed_calls, &openai_live);
             assign_tool_call_ids(s, &parsed_calls, j->req.api);
+            if (j->req.inkling2) {
+                free(parsed_calls.raw_tool_text);
+                parsed_calls.raw_tool_text = NULL;
+                buf ink_raw = {0};
+                append_inkling2_tool_calls_text(&ink_raw, &parsed_calls);
+                parsed_calls.raw_tool_text = buf_take(&ink_raw);
+            }
             /* Known tool IDs can replay Qwen's empty thinking prelude exactly,
              * preserving recurrent and vision state without a full rebuild. */
             parsed_calls.replay_empty_think = !s->disable_exact_tool_replay &&
-                !j->req.kat_coder && !p36_think_mode_enabled(j->req.think_mode);
+                !j->req.kat_coder && !j->req.inkling2 && !p36_think_mode_enabled(j->req.think_mode);
             tool_memory_remember(s, &parsed_calls);
             final_finish = "tool_calls";
         }

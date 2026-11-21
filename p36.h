@@ -214,6 +214,7 @@ typedef struct {
 
 bool p36_engine_is_qwen38(p36_engine *e);
 bool p36_engine_is_kat_coder(p36_engine *e);
+bool p36_engine_is_inkling2(p36_engine *e);
 const char *p36_engine_chat_template(p36_engine *e);
 const char *p36_qwen38_effort_instruction(p36_think_mode mode);
 const char *p36_jinja_effort_name(p36_think_mode mode);

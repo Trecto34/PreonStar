@@ -145,21 +145,32 @@ p36_context_memory p36_context_memory_estimate_configured(
     m.raw_cap = p36_backend_uses_graph(backend) ? (uint32_t)ctx_size : 0;
     m.comp_cap = 0;
     if (p36_backend_uses_graph(backend)) {
-        uint64_t full_layers = P36_N_LAYER / P36_FULL_ATTENTION_INTERVAL;
-        uint64_t recurrent_layers = P36_N_LAYER - full_layers;
-        uint64_t k_row = p36_kv_cache_row_bytes(cache_type_k,
-                                                P36_N_HEAD_KV * P36_N_HEAD_DIM);
-        uint64_t v_row = p36_kv_cache_row_bytes(cache_type_v,
-                                                P36_N_HEAD_KV * P36_N_VALUE_DIM);
-        m.raw_bytes = full_layers * (uint64_t)ctx_size * (k_row + v_row);
-        m.compressed_bytes = recurrent_layers *
-                             ((uint64_t)(P36_N_SSM_CONV - 1u) *
-                                  P36_N_SSM_CONV_DIM * sizeof(float) +
-                              (uint64_t)P36_N_SSM_STATE * P36_N_SSM_STATE *
-                                  P36_N_SSM_DT_RANK * sizeof(float));
-        m.scratch_bytes = p36_vulkan_scratch_bytes(
-            backend, (uint32_t)ctx_size, m.prefill_cap,
-            cache_type_k, cache_type_v);
+        if (g_p36_shape.variant == P36_VARIANT_INKLING2_LOOP) {
+            uint64_t full_layers = 8ull;
+            uint64_t swa_layers = 40ull;
+            uint64_t swa_cap = 1024ull;
+            uint64_t kv_row = 1024ull * sizeof(uint16_t);
+            uint64_t conv_per_layer = (2ull * 3ull * 1024ull + 2ull * 3ull * 2304ull) * sizeof(float);
+            m.raw_bytes = full_layers * (uint64_t)ctx_size * (2ull * kv_row);
+            m.compressed_bytes = swa_layers * swa_cap * (2ull * kv_row) + 48ull * conv_per_layer;
+            m.scratch_bytes = (uint64_t)m.prefill_cap * 195328ull + 200058ull * sizeof(float);
+        } else {
+            uint64_t full_layers = P36_N_LAYER / P36_FULL_ATTENTION_INTERVAL;
+            uint64_t recurrent_layers = P36_N_LAYER - full_layers;
+            uint64_t k_row = p36_kv_cache_row_bytes(cache_type_k,
+                                                    P36_N_HEAD_KV * P36_N_HEAD_DIM);
+            uint64_t v_row = p36_kv_cache_row_bytes(cache_type_v,
+                                                    P36_N_HEAD_KV * P36_N_VALUE_DIM);
+            m.raw_bytes = full_layers * (uint64_t)ctx_size * (k_row + v_row);
+            m.compressed_bytes = recurrent_layers *
+                                 ((uint64_t)(P36_N_SSM_CONV - 1u) *
+                                      P36_N_SSM_CONV_DIM * sizeof(float) +
+                                  (uint64_t)P36_N_SSM_STATE * P36_N_SSM_STATE *
+                                      P36_N_SSM_DT_RANK * sizeof(float));
+            m.scratch_bytes = p36_vulkan_scratch_bytes(
+                backend, (uint32_t)ctx_size, m.prefill_cap,
+                cache_type_k, cache_type_v);
+        }
     } else {
         m.raw_bytes = (uint64_t)P36_N_LAYER * P36_N_HEAD_KV *
                       P36_N_HEAD_DIM * (uint64_t)ctx_size * sizeof(float);
