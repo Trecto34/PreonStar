@@ -71,7 +71,7 @@ void main(void) {
     float r1 = (lane < 16u) ? r_buf[(h0 + 1u) * 16u + lane] * LOG2E : 0.0;
     float r2 = (lane < 16u) ? r_buf[(h0 + 2u) * 16u + lane] * LOG2E : 0.0;
 
-    uint k_start_all = (pc.is_swa != 0u && pc.pos >= pc.kv_cap) ? (pc.pos - pc.kv_cap + 1u) : 0u;
+    uint k_start_all = (pc.is_swa != 0u && pc.pos >= pc.rel_extent) ? (pc.pos - pc.rel_extent + 1u) : 0u;
     uint k_end_all = pc.pos + 1u;
     uint k_total = k_end_all - k_start_all;
     uint k_per = (k_total + pc.n_splits - 1u) / pc.n_splits;

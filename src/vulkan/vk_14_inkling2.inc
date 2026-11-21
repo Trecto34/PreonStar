@@ -630,7 +630,7 @@ int p36_gpu_inkling2_attn_tensor(
     if (!rb_t) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
     const p36_gpu_tensor *bindings[8] = { q, r, rb_t, sinks, gate, cache_k, cache_v, out };
     if (n_tok == 1u) {
-        uint32_t k_len = (is_swa && pos0 >= kv_cap) ? kv_cap : (pos0 + 1u);
+        uint32_t k_len = (is_swa && pos0 >= rel_extent) ? rel_extent : (pos0 + 1u);
         uint32_t n_splits = (k_len >= 128u) ? ((k_len + 63u) / 64u) : 1u;
         if (n_splits > 16u) n_splits = 16u;
         if (n_splits > 1u && !p36_vk_ink_attn_parts) {

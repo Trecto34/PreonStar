@@ -386,7 +386,7 @@ static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint
     rt->prefill_cap = prefill_cap;
     ink->prefill_cap = prefill_cap;
     ink->full_kv_cap = (uint32_t)ctx_size;
-    ink->swa_kv_cap = 1024u;
+    ink->swa_kv_cap = 2048u;
     ink->n_logical = 48u;
 
     const uint32_t D = 2304u;

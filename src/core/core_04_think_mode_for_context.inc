@@ -148,7 +148,7 @@ p36_context_memory p36_context_memory_estimate_configured(
         if (g_p36_shape.variant == P36_VARIANT_INKLING2_LOOP) {
             uint64_t full_layers = 8ull;
             uint64_t swa_layers = 40ull;
-            uint64_t swa_cap = 1024ull;
+            uint64_t swa_cap = 2048ull;
             uint64_t kv_row = 1024ull * sizeof(uint16_t);
             uint64_t conv_per_layer = (2ull * 3ull * 1024ull + 2ull * 3ull * 2304ull) * sizeof(float);
             m.raw_bytes = full_layers * (uint64_t)ctx_size * (2ull * kv_row);

@@ -87,10 +87,10 @@ void main(void) {
 
     uint t_last = min(t0 + 7u, pc.n_tok - 1u);
     uint k_end_tile = pc.pos0 + t_last + 1u;
-    uint k_min_tile = (pc.is_swa != 0u && (pc.pos0 + t0) >= pc.kv_cap)
-                    ? (pc.pos0 + t0 - pc.kv_cap + 1u) : 0u;
-    uint my_k_start = (pc.is_swa != 0u && q_pos >= pc.kv_cap)
-                    ? (q_pos - pc.kv_cap + 1u) : 0u;
+    uint k_min_tile = (pc.is_swa != 0u && (pc.pos0 + t0) >= pc.rel_extent)
+                    ? (pc.pos0 + t0 - pc.rel_extent + 1u) : 0u;
+    uint my_k_start = (pc.is_swa != 0u && q_pos >= pc.rel_extent)
+                    ? (q_pos - pc.rel_extent + 1u) : 0u;
     uint mask = pc.kv_cap - 1u;
     uint q_pos0 = pc.pos0 + t0;
     bool lane_lt16 = (lane < 16u);

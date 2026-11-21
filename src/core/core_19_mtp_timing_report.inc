@@ -801,7 +801,7 @@ uint64_t p36_session_payload_bytes(p36_session *s) {
     bytes += (uint64_t)rows * sizeof(int32_t);
     bytes += (uint64_t)P36_N_VOCAB * sizeof(float);
     if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) {
-        uint32_t swa_cap = 1024u;
+        uint32_t swa_cap = 2048u;
         uint32_t swa_rows = rows < swa_cap ? rows : swa_cap;
         uint64_t conv_layer_bytes = (2ull * 3ull * 1024ull + 2ull * 3ull * 2304ull) * sizeof(float);
         for (uint32_t il = 0; il < 48u; il++) {
