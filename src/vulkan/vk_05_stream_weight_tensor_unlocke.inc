@@ -230,7 +230,9 @@ int p36_gpu_init(void) {
     p36_vk.matmul_bf16 = P36_VK_KERNEL("vulkan/matmul_bf16.spv", 3, 16, 1u << 2);
     p36_gdn_front = P36_VK_KERNEL("vulkan/gdn_front.spv", 12, 24, 1u | (15u << 8));
     p36_vk.vision_matmul_f16 = P36_VK_KERNEL("vulkan/vision_matmul_f16.spv", 3, 16, 1u << 2);
-    p36_vk.vision_attention = P36_VK_KERNEL("vulkan/vision_attention.spv", 2, 4, 1u << 1);
+    p36_vk.vision_attention = P36_VK_KERNEL("vulkan/vision_attention.spv", 2, 16, 1u << 1);
+    p36_vk.vision_attention_hd64 = P36_VK_KERNEL("vulkan/vision_attention_hd64.spv", 2, 12, 1u << 1);
+    p36_vk.vision_ops = P36_VK_KERNEL("vulkan/vision_ops.spv", 4, 32, 1u << 0);
     p36_vk.matmul_f32 = P36_VK_KERNEL("vulkan/matmul_f32.spv", 3, 16, 1u << 2);
     p36_vk.matmul_f32_fast = P36_VK_KERNEL("vulkan/matmul_f32_fast.spv", 3, 16, 1u << 2);
     p36_vk.matmul_f32_fast_t8 = P36_VK_KERNEL("vulkan/matmul_f32_fast_t8.spv", 3, 16, 1u << 2);

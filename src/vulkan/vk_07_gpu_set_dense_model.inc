@@ -421,17 +421,138 @@ static int p36_vk_vision_matmul_dispatch(p36_gpu_tensor *out,
     return ok;
 }
 
+int p36_gpu_vision_matmul_q8_0_tensor(p36_gpu_tensor *out,
+                                      const p36_gpu_tensor *weights,
+                                      uint64_t in_dim, uint64_t out_dim,
+                                      const p36_gpu_tensor *x,
+                                      uint64_t n_tok) {
+    if (!out || !weights || !x || !in_dim || !out_dim || !n_tok ||
+        (in_dim % 32u) != 0)
+        return 0;
+    uint64_t blocks = in_dim / 32u;
+    uint64_t row_bytes = blocks * 34u;
+    if (row_bytes * out_dim > weights->bytes) return 0;
+
+    struct {
+        uint32_t out_dim;
+        uint32_t n_tok;
+        uint32_t blocks;
+        uint32_t row_bytes;
+        float scale;
+    } push = {(uint32_t)out_dim, (uint32_t)n_tok, (uint32_t)blocks, (uint32_t)row_bytes, 1.0f};
+    const p36_gpu_tensor *bindings[3] = {weights, x, out};
+    int use_f16 = p36_vk.have_f16 && n_tok >= 32u && out_dim >= 64u;
+    p36_vk_kernel *kernel = use_f16 ? &p36_vk.matmul_q8_0_mm_f16 : &p36_vk.matmul_q8_0_mm;
+    uint32_t gx = use_f16 ? (uint32_t)((out_dim + 127u) / 128u) : (uint32_t)((out_dim + 63u) / 64u);
+    uint32_t gy = (uint32_t)((n_tok + 63u) / 64u);
+    pthread_mutex_lock(&p36_vk_mu);
+    int ok = p36_vk_run_unlocked("vision_q8_0", kernel, bindings, &push, sizeof(push), gx, gy, 1u);
+    pthread_mutex_unlock(&p36_vk_mu);
+    return ok;
+}
+
+int p36_gpu_vision_has_hd64(void) {
+    return (p36_vk.subgroup_size == 64u && p36_vk.have_f16) ? 1 : 0;
+}
+
+int p36_gpu_vision_matmul_q8_0_mem(p36_gpu_tensor *out,
+                                   const void *q8_weights,
+                                   uint64_t weight_bytes,
+                                   uint64_t in_dim, uint64_t out_dim,
+                                   const p36_gpu_tensor *x,
+                                   uint64_t n_tok) {
+    if (!out || !q8_weights || !x || !in_dim || !out_dim || !n_tok ||
+        (in_dim % 32u) != 0 || !p36_vk_vision_weight ||
+        weight_bytes > p36_vk_vision_weight->bytes)
+        return 0;
+    uint64_t blocks = in_dim / 32u;
+    uint64_t row_bytes = blocks * 34u;
+    if (row_bytes * out_dim != weight_bytes) return 0;
+    unsigned char *dst = p36_gpu_tensor_contents_named(
+        p36_vk_vision_weight, "submit_wait_vision_q8_weight_reuse");
+    if (!dst) return 0;
+    memcpy(dst, q8_weights, (size_t)weight_bytes);
+
+    struct {
+        uint32_t out_dim;
+        uint32_t n_tok;
+        uint32_t blocks;
+        uint32_t row_bytes;
+        float scale;
+    } push = {(uint32_t)out_dim, (uint32_t)n_tok, (uint32_t)blocks, (uint32_t)row_bytes, 1.0f};
+    const p36_gpu_tensor *bindings[3] = {p36_vk_vision_weight, x, out};
+    int use_f16 = p36_vk.have_f16 && n_tok >= 32u && out_dim >= 64u;
+    p36_vk_kernel *kernel = use_f16 ? &p36_vk.matmul_q8_0_mm_f16 : &p36_vk.matmul_q8_0_mm;
+    uint32_t gx = use_f16 ? (uint32_t)((out_dim + 127u) / 128u) : (uint32_t)((out_dim + 63u) / 64u);
+    uint32_t gy = (uint32_t)((n_tok + 63u) / 64u);
+    pthread_mutex_lock(&p36_vk_mu);
+    int ok = p36_vk_run_unlocked("vision_q8_0", kernel, bindings, &push, sizeof(push), gx, gy, 1u);
+    pthread_mutex_unlock(&p36_vk_mu);
+    return ok;
+}
+
+int p36_gpu_vision_op(uint32_t op,
+                      p36_gpu_tensor *a,
+                      const p36_gpu_tensor *b,
+                      const p36_gpu_tensor *c,
+                      const p36_gpu_tensor *d,
+                      uint32_t rows, uint32_t width,
+                      uint32_t p0, uint32_t p1, uint32_t p2,
+                      float fp0, uint32_t gx) {
+    if (!a || !gx) return 0;
+    struct {
+        uint32_t op;
+        uint32_t rows;
+        uint32_t width;
+        uint32_t p0;
+        uint32_t p1;
+        uint32_t p2;
+        float fp0;
+        uint32_t pad;
+    } push = {op, rows, width, p0, p1, p2, fp0, 0u};
+    const p36_gpu_tensor *bindings[4] = {a, b ? b : a, c ? c : a, d ? d : a};
+    pthread_mutex_lock(&p36_vk_mu);
+    int ok = p36_vk_run_unlocked("vision_ops", &p36_vk.vision_ops,
+                                 bindings, &push, sizeof(push), gx, 1u, 1u);
+    pthread_mutex_unlock(&p36_vk_mu);
+    return ok;
+}
+
+int p36_gpu_vision_attention_ex(p36_gpu_tensor *out,
+                                const p36_gpu_tensor *qkv,
+                                uint32_t rows,
+                                uint32_t n_heads,
+                                uint32_t head_dim) {
+    if (!out || !qkv || !rows || !n_heads || !head_dim || head_dim > 128u) return 0;
+    const p36_gpu_tensor *bindings[2] = {qkv, out};
+    pthread_mutex_lock(&p36_vk_mu);
+    int ok;
+    if (head_dim == 64u && p36_vk.subgroup_size == 64u && p36_vk.have_f16) {
+        struct {
+            uint32_t rows;
+            uint32_t n_heads;
+            float scale;
+        } push = {rows, n_heads, 1.0f / 8.0f};
+        ok = p36_vk_run_unlocked("vision_attention_hd64", &p36_vk.vision_attention_hd64,
+                                 bindings, &push, sizeof(push), (rows + 15u) / 16u, n_heads, 1u);
+    } else {
+        struct {
+            uint32_t rows;
+            uint32_t n_heads;
+            uint32_t head_dim;
+            float scale;
+        } push = {rows, n_heads, head_dim, 1.0f / sqrtf((float)head_dim)};
+        ok = p36_vk_run_unlocked("vision_attention", &p36_vk.vision_attention,
+                                 bindings, &push, sizeof(push), rows, n_heads, 1u);
+    }
+    pthread_mutex_unlock(&p36_vk_mu);
+    return ok;
+}
+
 int p36_gpu_vision_attention(p36_gpu_tensor *out,
                              const p36_gpu_tensor *qkv,
                              uint32_t rows) {
-    if (!out || !qkv || !rows) return 0;
-    struct { uint32_t rows; } push = {rows};
-    const p36_gpu_tensor *bindings[2] = {qkv, out};
-    pthread_mutex_lock(&p36_vk_mu);
-    int ok = p36_vk_run_unlocked("vision_attention", &p36_vk.vision_attention,
-                                 bindings, &push, sizeof(push), rows, 16u, 1u);
-    pthread_mutex_unlock(&p36_vk_mu);
-    return ok;
+    return p36_gpu_vision_attention_ex(out, qkv, rows, 16u, 72u);
 }
 
 /* The f32 tensors in this model are the small control projections (expert

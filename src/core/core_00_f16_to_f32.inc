@@ -693,6 +693,8 @@ struct p36_engine {
     p36_gpu_tensor *directional_steering_gpu;
     p36_gpu_tensor *session_batch_logits;
     uint32_t session_batch_logits_cap;
+    p36_gpu_tensor *vision_gpu_buf;
+    uint64_t *vision_gpu_offsets;
 #endif
     float directional_steering_attn_scale;
     float directional_steering_ffn_scale;
@@ -709,6 +711,14 @@ struct p36_engine {
     bool ssd_streaming_full_layers_set;
     bool mtp_ready;
     bool vision_ready;
+    uint32_t vision_kind; /* 0=none, 1=qwen3vl, 2=inkling2v */
+    uint32_t vision_patch_size;
+    uint32_t vision_spatial_merge;
+    uint32_t vision_n_embd;
+    uint32_t vision_n_ff;
+    uint32_t vision_n_layer;
+    uint32_t vision_n_head;
+    float vision_ln_eps;
     bool kat_coder;
     char *chat_template;
     bool cpu_mmq_contract;   /* CPU reference emulates the f16 dense MMQ contract */

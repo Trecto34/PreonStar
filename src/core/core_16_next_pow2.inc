@@ -376,9 +376,9 @@ static void vocab_load(p36_vocab *vocab, const p36_model *model) {
         vocab->im_end_id = vocab_lookup_opt(vocab, "<|end_message|>");
         vocab->think_start_id = vocab_lookup_opt(vocab, "<|content_thinking|>");
         vocab->think_end_id = vocab_lookup_opt(vocab, "<|end_message|>");
-        vocab->vision_start_id = vocab_lookup_opt(vocab, "<|vision_start|>");
-        vocab->vision_end_id = vocab_lookup_opt(vocab, "<|vision_end|>");
-        vocab->image_pad_id = vocab_lookup_opt(vocab, "<|image_pad|>");
+        vocab->vision_start_id = vocab_lookup_opt(vocab, "<|content_image|>");
+        vocab->vision_end_id = vocab_lookup_opt(vocab, "<|end_message|>");
+        vocab->image_pad_id = vocab->vision_start_id;
         vocab->video_pad_id = vocab_lookup_opt(vocab, "<|video_pad|>");
     } else {
         vocab->im_start_id = vocab_lookup(vocab, "<|im_start|>");

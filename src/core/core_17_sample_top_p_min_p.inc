@@ -326,14 +326,49 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
     }
     if (opt->vision_path && opt->vision_path[0]) {
         model_open(&e->vision_model, opt->vision_path, false);
-        p36_str arch = required_string(&e->vision_model, "general.architecture");
-        p36_str projector = required_string(&e->vision_model, "clip.projector_type");
+        p36_str arch = {0}, projector = {0};
+        bool has_arch = model_get_string(&e->vision_model, "general.architecture", &arch);
+        bool has_proj = model_get_string(&e->vision_model, "clip.projector_type", &projector) ||
+                        model_get_string(&e->vision_model, "clip.vision.projector_type", &projector);
         p36_tensor *projection = model_find_tensor(&e->vision_model, "mm.2.weight");
-        if (!p36_streq(arch, "clip") || !p36_streq(projector, "qwen3vl_merger") ||
-            !projection ||
-            (projection->type != P36_TENSOR_F16 && projection->type != P36_TENSOR_F32 &&
-             projection->type != P36_TENSOR_Q8_0) ||
-            projection->dim[0] != 4608u || projection->dim[1] != P36_N_EMBD) {
+        bool sidecar_ok = false;
+        if (has_arch && has_proj && p36_streq(arch, "clip") && projection &&
+            (projection->type == P36_TENSOR_F16 || projection->type == P36_TENSOR_F32 ||
+             projection->type == P36_TENSOR_Q8_0) &&
+            projection->dim[1] == P36_N_EMBD) {
+            if (e->variant == P36_VARIANT_INKLING2_LOOP && p36_streq(projector, "inkling2v")) {
+                uint32_t patch_size = 20u, merge = 2u, v_embd = 1024u, v_ff = 4096u;
+                uint32_t v_layer = 23u, v_head = 16u;
+                float v_eps = 1.0e-5f;
+                model_get_u32(&e->vision_model, "clip.vision.patch_size", &patch_size);
+                model_get_u32(&e->vision_model, "clip.vision.spatial_merge_size", &merge);
+                model_get_u32(&e->vision_model, "clip.vision.embedding_length", &v_embd);
+                model_get_u32(&e->vision_model, "clip.vision.feed_forward_length", &v_ff);
+                model_get_u32(&e->vision_model, "clip.vision.block_count", &v_layer);
+                model_get_u32(&e->vision_model, "clip.vision.attention.head_count", &v_head);
+                model_get_f32_compat(&e->vision_model, "clip.vision.attention.layer_norm_epsilon", &v_eps);
+                if (patch_size > 0 && merge > 0 && v_embd > 0 && v_head > 0 &&
+                    (v_embd % v_head) == 0 && (v_embd / v_head) <= 128u &&
+                    v_layer > 0 && v_ff > 0 &&
+                    projection->dim[0] == v_embd * merge * merge) {
+                    e->vision_kind = 2u; /* inkling2v */
+                    e->vision_patch_size = patch_size;
+                    e->vision_spatial_merge = merge;
+                    e->vision_n_embd = v_embd;
+                    e->vision_n_ff = v_ff;
+                    e->vision_n_layer = v_layer;
+                    e->vision_n_head = v_head;
+                    e->vision_ln_eps = v_eps;
+                    sidecar_ok = true;
+                }
+            } else if (e->variant != P36_VARIANT_INKLING2_LOOP &&
+                       p36_streq(projector, "qwen3vl_merger") &&
+                       projection->dim[0] == 4608u) {
+                e->vision_kind = 1u; /* qwen3vl */
+                sidecar_ok = true;
+            }
+        }
+        if (!sidecar_ok) {
             fprintf(stderr, "p36: vision sidecar does not match the language model\n");
             p36_engine_close(e);
             return 1;
@@ -342,7 +377,9 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
         madvise((void *)e->vision_model.map, (size_t)e->vision_model.size, MADV_RANDOM);
 #endif
 #ifdef MADV_DONTNEED
-        madvise((void *)e->vision_model.map, (size_t)e->vision_model.size, MADV_DONTNEED);
+        if (e->vision_kind != 2u) {
+            madvise((void *)e->vision_model.map, (size_t)e->vision_model.size, MADV_DONTNEED);
+        }
 #endif
 #if !defined(P36_NO_GPU) && !defined(P36_METAL)
         /* Non-F16 matrices are expanded to F16 in the stream buffer. */
@@ -597,6 +634,8 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
 void p36_engine_close(p36_engine *e) {
     if (!e) return;
 #ifndef P36_NO_GPU
+    p36_gpu_tensor_free(e->vision_gpu_buf);
+    free(e->vision_gpu_offsets);
     p36_gpu_tensor_free(e->directional_steering_gpu);
     p36_gpu_tensor_free(e->session_batch_logits);
     if (p36_backend_uses_graph(e->backend)) p36_gpu_cleanup();

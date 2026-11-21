@@ -477,3 +477,107 @@ int p36_image_preprocess_qwen3vl(
     out->patches = patches;
     return 1;
 }
+
+int p36_image_preprocess_inkling2v(
+        p36_image_patches *out,
+        const p36_image *image,
+        uint32_t patch_size,
+        uint32_t spatial_merge,
+        uint32_t max_patches,
+        char *error,
+        size_t error_cap) {
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    if (!image || !image->rgb || !image->width || !image->height ||
+        !patch_size || !spatial_merge || max_patches < spatial_merge * spatial_merge ||
+        max_patches > 16384u) {
+        p36_image_error(error, error_cap, "invalid Inkling-2 vision image parameters");
+        return 0;
+    }
+
+    const uint32_t align = patch_size * spatial_merge;
+    const uint64_t max_pixels = (uint64_t)max_patches * patch_size * patch_size;
+    uint32_t content_w = image->width;
+    uint32_t content_h = image->height;
+    uint32_t padded_w = ((content_w + align - 1u) / align) * align;
+    uint32_t padded_h = ((content_h + align - 1u) / align) * align;
+    bool resized = false;
+
+    if ((uint64_t)padded_w * padded_h > max_pixels) {
+        double scale = sqrt((double)max_pixels / ((double)content_w * content_h));
+        content_w = (uint32_t)floor((double)content_w * scale / align) * align;
+        content_h = (uint32_t)floor((double)content_h * scale / align) * align;
+        if (content_w < align) content_w = align;
+        if (content_h < align) content_h = align;
+        while ((uint64_t)content_w * content_h > max_pixels) {
+            if (content_w >= content_h && content_w > align) content_w -= align;
+            else if (content_h > align) content_h -= align;
+            else break;
+        }
+        padded_w = content_w;
+        padded_h = content_h;
+        resized = true;
+    }
+
+    size_t canvas_values = (size_t)padded_w * padded_h * 3u;
+    float *canvas = malloc(canvas_values * sizeof(*canvas));
+    if (!canvas) {
+        p36_image_error(error, error_cap, "unable to allocate Inkling-2 image canvas");
+        return 0;
+    }
+    /* Reference pads with raw -1.0f before normalizing with mean=127.5, std=127.5. */
+    for (size_t i = 0; i < canvas_values; i++) canvas[i] = -1.0f;
+
+    if (resized) {
+        p36_resize_rgb_bicubic(image->rgb, image->width, image->height,
+                               canvas, content_w, content_h, padded_w);
+    } else {
+        for (uint32_t y = 0; y < content_h; y++) {
+            const uint8_t *src = image->rgb + (size_t)y * content_w * 3u;
+            float *dst = canvas + (size_t)y * padded_w * 3u;
+            for (uint32_t x = 0; x < content_w * 3u; x++) dst[x] = (float)src[x];
+        }
+    }
+
+    for (size_t i = 0; i < canvas_values; i++)
+        canvas[i] = (canvas[i] - 127.5f) / 127.5f;
+
+    uint32_t grid_w = padded_w / patch_size;
+    uint32_t grid_h = padded_h / patch_size;
+    uint32_t patch_count = grid_w * grid_h;
+    size_t patch_dim = (size_t)3u * patch_size * patch_size;
+    float *patches = malloc((size_t)patch_count * patch_dim * sizeof(*patches));
+    if (!patches) {
+        free(canvas);
+        p36_image_error(error, error_cap, "unable to allocate Inkling-2 vision patches");
+        return 0;
+    }
+
+    /* Row-major (py, px) patches; each patch stored in (c, y, x) order to match
+     * v.patch_embd.weight dims=(patch_size, patch_size, 3, n_embd). */
+    size_t idx = 0;
+    for (uint32_t py = 0; py < grid_h; py++) {
+        for (uint32_t px = 0; px < grid_w; px++) {
+            for (uint32_t c = 0; c < 3u; c++) {
+                for (uint32_t y = 0; y < patch_size; y++) {
+                    for (uint32_t x = 0; x < patch_size; x++) {
+                        patches[idx++] = canvas[
+                            ((size_t)(py * patch_size + y) * padded_w +
+                             px * patch_size + x) * 3u + c];
+                    }
+                }
+            }
+        }
+    }
+    free(canvas);
+    out->content_width = content_w;
+    out->content_height = content_h;
+    out->padded_width = padded_w;
+    out->padded_height = padded_h;
+    out->grid_width = grid_w;
+    out->grid_height = grid_h;
+    out->patch_count = patch_count;
+    out->image_token_count = patch_count / (spatial_merge * spatial_merge);
+    out->patches = patches;
+    return 1;
+}

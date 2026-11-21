@@ -1,0 +1,162 @@
+#version 460
+
+/* Multi-op Vulkan elementwise / LayerNorm / 2D RoPE / LayerScale / GELU_ERF
+ * shader for GPU-resident Inkling-2 ViT execution.
+ *
+ * op == 0: LayerNorm: A[r, d] = (B[r, d] - mean) * inv_std * C[d] + D[d]
+ *          Dispatch: (rows, 1, 1), local_size_x = 256, fparam0 = eps
+ * op == 1: Bias + Inkling-2 2D RoPE + pack into QKV slice:
+ *          A[r * 3 * width + part * width + d] = RoPE(B[r, d] + C[d])
+ *          Dispatch: ((rows * (width / 2) + 255) / 256, 1, 1)
+ *          param0 = part (0=Q, 1=K, 2=V), param1 = grid_w, param2 = head_dim
+ * op == 2: LayerScale + Bias + Residual:
+ *          A[i] = A[i] + (B[i] + C[i % width]) * D[i % width]
+ *          Dispatch: ((rows * width + 255) / 256, 1, 1)
+ * op == 3: GELU_ERF + optional Bias (in-place on A):
+ *          v = A[i] + (param0 != 0 ? C[i % width] : 0.0)
+ *          A[i] = 0.5 * v * (1.0 + erf(v * 0.70710678))
+ *          Dispatch: ((rows * width + 255) / 256, 1, 1)
+ */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer BufA { float A[]; };
+layout(set = 0, binding = 1) readonly buffer BufB { float B[]; };
+layout(set = 0, binding = 2) readonly buffer BufC { float C[]; };
+layout(set = 0, binding = 3) readonly buffer BufD { float D[]; };
+
+layout(push_constant) uniform Push {
+    uint op;
+    uint rows;
+    uint width;
+    uint param0;
+    uint param1;
+    uint param2;
+    float fparam0;
+    uint pad;
+} pc;
+
+shared float sh0[256];
+shared float sh1[256];
+
+/* Abramowitz & Stegun 7.1.26 erf approximation, max error < 1.5e-7. */
+float fast_erf(float x) {
+    float s = x < 0.0 ? -1.0 : 1.0;
+    float a = abs(x);
+    float t = 1.0 / (1.0 + 0.3275911 * a);
+    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+                      - 0.284496736) * t + 0.254829592) * t * exp(-a * a);
+    return s * y;
+}
+
+void main() {
+    if (pc.op == 0u) {
+        /* LayerNorm */
+        uint r = gl_WorkGroupID.x;
+        uint tid = gl_LocalInvocationID.x;
+        if (r >= pc.rows) return;
+        uint base = r * pc.width;
+        float sum = 0.0;
+        for (uint d = tid; d < pc.width; d += 256u) sum += B[base + d];
+        sh0[tid] = sum;
+        barrier();
+        for (uint s = 128u; s > 0u; s >>= 1u) {
+            if (tid < s) sh0[tid] += sh0[tid + s];
+            barrier();
+        }
+        float mean = sh0[0] / float(pc.width);
+        float var_sum = 0.0;
+        for (uint d = tid; d < pc.width; d += 256u) {
+            float diff = B[base + d] - mean;
+            var_sum += diff * diff;
+        }
+        sh1[tid] = var_sum;
+        barrier();
+        for (uint s = 128u; s > 0u; s >>= 1u) {
+            if (tid < s) sh1[tid] += sh1[tid + s];
+            barrier();
+        }
+        float inv = inversesqrt(sh1[0] / float(pc.width) + pc.fparam0);
+        for (uint d = tid; d < pc.width; d += 256u) {
+            A[base + d] = (B[base + d] - mean) * inv * C[d] + D[d];
+        }
+    } else if (pc.op == 1u || pc.op == 5u) {
+        /* Bias + 2D RoPE + pack into QKV:
+         * op == 1: row-major interleaved [rows, 3, width]
+         * op == 5: head-major contiguous [3, n_heads, rows, head_dim] */
+        uint half_w = pc.width >> 1u;
+        uint gid = gl_GlobalInvocationID.x;
+        uint total = pc.rows * half_w;
+        if (gid >= total) return;
+        uint r = gid / half_w;
+        uint p = gid - r * half_w;
+        uint d0 = p * 2u;
+        uint d1 = d0 + 1u;
+        uint src_base = r * pc.width;
+        float v0 = B[src_base + d0] + C[d0];
+        float v1 = B[src_base + d1] + C[d1];
+        uint head_dim = pc.param2;
+        if (pc.param0 < 2u && r > 0u) {
+            uint half_hd = head_dim >> 1u;
+            uint in_head = d0 % head_dim;
+            uint idx = r - 1u;
+            float pos = (in_head < half_hd)
+                ? float((idx % pc.param1) + 1u)
+                : float((idx / pc.param1) + 1u);
+            uint pair_i = (in_head < half_hd ? in_head : (in_head - half_hd)) >> 1u;
+            float angle = pos * pow(10000.0, -2.0 * float(pair_i) / float(half_hd));
+            float cs = cos(angle);
+            float sn = sin(angle);
+            float r0 = v0 * cs - v1 * sn;
+            float r1 = v0 * sn + v1 * cs;
+            v0 = r0;
+            v1 = r1;
+        }
+        if (pc.op == 5u) {
+            uint n_heads = pc.width / head_dim;
+            uint head = d0 / head_dim;
+            uint in_head = d0 - head * head_dim;
+            uint dst_base = (pc.param0 * n_heads + head) * (pc.rows * head_dim) + r * head_dim;
+            A[dst_base + in_head] = v0;
+            A[dst_base + in_head + 1u] = v1;
+        } else {
+            uint dst_base = r * (pc.width * 3u) + pc.param0 * pc.width;
+            A[dst_base + d0] = v0;
+            A[dst_base + d1] = v1;
+        }
+    } else if (pc.op == 2u) {
+        /* LayerScale + Bias + Residual */
+        uint gid = gl_GlobalInvocationID.x;
+        uint total = pc.rows * pc.width;
+        if (gid >= total) return;
+        uint d = gid % pc.width;
+        A[gid] = A[gid] + (B[gid] + C[d]) * D[d];
+    } else if (pc.op == 3u) {
+        /* GELU_ERF + optional Bias */
+        uint gid = gl_GlobalInvocationID.x;
+        uint total = pc.rows * pc.width;
+        if (gid >= total) return;
+        float v = A[gid];
+        if (pc.param0 != 0u) v += C[gid % pc.width];
+        A[gid] = 0.5 * v * (1.0 + fast_erf(v * 0.7071067811865475));
+    } else if (pc.op == 4u) {
+        /* Spatial merge (skip CLS row 0): B[1 + py*grid_w + px, d] -> A[by*gw_m + bx, sub*D + d]
+         * rows = gh_m * gw_m, width = merge * merge * D, param0 = grid_w, param1 = merge, param2 = D */
+        uint gid = gl_GlobalInvocationID.x;
+        uint total = pc.rows * pc.width;
+        if (gid >= total) return;
+        uint m_idx = gid / pc.width;
+        uint m_off = gid - m_idx * pc.width;
+        uint sub = m_off / pc.param2;
+        uint d = m_off - sub * pc.param2;
+        uint gw_m = pc.param0 / pc.param1;
+        uint by = m_idx / gw_m;
+        uint bx = m_idx - by * gw_m;
+        uint my = sub / pc.param1;
+        uint mx = sub - my * pc.param1;
+        uint py = by * pc.param1 + my;
+        uint px = bx * pc.param1 + mx;
+        uint src_row = 1u + py * pc.param0 + px;
+        A[gid] = B[src_row * pc.param2 + d];
+    }
+}

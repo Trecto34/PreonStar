@@ -56,6 +56,8 @@ VULKAN_SHADERS := \
 	vulkan/matmul_bf16.spv \
 	vulkan/vision_matmul_f16.spv \
 	vulkan/vision_attention.spv \
+	vulkan/vision_attention_hd64.spv \
+	vulkan/vision_ops.spv \
 	vulkan/matmul_f32.spv \
 	vulkan/matmul_f32_fast.spv \
 	vulkan/matmul_f32_fast_t8.spv \
@@ -277,6 +279,12 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_qkv_rel_q4k_decode.spv
 
 vulkan/inkling2_mix.spv: vulkan/inkling2_mix.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/vision_attention_hd64.spv: vulkan/vision_attention_hd64.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/vision_ops.spv: vulkan/vision_ops.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_post_attn_mix.spv: vulkan/inkling2_post_attn_mix.comp

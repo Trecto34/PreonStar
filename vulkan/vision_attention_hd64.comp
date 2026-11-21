@@ -1,0 +1,110 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+/* 16-query LDS-tiled Wave64 Flash-Attention for head_dim == 64 (Inkling-2 ViT).
+ * Reads head-major contiguous QKV layout [3, n_heads, rows, 64] so K/V tiles
+ * are 100% sequential 8 KiB DRAM bursts (zero 12 KiB row-stride misses).
+ * Writes row-major output [rows, n_heads * 64] directly for attn_out GEMM.
+ * Dispatch: ((rows + 15) / 16, n_heads, 1). */
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer QKV { float qkv[]; };
+layout(set = 0, binding = 1) writeonly buffer Output { float outv[]; };
+
+layout(push_constant) uniform Push {
+    uint rows;
+    uint n_heads;
+    float scale;
+} pc;
+
+shared float16_t sK[32][64];
+shared float16_t sV[32][64];
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint wy = gl_LocalInvocationID.y;
+    uint r0 = gl_WorkGroupID.x * 16u + wy * 4u;
+    uint head = gl_WorkGroupID.y;
+    uint embd = pc.n_heads * 64u;
+    uint head_stride = pc.rows * 64u;
+    uint q_base = head * head_stride + lane;
+    uint k_base = (pc.n_heads + head) * head_stride + lane;
+    uint v_base = (2u * pc.n_heads + head) * head_stride + lane;
+
+    float q0 = (r0 + 0u < pc.rows) ? qkv[q_base + (r0 + 0u) * 64u] : 0.0;
+    float q1 = (r0 + 1u < pc.rows) ? qkv[q_base + (r0 + 1u) * 64u] : 0.0;
+    float q2 = (r0 + 2u < pc.rows) ? qkv[q_base + (r0 + 2u) * 64u] : 0.0;
+    float q3 = (r0 + 3u < pc.rows) ? qkv[q_base + (r0 + 3u) * 64u] : 0.0;
+
+    float acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
+    float high0 = -3.402823466e38, high1 = -3.402823466e38;
+    float high2 = -3.402823466e38, high3 = -3.402823466e38;
+    float den0 = 0.0, den1 = 0.0, den2 = 0.0, den3 = 0.0;
+
+    for (uint base = 0u; base < pc.rows; base += 32u) {
+        uint tile = min(32u, pc.rows - base);
+        for (uint t = wy; t < 32u; t += 4u) {
+            uint kr = base + t;
+            if (kr < pc.rows) {
+                uint off = kr * 64u;
+                sK[t][lane] = float16_t(qkv[k_base + off]);
+                sV[t][lane] = float16_t(qkv[v_base + off]);
+            } else {
+                sK[t][lane] = float16_t(0.0);
+                sV[t][lane] = float16_t(0.0);
+            }
+        }
+        barrier();
+
+        if (r0 < pc.rows) {
+            for (uint t = 0u; t < tile; t++) {
+                float kf = float(sK[t][lane]);
+                float vf = float(sV[t][lane]);
+                bool first = (base == 0u && t == 0u);
+
+                float s0 = subgroupAdd(q0 * kf) * pc.scale;
+                float n0 = max(high0, s0);
+                float o0 = first ? 0.0 : exp(high0 - n0);
+                float w0 = exp(s0 - n0);
+                den0 = den0 * o0 + w0;
+                acc0 = acc0 * o0 + w0 * vf;
+                high0 = n0;
+
+                float s1 = subgroupAdd(q1 * kf) * pc.scale;
+                float n1 = max(high1, s1);
+                float o1 = first ? 0.0 : exp(high1 - n1);
+                float w1 = exp(s1 - n1);
+                den1 = den1 * o1 + w1;
+                acc1 = acc1 * o1 + w1 * vf;
+                high1 = n1;
+
+                float s2 = subgroupAdd(q2 * kf) * pc.scale;
+                float n2 = max(high2, s2);
+                float o2 = first ? 0.0 : exp(high2 - n2);
+                float w2 = exp(s2 - n2);
+                den2 = den2 * o2 + w2;
+                acc2 = acc2 * o2 + w2 * vf;
+                high2 = n2;
+
+                float s3 = subgroupAdd(q3 * kf) * pc.scale;
+                float n3 = max(high3, s3);
+                float o3 = first ? 0.0 : exp(high3 - n3);
+                float w3 = exp(s3 - n3);
+                den3 = den3 * o3 + w3;
+                acc3 = acc3 * o3 + w3 * vf;
+                high3 = n3;
+            }
+        }
+        barrier();
+    }
+
+    uint out_head_off = head * 64u + lane;
+    if (r0 + 0u < pc.rows) outv[(r0 + 0u) * embd + out_head_off] = acc0 / den0;
+    if (r0 + 1u < pc.rows) outv[(r0 + 1u) * embd + out_head_off] = acc1 / den1;
+    if (r0 + 2u < pc.rows) outv[(r0 + 2u) * embd + out_head_off] = acc2 / den2;
+    if (r0 + 3u < pc.rows) outv[(r0 + 3u) * embd + out_head_off] = acc3 / den3;
+}

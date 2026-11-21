@@ -156,6 +156,8 @@ typedef struct {
     p36_vk_kernel matmul_bf16;
     p36_vk_kernel vision_matmul_f16;
     p36_vk_kernel vision_attention;
+    p36_vk_kernel vision_attention_hd64;
+    p36_vk_kernel vision_ops;
     p36_vk_kernel matmul_f32;
     p36_vk_kernel matmul_f32_fast;
     p36_vk_kernel matmul_f32_fast_t8;

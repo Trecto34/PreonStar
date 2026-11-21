@@ -208,6 +208,79 @@ static int p36_vision_fill_cb(void *opaque, uint16_t *dst) {
 }
 #endif
 
+#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+static bool p36_vision_ensure_resident_gpu(p36_engine *e) {
+    if (e->vision_gpu_buf && e->vision_gpu_offsets) return true;
+    p36_model *m = &e->vision_model;
+    if (!m->n_tensors || !m->map) return false;
+    uint64_t *offs = calloc((size_t)m->n_tensors, sizeof(*offs));
+    if (!offs) return false;
+    uint64_t total = 0;
+    for (uint64_t i = 0; i < m->n_tensors; i++) {
+        offs[i] = total;
+        total += (m->tensors[i].bytes + 255u) & ~255ull;
+    }
+    p36_gpu_tensor *buf = p36_gpu_tensor_alloc_uninitialized(total);
+    if (!buf) {
+        free(offs);
+        return false;
+    }
+    int ok = 1;
+    for (uint64_t i = 0; i < m->n_tensors; i++) {
+        const p36_tensor *t = &m->tensors[i];
+        if (!p36_gpu_tensor_write(buf, offs[i], m->map + t->abs_offset, t->bytes)) {
+            ok = 0;
+            break;
+        }
+    }
+    if (!ok) {
+        p36_gpu_tensor_free(buf);
+        free(offs);
+        return false;
+    }
+    e->vision_gpu_buf = buf;
+    e->vision_gpu_offsets = offs;
+    return true;
+}
+
+static p36_gpu_tensor *p36_vision_resident_view(p36_engine *e, const p36_tensor *t) {
+    if (!e || !e->vision_gpu_buf || !e->vision_gpu_offsets || !t) return NULL;
+    uint64_t idx = (uint64_t)(t - e->vision_model.tensors);
+    if (idx >= e->vision_model.n_tensors) return NULL;
+    return p36_gpu_tensor_view(e->vision_gpu_buf, e->vision_gpu_offsets[idx], t->bytes);
+}
+
+static bool p36_vision_mm_gpu(p36_engine *e, const p36_tensor *weight,
+                              const p36_gpu_tensor *gx, p36_gpu_tensor *gy,
+                              uint32_t rows, uint32_t in_dim, uint32_t out_dim) {
+    p36_model *m = &e->vision_model;
+    if (!p36_vision_weight_type_ok(weight, in_dim) ||
+        weight->elements != (uint64_t)in_dim * out_dim ||
+        (weight->ndim == 2 &&
+         (weight->dim[0] != in_dim || weight->dim[1] != out_dim)))
+        return false;
+    if (weight->type == P36_TENSOR_Q8_0) {
+        if (e->vision_gpu_buf && e->vision_gpu_offsets) {
+            p36_gpu_tensor *wv = p36_vision_resident_view(e, weight);
+            if (!wv) return false;
+            int ok = p36_gpu_vision_matmul_q8_0_tensor(gy, wv, in_dim, out_dim, gx, rows);
+            p36_gpu_tensor_free(wv);
+            return ok != 0;
+        }
+        return p36_gpu_vision_matmul_q8_0_mem(gy, m->map + weight->abs_offset,
+                                              weight->bytes, in_dim, out_dim,
+                                              gx, rows) != 0;
+    }
+    if (weight->type == P36_TENSOR_F16) {
+        return p36_gpu_vision_matmul_f16_disk(gy, m->fd, weight->abs_offset,
+                                              in_dim, out_dim, gx, rows) != 0;
+    }
+    p36_vision_fill_job fj = {{m, weight, in_dim, NULL}, out_dim, e->n_threads};
+    return p36_gpu_vision_matmul_f16_fill(gy, p36_vision_fill_cb, &fj,
+                                          in_dim, out_dim, gx, rows) != 0;
+}
+#endif
+
 static bool p36_vision_mm(p36_engine *e, const p36_tensor *weight,
                           const float *input, float *output,
                           uint32_t rows, uint32_t in_dim, uint32_t out_dim,
@@ -225,13 +298,8 @@ static bool p36_vision_mm(p36_engine *e, const p36_tensor *weight,
         p36_gpu_tensor *gx = p36_gpu_tensor_alloc_uninitialized(in_bytes);
         p36_gpu_tensor *gy = p36_gpu_tensor_alloc_uninitialized(out_bytes);
         float *tmp = add ? malloc((size_t)out_bytes) : output;
-        p36_vision_fill_job fj = {{m, weight, in_dim, NULL}, out_dim, e->n_threads};
         int ok = gx && gy && tmp && p36_gpu_tensor_write(gx, 0, input, in_bytes) &&
-            (weight->type == P36_TENSOR_F16
-                 ? p36_gpu_vision_matmul_f16_disk(gy, m->fd, weight->abs_offset,
-                                                  in_dim, out_dim, gx, rows)
-                 : p36_gpu_vision_matmul_f16_fill(gy, p36_vision_fill_cb, &fj,
-                                                  in_dim, out_dim, gx, rows)) &&
+            p36_vision_mm_gpu(e, weight, gx, gy, rows, in_dim, out_dim) &&
             p36_gpu_tensor_read(gy, 0, tmp, out_bytes);
         if (ok && add)
             for (uint64_t i = 0, n = (uint64_t)rows * out_dim; i < n; i++)
@@ -239,10 +307,6 @@ static bool p36_vision_mm(p36_engine *e, const p36_tensor *weight,
         if (add) free(tmp);
         p36_gpu_tensor_free(gx);
         p36_gpu_tensor_free(gy);
-#ifdef POSIX_FADV_DONTNEED
-        posix_fadvise(m->fd, (off_t)weight->abs_offset, (off_t)weight->bytes,
-                      POSIX_FADV_DONTNEED);
-#endif
         if (ok) return true;
         return false;
 #endif
@@ -262,9 +326,9 @@ static const float *p36_vision_f32(const p36_model *m, const p36_tensor *t,
     return (const float *)(m->map + t->abs_offset);
 }
 
-static void p36_vision_layer_norm(float *out, const float *x,
-                                  const float *weight, const float *bias,
-                                  uint32_t rows, uint32_t width) {
+static void p36_vision_layer_norm_eps(float *out, const float *x,
+                                      const float *weight, const float *bias,
+                                      uint32_t rows, uint32_t width, float eps) {
     for (uint32_t r = 0; r < rows; r++) {
         const float *xr = x + (uint64_t)r * width;
         float *yr = out + (uint64_t)r * width;
@@ -275,24 +339,43 @@ static void p36_vision_layer_norm(float *out, const float *x,
             double d = xr[i] - mean;
             variance += d * d;
         }
-        float inv = 1.0f / sqrtf((float)(variance / width) + 1.0e-6f);
+        float inv = 1.0f / sqrtf((float)(variance / width) + eps);
         for (uint32_t i = 0; i < width; i++)
             yr[i] = (xr[i] - (float)mean) * inv * weight[i] + bias[i];
     }
+}
+
+static void p36_vision_layer_norm(float *out, const float *x,
+                                  const float *weight, const float *bias,
+                                  uint32_t rows, uint32_t width) {
+    p36_vision_layer_norm_eps(out, x, weight, bias, rows, width, 1.0e-6f);
 }
 
 static void p36_vision_bias_residual(float *x, const float *bias,
                                      const float *residual,
                                      uint32_t rows, uint32_t width) {
     for (uint64_t i = 0, n = (uint64_t)rows * width; i < n; i++)
-        x[i] += bias[i % width] + (residual ? residual[i] : 0.0f);
+        x[i] += (bias ? bias[i % width] : 0.0f) + (residual ? residual[i] : 0.0f);
+}
+
+static void p36_vision_layerscale_residual(float *dst, const float *x,
+                                           const float *bias,
+                                           const float *scale,
+                                           const float *residual,
+                                           uint32_t rows, uint32_t width) {
+    for (uint64_t i = 0, n = (uint64_t)rows * width; i < n; i++) {
+        uint32_t d = (uint32_t)(i % width);
+        float v = x[i] + (bias ? bias[d] : 0.0f);
+        if (scale) v *= scale[d];
+        dst[i] = v + (residual ? residual[i] : 0.0f);
+    }
 }
 
 static void p36_vision_gelu_bias(float *x, const float *bias,
                                  uint32_t rows, uint32_t width) {
     const float k = 0.7071067811865475f;
     for (uint64_t i = 0, n = (uint64_t)rows * width; i < n; i++) {
-        float v = x[i] + bias[i % width];
+        float v = x[i] + (bias ? bias[i % width] : 0.0f);
         x[i] = 0.5f * v * (1.0f + erff(v * k));
     }
 }
@@ -301,55 +384,68 @@ typedef struct {
     const float *qkv;
     float *out;
     uint32_t rows;
+    uint32_t n_heads;
+    uint32_t head_dim;
 } p36_vision_attn_ctx;
 
 static void p36_vision_attention_worker(void *opaque, uint64_t row0, uint64_t row1) {
     p36_vision_attn_ctx *c = opaque;
-    const float scale = 1.0f / sqrtf(72.0f);
+    const uint32_t n_heads = c->n_heads;
+    const uint32_t head_dim = c->head_dim;
+    const uint32_t embd = n_heads * head_dim;
+    const uint32_t stride = embd * 3u;
+    const float scale = 1.0f / sqrtf((float)head_dim);
     for (uint64_t job = row0; job < row1; job++) {
-        uint32_t row = (uint32_t)(job / 16u), head = (uint32_t)(job % 16u);
-        const float *q = c->qkv + (uint64_t)row * 3456u + head * 72u;
-        float *dst = c->out + (uint64_t)row * 1152u + head * 72u;
+        uint32_t row = (uint32_t)(job / n_heads), head = (uint32_t)(job % n_heads);
+        const float *q = c->qkv + (uint64_t)row * stride + head * head_dim;
+        float *dst = c->out + (uint64_t)row * embd + head * head_dim;
         float max_score = -INFINITY, denom = 0.0f;
-        memset(dst, 0, 72u * sizeof(*dst));
+        memset(dst, 0, (size_t)head_dim * sizeof(*dst));
         for (uint32_t kr = 0; kr < c->rows; kr++) {
-            const float *k = c->qkv + (uint64_t)kr * 3456u + 1152u + head * 72u;
-            const float *v = c->qkv + (uint64_t)kr * 3456u + 2304u + head * 72u;
+            const float *k = c->qkv + (uint64_t)kr * stride + embd + head * head_dim;
+            const float *v = c->qkv + (uint64_t)kr * stride + 2u * embd + head * head_dim;
             float score = 0.0f;
-            for (uint32_t d = 0; d < 72u; d++) score += q[d] * k[d];
+            for (uint32_t d = 0; d < head_dim; d++) score += q[d] * k[d];
             score *= scale;
             float next = fmaxf(max_score, score);
             float old_scale = isfinite(max_score) ? expf(max_score - next) : 0.0f;
             float new_scale = expf(score - next);
             denom = denom * old_scale + new_scale;
-            for (uint32_t d = 0; d < 72u; d++)
+            for (uint32_t d = 0; d < head_dim; d++)
                 dst[d] = dst[d] * old_scale + new_scale * v[d];
             max_score = next;
         }
-        for (uint32_t d = 0; d < 72u; d++) dst[d] /= denom;
+        for (uint32_t d = 0; d < head_dim; d++) dst[d] /= denom;
     }
 }
 
-static bool p36_vision_attention(p36_engine *e, const float *qkv,
-                                 float *out, uint32_t rows) {
+static bool p36_vision_attention_ex(p36_engine *e, const float *qkv,
+                                    float *out, uint32_t rows,
+                                    uint32_t n_heads, uint32_t head_dim) {
+    const uint32_t embd = n_heads * head_dim;
 #if !defined(P36_NO_GPU) && !defined(P36_METAL)
     if (e->backend == P36_BACKEND_VULKAN) {
-        uint64_t qkv_bytes = (uint64_t)rows * 3456u * sizeof(float);
-        uint64_t out_bytes = (uint64_t)rows * 1152u * sizeof(float);
+        uint64_t qkv_bytes = (uint64_t)rows * (embd * 3u) * sizeof(float);
+        uint64_t out_bytes = (uint64_t)rows * embd * sizeof(float);
         p36_gpu_tensor *gqkv = p36_gpu_tensor_alloc_uninitialized(qkv_bytes);
         p36_gpu_tensor *gout = p36_gpu_tensor_alloc_uninitialized(out_bytes);
         int ok = gqkv && gout && p36_gpu_tensor_write(gqkv, 0, qkv, qkv_bytes) &&
-            p36_gpu_vision_attention(gout, gqkv, rows) &&
+            p36_gpu_vision_attention_ex(gout, gqkv, rows, n_heads, head_dim) &&
             p36_gpu_tensor_read(gout, 0, out, out_bytes);
         p36_gpu_tensor_free(gqkv);
         p36_gpu_tensor_free(gout);
         return ok != 0;
     }
 #endif
-    p36_vision_attn_ctx ac = {qkv, out, rows};
-    p36_parallel_for_rows((uint64_t)rows * 16u, 8, e->n_threads,
+    p36_vision_attn_ctx ac = {qkv, out, rows, n_heads, head_dim};
+    p36_parallel_for_rows((uint64_t)rows * n_heads, 8, e->n_threads,
                           p36_vision_attention_worker, &ac);
     return true;
+}
+
+static bool p36_vision_attention(p36_engine *e, const float *qkv,
+                                 float *out, uint32_t rows) {
+    return p36_vision_attention_ex(e, qkv, out, rows, 16u, 72u);
 }
 
 static void p36_vision_rope(float *qkv, uint32_t rows, uint32_t grid_width) {
@@ -382,9 +478,485 @@ static p36_tensor *p36_vision_tensorf(const p36_model *m, uint32_t layer,
     return model_find_tensor(m, name);
 }
 
+static void p36_vision_rope_inkling2v(float *qkv, uint32_t rows,
+                                      uint32_t grid_w, uint32_t n_heads,
+                                      uint32_t head_dim) {
+    const uint32_t embd = n_heads * head_dim;
+    const uint32_t stride = embd * 3u;
+    const uint32_t half = head_dim / 2u;
+    const uint32_t pairs = half / 2u;
+    for (uint32_t r = 1u; r < rows; r++) { /* row 0 is CLS at (0, 0) -> identity */
+        uint32_t idx = r - 1u;
+        float pos_w = (float)(idx % grid_w + 1u);
+        float pos_h = (float)(idx / grid_w + 1u);
+        for (uint32_t part = 0; part < 2u; part++) { /* 0=Q, 1=K */
+            for (uint32_t h = 0; h < n_heads; h++) {
+                float *v = qkv + (uint64_t)r * stride + part * embd + h * head_dim;
+                for (uint32_t i = 0; i < pairs; i++) {
+                    float inv_freq = powf(10000.0f, -2.0f * (float)i / (float)half);
+                    float aw = pos_w * inv_freq;
+                    float cw = cosf(aw), sw = sinf(aw);
+                    float x0 = v[2u * i], x1 = v[2u * i + 1u];
+                    v[2u * i] = x0 * cw - x1 * sw;
+                    v[2u * i + 1u] = x0 * sw + x1 * cw;
+
+                    float ah = pos_h * inv_freq;
+                    float ch = cosf(ah), sh = sinf(ah);
+                    float y0 = v[half + 2u * i], y1 = v[half + 2u * i + 1u];
+                    v[half + 2u * i] = y0 * ch - y1 * sh;
+                    v[half + 2u * i + 1u] = y0 * sh + y1 * ch;
+                }
+            }
+        }
+    }
+}
+
+static int p36_vision_encode_image_inkling2v(p36_engine *e,
+                                             const p36_image *image,
+                                             p36_vision_embedding *out,
+                                             char *err, size_t errlen) {
+    p36_model *m = &e->vision_model;
+    const uint32_t patch_size = e->vision_patch_size;
+    const uint32_t merge = e->vision_spatial_merge;
+    const uint32_t D = e->vision_n_embd;
+    const uint32_t FF = e->vision_n_ff;
+    const uint32_t n_layer = e->vision_n_layer;
+    const uint32_t n_head = e->vision_n_head;
+    const uint32_t head_dim = D / n_head;
+    const float eps = e->vision_ln_eps;
+    const uint32_t patch_in_dim = 3u * patch_size * patch_size;
+    const uint32_t merged_dim = D * merge * merge;
+
+    p36_image_patches patches = {0};
+    float *x = NULL, *norm = NULL, *qkv = NULL, *proj_tmp = NULL;
+    float *work = NULL, *wide = NULL, *merged_in = NULL;
+    int ok = 0;
+
+    if (!e->vision_ready || !p36_image_preprocess_inkling2v(
+            &patches, image, patch_size, merge, 4096u, err, errlen)) return 0;
+
+    const uint32_t n_patches = patches.patch_count;
+    const uint32_t rows = n_patches + 1u; /* CLS + patches */
+    const uint32_t merged = patches.image_token_count;
+    const uint64_t base_values = (uint64_t)rows * D;
+
+    x = malloc(base_values * sizeof(*x));
+    uint64_t wide_count = (uint64_t)rows * FF;
+    if ((uint64_t)merged * merged_dim > wide_count)
+        wide_count = (uint64_t)merged * merged_dim;
+    bool vk_path = false;
+#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+    vk_path = (e->backend == P36_BACKEND_VULKAN);
+#endif
+    if (!vk_path) {
+        norm = malloc(base_values * sizeof(*norm));
+        work = malloc(base_values * sizeof(*work));
+        proj_tmp = malloc(base_values * sizeof(*proj_tmp));
+        qkv = malloc((uint64_t)rows * (3u * D) * sizeof(*qkv));
+        wide = malloc(wide_count * sizeof(*wide));
+        merged_in = malloc((uint64_t)merged * merged_dim * sizeof(*merged_in));
+    }
+    if (!x || (!vk_path && (!norm || !work || !proj_tmp || !qkv || !wide || !merged_in))) {
+        if (err && errlen) snprintf(err, errlen, "unable to allocate Inkling-2 vision workspace");
+        goto done;
+    }
+
+    /* 1. Patch embedding + bilinear resized position embedding + CLS token + pre_ln */
+    {
+        p36_tensor *patch_w = model_find_tensor(m, "v.patch_embd.weight");
+        p36_tensor *cls_t = model_find_tensor(m, "v.class_embd");
+        p36_tensor *cls_pos_t = model_find_tensor(m, "v.class_position_embd.weight");
+        p36_tensor *pos_t = model_find_tensor(m, "v.position_embd.weight");
+        p36_tensor *pre_ln_w_t = model_find_tensor(m, "v.pre_ln.weight");
+        p36_tensor *pre_ln_b_t = model_find_tensor(m, "v.pre_ln.bias");
+        const float *cls = p36_vision_f32(m, cls_t, D);
+        const float *cls_pos = p36_vision_f32(m, cls_pos_t, D);
+        const float *pre_ln_w = p36_vision_f32(m, pre_ln_w_t, D);
+        const float *pre_ln_b = p36_vision_f32(m, pre_ln_b_t, D);
+        if (!patch_w || !cls || !cls_pos || !pos_t || pos_t->type != P36_TENSOR_F32 ||
+            (pos_t->elements % D) != 0 || !pre_ln_w || !pre_ln_b) {
+            if (err && errlen) snprintf(err, errlen, "invalid Inkling-2 vision embedding tensors");
+            goto done;
+        }
+        uint32_t pos_n = (uint32_t)(pos_t->elements / D);
+        uint32_t n_per_side = (uint32_t)lround(sqrt((double)pos_n));
+        if (n_per_side == 0 || n_per_side * n_per_side != pos_n) {
+            if (err && errlen) snprintf(err, errlen, "invalid Inkling-2 position embedding grid");
+            goto done;
+        }
+        const float *position = (const float *)(m->map + pos_t->abs_offset);
+
+        /* Row 0: CLS + class_position_embd */
+        for (uint32_t d = 0; d < D; d++) x[d] = cls[d] + cls_pos[d];
+
+        /* Rows 1..n_patches: patch_embd(patches) */
+        if (!p36_vision_mm(e, patch_w, patches.patches, x + D, n_patches, patch_in_dim, D, false)) {
+            if (err && errlen) snprintf(err, errlen, "Inkling-2 patch embedding matmul failed");
+            goto done;
+        }
+
+        /* Add learned position embeddings (bilinear resize if grid != n_per_side x n_per_side) */
+        for (uint32_t py = 0; py < patches.grid_height; py++) {
+            float sy = patches.grid_height == n_per_side
+                ? (float)py
+                : ((float)py + 0.5f) * (float)n_per_side / (float)patches.grid_height - 0.5f;
+            if (sy < 0.0f) sy = 0.0f;
+            if (sy > (float)(n_per_side - 1u)) sy = (float)(n_per_side - 1u);
+            uint32_t y0 = (uint32_t)floorf(sy);
+            uint32_t y1 = y0 + 1u < n_per_side ? y0 + 1u : y0;
+            float fy = sy - (float)y0;
+            for (uint32_t px = 0; px < patches.grid_width; px++) {
+                float sx = patches.grid_width == n_per_side
+                    ? (float)px
+                    : ((float)px + 0.5f) * (float)n_per_side / (float)patches.grid_width - 0.5f;
+                if (sx < 0.0f) sx = 0.0f;
+                if (sx > (float)(n_per_side - 1u)) sx = (float)(n_per_side - 1u);
+                uint32_t x0 = (uint32_t)floorf(sx);
+                uint32_t x1 = x0 + 1u < n_per_side ? x0 + 1u : x0;
+                float fx = sx - (float)x0;
+                float *dst = x + (uint64_t)(1u + py * patches.grid_width + px) * D;
+                const float *p00 = position + ((uint64_t)y0 * n_per_side + x0) * D;
+                const float *p01 = position + ((uint64_t)y0 * n_per_side + x1) * D;
+                const float *p10 = position + ((uint64_t)y1 * n_per_side + x0) * D;
+                const float *p11 = position + ((uint64_t)y1 * n_per_side + x1) * D;
+                for (uint32_t d = 0; d < D; d++) {
+                    float top = p00[d] + (p01[d] - p00[d]) * fx;
+                    float bot = p10[d] + (p11[d] - p10[d]) * fx;
+                    dst[d] += top + (bot - top) * fy;
+                }
+            }
+        }
+
+        /* Pre-LayerNorm (on GPU when Vulkan, on CPU otherwise) */
+#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+        if (e->backend != P36_BACKEND_VULKAN)
+#endif
+        {
+            p36_vision_layer_norm_eps(norm, x, pre_ln_w, pre_ln_b, rows, D, eps);
+            memcpy(x, norm, base_values * sizeof(*x));
+        }
+    }
+
+    /* 2. ViT blocks + GPU spatial merge + projector (single batched Vulkan pass) */
+#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+    if (e->backend == P36_BACKEND_VULKAN) {
+        bool resident = p36_vision_ensure_resident_gpu(e);
+        const bool use_hd64 = (head_dim == 64u && p36_gpu_vision_has_hd64());
+        const uint32_t rope_op = use_hd64 ? 5u : 1u;
+
+        p36_gpu_tensor *gx = p36_gpu_tensor_alloc_uninitialized(base_values * sizeof(float));
+        p36_gpu_tensor *gnorm = p36_gpu_tensor_alloc_uninitialized(base_values * sizeof(float));
+        p36_gpu_tensor *gproj = p36_gpu_tensor_alloc_uninitialized(base_values * sizeof(float));
+        p36_gpu_tensor *gwork = p36_gpu_tensor_alloc_uninitialized(base_values * sizeof(float));
+        p36_gpu_tensor *gqkv = p36_gpu_tensor_alloc_uninitialized((uint64_t)rows * (3u * D) * sizeof(float));
+        p36_gpu_tensor *gwide = p36_gpu_tensor_alloc_uninitialized(wide_count * sizeof(float));
+        p36_gpu_tensor *gmerged = p36_gpu_tensor_alloc_uninitialized((uint64_t)merged * merged_dim * sizeof(float));
+        p36_gpu_tensor *gout = p36_gpu_tensor_alloc_uninitialized((uint64_t)merged * P36_N_EMBD * sizeof(float));
+        p36_gpu_tensor *g1d = NULL;
+        uint8_t *host_1d = NULL;
+        uint64_t d_stride = (((uint64_t)D * sizeof(float)) + 255u) & ~255ull;
+        uint64_t ff_stride = (((uint64_t)FF * sizeof(float)) + 255u) & ~255ull;
+        uint64_t layer_1d_stride = 11u * d_stride + ff_stride;
+        int gpu_ok = (gx && gnorm && gproj && gwork && gqkv && gwide && gmerged && gout);
+
+        /* Fallback 1D upload buffer only if full resident upload didn't fit in VRAM. */
+        if (gpu_ok && !resident) {
+            uint64_t total_1d_bytes = 2u * d_stride + (uint64_t)n_layer * layer_1d_stride;
+            host_1d = calloc(1, (size_t)total_1d_bytes);
+            g1d = p36_gpu_tensor_alloc_uninitialized(total_1d_bytes);
+            const float *pre_ln_w = p36_vision_f32(m, model_find_tensor(m, "v.pre_ln.weight"), D);
+            const float *pre_ln_b = p36_vision_f32(m, model_find_tensor(m, "v.pre_ln.bias"), D);
+            if (!host_1d || !g1d || !pre_ln_w || !pre_ln_b) {
+                gpu_ok = 0;
+            } else {
+                memcpy(host_1d + 0u * d_stride, pre_ln_w, (size_t)D * sizeof(float));
+                memcpy(host_1d + 1u * d_stride, pre_ln_b, (size_t)D * sizeof(float));
+                for (uint32_t il = 0; il < n_layer && gpu_ok; il++) {
+                    const float *v11[11] = {
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "ln1.weight"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "ln1.bias"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "attn_q.bias"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "attn_k.bias"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "attn_v.bias"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "attn_out.bias"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "ls1.weight"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "ln2.weight"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "ln2.bias"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "ffn_down.bias"), D),
+                        p36_vision_f32(m, p36_vision_tensorf(m, il, "ls2.weight"), D),
+                    };
+                    const float *upb = p36_vision_f32(m, p36_vision_tensorf(m, il, "ffn_up.bias"), FF);
+                    for (int k = 0; k < 11; k++) if (!v11[k]) gpu_ok = 0;
+                    if (!upb || !gpu_ok) { gpu_ok = 0; break; }
+                    uint64_t lbase = 2u * d_stride + (uint64_t)il * layer_1d_stride;
+                    for (int k = 0; k < 11; k++)
+                        memcpy(host_1d + lbase + (uint64_t)k * d_stride, v11[k], (size_t)D * sizeof(float));
+                    memcpy(host_1d + lbase + 11u * d_stride, upb, (size_t)FF * sizeof(float));
+                }
+                if (gpu_ok) gpu_ok = p36_gpu_tensor_write(g1d, 0, host_1d, total_1d_bytes);
+            }
+        }
+
+        if (gpu_ok) {
+            gpu_ok = p36_gpu_tensor_write(gnorm, 0, x, base_values * sizeof(float));
+        }
+
+        /* Batch the entire ViT + spatial merge + projector into 1 Vulkan command stream. */
+        bool batched = (gpu_ok && p36_gpu_begin_commands() != 0);
+
+        if (gpu_ok) {
+            p36_gpu_tensor *v_pre_w = resident
+                ? p36_vision_resident_view(e, model_find_tensor(m, "v.pre_ln.weight"))
+                : p36_gpu_tensor_view(g1d, 0u, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_pre_b = resident
+                ? p36_vision_resident_view(e, model_find_tensor(m, "v.pre_ln.bias"))
+                : p36_gpu_tensor_view(g1d, d_stride, (uint64_t)D * sizeof(float));
+            if (v_pre_w && v_pre_b) {
+                gpu_ok = p36_gpu_vision_op(0u, gx, gnorm, v_pre_w, v_pre_b, rows, D, 0u, 0u, 0u, eps, rows);
+            } else {
+                gpu_ok = 0;
+            }
+            p36_gpu_tensor_free(v_pre_w);
+            p36_gpu_tensor_free(v_pre_b);
+        }
+
+        const uint32_t gx_rope = (uint32_t)(((uint64_t)rows * (D / 2u) + 255u) / 256u);
+        const uint32_t gx_d = (uint32_t)((base_values + 255u) / 256u);
+        const uint32_t gx_ff = (uint32_t)(((uint64_t)rows * FF + 255u) / 256u);
+
+        for (uint32_t il = 0; gpu_ok && il < n_layer; il++) {
+            uint64_t lbase = 2u * d_stride + (uint64_t)il * layer_1d_stride;
+            p36_gpu_tensor *v_ln1w  = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "ln1.weight"))      : p36_gpu_tensor_view(g1d, lbase + 0u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_ln1b  = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "ln1.bias"))        : p36_gpu_tensor_view(g1d, lbase + 1u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_qb    = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "attn_q.bias"))     : p36_gpu_tensor_view(g1d, lbase + 2u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_kb    = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "attn_k.bias"))     : p36_gpu_tensor_view(g1d, lbase + 3u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_vb    = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "attn_v.bias"))     : p36_gpu_tensor_view(g1d, lbase + 4u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_outb  = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "attn_out.bias"))   : p36_gpu_tensor_view(g1d, lbase + 5u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_ls1w  = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "ls1.weight"))      : p36_gpu_tensor_view(g1d, lbase + 6u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_ln2w  = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "ln2.weight"))      : p36_gpu_tensor_view(g1d, lbase + 7u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_ln2b  = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "ln2.bias"))        : p36_gpu_tensor_view(g1d, lbase + 8u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_downb = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "ffn_down.bias"))   : p36_gpu_tensor_view(g1d, lbase + 9u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_ls2w  = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "ls2.weight"))      : p36_gpu_tensor_view(g1d, lbase + 10u * d_stride, (uint64_t)D * sizeof(float));
+            p36_gpu_tensor *v_upb   = resident ? p36_vision_resident_view(e, p36_vision_tensorf(m, il, "ffn_up.bias"))     : p36_gpu_tensor_view(g1d, lbase + 11u * d_stride, (uint64_t)FF * sizeof(float));
+
+            p36_tensor *qw    = p36_vision_tensorf(m, il, "attn_q.weight");
+            p36_tensor *kw    = p36_vision_tensorf(m, il, "attn_k.weight");
+            p36_tensor *vw    = p36_vision_tensorf(m, il, "attn_v.weight");
+            p36_tensor *outw  = p36_vision_tensorf(m, il, "attn_out.weight");
+            p36_tensor *upw   = p36_vision_tensorf(m, il, "ffn_up.weight");
+            p36_tensor *downw = p36_vision_tensorf(m, il, "ffn_down.weight");
+
+            gpu_ok = v_ln1w && v_ln1b && v_qb && v_kb && v_vb && v_outb &&
+                     v_ls1w && v_ln2w && v_ln2b && v_downb && v_ls2w && v_upb &&
+                     p36_gpu_vision_op(0u, gnorm, gx, v_ln1w, v_ln1b, rows, D, 0u, 0u, 0u, eps, rows) &&
+                     p36_vision_mm_gpu(e, qw, gnorm, gproj, rows, D, D) &&
+                     p36_gpu_vision_op(rope_op, gqkv, gproj, v_qb, NULL, rows, D, 0u, patches.grid_width, head_dim, 0.0f, gx_rope) &&
+                     p36_vision_mm_gpu(e, kw, gnorm, gproj, rows, D, D) &&
+                     p36_gpu_vision_op(rope_op, gqkv, gproj, v_kb, NULL, rows, D, 1u, patches.grid_width, head_dim, 0.0f, gx_rope) &&
+                     p36_vision_mm_gpu(e, vw, gnorm, gproj, rows, D, D) &&
+                     p36_gpu_vision_op(rope_op, gqkv, gproj, v_vb, NULL, rows, D, 2u, patches.grid_width, head_dim, 0.0f, gx_rope) &&
+                     p36_gpu_vision_attention_ex(gwork, gqkv, rows, n_head, head_dim) &&
+                     p36_vision_mm_gpu(e, outw, gwork, gnorm, rows, D, D) &&
+                     p36_gpu_vision_op(2u, gx, gnorm, v_outb, v_ls1w, rows, D, 0u, 0u, 0u, 0.0f, gx_d) &&
+                     p36_gpu_vision_op(0u, gnorm, gx, v_ln2w, v_ln2b, rows, D, 0u, 0u, 0u, eps, rows) &&
+                     p36_vision_mm_gpu(e, upw, gnorm, gwide, rows, D, FF) &&
+                     p36_gpu_vision_op(3u, gwide, NULL, v_upb, NULL, rows, FF, 1u, 0u, 0u, 0.0f, gx_ff) &&
+                     p36_vision_mm_gpu(e, downw, gwide, gnorm, rows, FF, D) &&
+                     p36_gpu_vision_op(2u, gx, gnorm, v_downb, v_ls2w, rows, D, 0u, 0u, 0u, 0.0f, gx_d);
+
+            p36_gpu_tensor_free(v_ln1w); p36_gpu_tensor_free(v_ln1b);
+            p36_gpu_tensor_free(v_qb);   p36_gpu_tensor_free(v_kb);
+            p36_gpu_tensor_free(v_vb);   p36_gpu_tensor_free(v_outb);
+            p36_gpu_tensor_free(v_ls1w); p36_gpu_tensor_free(v_ln2w);
+            p36_gpu_tensor_free(v_ln2b); p36_gpu_tensor_free(v_downb);
+            p36_gpu_tensor_free(v_ls2w); p36_gpu_tensor_free(v_upb);
+        }
+
+        if (gpu_ok) {
+            p36_tensor *mm1 = model_find_tensor(m, "mm.1.weight");
+            p36_tensor *mm2 = model_find_tensor(m, "mm.2.weight");
+            const float *mm1b = p36_vision_f32(m, model_find_tensor(m, "mm.1.bias"), merged_dim);
+            const float *mm2b = p36_vision_f32(m, model_find_tensor(m, "mm.2.bias"), P36_N_EMBD);
+            uint32_t gx_m = (uint32_t)(((uint64_t)merged * merged_dim + 255u) / 256u);
+            gpu_ok = mm1 && mm2 && !mm1b &&
+                     p36_gpu_vision_op(4u, gmerged, gx, NULL, NULL, merged, merged_dim,
+                                       patches.grid_width, merge, D, 0.0f, gx_m) &&
+                     p36_vision_mm_gpu(e, mm1, gmerged, gwide, merged, merged_dim, merged_dim) &&
+                     p36_gpu_vision_op(3u, gwide, NULL, NULL, NULL, merged, merged_dim,
+                                       0u, 0u, 0u, 0.0f, gx_m) &&
+                     p36_vision_mm_gpu(e, mm2, gwide, gout, merged, merged_dim, P36_N_EMBD);
+            if (batched) {
+                if (!p36_gpu_end_commands()) gpu_ok = 0;
+                batched = false;
+            }
+            if (gpu_ok) {
+                out->data = malloc((uint64_t)merged * P36_N_EMBD * sizeof(*out->data));
+                if (out->data &&
+                    p36_gpu_tensor_read(gout, 0, out->data, (uint64_t)merged * P36_N_EMBD * sizeof(float))) {
+                    if (mm2b) p36_vision_bias_residual(out->data, mm2b, NULL, merged, P36_N_EMBD);
+                    out->token_count = merged;
+                    out->grid_width = patches.grid_width / merge;
+                    out->grid_height = patches.grid_height / merge;
+                    out->width = image->width;
+                    out->height = image->height;
+                    memcpy(out->fingerprint, image->fingerprint, sizeof(out->fingerprint));
+                    ok = 1;
+                } else {
+                    free(out->data);
+                    memset(out, 0, sizeof(*out));
+                    if (err && errlen) snprintf(err, errlen, "Inkling-2 GPU vision readback failed");
+                }
+            } else if (err && errlen) {
+                snprintf(err, errlen, "Inkling-2 GPU vision projector failed");
+            }
+        } else {
+            if (batched) p36_gpu_end_commands();
+            if (err && errlen) snprintf(err, errlen, "Inkling-2 GPU vision encoder failed");
+        }
+
+        free(host_1d);
+        p36_gpu_tensor_free(g1d);   p36_gpu_tensor_free(gx);
+        p36_gpu_tensor_free(gnorm); p36_gpu_tensor_free(gproj);
+        p36_gpu_tensor_free(gwork); p36_gpu_tensor_free(gqkv);
+        p36_gpu_tensor_free(gwide); p36_gpu_tensor_free(gmerged);
+        p36_gpu_tensor_free(gout);
+        goto done;
+    }
+#endif
+
+    /* CPU fallback: 23 ViT layers + projector */
+    for (uint32_t il = 0; il < n_layer; il++) {
+        const float *ln1w = p36_vision_f32(m, p36_vision_tensorf(m, il, "ln1.weight"), D);
+        const float *ln1b = p36_vision_f32(m, p36_vision_tensorf(m, il, "ln1.bias"), D);
+        p36_tensor *qw = p36_vision_tensorf(m, il, "attn_q.weight");
+        const float *qb = p36_vision_f32(m, p36_vision_tensorf(m, il, "attn_q.bias"), D);
+        p36_tensor *kw = p36_vision_tensorf(m, il, "attn_k.weight");
+        const float *kb = p36_vision_f32(m, p36_vision_tensorf(m, il, "attn_k.bias"), D);
+        p36_tensor *vw = p36_vision_tensorf(m, il, "attn_v.weight");
+        const float *vb = p36_vision_f32(m, p36_vision_tensorf(m, il, "attn_v.bias"), D);
+        p36_tensor *outw = p36_vision_tensorf(m, il, "attn_out.weight");
+        const float *outb = p36_vision_f32(m, p36_vision_tensorf(m, il, "attn_out.bias"), D);
+        const float *ls1w = p36_vision_f32(m, p36_vision_tensorf(m, il, "ls1.weight"), D);
+        const float *ln2w = p36_vision_f32(m, p36_vision_tensorf(m, il, "ln2.weight"), D);
+        const float *ln2b = p36_vision_f32(m, p36_vision_tensorf(m, il, "ln2.bias"), D);
+        p36_tensor *upw = p36_vision_tensorf(m, il, "ffn_up.weight");
+        const float *upb = p36_vision_f32(m, p36_vision_tensorf(m, il, "ffn_up.bias"), FF);
+        p36_tensor *downw = p36_vision_tensorf(m, il, "ffn_down.weight");
+        const float *downb = p36_vision_f32(m, p36_vision_tensorf(m, il, "ffn_down.bias"), D);
+        const float *ls2w = p36_vision_f32(m, p36_vision_tensorf(m, il, "ls2.weight"), D);
+        if (!ln1w || !ln1b || !qb || !kb || !vb || !outb || !ls1w ||
+            !ln2w || !ln2b || !upb || !downb || !ls2w) {
+            if (err && errlen) snprintf(err, errlen, "invalid Inkling-2 vision block %u", il);
+            goto done;
+        }
+
+        p36_vision_layer_norm_eps(norm, x, ln1w, ln1b, rows, D, eps);
+
+        /* Q -> qkv[:, 0..D) */
+        if (!p36_vision_mm(e, qw, norm, proj_tmp, rows, D, D, false)) goto bad_mm;
+        for (uint32_t r = 0; r < rows; r++) {
+            const float *src = proj_tmp + (uint64_t)r * D;
+            float *dst = qkv + (uint64_t)r * (3u * D);
+            for (uint32_t d = 0; d < D; d++) dst[d] = src[d] + qb[d];
+        }
+        /* K -> qkv[:, D..2D) */
+        if (!p36_vision_mm(e, kw, norm, proj_tmp, rows, D, D, false)) goto bad_mm;
+        for (uint32_t r = 0; r < rows; r++) {
+            const float *src = proj_tmp + (uint64_t)r * D;
+            float *dst = qkv + (uint64_t)r * (3u * D) + D;
+            for (uint32_t d = 0; d < D; d++) dst[d] = src[d] + kb[d];
+        }
+        /* V -> qkv[:, 2D..3D) */
+        if (!p36_vision_mm(e, vw, norm, proj_tmp, rows, D, D, false)) goto bad_mm;
+        for (uint32_t r = 0; r < rows; r++) {
+            const float *src = proj_tmp + (uint64_t)r * D;
+            float *dst = qkv + (uint64_t)r * (3u * D) + 2u * D;
+            for (uint32_t d = 0; d < D; d++) dst[d] = src[d] + vb[d];
+        }
+
+        p36_vision_rope_inkling2v(qkv, rows, patches.grid_width, n_head, head_dim);
+        if (!p36_vision_attention_ex(e, qkv, work, rows, n_head, head_dim)) goto bad_mm;
+        if (!p36_vision_mm(e, outw, work, norm, rows, D, D, false)) goto bad_mm;
+        p36_vision_layerscale_residual(x, norm, outb, ls1w, x, rows, D);
+
+        p36_vision_layer_norm_eps(norm, x, ln2w, ln2b, rows, D, eps);
+        if (!p36_vision_mm(e, upw, norm, wide, rows, D, FF, false)) goto bad_mm;
+        p36_vision_gelu_bias(wide, upb, rows, FF);
+        if (!p36_vision_mm(e, downw, wide, norm, rows, FF, D, false)) goto bad_mm;
+        p36_vision_layerscale_residual(x, norm, downb, ls2w, x, rows, D);
+        continue;
+bad_mm:
+        if (err && errlen) snprintf(err, errlen, "Inkling-2 vision matmul failed in block %u", il);
+        goto done;
+    }
+
+    /* 3. Drop CLS token, spatial merge (merge x merge), and 2-layer GELU_ERF projector */
+    {
+        const float *patch_out = x + D; /* skip CLS row 0 */
+        const uint32_t gw_m = patches.grid_width / merge;
+        const uint32_t gh_m = patches.grid_height / merge;
+        for (uint32_t by = 0; by < gh_m; by++) {
+            for (uint32_t bx = 0; bx < gw_m; bx++) {
+                float *dst = merged_in + (uint64_t)(by * gw_m + bx) * merged_dim;
+                uint32_t off = 0;
+                for (uint32_t my = 0; my < merge; my++) {
+                    for (uint32_t mx = 0; mx < merge; mx++) {
+                        uint32_t py = by * merge + my;
+                        uint32_t px = bx * merge + mx;
+                        memcpy(dst + off,
+                               patch_out + (uint64_t)(py * patches.grid_width + px) * D,
+                               (size_t)D * sizeof(float));
+                        off += D;
+                    }
+                }
+            }
+        }
+
+        p36_tensor *mm1 = model_find_tensor(m, "mm.1.weight");
+        p36_tensor *mm1b_t = model_find_tensor(m, "mm.1.bias");
+        const float *mm1b = mm1b_t ? p36_vision_f32(m, mm1b_t, merged_dim) : NULL;
+        p36_tensor *mm2 = model_find_tensor(m, "mm.2.weight");
+        p36_tensor *mm2b_t = model_find_tensor(m, "mm.2.bias");
+        const float *mm2b = mm2b_t ? p36_vision_f32(m, mm2b_t, P36_N_EMBD) : NULL;
+        if (!mm1 || !mm2) {
+            if (err && errlen) snprintf(err, errlen, "missing Inkling-2 projector tensors");
+            goto done;
+        }
+        if (!p36_vision_mm(e, mm1, merged_in, wide, merged, merged_dim, merged_dim, false)) goto proj_bad;
+        p36_vision_gelu_bias(wide, mm1b, merged, merged_dim);
+
+        out->data = malloc((uint64_t)merged * P36_N_EMBD * sizeof(*out->data));
+        if (!out->data) {
+            if (err && errlen) snprintf(err, errlen, "unable to allocate vision embedding");
+            goto done;
+        }
+        if (!p36_vision_mm(e, mm2, wide, out->data, merged, merged_dim, P36_N_EMBD, false)) goto proj_bad;
+        if (mm2b) p36_vision_bias_residual(out->data, mm2b, NULL, merged, P36_N_EMBD);
+        out->token_count = merged;
+        out->grid_width = gw_m;
+        out->grid_height = gh_m;
+        out->width = image->width;
+        out->height = image->height;
+        memcpy(out->fingerprint, image->fingerprint, sizeof(out->fingerprint));
+        ok = 1;
+        goto done;
+proj_bad:
+        free(out->data);
+        memset(out, 0, sizeof(*out));
+        if (err && errlen) snprintf(err, errlen, "Inkling-2 projector matmul failed");
+    }
+done:
+    free(x); free(norm); free(qkv); free(proj_tmp); free(work); free(wide); free(merged_in);
+    p36_image_patches_free(&patches);
+    return ok;
+}
+
 static int p36_vision_encode_image(p36_engine *e, const p36_image *image,
                                    p36_vision_embedding *out,
                                    char *err, size_t errlen) {
+    if (e && e->vision_kind == 2u) {
+        return p36_vision_encode_image_inkling2v(e, image, out, err, errlen);
+    }
     p36_model *m = &e->vision_model;
     p36_image_patches patches = {0};
     float *x = NULL, *norm = NULL, *qkv = NULL, *work = NULL, *wide = NULL;

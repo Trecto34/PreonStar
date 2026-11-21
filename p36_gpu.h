@@ -63,9 +63,34 @@ int p36_gpu_vision_matmul_f16_fill(p36_gpu_tensor *out,
                                    uint64_t in_dim, uint64_t out_dim,
                                    const p36_gpu_tensor *x,
                                    uint64_t n_tok);
+int p36_gpu_vision_matmul_q8_0_mem(p36_gpu_tensor *out,
+                                   const void *q8_weights,
+                                   uint64_t weight_bytes,
+                                   uint64_t in_dim, uint64_t out_dim,
+                                   const p36_gpu_tensor *x,
+                                   uint64_t n_tok);
+int p36_gpu_vision_matmul_q8_0_tensor(p36_gpu_tensor *out,
+                                      const p36_gpu_tensor *weights,
+                                      uint64_t in_dim, uint64_t out_dim,
+                                      const p36_gpu_tensor *x,
+                                      uint64_t n_tok);
+int p36_gpu_vision_has_hd64(void);
+int p36_gpu_vision_op(uint32_t op,
+                      p36_gpu_tensor *a,
+                      const p36_gpu_tensor *b,
+                      const p36_gpu_tensor *c,
+                      const p36_gpu_tensor *d,
+                      uint32_t rows, uint32_t width,
+                      uint32_t p0, uint32_t p1, uint32_t p2,
+                      float fp0, uint32_t gx);
 int p36_gpu_vision_attention(p36_gpu_tensor *out,
                              const p36_gpu_tensor *qkv,
                              uint32_t rows);
+int p36_gpu_vision_attention_ex(p36_gpu_tensor *out,
+                                const p36_gpu_tensor *qkv,
+                                uint32_t rows,
+                                uint32_t n_heads,
+                                uint32_t head_dim);
 
 int p36_gpu_begin_commands(void);
 int p36_gpu_flush_commands(void);

@@ -566,13 +566,15 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
         p36_gpu_tensor *stage = rt->embed_stage[rt->embed_flip & 1u];
         rt->embed_flip ^= 1u;
         if (embeddings) {
+            /* Raw vision embeddings bypass token_embd_norm (matches llama-inkling2). */
             INK_CHK(p36_gpu_tensor_write(stage, 0, embeddings, (uint64_t)n_tok * D * sizeof(float)), "embed_write");
+            INK_CHK(p36_gpu_copy_f32_tensor(ink->cur, stage, n_tok * D), "embed_copy_raw");
         } else {
             INK_CHK(p36_gpu_embed_tokens(m, w->token_embd, tokens, n_tok, stage), "embed_tokens");
+            INK_CHK(p36_gpu_copy_f32_tensor(rt->hidden, stage, n_tok * D), "embed_copy");
+            INK_CHK(p36_gpu_inkling2_rms_norm_q8k_tensor(ink->cur, NULL, rt->hidden, m->map, m->size,
+                                                         w->token_embd_norm->abs_offset, D, n_tok, hp->rms_eps), "tok_norm");
         }
-        INK_CHK(p36_gpu_copy_f32_tensor(rt->hidden, stage, n_tok * D), "embed_copy");
-        INK_CHK(p36_gpu_inkling2_rms_norm_q8k_tensor(ink->cur, NULL, rt->hidden, m->map, m->size,
-                                                     w->token_embd_norm->abs_offset, D, n_tok, hp->rms_eps), "tok_norm");
     }
 
     uint32_t n_blocks = 0;

@@ -37,6 +37,12 @@ int p36_image_preprocess_qwen3vl(p36_image_patches *out,
                                  const p36_image *image,
                                  uint32_t max_patches,
                                  char *error, size_t error_cap);
+int p36_image_preprocess_inkling2v(p36_image_patches *out,
+                                   const p36_image *image,
+                                   uint32_t patch_size,
+                                   uint32_t spatial_merge,
+                                   uint32_t max_patches,
+                                   char *error, size_t error_cap);
 void p36_image_patches_free(p36_image_patches *patches);
 
 #endif

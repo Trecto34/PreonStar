@@ -327,6 +327,8 @@ void p36_gpu_cleanup(void) {
     p36_vk_kernel_destroy(&p36_vk.matmul_bf16);
     p36_vk_kernel_destroy(&p36_vk.vision_matmul_f16);
     p36_vk_kernel_destroy(&p36_vk.vision_attention);
+    p36_vk_kernel_destroy(&p36_vk.vision_attention_hd64);
+    p36_vk_kernel_destroy(&p36_vk.vision_ops);
     for (uint32_t i = 0; i < P36_VK_CB_RING; i++) {
         if (p36_vk_ring[i].pool) vkDestroyDescriptorPool(p36_vk.device, p36_vk_ring[i].pool, NULL);
         if (p36_vk_ring[i].fence) vkDestroyFence(p36_vk.device, p36_vk_ring[i].fence, NULL);

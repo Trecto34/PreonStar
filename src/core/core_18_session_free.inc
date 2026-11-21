@@ -324,9 +324,13 @@ int p36_session_sync_vision(p36_session *s, const p36_tokens *prompt,
             if (s->display_progress) s->display_progress(s->display_progress_ud, "prefill_chunk", pos, prompt->len);
         }
         free(positions);
-        uint32_t extent = span->embedding.grid_width > span->embedding.grid_height ?
-                          span->embedding.grid_width : span->embedding.grid_height;
-        s->rope_delta = (int32_t)(base + extent) - pos;
+        if (s->engine->variant == P36_VARIANT_INKLING2_LOOP) {
+            s->rope_delta = 0;
+        } else {
+            uint32_t extent = span->embedding.grid_width > span->embedding.grid_height ?
+                              span->embedding.grid_width : span->embedding.grid_height;
+            s->rope_delta = (int32_t)(base + extent) - pos;
+        }
         s->vision_spans[k] = *span;
         s->vision_spans[k].embedding.data = NULL;
         s->vision_count = k + 1;
