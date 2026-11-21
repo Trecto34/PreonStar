@@ -1348,6 +1348,7 @@ static int p36_quant_bits_from_type(uint32_t type) {
         return 3;
     case P36_TENSOR_IQ4_XS:
     case P36_TENSOR_IQ4_NL:
+    case P36_TENSOR_NVFP4:
         return 4;
     case P36_TENSOR_IQ1_S:
     case P36_TENSOR_IQ1_M:

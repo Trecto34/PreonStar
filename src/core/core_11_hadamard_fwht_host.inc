@@ -227,10 +227,11 @@ static void config_validate_model(const p36_model *m) {
         g_p36_shape = P36_SHAPE_CLOVER_35B_A3B;
     } else if (p36_streq(arch, P36_SHAPE_27B.arch)) {
         g_p36_shape = P36_SHAPE_27B;
-    } else if (p36_streq(arch, P36_SHAPE_INKLING2_MINI.arch)) {
+    } else if (p36_streq(arch, P36_SHAPE_INKLING2_MINI.arch) || p36_streq(arch, "inkling2")) {
         uint32_t unpadded = 0;
         g_p36_shape = P36_SHAPE_INKLING2_MINI;
-        if (model_get_u32(m, "inkling2_loop.vocab_size_unpadded", &unpadded) && unpadded > 0) {
+        if ((model_get_u32(m, "inkling2_loop.vocab_size_unpadded", &unpadded) ||
+             model_get_u32(m, "inkling2.vocab_size_unpadded", &unpadded)) && unpadded > 0) {
             g_p36_shape.n_vocab = unpadded;
         }
         config_expect_string("tokenizer.ggml.model", tok_model, "gpt2");
@@ -333,7 +334,8 @@ static void model_summary(const p36_model *m) {
     model_get_string(m, "general.architecture", &arch);
     if (!model_get_u64_compat(m, "qwen35moe.context_length", &ctx_train) &&
         !model_get_u64_compat(m, "clover_moe.context_length", &ctx_train) &&
-        !model_get_u64_compat(m, "inkling2_loop.context_length", &ctx_train))
+        !model_get_u64_compat(m, "inkling2_loop.context_length", &ctx_train) &&
+        !model_get_u64_compat(m, "inkling2.context_length", &ctx_train))
         model_get_u64_compat(m, "qwen35.context_length", &ctx_train);
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         tensor_bytes += m->tensors[i].bytes;

@@ -39,6 +39,7 @@ enum {
     P36_VK_TENSOR_IQ2_S   = 22,
     P36_VK_TENSOR_IQ4_XS  = 23,
     P36_VK_TENSOR_IQ1_M   = 29,
+    P36_VK_TENSOR_NVFP4   = 40,
     P36_VK_TENSOR_Q2_0    = 42,
     P36_VK_TENSOR_PQ2_0   = 142,
     P36_VK_TENSOR_PTQ1_0  = 143,

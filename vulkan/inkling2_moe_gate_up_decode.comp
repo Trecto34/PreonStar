@@ -29,6 +29,7 @@ layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
 layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
 layout(set = 0, binding = 3) writeonly buffer Output { float y[]; };
 layout(set = 0, binding = 4) readonly buffer Tables { uint tables[]; };
+layout(set = 0, binding = 5) readonly buffer ExpScale { float exp_scale[]; };
 
 layout(push_constant) uniform Push {
     uint mid_dim;      /* 1152 */
@@ -38,9 +39,11 @@ layout(push_constant) uniform Push {
     float inv_beta;    /* 0.25 */
     float situ_lb;     /* 25.0 */
     float inv_lb;      /* 0.04 */
+    uint has_exp_scale;
 } pc;
 
 const uint IQ2_U16 = 33u;
+const uint IQ2XS_U16 = 37u;
 const uint IQ2S_BYTES = 82u;
 const uint IQ3XXS_BYTES = 98u;
 const uint IQ3S_BYTES = 110u;
@@ -48,6 +51,7 @@ const uint TAB_KSIGNS = 512u;
 const uint TAB_IQ2S = 544u;
 const uint TAB_IQ3S_GRID = 2592u;
 const uint TAB_IQ3XXS_GRID = 3104u;
+const uint TAB_IQ2XS = 7456u;
 
 uint w_u8(uint off) {
     return (uint(w[off >> 1u]) >> (8u * (off & 1u))) & 255u;
@@ -67,6 +71,9 @@ float sum16(float v) {
 
 #ifdef P36_MOE_IQ2XXS
 shared uvec2 sh_grid[256];
+#elif defined(P36_MOE_IQ2XS)
+shared uvec2 sh_grid[512];
+shared uint sh_ksigns[128];
 #elif defined(P36_MOE_IQ2S)
 shared uvec2 sh_grid[1024];
 #elif defined(P36_MOE_IQ3XXS)
@@ -88,6 +95,18 @@ void main(void) {
 #ifdef P36_MOE_IQ2XXS
     for (uint i = tid; i < 256u; i += WG_THREADS) {
         sh_grid[i] = uvec2(tables[2u * i], tables[2u * i + 1u]);
+    }
+    barrier();
+#elif defined(P36_MOE_IQ2XS)
+    for (uint i = tid; i < 512u; i += WG_THREADS) {
+        sh_grid[i] = uvec2(tables[TAB_IQ2XS + 2u * i], tables[TAB_IQ2XS + 2u * i + 1u]);
+    }
+    if (tid < 32u) {
+        uint kw = tables[TAB_KSIGNS + tid];
+        sh_ksigns[4u * tid + 0u] = kw & 255u;
+        sh_ksigns[4u * tid + 1u] = (kw >> 8u) & 255u;
+        sh_ksigns[4u * tid + 2u] = (kw >> 16u) & 255u;
+        sh_ksigns[4u * tid + 3u] = kw >> 24u;
     }
     barrier();
 #elif defined(P36_MOE_IQ2S)
@@ -118,6 +137,10 @@ void main(void) {
     uint exp_row0 = expert * (2u * pc.mid_dim);
 #ifdef P36_MOE_IQ2XXS
     uint row_u16 = pc.blocks * IQ2_U16;
+    uint gbase = (exp_row0 + row) * row_u16;
+    uint ubase = (exp_row0 + pc.mid_dim + row) * row_u16;
+#elif defined(P36_MOE_IQ2XS)
+    uint row_u16 = pc.blocks * IQ2XS_U16;
     uint gbase = (exp_row0 + row) * row_u16;
     uint ubase = (exp_row0 + pc.mid_dim + row) * row_u16;
 #elif defined(P36_MOE_IQ2S)
@@ -170,6 +193,36 @@ void main(void) {
             uvec2 ug = sh_grid[uqs];
             vec4 u0 = neg4(vec4(unpack8(ug.x)), usign);
             vec4 u1 = neg4(vec4(unpack8(ug.y)), usign_hi);
+            vec4 b0 = (l == 0u) ? a0 : a2;
+            vec4 b4 = (l == 0u) ? a1 : a3;
+            gs += dot(b0, g0) + dot(b4, g1);
+            us += dot(b0, u0) + dot(b4, u1);
+        }
+        gate_acc = fma(gdb, gs, gate_acc);
+        up_acc = fma(udb, us, up_acc);
+#elif defined(P36_MOE_IQ2XS)
+        uint gb = gbase + i * IQ2XS_U16;
+        uint ub = ubase + i * IQ2XS_U16;
+        float gd = unpackHalf2x16(uint(w[gb])).x;
+        float ud = unpackHalf2x16(uint(w[ub])).x;
+        uint gsc = w_u8((gb + 33u) * 2u + ib32);
+        uint usc = w_u8((ub + 33u) * 2u + ib32);
+        float gdb = gd * 0.25 * (0.5 + float(qpair == 0u ? (gsc & 15u) : (gsc >> 4u)));
+        float udb = ud * 0.25 * (0.5 + float(qpair == 0u ? (usc & 15u) : (usc >> 4u)));
+        float gs = 0.0;
+        float us = 0.0;
+        [[unroll]] for (uint l = 0u; l < 2u; l++) {
+            uint sub = 2u * qpair + l;
+            uint gq = uint(w[gb + 1u + 4u * ib32 + sub]);
+            uint uq = uint(w[ub + 1u + 4u * ib32 + sub]);
+            uint gsign = sh_ksigns[gq >> 9u];
+            uint usign = sh_ksigns[uq >> 9u];
+            uvec2 gg = sh_grid[gq & 511u];
+            uvec2 ug = sh_grid[uq & 511u];
+            vec4 g0 = neg4(vec4(unpack8(gg.x)), gsign);
+            vec4 g1 = neg4(vec4(unpack8(gg.y)), gsign >> 4u);
+            vec4 u0 = neg4(vec4(unpack8(ug.x)), usign);
+            vec4 u1 = neg4(vec4(unpack8(ug.y)), usign >> 4u);
             vec4 b0 = (l == 0u) ? a0 : a2;
             vec4 b4 = (l == 0u) ? a1 : a3;
             gs += dot(b0, g0) + dot(b4, g1);
@@ -287,6 +340,11 @@ void main(void) {
     float g = sum16(gate_acc);
     float u = sum16(up_acc);
     if (itid == 0u) {
+        if (pc.has_exp_scale != 0u) {
+            float es = exp_scale[expert];
+            g *= es;
+            u *= es;
+        }
         float sg = pc.situ_beta * tanh(g * pc.inv_beta) / (1.0 + exp(-g));
         float su = pc.situ_lb * tanh(u * pc.inv_lb);
         y[pair * pc.mid_dim + row] = sg * su;

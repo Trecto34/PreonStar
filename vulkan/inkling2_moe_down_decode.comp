@@ -22,13 +22,15 @@ layout(set = 0, binding = 4) writeonly buffer Output { float y[]; };
 layout(set = 0, binding = 5) readonly buffer ConvW { vec4 cw[]; };
 layout(set = 0, binding = 6) buffer ConvState { float cs[]; };
 layout(set = 0, binding = 7) readonly buffer Res { float res[]; };
+layout(set = 0, binding = 8) readonly buffer ExpScale { float exp_scale[]; };
 
 layout(push_constant) uniform Push {
     uint out_dim;
     uint in_dim;
-    uint blocks;     /* in_dim / 32 = 36 */
-    uint n_used;     /* 8 */
-    float inv_scale; /* 1 / sqrt(5) for fused ffn_post_conv + residual */
+    uint blocks;        /* in_dim / 32 = 36 */
+    uint n_used;        /* 8 */
+    float inv_scale;    /* 1 / sqrt(5) for fused ffn_post_conv + residual */
+    uint has_exp_scale; /* 1 if exp_scale[] is valid */
 } pc;
 
 const uint ROWS = 8u;
@@ -42,8 +44,16 @@ const float IQ4NL_INIT[16] = float[16](
 shared float sh_lut[16];
 #elif defined(P36_MOE_Q5_0)
 const uint BLOCK_U16 = 11u;
+#elif defined(P36_MOE_NVFP4)
+const uint BLOCK_U32 = 9u; /* 36 bytes per 64 weights */
+const float NVFP4_INIT[16] = float[16](
+    0.0,  1.0,  2.0,  3.0,  4.0,  6.0,  8.0,  12.0,
+    0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0
+);
+shared float sh_lut[16];
+shared float sh_ue4m3[256];
 #else
-#error "Define P36_MOE_IQ4NL or P36_MOE_Q5_0"
+#error "Define P36_MOE_IQ4NL, P36_MOE_Q5_0, or P36_MOE_NVFP4"
 #endif
 
 void main(void) {
@@ -56,13 +66,33 @@ void main(void) {
 #ifdef P36_MOE_IQ4NL
     if (tid < 16u) sh_lut[tid] = IQ4NL_INIT[tid];
     barrier();
+#elif defined(P36_MOE_NVFP4)
+    if (tid < 16u) sh_lut[tid] = NVFP4_INIT[tid];
+    for (uint i = tid; i < 256u; i += 64u) {
+        if (i == 0u || i == 0x7Fu) {
+            sh_ue4m3[i] = 0.0;
+        } else {
+            uint e = (i >> 3u) & 15u;
+            uint m = i & 7u;
+            float raw = (e == 0u) ? ldexp(float(m), -9)
+                                  : ldexp(1.0 + float(m) * 0.125, int(e) - 7);
+            sh_ue4m3[i] = raw * 0.5;
+        }
+    }
+    barrier();
 #endif
 
     uint expert = selected[slot];
     float weight = rw[slot];
+    if (pc.has_exp_scale != 0u) weight *= exp_scale[expert];
     uint x_base = slot * (pc.in_dim >> 2u);
+#ifdef P36_MOE_NVFP4
+    uint row_u32 = (pc.blocks >> 1u) * BLOCK_U32;
+    uint exp_u32 = expert * pc.out_dim * row_u32;
+#else
     uint exp_u16 = expert * pc.out_dim * pc.blocks * BLOCK_U16;
     uint row_u16 = pc.blocks * BLOCK_U16;
+#endif
 
     float acc[ROWS];
     [[unroll]] for (uint r = 0u; r < ROWS; r++) acc[r] = 0.0;
@@ -79,6 +109,36 @@ void main(void) {
         vec4 a7 = xv[x4 + 7u];
 
         [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+#ifdef P36_MOE_NVFP4
+            uint blk = b >> 1u;
+            uint half_b = b & 1u;
+            uint wi = exp_u32 + (row0 + r) * row_u32 + blk * BLOCK_U32;
+            uint ds = w[wi];
+            uint qbase = wi + 1u + half_b * 4u;
+            uint q0 = w[qbase + 0u];
+            uint q1 = w[qbase + 1u];
+            uint q2 = w[qbase + 2u];
+            uint q3 = w[qbase + 3u];
+            float d0 = sh_ue4m3[(ds >> (half_b * 16u)) & 255u];
+            float d1 = sh_ue4m3[(ds >> (half_b * 16u + 8u)) & 255u];
+            float s0 = dot(vec4(sh_lut[(q0      ) & 15u], sh_lut[(q0 >>  8u) & 15u],
+                                sh_lut[(q0 >> 16u) & 15u], sh_lut[(q0 >> 24u) & 15u]), a0)
+                     + dot(vec4(sh_lut[(q1      ) & 15u], sh_lut[(q1 >>  8u) & 15u],
+                                sh_lut[(q1 >> 16u) & 15u], sh_lut[(q1 >> 24u) & 15u]), a1)
+                     + dot(vec4(sh_lut[(q0 >>  4u) & 15u], sh_lut[(q0 >> 12u) & 15u],
+                                sh_lut[(q0 >> 20u) & 15u], sh_lut[(q0 >> 28u) & 15u]), a2)
+                     + dot(vec4(sh_lut[(q1 >>  4u) & 15u], sh_lut[(q1 >> 12u) & 15u],
+                                sh_lut[(q1 >> 20u) & 15u], sh_lut[(q1 >> 28u) & 15u]), a3);
+            float s1 = dot(vec4(sh_lut[(q2      ) & 15u], sh_lut[(q2 >>  8u) & 15u],
+                                sh_lut[(q2 >> 16u) & 15u], sh_lut[(q2 >> 24u) & 15u]), a4)
+                     + dot(vec4(sh_lut[(q3      ) & 15u], sh_lut[(q3 >>  8u) & 15u],
+                                sh_lut[(q3 >> 16u) & 15u], sh_lut[(q3 >> 24u) & 15u]), a5)
+                     + dot(vec4(sh_lut[(q2 >>  4u) & 15u], sh_lut[(q2 >> 12u) & 15u],
+                                sh_lut[(q2 >> 20u) & 15u], sh_lut[(q2 >> 28u) & 15u]), a6)
+                     + dot(vec4(sh_lut[(q3 >>  4u) & 15u], sh_lut[(q3 >> 12u) & 15u],
+                                sh_lut[(q3 >> 20u) & 15u], sh_lut[(q3 >> 28u) & 15u]), a7);
+            acc[r] = fma(d0, s0, fma(d1, s1, acc[r]));
+#else
             uint boff = exp_u16 + (row0 + r) * row_u16 + b * BLOCK_U16;
             uint wi = boff >> 1u;
             float d;
@@ -174,6 +234,7 @@ void main(void) {
                           float(int(((q3 >> 28u) & 15u) | (((qh >> 31u) & 1u) << 4u)) - 16)), a7);
 #endif
             acc[r] = fma(d, s, acc[r]);
+#endif
         }
     }
 

@@ -15,12 +15,14 @@ layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
 layout(set = 0, binding = 1) readonly buffer Act { vec4 xv[]; };
 layout(set = 0, binding = 2) readonly buffer Tiles { uint tiles[]; };
 layout(set = 0, binding = 3) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 4) readonly buffer ExpScale { float exp_scale[]; };
 
 layout(push_constant) uniform Push {
     uint out_dim;
     uint in_dim;
-    uint blocks;    /* in_dim / 32 = 36 */
-    uint n_used;    /* 8 */
+    uint blocks;        /* in_dim / 32 = 36 */
+    uint n_used;        /* 8 */
+    uint has_exp_scale; /* 1 if exp_scale[] is valid */
 } pc;
 
 const uint SLOT_TILE = 32u;
@@ -41,8 +43,18 @@ const float16_t IQ4NL_INIT[16] = float16_t[16](
 shared float16_t sh_lut[16];
 #elif defined(P36_MOE_Q5_0)
 const uint BLOCK_U16 = 11u;
+#elif defined(P36_MOE_NVFP4)
+const uint BLOCK_U32 = 9u;
+const float16_t NVFP4_INIT[16] = float16_t[16](
+    float16_t(0.0),  float16_t(1.0),  float16_t(2.0),  float16_t(3.0),
+    float16_t(4.0),  float16_t(6.0),  float16_t(8.0),  float16_t(12.0),
+    float16_t(0.0),  float16_t(-1.0), float16_t(-2.0), float16_t(-3.0),
+    float16_t(-4.0), float16_t(-6.0), float16_t(-8.0), float16_t(-12.0)
+);
+shared float16_t sh_lut[16];
+shared float sh_ue4m3[256];
 #else
-#error "Define P36_MOE_IQ4NL or P36_MOE_Q5_0"
+#error "Define P36_MOE_IQ4NL, P36_MOE_Q5_0, or P36_MOE_NVFP4"
 #endif
 
 shared f16vec4 Aw[BM][KK];
@@ -62,6 +74,17 @@ void main(void) {
     }
 #ifdef P36_MOE_IQ4NL
     if (tid < 16u) sh_lut[tid] = IQ4NL_INIT[tid];
+#elif defined(P36_MOE_NVFP4)
+    if (tid < 16u) sh_lut[tid] = NVFP4_INIT[tid];
+    if (tid == 0u || tid == 0x7Fu) {
+        sh_ue4m3[tid] = 0.0;
+    } else {
+        uint e = (tid >> 3u) & 15u;
+        uint m = tid & 7u;
+        float raw = (e == 0u) ? ldexp(float(m), -9)
+                              : ldexp(1.0 + float(m) * 0.125, int(e) - 7);
+        sh_ue4m3[tid] = raw * 0.5;
+    }
 #endif
     barrier();
 
@@ -78,8 +101,13 @@ void main(void) {
         acc1[i] = 0.0;
     }
 
+#ifdef P36_MOE_NVFP4
+    uint row_u32 = (pc.blocks >> 1u) * BLOCK_U32;
+    uint exp_u32 = expert * pc.out_dim * row_u32;
+#else
     uint exp_u16 = expert * pc.out_dim * pc.blocks * BLOCK_U16;
     uint row_u16 = pc.blocks * BLOCK_U16;
+#endif
     uint in_v4 = pc.in_dim >> 2u;
 
     /* Weight loader: 256 threads -> 128 rows x 2 halves (lc = 0, 1) */
@@ -97,6 +125,29 @@ void main(void) {
     uint swz_ry = P36_SWZ(ry);
 
     for (uint b = 0u; b < pc.blocks; b++) {
+#ifdef P36_MOE_NVFP4
+        uint blk = b >> 1u;
+        uint half_b = b & 1u;
+        uint wi = exp_u32 + (row0 + lr) * row_u32 + blk * BLOCK_U32;
+        uint ds = w[wi];
+        float d0 = sh_ue4m3[(ds >> (half_b * 16u)) & 255u];
+        float d1 = sh_ue4m3[(ds >> (half_b * 16u + 8u)) & 255u];
+        float dmax = max(d0, d1);
+        if (lc == 0u) Dw[lr] = dmax;
+        float16_t rel_d = (dmax > 0.0) ? float16_t(((lc == 0u) ? d0 : d1) / dmax) : float16_t(0.0);
+        uint qbase = wi + 1u + half_b * 4u + lc * 2u;
+        uint q0 = w[qbase + 0u];
+        uint q1 = w[qbase + 1u];
+        uint base_k = lc * 4u;
+        Aw[lr][(base_k + 0u) ^ sa] = f16vec4(sh_lut[(q0      ) & 15u], sh_lut[(q0 >>  8u) & 15u],
+                                             sh_lut[(q0 >> 16u) & 15u], sh_lut[(q0 >> 24u) & 15u]) * rel_d;
+        Aw[lr][(base_k + 1u) ^ sa] = f16vec4(sh_lut[(q1      ) & 15u], sh_lut[(q1 >>  8u) & 15u],
+                                             sh_lut[(q1 >> 16u) & 15u], sh_lut[(q1 >> 24u) & 15u]) * rel_d;
+        Aw[lr][(base_k + 2u) ^ sa] = f16vec4(sh_lut[(q0 >>  4u) & 15u], sh_lut[(q0 >> 12u) & 15u],
+                                             sh_lut[(q0 >> 20u) & 15u], sh_lut[(q0 >> 28u) & 15u]) * rel_d;
+        Aw[lr][(base_k + 3u) ^ sa] = f16vec4(sh_lut[(q1 >>  4u) & 15u], sh_lut[(q1 >> 12u) & 15u],
+                                             sh_lut[(q1 >> 20u) & 15u], sh_lut[(q1 >> 28u) & 15u]) * rel_d;
+#else
         uint boff = exp_u16 + (row0 + lr) * row_u16 + b * BLOCK_U16;
         uint wi = boff >> 1u;
         bool odd = (b & 1u) != 0u;
@@ -163,6 +214,7 @@ void main(void) {
             float16_t(int(((q1 >> 20u) & 15u) | (((qh >> (sh2 + 6u)) & 1u) << 4u)) - 16),
             float16_t(int(((q1 >> 28u) & 15u) | (((qh >> (sh2 + 7u)) & 1u) << 4u)) - 16));
 #endif
+#endif
         Bs[b_slot][b_swz] = live_b ? f16vec4(xv[b_base + b * 8u]) : f16vec4(0.0hf);
         barrier();
 
@@ -209,11 +261,12 @@ void main(void) {
         barrier();
     }
 
+    float es = (pc.has_exp_scale != 0u) ? exp_scale[expert] : 1.0;
     uint s0 = sh_slot[sl];
     uint s1 = hi_live ? sh_slot[sl + 16u] : INVALID;
     [[unroll]] for (uint i = 0u; i < 8u; i++) {
         uint row = row0 + ry + 16u * i;
-        if (s0 != INVALID) y[s0 * pc.out_dim + row] = acc0[i];
-        if (s1 != INVALID) y[s1 * pc.out_dim + row] = acc1[i];
+        if (s0 != INVALID) y[s0 * pc.out_dim + row] = acc0[i] * es;
+        if (s1 != INVALID) y[s1 * pc.out_dim + row] = acc1[i] * es;
     }
 }

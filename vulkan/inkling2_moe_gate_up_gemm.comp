@@ -21,6 +21,7 @@ layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
 layout(set = 0, binding = 2) readonly buffer Tiles { uint tiles[]; };
 layout(set = 0, binding = 3) writeonly buffer Output { float y[]; };
 layout(set = 0, binding = 4) readonly buffer Tables { uint tables[]; };
+layout(set = 0, binding = 5) readonly buffer ExpScale { float exp_scale[]; };
 
 layout(push_constant) uniform Push {
     uint mid_dim;
@@ -30,9 +31,11 @@ layout(push_constant) uniform Push {
     float inv_beta;
     float situ_lb;
     float inv_lb;
+    uint has_exp_scale;
 } pc;
 
 const uint IQ2_U16 = 33u;
+const uint IQ2XS_U16 = 37u;
 const uint IQ2S_BYTES = 82u;
 const uint IQ3XXS_BYTES = 98u;
 const uint IQ3S_BYTES = 110u;
@@ -40,6 +43,7 @@ const uint TAB_KSIGNS = 512u;
 const uint TAB_IQ2S = 544u;
 const uint TAB_IQ3S_GRID = 2592u;
 const uint TAB_IQ3XXS_GRID = 3104u;
+const uint TAB_IQ2XS = 7456u;
 
 const uint SLOT_TILE = 32u;
 const uint TILE_WORDS = 1u + SLOT_TILE;
@@ -54,6 +58,9 @@ uint w_u8(uint off) {
 
 #ifdef P36_MOE_IQ2XXS
 shared uvec2 sh_grid[256];
+#elif defined(P36_MOE_IQ2XS)
+shared uvec2 sh_grid[512];
+shared uint sh_ksigns[128];
 #elif defined(P36_MOE_IQ3XXS)
 shared uint sh_grid[256];
 shared uint sh_ksigns[128];
@@ -82,6 +89,17 @@ void main(void) {
     }
 #ifdef P36_MOE_IQ2XXS
     sh_grid[tid] = uvec2(tables[2u * tid], tables[2u * tid + 1u]);
+#elif defined(P36_MOE_IQ2XS)
+    for (uint i = tid; i < 512u; i += 256u) {
+        sh_grid[i] = uvec2(tables[TAB_IQ2XS + 2u * i], tables[TAB_IQ2XS + 2u * i + 1u]);
+    }
+    if (tid < 32u) {
+        uint kw = tables[TAB_KSIGNS + tid];
+        sh_ksigns[4u * tid + 0u] = kw & 255u;
+        sh_ksigns[4u * tid + 1u] = (kw >> 8u) & 255u;
+        sh_ksigns[4u * tid + 2u] = (kw >> 16u) & 255u;
+        sh_ksigns[4u * tid + 3u] = kw >> 24u;
+    }
 #elif defined(P36_MOE_IQ3XXS)
     sh_grid[tid] = tables[TAB_IQ3XXS_GRID + tid];
     if (tid < 32u) {
@@ -106,6 +124,9 @@ void main(void) {
 #ifdef P36_MOE_IQ2XXS
     uint gbase_u16 = g_row * pc.blocks * IQ2_U16;
     uint ubase_u16 = u_row * pc.blocks * IQ2_U16;
+#elif defined(P36_MOE_IQ2XS)
+    uint gbase_u16 = g_row * pc.blocks * IQ2XS_U16;
+    uint ubase_u16 = u_row * pc.blocks * IQ2XS_U16;
 #elif defined(P36_MOE_IQ2S)
     uint gbase_bytes = g_row * pc.blocks * IQ2S_BYTES;
     uint ubase_bytes = u_row * pc.blocks * IQ2S_BYTES;
@@ -181,6 +202,39 @@ void main(void) {
             if (sub == 0u) {
                 Dg[ar] = unpackHalf2x16(uint(w[gb])).x * 16.0 * (0.5 + float(gss >> 28u));
                 Du[ar] = unpackHalf2x16(uint(w[ub])).x * 16.0 * (0.5 + float(uss >> 28u));
+            }
+        }
+#elif defined(P36_MOE_IQ2XS)
+        {
+            uint gb = gbase_u16 + sb * IQ2XS_U16;
+            uint ub = ubase_u16 + sb * IQ2XS_U16;
+            uint gsc_b = w_u8((gb + 33u) * 2u + ib32);
+            uint usc_b = w_u8((ub + 33u) * 2u + ib32);
+            uint gnib = sub < 2u ? (gsc_b & 15u) : (gsc_b >> 4u);
+            uint unib = sub < 2u ? (usc_b & 15u) : (usc_b >> 4u);
+            float gsc = (0.5 + float(gnib)) * 0.015625;
+            float usc = (0.5 + float(unib)) * 0.015625;
+            uint gq = uint(w[gb + 1u + 4u * ib32 + sub]);
+            uint uq = uint(w[ub + 1u + 4u * ib32 + sub]);
+            uint gsign = sh_ksigns[gq >> 9u];
+            uint usign = sh_ksigns[uq >> 9u];
+            uvec2 gg = sh_grid[gq & 511u];
+            uvec2 ug = sh_grid[uq & 511u];
+            vec4 g0 = vec4(unpack8(gg.x));
+            vec4 g1 = vec4(unpack8(gg.y));
+            g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (gsign & 128u) != 0u));
+            Ag[ar][a_k0] = f16vec4(g0 * gsc);
+            Ag[ar][a_k1] = f16vec4(g1 * gsc);
+            vec4 u0 = vec4(unpack8(ug.x));
+            vec4 u1 = vec4(unpack8(ug.y));
+            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
+            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (usign & 128u) != 0u));
+            Au[ar][a_k0] = f16vec4(u0 * usc);
+            Au[ar][a_k1] = f16vec4(u1 * usc);
+            if (sub == 0u && ib32 == 0u) {
+                Dg[ar] = unpackHalf2x16(uint(w[gb])).x * 16.0;
+                Du[ar] = unpackHalf2x16(uint(w[ub])).x * 16.0;
             }
         }
 #elif defined(P36_MOE_IQ2S)
@@ -338,19 +392,20 @@ void main(void) {
         barrier();
     }
 
+    float es = (pc.has_exp_scale != 0u) ? exp_scale[expert] : 1.0;
     uint s0 = sh_slot[sl];
     uint s1 = hi_live ? sh_slot[sl + 16u] : INVALID;
     [[unroll]] for (uint i = 0u; i < 4u; i++) {
         uint out_row = row0 + arow[i];
         if (out_row >= pc.mid_dim) continue;
         if (s0 != INVALID) {
-            float g = accg[i][0], u = accu[i][0];
+            float g = accg[i][0] * es, u = accu[i][0] * es;
             y[s0 * pc.mid_dim + out_row] =
                 (pc.situ_beta * tanh(g * pc.inv_beta) / (1.0 + exp(-g))) *
                 (pc.situ_lb * tanh(u * pc.inv_lb));
         }
         if (s1 != INVALID) {
-            float g = accg[i][1], u = accu[i][1];
+            float g = accg[i][1] * es, u = accu[i][1] * es;
             y[s1 * pc.mid_dim + out_row] =
                 (pc.situ_beta * tanh(g * pc.inv_beta) / (1.0 + exp(-g))) *
                 (pc.situ_lb * tanh(u * pc.inv_lb));

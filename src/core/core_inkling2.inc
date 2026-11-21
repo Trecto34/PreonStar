@@ -66,7 +66,9 @@ typedef struct {
     p36_tensor *ffn_gate_inp;
     p36_tensor *exp_probs_b;
     p36_tensor *ffn_gate_up_exps;
+    p36_tensor *ffn_gate_up_exps_scale;
     p36_tensor *ffn_down_exps;
+    p36_tensor *ffn_down_exps_scale;
     p36_tensor *loop_msg_query;
     p36_tensor *loop_down[4];
     p36_tensor *loop_forget[4];
@@ -91,73 +93,115 @@ static bool p36_inkling2_init_engine(p36_engine *e) {
     e->ink_hparams = hp;
     e->ink_weights = w;
 
-    hp->n_phys_layer = 24;
-    model_get_u32(m, "inkling2_loop.block_count", &hp->n_phys_layer);
+    p36_str arch = {0};
+    model_get_string(m, "general.architecture", &arch);
+    bool is_inkling2_arch = p36_streq(arch, "inkling2");
+
+#define INK_GET_U32(suf, dst) do { \
+    if (!model_get_u32(m, "inkling2_loop." suf, &(dst))) \
+        model_get_u32(m, "inkling2." suf, &(dst)); \
+} while (0)
+#define INK_GET_F32(suf, dst) do { \
+    if (!model_get_f32_compat(m, "inkling2_loop." suf, &(dst))) \
+        model_get_f32_compat(m, "inkling2." suf, &(dst)); \
+} while (0)
+
+    uint32_t block_count = is_inkling2_arch ? 48u : 24u;
+    INK_GET_U32("block_count", block_count);
     hp->n_embd = 2304;
-    model_get_u32(m, "inkling2_loop.embedding_length", &hp->n_embd);
+    INK_GET_U32("embedding_length", hp->n_embd);
     hp->n_head = 24;
     hp->n_head_kv = 8;
     hp->n_head_dim = 128;
-    model_get_u32(m, "inkling2_loop.attention.key_length", &hp->n_head_dim);
+    INK_GET_U32("attention.key_length", hp->n_head_dim);
     hp->n_expert = 128;
-    model_get_u32(m, "inkling2_loop.expert_count", &hp->n_expert);
+    INK_GET_U32("expert_count", hp->n_expert);
     hp->n_expert_used = 8;
-    model_get_u32(m, "inkling2_loop.expert_used_count", &hp->n_expert_used);
+    INK_GET_U32("expert_used_count", hp->n_expert_used);
     hp->n_ff_exp = 1152;
-    model_get_u32(m, "inkling2_loop.expert_feed_forward_length", &hp->n_ff_exp);
+    INK_GET_U32("expert_feed_forward_length", hp->n_ff_exp);
     hp->n_vocab_padded = 201024;
-    model_get_u32(m, "inkling2_loop.vocab_size", &hp->n_vocab_padded);
+    INK_GET_U32("vocab_size", hp->n_vocab_padded);
     hp->n_vocab_unpadded = 200058;
-    model_get_u32(m, "inkling2_loop.vocab_size_unpadded", &hp->n_vocab_unpadded);
+    INK_GET_U32("vocab_size_unpadded", hp->n_vocab_unpadded);
     hp->n_swa = 1024;
-    model_get_u32(m, "inkling2_loop.attention.sliding_window", &hp->n_swa);
+    INK_GET_U32("attention.sliding_window", hp->n_swa);
     hp->n_relative = 16;
-    model_get_u32(m, "inkling2_loop.attention.relative_length", &hp->n_relative);
+    INK_GET_U32("attention.relative_length", hp->n_relative);
     hp->n_relative_extent = 1024;
-    model_get_u32(m, "inkling2_loop.attention.relative_extent", &hp->n_relative_extent);
+    INK_GET_U32("attention.relative_extent", hp->n_relative_extent);
     hp->n_conv = 4;
-    model_get_u32(m, "inkling2_loop.shortconv.l_cache", &hp->n_conv);
+    INK_GET_U32("shortconv.l_cache", hp->n_conv);
     hp->attn_res_block_size = 6;
-    model_get_u32(m, "inkling2_loop.attn_res.block_size", &hp->attn_res_block_size);
+    INK_GET_U32("attn_res.block_size", hp->attn_res_block_size);
     hp->loop_start = 6;
-    model_get_u32(m, "inkling2_loop.loop.start", &hp->loop_start);
+    if (!model_get_u32(m, "inkling2_loop.loop.start", &hp->loop_start))
+        model_get_u32(m, "inkling2.loop.core_start", &hp->loop_start);
     hp->loop_end = 18;
-    model_get_u32(m, "inkling2_loop.loop.end", &hp->loop_end);
+    if (!model_get_u32(m, "inkling2_loop.loop.end", &hp->loop_end))
+        model_get_u32(m, "inkling2.loop.core_end", &hp->loop_end);
     hp->loop_count = 3;
-    model_get_u32(m, "inkling2_loop.loop.count", &hp->loop_count);
+    if (!model_get_u32(m, "inkling2_loop.loop.count", &hp->loop_count))
+        model_get_u32(m, "inkling2.num_loops", &hp->loop_count);
     hp->loop_gate_rank = 64;
-    model_get_u32(m, "inkling2_loop.loop.gate_rank", &hp->loop_gate_rank);
+    INK_GET_U32("loop.gate_rank", hp->loop_gate_rank);
 
     hp->rms_eps = 1.0e-6f;
-    model_get_f32_compat(m, "inkling2_loop.attention.layer_norm_rms_epsilon", &hp->rms_eps);
+    INK_GET_F32("attention.layer_norm_rms_epsilon", hp->rms_eps);
     hp->qk_clip = 22.6274166f;
-    model_get_f32_compat(m, "inkling2_loop.attention.qk_clip", &hp->qk_clip);
+    INK_GET_F32("attention.qk_clip", hp->qk_clip);
     hp->rel_clip = 8.0f;
-    model_get_f32_compat(m, "inkling2_loop.attention.relative_clip", &hp->rel_clip);
+    INK_GET_F32("attention.relative_clip", hp->rel_clip);
     hp->log_scale_floor = 8192.0f;
-    model_get_f32_compat(m, "inkling2_loop.attention.log_scale_floor", &hp->log_scale_floor);
+    INK_GET_F32("attention.log_scale_floor", hp->log_scale_floor);
     hp->log_scale_alpha = 0.1f;
-    model_get_f32_compat(m, "inkling2_loop.attention.log_scale_alpha", &hp->log_scale_alpha);
+    INK_GET_F32("attention.log_scale_alpha", hp->log_scale_alpha);
     hp->situ_beta = 4.0f;
-    model_get_f32_compat(m, "inkling2_loop.activation.situ_beta", &hp->situ_beta);
+    INK_GET_F32("activation.situ_beta", hp->situ_beta);
     hp->situ_linear_beta = 25.0f;
-    model_get_f32_compat(m, "inkling2_loop.activation.situ_linear_beta", &hp->situ_linear_beta);
+    INK_GET_F32("activation.situ_linear_beta", hp->situ_linear_beta);
     hp->expert_weights_scale = 8.0f;
-    model_get_f32_compat(m, "inkling2_loop.expert_weights_scale", &hp->expert_weights_scale);
+    INK_GET_F32("expert_weights_scale", hp->expert_weights_scale);
     hp->final_logit_softcapping = 30.0f;
-    model_get_f32_compat(m, "inkling2_loop.final_logit_softcapping", &hp->final_logit_softcapping);
+    INK_GET_F32("final_logit_softcapping", hp->final_logit_softcapping);
+
+#undef INK_GET_U32
+#undef INK_GET_F32
 
     uint32_t n_core = hp->loop_count > 1 ? (hp->loop_end - hp->loop_start) : 0;
-    hp->n_logical_layer = hp->n_phys_layer + n_core * (hp->loop_count > 1 ? (hp->loop_count - 1u) : 0u);
+    uint32_t extra_core = n_core * (hp->loop_count > 1 ? (hp->loop_count - 1u) : 0u);
+    if (is_inkling2_arch) {
+        hp->n_logical_layer = block_count;
+        hp->n_phys_layer = block_count - extra_core;
+    } else {
+        hp->n_phys_layer = block_count;
+        hp->n_logical_layer = block_count + extra_core;
+    }
 
     /* Read sliding_window_pattern array (or fallback to every 6th full-attn). */
     p36_array_ref pat;
-    if (model_get_array(m, "inkling2_loop.attention.sliding_window_pattern", &pat) &&
-        pat.len == hp->n_phys_layer && pat.type == GGUF_VALUE_BOOL) {
+    bool got_pat = model_get_array(m, "inkling2_loop.attention.sliding_window_pattern", &pat) ||
+                   model_get_array(m, "inkling2.attention.sliding_window_pattern", &pat);
+    if (got_pat && pat.len == hp->n_phys_layer && pat.type == GGUF_VALUE_BOOL) {
         p36_cursor c = cursor_at(m, pat.data_pos);
         for (uint32_t i = 0; i < hp->n_phys_layer; i++) {
             uint8_t b = 1;
             if (cursor_read(&c, &b, 1)) hp->is_swa[i] = (b != 0);
+        }
+    } else if (got_pat && pat.len == hp->n_logical_layer && pat.type == GGUF_VALUE_BOOL) {
+        p36_cursor c = cursor_at(m, pat.data_pos);
+        for (uint32_t il = 0; il < hp->n_logical_layer; il++) {
+            uint8_t b = 1;
+            if (!cursor_read(&c, &b, 1)) break;
+            uint32_t ip;
+            if (n_core > 0 && il >= hp->loop_start && il < hp->loop_start + n_core * hp->loop_count) {
+                ip = hp->loop_start + ((il - hp->loop_start) % n_core);
+            } else if (n_core > 0 && il >= hp->loop_start + n_core * hp->loop_count) {
+                ip = hp->loop_end + (il - (hp->loop_start + n_core * hp->loop_count));
+            } else {
+                ip = il;
+            }
+            if (ip < P36_INK_MAX_PHYS) hp->is_swa[ip] = (b != 0);
         }
     } else {
         for (uint32_t i = 0; i < hp->n_phys_layer; i++) {
@@ -212,7 +256,9 @@ static bool p36_inkling2_init_engine(p36_engine *e) {
         l->ffn_gate_inp = required_tensorf(m, "blk.%u.ffn_gate_inp.weight", ip);
         l->exp_probs_b = tensor_by_namef(m, "blk.%u.exp_probs_b.bias", ip);
         l->ffn_gate_up_exps = required_tensorf(m, "blk.%u.ffn_gate_up_exps.weight", ip);
+        l->ffn_gate_up_exps_scale = tensor_by_namef(m, "blk.%u.ffn_gate_up_exps.scale", ip);
         l->ffn_down_exps = required_tensorf(m, "blk.%u.ffn_down_exps.weight", ip);
+        l->ffn_down_exps_scale = tensor_by_namef(m, "blk.%u.ffn_down_exps.scale", ip);
 
         if (hp->loop_count > 1 && ip >= hp->loop_start && ip < hp->loop_end) {
             l->loop_msg_query = tensor_by_namef(m, "blk.%u.loop_msg_query.weight", ip);
@@ -741,6 +787,7 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
         }
 
         /* Attention projections */
+        bool fused_gate = false;
         if (n_tok == 1u &&
             l->attn_q->type == P36_TENSOR_Q4_K && l->attn_k->type == P36_TENSOR_Q4_K &&
             l->attn_v->type == P36_TENSOR_Q4_K && l->attn_rel->type == P36_TENSOR_Q4_K &&
@@ -752,12 +799,30 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                                                        D, Q, KV, KV, hp->n_head * hp->n_relative)) {
             /* Fused 0%-tail Q4_K decode: Q + K + V + rel in 1 dispatch! (-144 disp/tok) */
         } else {
-            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_q, n_in[0], q8_in[0], ink->q_buf, D, Q, n_tok, 1.0f), "attn_q");
-            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_k, n_in[1], q8_in[1], ink->k_buf, D, KV, n_tok, 1.0f), "attn_k");
-            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_v, n_in[2], q8_in[2], ink->v_buf, D, KV, n_tok, 1.0f), "attn_v");
+            if (n_tok == 1u &&
+                l->attn_q->type == P36_TENSOR_Q8_0 && l->attn_gate->type == P36_TENSOR_Q8_0 &&
+                p36_gpu_matmul_q8_0_pair_scaled_tensor(ink->q_buf, ink->gate_buf, m->map, m->size,
+                                                       l->attn_q->abs_offset, l->attn_gate->abs_offset,
+                                                       D, Q, Q, n_in[0], 1.0f, 1.0f)) {
+                fused_gate = true;
+            } else {
+                INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_q, n_in[0], q8_in[0], ink->q_buf, D, Q, n_tok, 1.0f), "attn_q");
+            }
+            if (n_tok == 1u && n_in[1] == n_in[2] &&
+                l->attn_k->type == P36_TENSOR_Q8_0 && l->attn_v->type == P36_TENSOR_Q8_0 &&
+                p36_gpu_matmul_q8_0_pair_scaled_tensor(ink->k_buf, ink->v_buf, m->map, m->size,
+                                                       l->attn_k->abs_offset, l->attn_v->abs_offset,
+                                                       D, KV, KV, n_in[1], 1.0f, 1.0f)) {
+                /* Fused Q8_0 pair: attn_k + attn_v on SWA pass 0 */
+            } else {
+                INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_k, n_in[1], q8_in[1], ink->k_buf, D, KV, n_tok, 1.0f), "attn_k");
+                INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_v, n_in[2], q8_in[2], ink->v_buf, D, KV, n_tok, 1.0f), "attn_v");
+            }
             INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_rel, n_in[0], q8_in[0], ink->r_buf, D, hp->n_head * hp->n_relative, n_tok, 1.0f), "attn_rel");
         }
-        if (n_tok == 1u &&
+        if (fused_gate) {
+            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_sink_proj, n_in[0], q8_in[0], ink->sinks_buf, D, hp->n_head, n_tok, 1.0f), "attn_sink");
+        } else if (n_tok == 1u &&
             l->attn_gate->type == P36_TENSOR_Q8_0 && l->attn_sink_proj->type == P36_TENSOR_Q8_0 &&
             p36_gpu_matmul_q8_0_pair_scaled_tensor(ink->gate_buf, ink->sinks_buf, m->map, m->size,
                                                    l->attn_gate->abs_offset, l->attn_sink_proj->abs_offset,
@@ -887,7 +952,11 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                                                 ink->moe_mid, ink->moe_down,
                                                 m->map, m->size,
                                                 l->ffn_gate_up_exps->abs_offset, l->ffn_gate_up_exps->type, l->ffn_gate_up_exps->bytes,
+                                                l->ffn_gate_up_exps_scale ? l->ffn_gate_up_exps_scale->abs_offset : 0,
+                                                l->ffn_gate_up_exps_scale != NULL,
                                                 l->ffn_down_exps->abs_offset, l->ffn_down_exps->type, l->ffn_down_exps->bytes,
+                                                l->ffn_down_exps_scale ? l->ffn_down_exps_scale->abs_offset : 0,
+                                                l->ffn_down_exps_scale != NULL,
                                                 l->ffn_post_conv->abs_offset, ink->conv_ffn_post[il], ink->ffn_inp, inv_sqrt_5,
                                                 ink->norm[0], ink->selected, ink->router_w,
                                                 n_tok, D, hp->n_ff_exp, D, hp->n_expert, hp->n_expert_used,

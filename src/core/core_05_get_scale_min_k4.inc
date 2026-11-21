@@ -51,6 +51,35 @@ static const uint8_t *p36_iq3xxs_grid_at(uint32_t idx) {
     return (const uint8_t *)&p36_iq3xxs_grid[idx];
 }
 
+static float p36_ue4m3_to_f32(uint8_t x) {
+    if (x == 0u || x == 0x7Fu) return 0.0f;
+    int exp = (x >> 3) & 0xF;
+    int man = x & 0x7;
+    float raw = (exp == 0) ? ldexpf((float)man, -9)
+                           : ldexpf(1.0f + (float)man / 8.0f, exp - 7);
+    return raw * 0.5f;
+}
+
+static void p36_dequantize_row_nvfp4(const p36_block_nvfp4 *x, float *y, uint64_t k) {
+    static const int8_t kvalues[16] = {
+        0, 1, 2, 3, 4, 6, 8, 12,
+        0, -1, -2, -3, -4, -6, -8, -12,
+    };
+    if ((k % 64u) != 0) p36_die("nvfp4 row size mismatch");
+    uint64_t nb = k / 64u;
+    for (uint64_t i = 0; i < nb; i++) {
+        for (uint32_t s = 0; s < 4u; s++) {
+            float d = p36_ue4m3_to_f32(x[i].d[s]);
+            float *yb = y + i * 64u + s * 16u;
+            for (uint32_t j = 0; j < 8u; j++) {
+                uint8_t q = x[i].qs[s * 8u + j];
+                yb[j]      = (float)kvalues[q & 0x0Fu] * d;
+                yb[j + 8u] = (float)kvalues[q >> 4]    * d;
+            }
+        }
+    }
+}
+
 static bool p36_dequantize_row_from_ptr(uint32_t type, const uint8_t *src, float *dst, uint32_t n) {
     switch (type) {
     case P36_TENSOR_F32:
@@ -117,6 +146,9 @@ static bool p36_dequantize_row_from_ptr(uint32_t type, const uint8_t *src, float
         return true;
     case P36_TENSOR_IQ1_M:
         p36_dequantize_row_iq1_m((const p36_block_iq1_m *)src, dst, n);
+        return true;
+    case P36_TENSOR_NVFP4:
+        p36_dequantize_row_nvfp4((const p36_block_nvfp4 *)src, dst, n);
         return true;
     default:
         return false;

@@ -347,6 +347,7 @@ static const gguf_type_info gguf_types[] = {
     [26] = {"i32", 1, 4},
     [29] = {"iq1_m", 256, 56},
     [30] = {"bf16", 1, 2},
+    [40] = {"nvfp4", 64, 36},
     [42] = {"q2_0", 64, 18},
     [142] = {"pq2_0", 128, 34},
     [143] = {"ptq1_0", 128, 28},
@@ -375,6 +376,7 @@ enum {
     P36_TENSOR_I32 = 26,
     P36_TENSOR_IQ1_M = 29,
     P36_TENSOR_BF16 = 30,
+    P36_TENSOR_NVFP4 = 40,
     P36_TENSOR_Q2_0 = 42,
     P36_TENSOR_PQ2_0 = 142,
     P36_TENSOR_PTQ1_0 = 143,
@@ -521,6 +523,11 @@ typedef struct {
     uint16_t d;
     uint8_t qs[16];
 } p36_block_iq4_nl;
+
+typedef struct {
+    uint8_t d[4];
+    uint8_t qs[32];
+} p36_block_nvfp4;
 
 typedef struct {
     uint16_t d;
