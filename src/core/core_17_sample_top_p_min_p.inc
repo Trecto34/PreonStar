@@ -272,6 +272,27 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
             e->kat_coder = p36_str_contains(name, "KAT Coder") ||
                            p36_str_contains(name, "KAT-Coder");
         }
+        float v = 0.0f;
+        if (model_get_f32_compat(&e->model, "general.sampling.temp", &v) &&
+            isfinite(v) && v >= 0.0f && v <= 100.0f) {
+            e->sampling_temp = v;
+            e->sampling_temp_set = true;
+        }
+        if (model_get_f32_compat(&e->model, "general.sampling.top_k", &v) &&
+            isfinite(v) && v >= 0.0f && v <= 1000000.0f) {
+            e->sampling_top_k = (int)v;
+            e->sampling_top_k_set = true;
+        }
+        if (model_get_f32_compat(&e->model, "general.sampling.top_p", &v) &&
+            isfinite(v) && v >= 0.0f && v <= 1.0f) {
+            e->sampling_top_p = v;
+            e->sampling_top_p_set = true;
+        }
+        if (model_get_f32_compat(&e->model, "general.sampling.min_p", &v) &&
+            isfinite(v) && v >= 0.0f && v <= 1.0f) {
+            e->sampling_min_p = v;
+            e->sampling_min_p_set = true;
+        }
     }
     {
         const char *tmpl_opt = opt->chat_template;
@@ -789,18 +810,22 @@ void p36_engine_sampling_defaults(p36_engine *e, float *temperature,
     *top_k = 0;
     *top_p = P36_DEFAULT_TOP_P;
     *min_p = P36_DEFAULT_MIN_P;
-    if (e && e->variant == P36_VARIANT_CLOVER_35B_A3B) {
+    if (!e) return;
+    if (e->variant == P36_VARIANT_CLOVER_35B_A3B) {
         *temperature = 0.0f;
         *top_k = 1;
         *top_p = 1.0f;
         *min_p = 0.0f;
-        return;
+    } else if (e->kat_coder) {
+        *temperature = 0.7f;
+        *top_k = 20;
+        *top_p = 0.8f;
+        *min_p = 0.05f;
     }
-    if (!e || !e->kat_coder) return;
-    *temperature = 0.7f;
-    *top_k = 20;
-    *top_p = 0.8f;
-    *min_p = 0.05f;
+    if (e->sampling_temp_set) *temperature = e->sampling_temp;
+    if (e->sampling_top_k_set) *top_k = e->sampling_top_k;
+    if (e->sampling_top_p_set) *top_p = e->sampling_top_p;
+    if (e->sampling_min_p_set) *min_p = e->sampling_min_p;
 }
 
 int p36_inspect_model(const char *model_path) {

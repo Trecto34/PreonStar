@@ -1403,6 +1403,27 @@ static void test_explicit_sampling_wins_in_thinking_mode(void) {
     TEST_ASSERT(top_k == 17);
     TEST_ASSERT(min_p == 0.01f);
     request_free(&r);
+
+    /* Precedence: remote client JSON > server launch flags > model defaults. */
+    server srv = {0};
+    srv.default_temperature = 0.6f;
+    srv.default_temperature_set = true;
+    srv.default_top_k = 40;
+    srv.default_top_k_set = true;
+    request r2;
+    request_init(&r2, REQ_CHAT, 128);
+    request_apply_default_penalties(&r2, &srv);
+    /* Simulate remote client overriding top_k and top_p. */
+    r2.top_k = 12;
+    r2.top_k_set = true;
+    r2.top_p = 0.9f;
+    r2.top_p_set = true;
+    request_apply_model_sampling_defaults(NULL, &r2);
+    TEST_ASSERT(r2.temperature == 0.6f && r2.temperature_set);   /* launch flag beats model default */
+    TEST_ASSERT(r2.top_k == 12 && r2.top_k_set);                 /* client beats launch flag */
+    TEST_ASSERT(r2.top_p == 0.9f && r2.top_p_set);               /* client beats model default */
+    TEST_ASSERT(r2.min_p == P36_DEFAULT_MIN_P && !r2.min_p_set); /* unset falls back to model default */
+    request_free(&r2);
 }
 
 static void test_request_peek_model(void) {

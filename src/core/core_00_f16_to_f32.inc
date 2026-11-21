@@ -720,6 +720,14 @@ struct p36_engine {
     uint32_t vision_n_head;
     float vision_ln_eps;
     bool kat_coder;
+    bool sampling_temp_set;
+    bool sampling_top_k_set;
+    bool sampling_top_p_set;
+    bool sampling_min_p_set;
+    float sampling_temp;
+    int sampling_top_k;
+    float sampling_top_p;
+    float sampling_min_p;
     char *chat_template;
     bool cpu_mmq_contract;   /* CPU reference emulates the f16 dense MMQ contract */
     p36_variant variant;
