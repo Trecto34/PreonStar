@@ -1,11 +1,15 @@
 #version 460
 
+#extension GL_EXT_control_flow_attributes : require
+
 /* Combines Split-K FlashAttention decode partials and applies fused sigmoid output gate.
- * Dispatch: (n_head = 24, 1, 1), local_size_x = 32 (4 dims/lane = 128 dims). */
+ * 128 threads = 2 wave64s = 4 groups of 32 lanes (4x parallel split reads, single-pass
+ * online exp2 merge, aligned vec4 loads via 132-float stride).
+ * Dispatch: (n_head = 24, 1, 1), local_size_x = 128. */
 
-layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer PartBuf { float part_buf[]; };
+layout(set = 0, binding = 0) readonly buffer PartBuf { vec4 part_v[]; };
 layout(set = 0, binding = 1) readonly buffer GateBuf { vec4 gate_buf[]; };
 layout(set = 0, binding = 2) writeonly buffer OutBuf { vec4 out_buf[]; };
 
@@ -13,34 +17,61 @@ layout(push_constant) uniform Push {
     uint n_splits;
 } pc;
 
+shared float sh_m[4];
+shared float sh_l[4];
+shared vec4 sh_o[4][32];
+
 void main(void) {
     uint h = gl_WorkGroupID.x;
-    uint lane = gl_LocalInvocationID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint grp = tid >> 5u;      /* 0..3: 4 parallel split-groups */
+    uint lane = tid & 31u;     /* 0..31: 4 dims/lane = 128 dims */
 
-    float m_all = -1.0e30;
-    for (uint s = 0u; s < pc.n_splits; s++) {
-        uint pbase = (h * pc.n_splits + s) * 130u;
-        float ms = part_buf[pbase + 0u];
-        float ls = part_buf[pbase + 1u];
-        if (ls > 0.0) m_all = max(m_all, ms);
-    }
+    float ma = -1.0e30;
+    float la = 0.0;
+    vec4 oa = vec4(0.0);
 
-    float l_all = 0.0;
-    vec4 o_all = vec4(0.0);
-    for (uint s = 0u; s < pc.n_splits; s++) {
-        uint pbase = (h * pc.n_splits + s) * 130u;
-        float ms = part_buf[pbase + 0u];
-        float ls = part_buf[pbase + 1u];
+    /* Stride = 132 floats = 33 vec4s: vec4[0] = (m_log2, l, 0, 0), vec4[1..32] = O[0..127] */
+    for (uint s = grp; s < pc.n_splits; s += 4u) {
+        uint pbase4 = (h * pc.n_splits + s) * 33u;
+        vec4 hdr = part_v[pbase4];
+        float ms = hdr.x;
+        float ls = hdr.y;
         if (ls > 0.0) {
-            float w = exp(ms - m_all);
-            l_all += ls * w;
-            uint ob = pbase + 2u + lane * 4u;
-            vec4 os = vec4(part_buf[ob], part_buf[ob + 1u], part_buf[ob + 2u], part_buf[ob + 3u]);
-            o_all += os * w;
+            vec4 os = part_v[pbase4 + 1u + lane];
+            float mn = max(ma, ms);
+            float wa = (la > 0.0) ? exp2(ma - mn) : 0.0;
+            float ws = exp2(ms - mn);
+            oa = oa * wa + os * ws;
+            la = la * wa + ls * ws;
+            ma = mn;
         }
     }
 
-    vec4 y = o_all * (1.0 / l_all);
-    vec4 g = 1.0 / (1.0 + exp(-gate_buf[h * 32u + lane]));
-    out_buf[h * 32u + lane] = y * g;
+    if (lane == 0u) {
+        sh_m[grp] = ma;
+        sh_l[grp] = la;
+    }
+    sh_o[grp][lane] = oa;
+    barrier();
+
+    if (grp == 0u) {
+        float m_all = -1.0e30;
+        [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            if (sh_l[i] > 0.0) m_all = max(m_all, sh_m[i]);
+        }
+        float l_all = 0.0;
+        vec4 o_all = vec4(0.0);
+        [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            float li = sh_l[i];
+            if (li > 0.0) {
+                float w = exp2(sh_m[i] - m_all);
+                l_all += li * w;
+                o_all += sh_o[i][lane] * w;
+            }
+        }
+        vec4 y = o_all * (1.0 / l_all);
+        vec4 g = 1.0 / (1.0 + exp(-gate_buf[h * 32u + lane]));
+        out_buf[h * 32u + lane] = y * g;
+    }
 }

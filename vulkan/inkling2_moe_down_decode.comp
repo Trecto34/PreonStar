@@ -8,8 +8,9 @@
  * Uses aligned 32-bit uint loads (5/6 buffer_load_dword instead of 9/11 buffer_load_ushort!).
  * Supports IQ4_NL (18 bytes / 32 weights) and Q5_0 (22 bytes / 32 weights).
  * IQ4_NL LUT lives in shared memory to avoid dynamic-index VGPR ladders on RADV.
- * 4 output rows per workgroup sharing activations across all 8 experts.
- * Dispatch: (out_dim / 4, 1, 1). */
+ * 8 output rows per workgroup sharing activations across all 8 experts, with 8-lane
+ * parallel coalesced conv + residual epilogue.
+ * Dispatch: (out_dim / 8, 1, 1). */
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -176,19 +177,21 @@ void main(void) {
         }
     }
 
+    float my_x3 = 0.0;
     [[unroll]] for (uint r = 0u; r < ROWS; r++) {
         float x3 = subgroupAdd(acc[r] * weight);
-        if (tid == 0u) {
-            uint c = row0 + r;
-            vec4 kw = cw[c];
-            float s0 = cs[c];
-            float s1 = cs[pc.out_dim + c];
-            float s2 = cs[2u * pc.out_dim + c];
-            float conv_acc = s0 * kw.x + s1 * kw.y + s2 * kw.z + x3 * kw.w;
-            y[c] = (x3 + conv_acc) * pc.inv_scale + res[c];
-            cs[c] = s1;
-            cs[pc.out_dim + c] = s2;
-            cs[2u * pc.out_dim + c] = x3;
-        }
+        if (tid == r) my_x3 = x3;
+    }
+    if (tid < ROWS) {
+        uint c = row0 + tid;
+        vec4 kw = cw[c];
+        float s0 = cs[c];
+        float s1 = cs[pc.out_dim + c];
+        float s2 = cs[2u * pc.out_dim + c];
+        float conv_acc = s0 * kw.x + s1 * kw.y + s2 * kw.z + my_x3 * kw.w;
+        y[c] = (my_x3 + conv_acc) * pc.inv_scale + res[c];
+        cs[c] = s1;
+        cs[pc.out_dim + c] = s2;
+        cs[2u * pc.out_dim + c] = my_x3;
     }
 }

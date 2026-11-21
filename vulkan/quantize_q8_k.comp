@@ -1,15 +1,17 @@
 #version 460
 
-/* q8_K activation quantization on GPU.  One workgroup handles one 256-wide
- * block from one token row: 64 threads x 4 floats each.  The block layout
- * matches p36_vk_block_q8_K exactly: d, dmin=0, 64 packed q bytes, 8 packed
- * bsum word pairs.  This is the fast path; quality mode keeps the old host
- * quantizer. */
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+/* Zero-barrier wave64 q8_K activation quantization on GPU.
+ * One workgroup (64 threads = 1 wave64) handles one 256-wide block from one token row:
+ * 64 threads x 1 vec4 each, register-cached, subgroup reductions, zero LDS, zero barriers. */
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Input {
-    float x[];
+    vec4 xv[];
 };
 
 layout(set = 0, binding = 1) writeonly buffer Output {
@@ -22,18 +24,9 @@ layout(push_constant) uniform Push {
     uint n_tok;
 } pc;
 
-const uint QK_K = 256u;
 const uint Q8K_WORDS = 74u;
 
-shared float sh_abs[64];
-shared float sh_val[64];
-shared uint sh_idx[64];
-shared int sh_sum4[64];
-shared int sh_bsum[16];
-
 int nearest_int(float fval) {
-    /* precise: keep the mul that produces fval from contracting into an fma
-     * with this magic-number add, or bytes drift from the CPU quantizer. */
     precise float val = fval + 12582912.0f;
     uint bits = floatBitsToUint(val);
     return int(bits & 0x007fffffu) - 0x00400000;
@@ -50,75 +43,41 @@ void main(void) {
     uint lid = gl_LocalInvocationID.x;
     uint block = gl_WorkGroupID.x;
     uint tok = gl_WorkGroupID.y;
-    uint elem0 = lid * 4u;
-    uint xbase = (tok * pc.in_dim) + block * QK_K;
+    uint xbase4 = (tok * (pc.in_dim >> 2u)) + block * 64u;
     uint out_base = (tok * pc.blocks + block) * Q8K_WORDS;
-    float best_abs = 0.0f;
-    float best_val = 0.0f;
-    uint best_idx = elem0;
 
-    for (uint j = 0u; j < 4u; j++) {
-        uint idx = elem0 + j;
-        float xv = x[xbase + idx];
-        float ax = abs(xv);
-        if (ax > best_abs) {
-            best_abs = ax;
-            best_val = xv;
-            best_idx = idx;
-        }
+    vec4 v = xv[xbase4 + lid];
+    vec4 av = abs(v);
+    float max_a = max(max(av.x, av.y), max(av.z, av.w));
+    float gmax_a = subgroupMax(max_a);
+
+    float iscale = 0.0f;
+    float d = 0.0f;
+    if (gmax_a > 0.0f) {
+        float cand_v = (av.x == gmax_a) ? v.x : ((av.y == gmax_a) ? v.y : ((av.z == gmax_a) ? v.z : v.w));
+        uint win_lane = subgroupMin((max_a == gmax_a) ? lid : 64u);
+        float maxv = subgroupShuffle(cand_v, win_lane);
+        iscale = -127.0f / maxv;
+        d = 1.0f / iscale;
     }
 
-    sh_abs[lid] = best_abs;
-    sh_val[lid] = best_val;
-    sh_idx[lid] = best_idx;
-    barrier();
-
-    for (uint s = 32u; s > 0u; s >>= 1u) {
-        if (lid < s) {
-            float other_abs = sh_abs[lid + s];
-            uint other_idx = sh_idx[lid + s];
-            if (other_abs > sh_abs[lid] || (other_abs == sh_abs[lid] && other_idx < sh_idx[lid])) {
-                sh_abs[lid] = other_abs;
-                sh_val[lid] = sh_val[lid + s];
-                sh_idx[lid] = other_idx;
-            }
-        }
-        barrier();
-    }
-
-    /* fp64 divisions: GLSL float division is only 2.5-ulp on RADV, and the
-     * CPU quantizer's correctly rounded d must match bit for bit. */
-    float maxv = sh_val[0];
-    float iscale = maxv != 0.0f ? float(-127.0 / double(maxv)) : 0.0f;
-    float d = iscale != 0.0f ? float(1.0 / double(iscale)) : 0.0f;
-    int qv[4];
-    int sum4 = 0;
-
-    for (uint j = 0u; j < 4u; j++) {
-        float xv = x[xbase + elem0 + j];
-        int q = iscale != 0.0f ? nearest_int(iscale * xv) : 0;
-        if (q > 127) q = 127;
-        qv[j] = q;
-        sum4 += q;
-    }
+    int q0 = iscale != 0.0f ? min(nearest_int(iscale * v.x), 127) : 0;
+    int q1 = iscale != 0.0f ? min(nearest_int(iscale * v.y), 127) : 0;
+    int q2 = iscale != 0.0f ? min(nearest_int(iscale * v.z), 127) : 0;
+    int q3 = iscale != 0.0f ? min(nearest_int(iscale * v.w), 127) : 0;
 
     if (lid == 0u) {
         q8[out_base + 0u] = floatBitsToUint(d);
         q8[out_base + 1u] = 0u;
     }
-    q8[out_base + 2u + lid] = pack_i8x4(qv[0], qv[1], qv[2], qv[3]);
+    q8[out_base + 2u + lid] = pack_i8x4(q0, q1, q2, q3);
 
-    sh_sum4[lid] = sum4;
-    barrier();
-
-    if ((lid & 3u) == 0u) {
-        sh_bsum[lid >> 2u] = sh_sum4[lid] + sh_sum4[lid + 1u] + sh_sum4[lid + 2u] + sh_sum4[lid + 3u];
-    }
-    barrier();
-
-    if (lid < 8u) {
-        int s0 = sh_bsum[2u * lid + 0u];
-        int s1 = sh_bsum[2u * lid + 1u];
-        q8[out_base + 66u + lid] = (uint(s0) & 0xffffu) | ((uint(s1) & 0xffffu) << 16u);
+    int s4 = q0 + q1 + q2 + q3;
+    s4 += subgroupShuffleXor(s4, 1u);
+    s4 += subgroupShuffleXor(s4, 2u);
+    int s_pair = subgroupShuffleXor(s4, 4u);
+    if ((lid & 7u) == 0u) {
+        uint pair_idx = lid >> 3u;
+        q8[out_base + 66u + pair_idx] = (uint(s4) & 0xffffu) | ((uint(s_pair) & 0xffffu) << 16u);
     }
 }

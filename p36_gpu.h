@@ -1098,6 +1098,75 @@ int p36_gpu_inkling2_mix_norm_tensor(
         uint32_t              state_stride,
         float                 eps);
 
+int p36_gpu_inkling2_control_prep_down3_tensor(
+        p36_gpu_tensor       *h_out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              down0_offset,
+        uint64_t              down1_offset,
+        uint64_t              down2_offset,
+        const p36_gpu_tensor *cur,
+        const p36_gpu_tensor *msg,
+        uint32_t              n_embd,
+        uint32_t              rank,
+        uint32_t              cur_stride,
+        uint32_t              msg_stride,
+        uint32_t              h_stride);
+
+int p36_gpu_inkling2_control_gate3_tensor(
+        p36_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              f0_offset,
+        uint64_t              g0_offset,
+        uint64_t              f1_offset,
+        uint64_t              g1_offset,
+        uint64_t              f2_offset,
+        uint64_t              g2_offset,
+        const p36_gpu_tensor *h,
+        const p36_gpu_tensor *cur,
+        const p36_gpu_tensor *msg,
+        uint32_t              n_embd,
+        uint32_t              rank,
+        uint32_t              cur_stride,
+        uint32_t              msg_stride,
+        uint32_t              h_stride,
+        uint32_t              out_stride);
+
+int p36_gpu_inkling2_rms_norm_q8k3_tensor(
+        p36_gpu_tensor       *norm_out,
+        p36_gpu_tensor       *q8_out,
+        const p36_gpu_tensor *inp,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              w0_offset,
+        uint64_t              w1_offset,
+        uint64_t              w2_offset,
+        uint32_t              n_embd,
+        uint32_t              tok_stride,
+        uint32_t              q8_stride_blocks,
+        float                 eps);
+
+int p36_gpu_inkling2_qkv_rel_q4k_decode_tensor(
+        p36_gpu_tensor       *yq,
+        p36_gpu_tensor       *yk,
+        p36_gpu_tensor       *yv,
+        p36_gpu_tensor       *yr,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              wq_offset,
+        uint64_t              wk_offset,
+        uint64_t              wv_offset,
+        uint64_t              wr_offset,
+        const p36_gpu_tensor *q8_0,
+        const p36_gpu_tensor *q8_1,
+        const p36_gpu_tensor *q8_2,
+        uint32_t              in_dim,
+        uint32_t              out_q,
+        uint32_t              out_k,
+        uint32_t              out_v,
+        uint32_t              out_r);
+
 int p36_gpu_inkling2_post_attn_mix_tensor(
         p36_gpu_tensor       *blocks_normed,
         const p36_gpu_tensor *wo_out,

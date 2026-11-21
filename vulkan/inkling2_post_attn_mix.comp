@@ -4,15 +4,15 @@
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
 
-/* Fused decode-only (n_tok == 1) post-attention pipeline for Inkling-2-Mini:
+/* Fused decode-only (n_tok == 1) post-attention pipeline for Inkling-2-Mini (D = 2304):
  *   1. Optional block-boundary push: blocks[push_slot] = rms(inp_sa)
  *   2. attn_post_conv on wo_out (+ optional inp_sa residual) -> writes ffn_inp & updates state
  *   3. ffn_res_query depth-residual mix over blocks[0..n_blocks-1] + rms(ffn_inp)
  *   4. Optional ffn_norm (when has_norm != 0, i.e. pass <= 0)
- * Eliminates 56 dispatches + 56 full GPU pipeline barriers per token!
- * Dispatch: (1, 1, 1), local_size_x = 64. */
+ * 576 threads = 9 wave64s = 1 vec4/thread: ZERO loops, ZERO branches, full parallel loads!
+ * Dispatch: (1, 1, 1), local_size_x = 576. */
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 576, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) buffer BlocksNormed { vec4 blocks[]; };
 layout(set = 0, binding = 1) readonly buffer WoOut { vec4 wo_out[]; };
@@ -35,87 +35,88 @@ layout(push_constant) uniform Push {
     float eps;          /* 1e-6 */
 } pc;
 
+shared float sh_red[5][9];
+
+float wg_sum1(float v, uint w, uint lane) {
+    v = subgroupAdd(v);
+    if (lane == 0u) sh_red[0][w] = v;
+    barrier();
+    float s = sh_red[0][0] + sh_red[0][1] + sh_red[0][2]
+            + sh_red[0][3] + sh_red[0][4] + sh_red[0][5]
+            + sh_red[0][6] + sh_red[0][7] + sh_red[0][8];
+    barrier();
+    return s;
+}
+
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
-    uint d4 = pc.n_embd >> 2u;          /* 576 = 9 * 64 */
+    uint w = tid >> 6u;                 /* 0..8 */
+    uint lane = tid & 63u;              /* 0..63 */
+    uint d4 = pc.n_embd >> 2u;          /* 576 */
     uint state_stride4 = pc.state_stride >> 2u;
 
     /* 1. Optional block boundary push: blocks[push_slot] = rms(inp_sa) */
     uint n_blk = pc.n_blocks;
     if (pc.push_slot != 0xffffffffu) {
-        vec4 sa[9];
-        float sum_sa = 0.0;
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            vec4 v = inp_sa[c * 64u + tid];
-            sa[c] = v;
-            sum_sa += dot(v, v);
-        }
-        float inv_sa = inversesqrt(subgroupAdd(sum_sa) / float(pc.n_embd) + 1.0e-6);
-        uint dst_base = pc.push_slot * state_stride4;
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            blocks[dst_base + c * 64u + tid] = sa[c] * inv_sa;
-        }
+        vec4 sa = inp_sa[tid];
+        float inv_sa = inversesqrt(wg_sum1(dot(sa, sa), w, lane) / float(pc.n_embd) + 1.0e-6);
+        blocks[pc.push_slot * state_stride4 + tid] = sa * inv_sa;
         n_blk += 1u;
     }
 
     /* 2. attn_post_conv + optional inp_sa residual -> ffn_inp + rms(ffn_inp) in cur_n */
-    vec4 cur_n[9];
-    float sum_cur = 0.0;
-    [[unroll]] for (uint c = 0u; c < 9u; c++) {
-        uint idx = c * 64u + tid;
-        uint ch0 = idx * 4u;
-        vec4 kw0 = cw[ch0 + 0u];
-        vec4 kw1 = cw[ch0 + 1u];
-        vec4 kw2 = cw[ch0 + 2u];
-        vec4 kw3 = cw[ch0 + 3u];
-        vec4 x3 = wo_out[idx];
-        vec4 s0 = cs[idx];
-        vec4 s1 = cs[d4 + idx];
-        vec4 s2 = cs[2u * d4 + idx];
-        vec4 conv_acc = vec4(
-            s0.x * kw0.x + s1.x * kw0.y + s2.x * kw0.z + x3.x * kw0.w,
-            s0.y * kw1.x + s1.y * kw1.y + s2.y * kw1.z + x3.y * kw1.w,
-            s0.z * kw2.x + s1.z * kw2.y + s2.z * kw2.z + x3.z * kw2.w,
-            s0.w * kw3.x + s1.w * kw3.y + s2.w * kw3.z + x3.w * kw3.w
-        );
-        vec4 y = (x3 + conv_acc) * pc.inv_scale;
-        if (pc.has_res != 0u) y += inp_sa[idx];
-        ffn_inp[idx] = y;
-        cs[idx] = s1;
-        cs[d4 + idx] = s2;
-        cs[2u * d4 + idx] = x3;
-        cur_n[c] = y;
-        sum_cur += dot(y, y);
-    }
-    float inv_cur = inversesqrt(subgroupAdd(sum_cur) / float(pc.n_embd) + 1.0e-6);
-    [[unroll]] for (uint c = 0u; c < 9u; c++) {
-        cur_n[c] *= inv_cur;
-    }
+    uint ch0 = tid * 4u;
+    vec4 kw0 = cw[ch0 + 0u];
+    vec4 kw1 = cw[ch0 + 1u];
+    vec4 kw2 = cw[ch0 + 2u];
+    vec4 kw3 = cw[ch0 + 3u];
+    vec4 x3 = wo_out[tid];
+    vec4 s0 = cs[tid];
+    vec4 s1 = cs[d4 + tid];
+    vec4 s2 = cs[2u * d4 + tid];
+    vec4 conv_acc = vec4(
+        s0.x * kw0.x + s1.x * kw0.y + s2.x * kw0.z + x3.x * kw0.w,
+        s0.y * kw1.x + s1.y * kw1.y + s2.y * kw1.z + x3.y * kw1.w,
+        s0.z * kw2.x + s1.z * kw2.y + s2.z * kw2.z + x3.z * kw2.w,
+        s0.w * kw3.x + s1.w * kw3.y + s2.w * kw3.z + x3.w * kw3.w
+    );
+    vec4 y = (x3 + conv_acc) * pc.inv_scale;
+    if (pc.has_res != 0u) y += inp_sa[tid];
+    ffn_inp[tid] = y;
+    cs[tid] = s1;
+    cs[d4 + tid] = s2;
+    cs[2u * d4 + tid] = x3;
 
-    /* 3. ffn_res_query depth-residual mix (n_q == 1) */
+    float inv_cur = inversesqrt(wg_sum1(dot(y, y), w, lane) / float(pc.n_embd) + 1.0e-6);
+    vec4 cur_n = y * inv_cur;
+
+    /* 3. ffn_res_query depth-residual mix (n_q == 1): load query once, 1 barrier for all states */
+    vec4 qv = query[tid];
     float inv_sqrt_d = inversesqrt(float(pc.n_embd));
-    float probs[5];
+    uint n_states = n_blk + 1u;
+
+    vec4 blk_v[4];
     for (uint s = 0u; s < n_blk; s++) {
-        uint s_base = s * state_stride4;
-        float acc = 0.0;
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            uint idx = c * 64u + tid;
-            acc += dot(blocks[s_base + idx], query[idx]);
-        }
-        probs[s] = subgroupAdd(acc) * inv_sqrt_d;
+        vec4 bv = blocks[s * state_stride4 + tid];
+        blk_v[s] = bv;
+        float acc = subgroupAdd(dot(bv, qv));
+        if (lane == 0u) sh_red[s][w] = acc;
     }
     {
-        float acc = 0.0;
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            uint idx = c * 64u + tid;
-            acc += dot(cur_n[c], query[idx]);
-        }
-        probs[n_blk] = subgroupAdd(acc) * inv_sqrt_d;
+        float acc = subgroupAdd(dot(cur_n, qv));
+        if (lane == 0u) sh_red[n_blk][w] = acc;
     }
+    barrier();
 
-    uint n_states = n_blk + 1u;
+    float probs[5];
     float max_s = -1.0e30;
-    for (uint s = 0u; s < n_states; s++) max_s = max(max_s, probs[s]);
+    for (uint s = 0u; s < n_states; s++) {
+        float tot = sh_red[s][0] + sh_red[s][1] + sh_red[s][2]
+                  + sh_red[s][3] + sh_red[s][4] + sh_red[s][5]
+                  + sh_red[s][6] + sh_red[s][7] + sh_red[s][8];
+        probs[s] = tot * inv_sqrt_d;
+        max_s = max(max_s, probs[s]);
+    }
     float sum_e = 0.0;
     for (uint s = 0u; s < n_states; s++) {
         probs[s] = exp(probs[s] - max_s);
@@ -124,29 +125,17 @@ void main(void) {
     float inv_e = 1.0 / sum_e;
     for (uint s = 0u; s < n_states; s++) probs[s] *= inv_e;
 
-    /* 4. Accumulate mix output + optional fused ffn_norm */
-    vec4 o0[9];
-    float sum_o = 0.0;
-    [[unroll]] for (uint c = 0u; c < 9u; c++) {
-        uint idx = c * 64u + tid;
-        vec4 v = vec4(0.0);
-        for (uint s = 0u; s < n_blk; s++) {
-            v = fma(vec4(probs[s]), blocks[s * state_stride4 + idx], v);
-        }
-        v = fma(vec4(probs[n_blk]), cur_n[c], v);
-        o0[c] = v;
-        sum_o += dot(v, v);
+    /* 4. Accumulate mix output from register-cached blk_v[] (zero second DRAM pass!) */
+    vec4 o0 = cur_n * probs[n_blk];
+    for (uint s = 0u; s < n_blk; s++) {
+        o0 = fma(vec4(probs[s]), blk_v[s], o0);
     }
 
     if (pc.has_norm != 0u) {
-        float inv_o = inversesqrt(subgroupAdd(sum_o) / float(pc.n_embd) + pc.eps);
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            uint idx = c * 64u + tid;
-            out_buf[idx] = o0[c] * inv_o * norm_w[idx];
-        }
+        barrier();
+        float inv_o = inversesqrt(wg_sum1(dot(o0, o0), w, lane) / float(pc.n_embd) + pc.eps);
+        out_buf[tid] = o0 * inv_o * norm_w[tid];
     } else {
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            out_buf[c * 64u + tid] = o0[c];
-        }
+        out_buf[tid] = o0;
     }
 }

@@ -141,16 +141,16 @@ void main(void) {
             vec4 g = 1.0 / (1.0 + exp(-gate_buf[h * 32u + lane]));
             out_buf[h * 32u + lane] = y * g;
         } else {
-            /* PartBuf layout: [n_head, n_splits, 130] -> [m (nat log), l, O[0..127]] */
-            uint pbase = (h * pc.n_splits + split) * 130u;
+            /* PartBuf layout: [n_head, n_splits, 132] -> [m (log2), l, pad, pad, O[0..127]] */
+            uint pbase = (h * pc.n_splits + split) * 132u;
             if (lane == 0u) {
-                part_buf[pbase + 0u] = ma * LN2;
+                part_buf[pbase + 0u] = ma;
                 part_buf[pbase + 1u] = la;
             }
-            part_buf[pbase + 2u + lane * 4u + 0u] = oa.x;
-            part_buf[pbase + 2u + lane * 4u + 1u] = oa.y;
-            part_buf[pbase + 2u + lane * 4u + 2u] = oa.z;
-            part_buf[pbase + 2u + lane * 4u + 3u] = oa.w;
+            part_buf[pbase + 4u + lane * 4u + 0u] = oa.x;
+            part_buf[pbase + 4u + lane * 4u + 1u] = oa.y;
+            part_buf[pbase + 4u + lane * 4u + 2u] = oa.z;
+            part_buf[pbase + 4u + lane * 4u + 3u] = oa.w;
         }
     }
 }

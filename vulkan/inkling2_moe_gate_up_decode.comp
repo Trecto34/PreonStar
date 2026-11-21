@@ -14,7 +14,15 @@
  * Uses IEEE float sign-bit XOR instead of bvec4/mix.
  * Dispatch: (mid_dim / 4, n_used, 1). */
 
+#if defined(P36_MOE_IQ2S)
+const uint WG_THREADS = 256u;
+const uint WG_ROWS = 16u;
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+#else
+const uint WG_THREADS = 64u;
+const uint WG_ROWS = 4u;
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+#endif
 
 layout(set = 0, binding = 0) readonly buffer Weights { uint16_t w[]; };
 layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
@@ -58,32 +66,47 @@ float sum16(float v) {
 }
 
 #ifdef P36_MOE_IQ2XXS
-shared uint sh_grid[512];
+shared uvec2 sh_grid[256];
+#elif defined(P36_MOE_IQ2S)
+shared uvec2 sh_grid[1024];
 #elif defined(P36_MOE_IQ3XXS)
 shared uint sh_grid[256];
-shared uint sh_ksigns[32];
+shared uint sh_ksigns[128];
 #elif defined(P36_MOE_IQ3S)
 shared uint sh_grid[512];
 #endif
 
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
-    uint r_local = tid >> 4u;    /* 0..3 */
+    uint r_local = tid >> 4u;
     uint itid = tid & 15u;       /* 0..15 */
-    uint row = gl_WorkGroupID.x * 4u + r_local;
+    uint row = gl_WorkGroupID.x * WG_ROWS + r_local;
     uint pair = gl_WorkGroupID.y;
     uint expert = selected[pair];
     uint x4 = (pair / pc.n_used) * pc.blocks * 64u;
 
 #ifdef P36_MOE_IQ2XXS
-    for (uint i = tid; i < 512u; i += 64u) sh_grid[i] = tables[i];
+    for (uint i = tid; i < 256u; i += WG_THREADS) {
+        sh_grid[i] = uvec2(tables[2u * i], tables[2u * i + 1u]);
+    }
+    barrier();
+#elif defined(P36_MOE_IQ2S)
+    for (uint i = tid; i < 1024u; i += WG_THREADS) {
+        sh_grid[i] = uvec2(tables[TAB_IQ2S + 2u * i], tables[TAB_IQ2S + 2u * i + 1u]);
+    }
     barrier();
 #elif defined(P36_MOE_IQ3XXS)
-    for (uint i = tid; i < 256u; i += 64u) sh_grid[i] = tables[TAB_IQ3XXS_GRID + i];
-    if (tid < 32u) sh_ksigns[tid] = tables[TAB_KSIGNS + tid];
+    for (uint i = tid; i < 256u; i += WG_THREADS) sh_grid[i] = tables[TAB_IQ3XXS_GRID + i];
+    if (tid < 32u) {
+        uint kw = tables[TAB_KSIGNS + tid];
+        sh_ksigns[4u * tid + 0u] = kw & 255u;
+        sh_ksigns[4u * tid + 1u] = (kw >> 8u) & 255u;
+        sh_ksigns[4u * tid + 2u] = (kw >> 16u) & 255u;
+        sh_ksigns[4u * tid + 3u] = kw >> 24u;
+    }
     barrier();
 #elif defined(P36_MOE_IQ3S)
-    for (uint i = tid; i < 512u; i += 64u) sh_grid[i] = tables[TAB_IQ3S_GRID + i];
+    for (uint i = tid; i < 512u; i += WG_THREADS) sh_grid[i] = tables[TAB_IQ3S_GRID + i];
     barrier();
 #endif
 
@@ -138,13 +161,15 @@ void main(void) {
             uint gqs = (gidx_w >> (8u * l)) & 255u;
             uint gsign = bitfieldExtract(gss, int(sbit), 7);
             uint gsign_hi = (gsign >> 4u) | ((uint(bitCount(gsign)) & 1u) << 3u);
-            vec4 g0 = neg4(vec4(unpack8(sh_grid[gqs * 2u])), gsign);
-            vec4 g1 = neg4(vec4(unpack8(sh_grid[gqs * 2u + 1u])), gsign_hi);
+            uvec2 gg = sh_grid[gqs];
+            vec4 g0 = neg4(vec4(unpack8(gg.x)), gsign);
+            vec4 g1 = neg4(vec4(unpack8(gg.y)), gsign_hi);
             uint uqs = (uidx_w >> (8u * l)) & 255u;
             uint usign = bitfieldExtract(uss, int(sbit), 7);
             uint usign_hi = (usign >> 4u) | ((uint(bitCount(usign)) & 1u) << 3u);
-            vec4 u0 = neg4(vec4(unpack8(sh_grid[uqs * 2u])), usign);
-            vec4 u1 = neg4(vec4(unpack8(sh_grid[uqs * 2u + 1u])), usign_hi);
+            uvec2 ug = sh_grid[uqs];
+            vec4 u0 = neg4(vec4(unpack8(ug.x)), usign);
+            vec4 u1 = neg4(vec4(unpack8(ug.y)), usign_hi);
             vec4 b0 = (l == 0u) ? a0 : a2;
             vec4 b4 = (l == 0u) ? a1 : a3;
             gs += dot(b0, g0) + dot(b4, g1);
@@ -175,10 +200,12 @@ void main(void) {
             uint usig = (usig01 >> (8u * l)) & 255u;
             uint gidx = ((gidx01 >> (8u * l)) & 255u) | ((gqh << (8u - 2u * p)) & 0x300u);
             uint uidx = ((uidx01 >> (8u * l)) & 255u) | ((uqh << (8u - 2u * p)) & 0x300u);
-            vec4 g0 = neg4(vec4(unpack8(tables[TAB_IQ2S + gidx * 2u])), gsig);
-            vec4 g1 = neg4(vec4(unpack8(tables[TAB_IQ2S + gidx * 2u + 1u])), gsig >> 4u);
-            vec4 u0 = neg4(vec4(unpack8(tables[TAB_IQ2S + uidx * 2u])), usig);
-            vec4 u1 = neg4(vec4(unpack8(tables[TAB_IQ2S + uidx * 2u + 1u])), usig >> 4u);
+            uvec2 gg = sh_grid[gidx];
+            uvec2 ug = sh_grid[uidx];
+            vec4 g0 = neg4(vec4(unpack8(gg.x)), gsig);
+            vec4 g1 = neg4(vec4(unpack8(gg.y)), gsig >> 4u);
+            vec4 u0 = neg4(vec4(unpack8(ug.x)), usig);
+            vec4 u1 = neg4(vec4(unpack8(ug.y)), usig >> 4u);
             vec4 b0 = (l == 0u) ? a0 : a2;
             vec4 b4 = (l == 0u) ? a1 : a3;
             gs += dot(b0, g0) + dot(b4, g1);
@@ -201,8 +228,8 @@ void main(void) {
             uint sub = 2u * qpair + l;
             uint gsi = (gaux >> (7u * sub)) & 127u;
             uint usi = (uaux >> (7u * sub)) & 127u;
-            uint gsign = (sh_ksigns[gsi >> 2u] >> (8u * (gsi & 3u))) & 255u;
-            uint usign = (sh_ksigns[usi >> 2u] >> (8u * (usi & 3u))) & 255u;
+            uint gsign = sh_ksigns[gsi];
+            uint usign = sh_ksigns[usi];
             uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
             uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
             vec4 g0 = neg4(vec4(unpack8(sh_grid[ge01 & 255u])), gsign);

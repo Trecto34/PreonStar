@@ -270,10 +270,14 @@ typedef struct {
     p36_gpu_tensor *attn_in_buf;       /* [3, prefill_cap, n_embd] */
     p36_gpu_tensor *attn_in_view[3];
     p36_gpu_tensor *ctrl_in;           /* [prefill_cap, 2 * n_embd] */
-    p36_gpu_tensor *ctrl_h[3];         /* 3x [prefill_cap, 64] for parallel Q/K/V */
-    p36_gpu_tensor *ctrl_out[4];       /* [prefill_cap, n_embd] */
-    p36_gpu_tensor *norm[3];           /* [prefill_cap, n_embd] */
-    p36_gpu_tensor *q8[3];             /* [prefill_cap, q8_k(n_embd)] */
+    p36_gpu_tensor *ctrl_h_buf;        /* [3, prefill_cap, 64] contiguous */
+    p36_gpu_tensor *ctrl_h[3];         /* 3x [prefill_cap, 64] views for parallel Q/K/V */
+    p36_gpu_tensor *ctrl_out_buf;      /* [4, prefill_cap, n_embd] contiguous */
+    p36_gpu_tensor *ctrl_out[4];       /* [prefill_cap, n_embd] views */
+    p36_gpu_tensor *norm_buf;          /* [3, prefill_cap, n_embd] contiguous */
+    p36_gpu_tensor *norm[3];           /* [prefill_cap, n_embd] views */
+    p36_gpu_tensor *q8_buf;            /* [3, prefill_cap, q8_k(n_embd)] contiguous */
+    p36_gpu_tensor *q8[3];             /* [prefill_cap, q8_k(n_embd)] views */
     p36_gpu_tensor *q_buf;             /* [prefill_cap, 3072] */
     p36_gpu_tensor *k_buf;             /* [prefill_cap, 1024] */
     p36_gpu_tensor *v_buf;             /* [prefill_cap, 1024] */
@@ -337,6 +341,10 @@ static void p36_inkling2_vulkan_runtime_free(p36_vulkan_runtime *rt) {
         p36_gpu_tensor_free(ink->msg_buf);
         p36_gpu_tensor_free(ink->attn_in_buf);
         p36_gpu_tensor_free(ink->ctrl_in);
+        p36_gpu_tensor_free(ink->ctrl_h_buf);
+        p36_gpu_tensor_free(ink->ctrl_out_buf);
+        p36_gpu_tensor_free(ink->norm_buf);
+        p36_gpu_tensor_free(ink->q8_buf);
         p36_gpu_tensor_free(ink->q_buf);
         p36_gpu_tensor_free(ink->k_buf);
         p36_gpu_tensor_free(ink->v_buf);
@@ -439,16 +447,23 @@ static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint
         goto fail;
     }
 
+    uint64_t h_slice_bytes = (uint64_t)prefill_cap * 64u * sizeof(float);
+    ink->ctrl_out_buf = p36_gpu_tensor_alloc_scratch(4u * tok_embd_bytes);
+    ink->ctrl_h_buf = p36_gpu_tensor_alloc_scratch(3u * h_slice_bytes);
+    ink->norm_buf = p36_gpu_tensor_alloc_scratch(3u * tok_embd_bytes);
+    ink->q8_buf = p36_gpu_tensor_alloc_scratch(3u * q8_bytes);
+    if (!ink->ctrl_out_buf || !ink->ctrl_h_buf || !ink->norm_buf || !ink->q8_buf) goto fail;
+
     for (int i = 0; i < 4; i++) {
         ink->msg_view[i] = p36_gpu_tensor_view(ink->msg_buf, (uint64_t)i * tok_embd_bytes, tok_embd_bytes);
-        ink->ctrl_out[i] = p36_gpu_tensor_alloc_scratch(tok_embd_bytes);
+        ink->ctrl_out[i] = p36_gpu_tensor_view(ink->ctrl_out_buf, (uint64_t)i * tok_embd_bytes, tok_embd_bytes);
         if (!ink->msg_view[i] || !ink->ctrl_out[i]) goto fail;
     }
     for (int i = 0; i < 3; i++) {
         ink->attn_in_view[i] = p36_gpu_tensor_view(ink->attn_in_buf, (uint64_t)i * tok_embd_bytes, tok_embd_bytes);
-        ink->ctrl_h[i] = p36_gpu_tensor_alloc_scratch((uint64_t)prefill_cap * 64u * sizeof(float));
-        ink->norm[i] = p36_gpu_tensor_alloc_scratch(tok_embd_bytes);
-        ink->q8[i] = p36_gpu_tensor_alloc_scratch(q8_bytes);
+        ink->ctrl_h[i] = p36_gpu_tensor_view(ink->ctrl_h_buf, (uint64_t)i * h_slice_bytes, h_slice_bytes);
+        ink->norm[i] = p36_gpu_tensor_view(ink->norm_buf, (uint64_t)i * tok_embd_bytes, tok_embd_bytes);
+        ink->q8[i] = p36_gpu_tensor_view(ink->q8_buf, (uint64_t)i * q8_bytes, q8_bytes);
         if (!ink->attn_in_view[i] || !ink->ctrl_h[i] || !ink->norm[i] || !ink->q8[i]) goto fail;
     }
 
@@ -556,8 +571,8 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
             INK_CHK(p36_gpu_embed_tokens(m, w->token_embd, tokens, n_tok, stage), "embed_tokens");
         }
         INK_CHK(p36_gpu_copy_f32_tensor(rt->hidden, stage, n_tok * D), "embed_copy");
-        INK_CHK(p36_gpu_rms_norm_weight_rows_tensor(ink->cur, rt->hidden, m->map, m->size,
-                                                    w->token_embd_norm->abs_offset, D, n_tok, hp->rms_eps), "tok_norm");
+        INK_CHK(p36_gpu_inkling2_rms_norm_q8k_tensor(ink->cur, NULL, rt->hidden, m->map, m->size,
+                                                     w->token_embd_norm->abs_offset, D, n_tok, hp->rms_eps), "tok_norm");
     }
 
     uint32_t n_blocks = 0;
@@ -661,21 +676,24 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
             }
             if (pass > 0) {
                 if (n_tok == 1u) {
-                    /* Parallel 3-way Q/K/V loop controllers: zero barriers between j=0,1,2! */
-                    for (int j = 0; j < 3; j++) {
-                        INK_CHK(p36_gpu_inkling2_control_prep_down_tensor(ink->ctrl_h[j], m->map, m->size,
-                                                                          l->loop_down[j]->abs_offset,
-                                                                          inp[j], ink->msg_view[j],
-                                                                          D, hp->loop_gate_rank), "ctrl_pd3");
-                    }
-                    for (int j = 0; j < 3; j++) {
-                        INK_CHK(p36_gpu_inkling2_control_gate_tensor(ink->ctrl_out[j], m->map, m->size,
-                                                                     l->loop_forget[j]->abs_offset,
-                                                                     l->loop_gain[j]->abs_offset,
-                                                                     ink->ctrl_h[j], inp[j], ink->msg_view[j],
-                                                                     1u, D, hp->loop_gate_rank), "ctrl_g3");
-                        inp[j] = ink->ctrl_out[j];
-                    }
+                    /* Fused 3-way Q/K/V loop controllers: 2 dispatches instead of 6! (-96 disp/tok) */
+                    uint32_t cur_str = is_swa ? 0u : state_stride;
+                    uint32_t h_str = ink->prefill_cap * 64u;
+                    INK_CHK(p36_gpu_inkling2_control_prep_down3_tensor(
+                                ink->ctrl_h_buf, m->map, m->size,
+                                l->loop_down[0]->abs_offset, l->loop_down[1]->abs_offset, l->loop_down[2]->abs_offset,
+                                inp[0], ink->msg_buf, D, hp->loop_gate_rank,
+                                cur_str, state_stride, h_str), "ctrl_pd3");
+                    INK_CHK(p36_gpu_inkling2_control_gate3_tensor(
+                                ink->ctrl_out_buf, m->map, m->size,
+                                l->loop_forget[0]->abs_offset, l->loop_gain[0]->abs_offset,
+                                l->loop_forget[1]->abs_offset, l->loop_gain[1]->abs_offset,
+                                l->loop_forget[2]->abs_offset, l->loop_gain[2]->abs_offset,
+                                ink->ctrl_h_buf, inp[0], ink->msg_buf, D, hp->loop_gate_rank,
+                                cur_str, state_stride, h_str, state_stride), "ctrl_g3");
+                    inp[0] = ink->ctrl_out[0];
+                    inp[1] = ink->ctrl_out[1];
+                    inp[2] = ink->ctrl_out[2];
                 } else {
                     for (int j = 0; j < 3; j++) {
                         INK_CHK(p36_inkling2_control_vk(m, l, hp, ink, ink->ctrl_out[j], inp[j], ink->msg_view[j], j, n_tok), "ctrl_qkv");
@@ -689,6 +707,21 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                                                              D, n_tok, hp->rms_eps), "attn_norm_q8_swa");
                 n_in[0] = n_in[1] = n_in[2] = ink->norm[0];
                 q8_in[0] = q8_in[1] = q8_in[2] = ink->q8[0];
+            } else if (n_tok == 1u) {
+                const p36_tensor *nw[3] = {
+                    is_swa ? l->attn_norm : l->attn_q_inp_norm,
+                    is_swa ? l->attn_norm : l->attn_k_inp_norm,
+                    is_swa ? l->attn_norm : l->attn_v_inp_norm,
+                };
+                p36_gpu_tensor *inp_base = (pass > 0) ? ink->ctrl_out_buf : ink->attn_in_buf;
+                INK_CHK(p36_gpu_inkling2_rms_norm_q8k3_tensor(
+                            ink->norm_buf, ink->q8_buf, inp_base, m->map, m->size,
+                            nw[0]->abs_offset, nw[1]->abs_offset, nw[2]->abs_offset,
+                            D, state_stride, ink->prefill_cap * (D / 256u), hp->rms_eps), "attn_norm_q8_3");
+                for (int j = 0; j < 3; j++) {
+                    n_in[j] = ink->norm[j];
+                    q8_in[j] = ink->q8[j];
+                }
             } else {
                 const p36_tensor *nw[3] = {
                     is_swa ? l->attn_norm : l->attn_q_inp_norm,
@@ -706,10 +739,22 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
         }
 
         /* Attention projections */
-        INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_q, n_in[0], q8_in[0], ink->q_buf, D, Q, n_tok, 1.0f), "attn_q");
-        INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_k, n_in[1], q8_in[1], ink->k_buf, D, KV, n_tok, 1.0f), "attn_k");
-        INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_v, n_in[2], q8_in[2], ink->v_buf, D, KV, n_tok, 1.0f), "attn_v");
-        INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_rel, n_in[0], q8_in[0], ink->r_buf, D, hp->n_head * hp->n_relative, n_tok, 1.0f), "attn_rel");
+        if (n_tok == 1u &&
+            l->attn_q->type == P36_TENSOR_Q4_K && l->attn_k->type == P36_TENSOR_Q4_K &&
+            l->attn_v->type == P36_TENSOR_Q4_K && l->attn_rel->type == P36_TENSOR_Q4_K &&
+            p36_gpu_inkling2_qkv_rel_q4k_decode_tensor(ink->q_buf, ink->k_buf, ink->v_buf, ink->r_buf,
+                                                       m->map, m->size,
+                                                       l->attn_q->abs_offset, l->attn_k->abs_offset,
+                                                       l->attn_v->abs_offset, l->attn_rel->abs_offset,
+                                                       q8_in[0], q8_in[1], q8_in[2],
+                                                       D, Q, KV, KV, hp->n_head * hp->n_relative)) {
+            /* Fused 0%-tail Q4_K decode: Q + K + V + rel in 1 dispatch! (-144 disp/tok) */
+        } else {
+            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_q, n_in[0], q8_in[0], ink->q_buf, D, Q, n_tok, 1.0f), "attn_q");
+            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_k, n_in[1], q8_in[1], ink->k_buf, D, KV, n_tok, 1.0f), "attn_k");
+            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_v, n_in[2], q8_in[2], ink->v_buf, D, KV, n_tok, 1.0f), "attn_v");
+            INK_CHK(p36_gpu_tensor_matmul_q8_or_float_scaled(m, l->attn_rel, n_in[0], q8_in[0], ink->r_buf, D, hp->n_head * hp->n_relative, n_tok, 1.0f), "attn_rel");
+        }
         if (n_tok == 1u &&
             l->attn_gate->type == P36_TENSOR_Q8_0 && l->attn_sink_proj->type == P36_TENSOR_Q8_0 &&
             p36_gpu_matmul_q8_0_pair_scaled_tensor(ink->gate_buf, ink->sinks_buf, m->map, m->size,
@@ -773,8 +818,8 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                 if (!p36_inkling2_control_vk(m, l, hp, ink, ink->ctrl_out[3], ink->cur, ink->msg_view[3], 3, 1u)) {
                     return false;
                 }
-                if (!p36_gpu_rms_norm_weight_rows_tensor(ink->norm[0], ink->ctrl_out[3], m->map, m->size,
-                                                         l->ffn_norm->abs_offset, D, 1u, hp->rms_eps)) {
+                if (!p36_gpu_inkling2_rms_norm_q8k_tensor(ink->norm[0], NULL, ink->ctrl_out[3], m->map, m->size,
+                                                          l->ffn_norm->abs_offset, D, 1u, hp->rms_eps)) {
                     return false;
                 }
             }
@@ -816,8 +861,8 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                 if (!p36_inkling2_control_vk(m, l, hp, ink, ink->ctrl_out[3], ink->cur, ink->msg_view[3], 3, n_tok)) {
                     return false;
                 }
-                if (!p36_gpu_rms_norm_weight_rows_tensor(ink->norm[0], ink->ctrl_out[3], m->map, m->size,
-                                                         l->ffn_norm->abs_offset, D, n_tok, hp->rms_eps)) {
+                if (!p36_gpu_inkling2_rms_norm_q8k_tensor(ink->norm[0], NULL, ink->ctrl_out[3], m->map, m->size,
+                                                          l->ffn_norm->abs_offset, D, n_tok, hp->rms_eps)) {
                     return false;
                 }
             }
@@ -852,13 +897,14 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
         }
     }
 
-    /* Final fused depth-residual mix + output_norm */
+    /* Final fused depth-residual mix + output_norm (+ Q8_K on decode!) */
     {
         uint32_t il = hp->n_logical_layer, ip = 0;
+        p36_gpu_tensor *out_q8 = (n_tok == 1u && logits_out) ? ink->q8[0] : NULL;
         INK_CHK(p36_gpu_inkling2_mix_norm_tensor(ink->blocks_normed, ink->cur, m->map, m->size,
                                                  w->output_res_query->abs_offset, w->output_res_query->bytes,
                                                  w->output_norm->abs_offset,
-                                                 rt->norm, NULL, n_tok, D, n_blocks, 1,
+                                                 rt->norm, out_q8, n_tok, D, n_blocks, 1,
                                                  state_stride, hp->rms_eps), "out_mix_norm");
 
         /* Final LM head projection + softcapping */
@@ -866,13 +912,16 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
             p36_gpu_tensor *last = NULL;
             const p36_gpu_tensor *out_in = rt->norm;
             uint32_t rows = n_tok;
-            if (!logits_all_rows) {
+            if (!logits_all_rows && n_tok > 1u) {
                 last = p36_gpu_tensor_view(rt->norm, (uint64_t)(n_tok - 1u) * D * sizeof(float), (uint64_t)D * sizeof(float));
                 out_in = last;
                 rows = 1u;
             }
-            bool ok = out_in && p36_gpu_tensor_matmul_scaled(m, w->output, out_in, logits_out,
-                                                             D, hp->n_vocab_padded, rows, 1.0f);
+            bool ok = out_in && (out_q8
+                ? p36_gpu_tensor_matmul_q8_or_float_scaled(m, w->output, out_in, out_q8, logits_out,
+                                                           D, hp->n_vocab_padded, 1u, 1.0f)
+                : p36_gpu_tensor_matmul_scaled(m, w->output, out_in, logits_out,
+                                               D, hp->n_vocab_padded, rows, 1.0f));
             p36_gpu_tensor_free(last);
             INK_CHK(ok, "lm_head");
             if (hp->final_logit_softcapping > 0.0f) {

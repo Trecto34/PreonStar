@@ -5,26 +5,30 @@
 #extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_EXT_control_flow_attributes : require
 
-/* Zero-barrier wave64 fused RMSNorm + Q8_K quantize for Inkling-2-Mini (D = 2304 = 9 * 256).
- * 1 wave64 per token: each lane owns 4 consecutive elements of each of the 9 256-blocks
- * (64 lanes x 4 floats = 256 elements = 1 exact Q8_K block!).
- * Writes BOTH norm_out (f32, for Q8_0 matmuls like attn_gate/sink) AND q8_out (p36_vk_block_q8_K).
- * Dispatch: (n_tok, 1, 1). */
+/* 9-wave64 (576 threads = 1 vec4/thread) fused RMSNorm + Q8_K quantize for Inkling-2-Mini (D = 2304).
+ * Supports both contiguous token batches and 3-way strided Q/K/V normalization in 1 dispatch!
+ * Dispatch: (n_tok or 3, 1, 1), local_size_x = 576. */
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 576, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Inp { vec4 xv[]; };
-layout(set = 0, binding = 1) readonly buffer Weight { vec4 wv[]; };
+layout(set = 0, binding = 1) readonly buffer Weight0 { vec4 wv0[]; };
 layout(set = 0, binding = 2) writeonly buffer NormOut { vec4 norm_out[]; };
 layout(set = 0, binding = 3) writeonly buffer Q8Out { uint q8[]; };
+layout(set = 0, binding = 4) readonly buffer Weight1 { vec4 wv1[]; };
+layout(set = 0, binding = 5) readonly buffer Weight2 { vec4 wv2[]; };
 
 layout(push_constant) uniform Push {
-    uint n_embd;     /* 2304 */
-    uint blocks;     /* 9 */
-    float eps;       /* 1e-6 */
+    uint n_embd;           /* 2304 */
+    uint blocks;           /* 9 (or 0 to skip Q8_K) */
+    uint tok_stride4;      /* vec4 stride between gl_WorkGroupID.x slices */
+    uint q8_stride_blocks; /* Q8_K block stride between gl_WorkGroupID.x slices */
+    uint multi_w;          /* 1 to select wv0/wv1/wv2 by gl_WorkGroupID.x */
+    float eps;             /* 1e-6 */
 } pc;
 
 const uint Q8K_WORDS = 74u;
+shared float sh_sum[9];
 
 uint pack_i8x4(int a0, int a1, int a2, int a3) {
     return (uint(a0) & 255u)
@@ -35,61 +39,59 @@ uint pack_i8x4(int a0, int a1, int a2, int a3) {
 
 void main(void) {
     uint tok = gl_WorkGroupID.x;
-    uint lid = gl_LocalInvocationID.x;
-    uint d4 = pc.n_embd >> 2u; /* 576 = 9 * 64 */
-    uint base4 = tok * d4;
+    uint tid = gl_LocalInvocationID.x;
+    uint b = tid >> 6u;       /* 0..8: Q8_K block index */
+    uint lid = tid & 63u;     /* 0..63: lane within wave64 */
+    uint base4 = tok * pc.tok_stride4;
 
-    vec4 v[9];
-    float sum_sq = 0.0;
-    [[unroll]] for (uint b = 0u; b < 9u; b++) {
-        vec4 x = xv[base4 + b * 64u + lid];
-        v[b] = x;
-        sum_sq += dot(x, x);
+    vec4 x = xv[base4 + tid];
+    float s = subgroupAdd(dot(x, x));
+    if (lid == 0u) sh_sum[b] = s;
+    barrier();
+
+    float sum_sq = sh_sum[0] + sh_sum[1] + sh_sum[2]
+                 + sh_sum[3] + sh_sum[4] + sh_sum[5]
+                 + sh_sum[6] + sh_sum[7] + sh_sum[8];
+    float inv_rms = inversesqrt(sum_sq / float(pc.n_embd) + pc.eps);
+
+    vec4 w = (pc.multi_w == 0u || tok == 0u) ? wv0[tid] : ((tok == 1u) ? wv1[tid] : wv2[tid]);
+    vec4 y = x * inv_rms * w;
+    norm_out[base4 + tid] = y;
+    if (pc.blocks == 0u) return;
+
+    /* Find max abs value across the 256-element block (64 lanes x 4 floats) */
+    vec4 ay = abs(y);
+    float max_a = max(max(ay.x, ay.y), max(ay.z, ay.w));
+    float gmax_a = subgroupMax(max_a);
+
+    float iscale = 0.0;
+    float d = 0.0;
+    if (gmax_a > 0.0) {
+        float cand_v = (ay.x == gmax_a) ? y.x : ((ay.y == gmax_a) ? y.y : ((ay.z == gmax_a) ? y.z : y.w));
+        uint win_lane = subgroupMin((max_a == gmax_a) ? lid : 64u);
+        float maxv = subgroupShuffle(cand_v, win_lane);
+        iscale = -127.0 / maxv;
+        d = 1.0 / iscale;
     }
-    float inv_rms = inversesqrt(subgroupAdd(sum_sq) / float(pc.n_embd) + pc.eps);
 
-    [[unroll]] for (uint b = 0u; b < 9u; b++) {
-        uint idx4 = b * 64u + lid;
-        vec4 y = v[b] * inv_rms * wv[idx4];
-        norm_out[base4 + idx4] = y;
+    int q0 = clamp(int(roundEven(iscale * y.x)), -128, 127);
+    int q1 = clamp(int(roundEven(iscale * y.y)), -128, 127);
+    int q2 = clamp(int(roundEven(iscale * y.z)), -128, 127);
+    int q3 = clamp(int(roundEven(iscale * y.w)), -128, 127);
 
-        /* Find max abs value across the 256-element block (64 lanes x 4 floats) */
-        vec4 ay = abs(y);
-        float max_a = max(max(ay.x, ay.y), max(ay.z, ay.w));
-        float gmax_a = subgroupMax(max_a);
+    uint out_base = (tok * pc.q8_stride_blocks + b) * Q8K_WORDS;
+    if (lid == 0u) {
+        q8[out_base + 0u] = floatBitsToUint(d);
+        q8[out_base + 1u] = 0u;
+    }
+    q8[out_base + 2u + lid] = pack_i8x4(q0, q1, q2, q3);
 
-        float iscale = 0.0;
-        float d = 0.0;
-        if (gmax_a > 0.0) {
-            /* Pick the signed max element from the lowest matching lane */
-            float cand_v = (ay.x == gmax_a) ? y.x : ((ay.y == gmax_a) ? y.y : ((ay.z == gmax_a) ? y.z : y.w));
-            uint win_lane = subgroupMin((max_a == gmax_a) ? lid : 64u);
-            float maxv = subgroupShuffle(cand_v, win_lane);
-            iscale = -127.0 / maxv;
-            d = 1.0 / iscale;
-        }
-
-        int q0 = clamp(int(roundEven(iscale * y.x)), -128, 127);
-        int q1 = clamp(int(roundEven(iscale * y.y)), -128, 127);
-        int q2 = clamp(int(roundEven(iscale * y.z)), -128, 127);
-        int q3 = clamp(int(roundEven(iscale * y.w)), -128, 127);
-
-        uint out_base = (tok * pc.blocks + b) * Q8K_WORDS;
-        if (lid == 0u) {
-            q8[out_base + 0u] = floatBitsToUint(d);
-            q8[out_base + 1u] = 0u;
-        }
-        q8[out_base + 2u + lid] = pack_i8x4(q0, q1, q2, q3);
-
-        /* bsums: sum of 16 elements = 4 consecutive lanes (lid & ~3 .. +3) */
-        int s4 = q0 + q1 + q2 + q3;
-        s4 += subgroupShuffleXor(s4, 1u);
-        s4 += subgroupShuffleXor(s4, 2u);
-        /* Lane 8*k holds bsum[2*k], lane 8*k+4 holds bsum[2*k+1] */
-        int s_pair = subgroupShuffleXor(s4, 4u);
-        if ((lid & 7u) == 0u) {
-            uint pair_idx = lid >> 3u; /* 0..7 */
-            q8[out_base + 66u + pair_idx] = (uint(s4) & 0xffffu) | ((uint(s_pair) & 0xffffu) << 16u);
-        }
+    int s4 = q0 + q1 + q2 + q3;
+    s4 += subgroupShuffleXor(s4, 1u);
+    s4 += subgroupShuffleXor(s4, 2u);
+    int s_pair = subgroupShuffleXor(s4, 4u);
+    if ((lid & 7u) == 0u) {
+        uint pair_idx = lid >> 3u;
+        q8[out_base + 66u + pair_idx] = (uint(s4) & 0xffffu) | ((uint(s_pair) & 0xffffu) << 16u);
     }
 }

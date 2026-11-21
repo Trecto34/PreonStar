@@ -273,12 +273,16 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_moe_gate_up_gemm_iq2xxs.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq2s.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv \
-	vulkan/inkling2_moe_gate_up_gemm_iq3s.spv
+	vulkan/inkling2_moe_gate_up_gemm_iq3s.spv \
+	vulkan/inkling2_qkv_rel_q4k_decode.spv
 
 vulkan/inkling2_mix.spv: vulkan/inkling2_mix.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_post_attn_mix.spv: vulkan/inkling2_post_attn_mix.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_qkv_rel_q4k_decode.spv: vulkan/inkling2_qkv_rel_q4k_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_f32_gemm.spv: vulkan/inkling2_f32_gemm.comp
@@ -1013,6 +1017,9 @@ vulkan/%.spv: vulkan/%.comp
 	$(GLSLC) -O -o $@ $<
 
 vulkan/hadamard_prepare.spv: vulkan/hadamard_prepare.comp
+	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
+
+vulkan/quantize_q8_k.spv: vulkan/quantize_q8_k.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<
 
 vulkan/router_topk.spv: vulkan/router_topk.comp

@@ -5,11 +5,13 @@
 #extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_EXT_control_flow_attributes : require
 
-/* Fused depth-residual attention for Inkling-2-Mini (vec4 vectorized, shared state reads),
+/* Fused depth-residual attention for Inkling-2-Mini (576 threads = 9 wave64s = 1 vec4/thread),
  * with optional fused RMSNorm (norm_mode == 1) or fused RMSNorm + Q8_K quantize (norm_mode == 2)
- * when n_q == 1! Eliminates 45 dispatches + 45 barriers per token. */
+ * when n_q == 1! Each wave64 owns 1 exact 256-element block: ZERO loops, ZERO branches,
+ * register-cached blocks[] (loaded ONCE instead of twice!), and zero-barrier wave64 Q8_K.
+ * Dispatch: (n_tok, 1, 1), local_size_x = 576. */
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 576, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) buffer BlocksNormed { vec4 blocks[]; };
 layout(set = 0, binding = 1) readonly buffer Cur { vec4 cur[]; };
@@ -33,6 +35,9 @@ layout(push_constant) uniform Push {
 
 const uint Q8K_WORDS = 74u;
 
+shared float sh_sum[9];
+shared float sh_probs[4][5][9];
+
 uint pack_i8x4(int a0, int a1, int a2, int a3) {
     return (uint(a0) & 255u)
          | ((uint(a1) & 255u) << 8u)
@@ -40,31 +45,34 @@ uint pack_i8x4(int a0, int a1, int a2, int a3) {
          | ((uint(a3) & 255u) << 24u);
 }
 
+float wg_sum(float v, uint w, uint lane) {
+    v = subgroupAdd(v);
+    if (lane == 0u) sh_sum[w] = v;
+    barrier();
+    float tot = sh_sum[0] + sh_sum[1] + sh_sum[2]
+              + sh_sum[3] + sh_sum[4] + sh_sum[5]
+              + sh_sum[6] + sh_sum[7] + sh_sum[8];
+    barrier();
+    return tot;
+}
+
 void main(void) {
     uint tok = gl_WorkGroupID.x;
     uint tid = gl_LocalInvocationID.x;
+    uint w = tid >> 6u;                 /* 0..8: wave64 / Q8_K block index */
+    uint lane = tid & 63u;              /* 0..63: lane within wave64 */
     uint d4 = pc.n_embd >> 2u;          /* 576 */
     uint base_tok4 = tok * d4;
     uint state_stride4 = pc.state_stride >> 2u;
     uint out_stride4 = pc.out_stride >> 2u;
 
-    vec4 cur_n[9];
+    vec4 cur_n = vec4(0.0);
     if (pc.include_cur != 0u || pc.push_slot != 0xffffffffu) {
-        float sum_sq = 0.0;
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            vec4 v = cur[base_tok4 + c * 64u + tid];
-            cur_n[c] = v;
-            sum_sq += dot(v, v);
-        }
-        float inv_rms = inversesqrt(subgroupAdd(sum_sq) / float(pc.n_embd) + 1.0e-6);
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            cur_n[c] *= inv_rms;
-        }
+        vec4 v = cur[base_tok4 + tid];
+        float inv_rms = inversesqrt(wg_sum(dot(v, v), w, lane) / float(pc.n_embd) + 1.0e-6);
+        cur_n = v * inv_rms;
         if (pc.push_slot != 0xffffffffu) {
-            uint dst_base = pc.push_slot * state_stride4 + base_tok4;
-            [[unroll]] for (uint c = 0u; c < 9u; c++) {
-                blocks[dst_base + c * 64u + tid] = cur_n[c];
-            }
+            blocks[pc.push_slot * state_stride4 + base_tok4 + tid] = cur_n;
         }
     }
 
@@ -72,40 +80,40 @@ void main(void) {
 
     uint n_states = pc.n_blocks + (pc.include_cur != 0u ? 1u : 0u);
     float inv_sqrt_d = inversesqrt(float(pc.n_embd));
-    float probs[4][5];
 
-    /* Pass 1: score each state once against all n_q queries */
+    /* Load queries once (up to 4) and blocks once (up to 4) into registers! */
+    vec4 qv[4];
+    for (uint q = 0u; q < pc.n_q; q++) {
+        qv[q] = query[(pc.q_offset + q) * d4 + tid];
+    }
+
+    vec4 blk_v[4];
     for (uint s = 0u; s < pc.n_blocks; s++) {
-        uint s_base = s * state_stride4 + base_tok4;
-        float acc[4] = float[4](0.0, 0.0, 0.0, 0.0);
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            uint idx = c * 64u + tid;
-            vec4 sv = blocks[s_base + idx];
-            for (uint q = 0u; q < pc.n_q; q++) {
-                acc[q] += dot(sv, query[(pc.q_offset + q) * d4 + idx]);
-            }
-        }
+        vec4 sv = blocks[s * state_stride4 + base_tok4 + tid];
+        blk_v[s] = sv;
         for (uint q = 0u; q < pc.n_q; q++) {
-            probs[q][s] = subgroupAdd(acc[q]) * inv_sqrt_d;
+            float acc = subgroupAdd(dot(sv, qv[q]));
+            if (lane == 0u) sh_probs[q][s][w] = acc;
         }
     }
     if (pc.include_cur != 0u) {
-        float acc[4] = float[4](0.0, 0.0, 0.0, 0.0);
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            uint idx = c * 64u + tid;
-            for (uint q = 0u; q < pc.n_q; q++) {
-                acc[q] += dot(cur_n[c], query[(pc.q_offset + q) * d4 + idx]);
-            }
-        }
         for (uint q = 0u; q < pc.n_q; q++) {
-            probs[q][pc.n_blocks] = subgroupAdd(acc[q]) * inv_sqrt_d;
+            float acc = subgroupAdd(dot(cur_n, qv[q]));
+            if (lane == 0u) sh_probs[q][pc.n_blocks][w] = acc;
         }
     }
+    barrier();
 
-    /* Softmax per query */
+    float probs[4][5];
     for (uint q = 0u; q < pc.n_q; q++) {
         float max_s = -1.0e30;
-        for (uint s = 0u; s < n_states; s++) max_s = max(max_s, probs[q][s]);
+        for (uint s = 0u; s < n_states; s++) {
+            float tot = sh_probs[q][s][0] + sh_probs[q][s][1] + sh_probs[q][s][2]
+                      + sh_probs[q][s][3] + sh_probs[q][s][4] + sh_probs[q][s][5]
+                      + sh_probs[q][s][6] + sh_probs[q][s][7] + sh_probs[q][s][8];
+            probs[q][s] = tot * inv_sqrt_d;
+            max_s = max(max_s, probs[q][s]);
+        }
         float sum_e = 0.0;
         for (uint s = 0u; s < n_states; s++) {
             probs[q][s] = exp(probs[q][s] - max_s);
@@ -117,82 +125,63 @@ void main(void) {
 
     /* Fast fused path for n_q == 1 with RMSNorm (+ optional Q8_K) */
     if (pc.norm_mode != 0u) {
-        vec4 o0[9];
-        float sum_sq = 0.0;
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            uint idx = c * 64u + tid;
-            vec4 v = vec4(0.0);
-            for (uint s = 0u; s < pc.n_blocks; s++) {
-                v = fma(vec4(probs[0][s]), blocks[s * state_stride4 + base_tok4 + idx], v);
-            }
-            if (pc.include_cur != 0u) {
-                v = fma(vec4(probs[0][pc.n_blocks]), cur_n[c], v);
-            }
-            o0[c] = v;
-            sum_sq += dot(v, v);
+        vec4 o0 = vec4(0.0);
+        for (uint s = 0u; s < pc.n_blocks; s++) {
+            o0 = fma(vec4(probs[0][s]), blk_v[s], o0);
         }
-        float inv_rms = inversesqrt(subgroupAdd(sum_sq) / float(pc.n_embd) + pc.eps);
+        if (pc.include_cur != 0u) {
+            o0 = fma(vec4(probs[0][pc.n_blocks]), cur_n, o0);
+        }
+        float inv_rms = inversesqrt(wg_sum(dot(o0, o0), w, lane) / float(pc.n_embd) + pc.eps);
+        vec4 y = o0 * inv_rms * norm_w[tid];
+        out_buf[base_tok4 + tid] = y;
 
-        [[unroll]] for (uint c = 0u; c < 9u; c++) {
-            uint idx = c * 64u + tid;
-            vec4 y = o0[c] * inv_rms * norm_w[idx];
-            out_buf[base_tok4 + idx] = y;
+        if (pc.norm_mode == 2u) {
+            vec4 ay = abs(y);
+            float max_a = max(max(ay.x, ay.y), max(ay.z, ay.w));
+            float gmax_a = subgroupMax(max_a);
+            float iscale = 0.0;
+            float d = 0.0;
+            if (gmax_a > 0.0) {
+                float cand_v = (ay.x == gmax_a) ? y.x : ((ay.y == gmax_a) ? y.y : ((ay.z == gmax_a) ? y.z : y.w));
+                uint win_lane = subgroupMin((max_a == gmax_a) ? lane : 64u);
+                float maxv = subgroupShuffle(cand_v, win_lane);
+                iscale = -127.0 / maxv;
+                d = 1.0 / iscale;
+            }
+            int q0 = clamp(int(roundEven(iscale * y.x)), -128, 127);
+            int q1 = clamp(int(roundEven(iscale * y.y)), -128, 127);
+            int q2 = clamp(int(roundEven(iscale * y.z)), -128, 127);
+            int q3 = clamp(int(roundEven(iscale * y.w)), -128, 127);
 
-            if (pc.norm_mode == 2u) {
-                vec4 ay = abs(y);
-                float max_a = max(max(ay.x, ay.y), max(ay.z, ay.w));
-                float gmax_a = subgroupMax(max_a);
-                float iscale = 0.0;
-                float d = 0.0;
-                if (gmax_a > 0.0) {
-                    float cand_v = (ay.x == gmax_a) ? y.x : ((ay.y == gmax_a) ? y.y : ((ay.z == gmax_a) ? y.z : y.w));
-                    uint win_lane = subgroupMin((max_a == gmax_a) ? tid : 64u);
-                    float maxv = subgroupShuffle(cand_v, win_lane);
-                    iscale = -127.0 / maxv;
-                    d = 1.0 / iscale;
-                }
-                int q0 = clamp(int(roundEven(iscale * y.x)), -128, 127);
-                int q1 = clamp(int(roundEven(iscale * y.y)), -128, 127);
-                int q2 = clamp(int(roundEven(iscale * y.z)), -128, 127);
-                int q3 = clamp(int(roundEven(iscale * y.w)), -128, 127);
+            uint out_base = (tok * 9u + w) * Q8K_WORDS;
+            if (lane == 0u) {
+                q8[out_base + 0u] = floatBitsToUint(d);
+                q8[out_base + 1u] = 0u;
+            }
+            q8[out_base + 2u + lane] = pack_i8x4(q0, q1, q2, q3);
 
-                uint out_base = (tok * 9u + c) * Q8K_WORDS;
-                if (tid == 0u) {
-                    q8[out_base + 0u] = floatBitsToUint(d);
-                    q8[out_base + 1u] = 0u;
-                }
-                q8[out_base + 2u + tid] = pack_i8x4(q0, q1, q2, q3);
-
-                int s4 = q0 + q1 + q2 + q3;
-                s4 += subgroupShuffleXor(s4, 1u);
-                s4 += subgroupShuffleXor(s4, 2u);
-                int s_pair = subgroupShuffleXor(s4, 4u);
-                if ((tid & 7u) == 0u) {
-                    uint pair_idx = tid >> 3u;
-                    q8[out_base + 66u + pair_idx] = (uint(s4) & 0xffffu) | ((uint(s_pair) & 0xffffu) << 16u);
-                }
+            int s4 = q0 + q1 + q2 + q3;
+            s4 += subgroupShuffleXor(s4, 1u);
+            s4 += subgroupShuffleXor(s4, 2u);
+            int s_pair = subgroupShuffleXor(s4, 4u);
+            if ((lane & 7u) == 0u) {
+                uint pair_idx = lane >> 3u;
+                q8[out_base + 66u + pair_idx] = (uint(s4) & 0xffffu) | ((uint(s_pair) & 0xffffu) << 16u);
             }
         }
         return;
     }
 
-    /* Pass 2: accumulate outputs across all queries per chunk */
-    [[unroll]] for (uint c = 0u; c < 9u; c++) {
-        uint idx = c * 64u + tid;
-        vec4 o[4] = vec4[4](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
+    /* Pass 2: accumulate outputs across all queries from register-cached blk_v[] */
+    for (uint q = 0u; q < pc.n_q; q++) {
+        vec4 o = vec4(0.0);
         for (uint s = 0u; s < pc.n_blocks; s++) {
-            vec4 sv = blocks[s * state_stride4 + base_tok4 + idx];
-            for (uint q = 0u; q < pc.n_q; q++) {
-                o[q] = fma(vec4(probs[q][s]), sv, o[q]);
-            }
+            o = fma(vec4(probs[q][s]), blk_v[s], o);
         }
         if (pc.include_cur != 0u) {
-            for (uint q = 0u; q < pc.n_q; q++) {
-                o[q] = fma(vec4(probs[q][pc.n_blocks]), cur_n[c], o[q]);
-            }
+            o = fma(vec4(probs[q][pc.n_blocks]), cur_n, o);
         }
-        for (uint q = 0u; q < pc.n_q; q++) {
-            out_buf[q * out_stride4 + base_tok4 + idx] = o[q];
-        }
+        out_buf[q * out_stride4 + base_tok4 + tid] = o;
     }
 }

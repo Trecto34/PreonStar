@@ -4,44 +4,71 @@
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
 
-/* Fused decode (n_tok == 1) control_prep + loop_down matmul:
- *   h[row] = dot(W_down[row, 0..D-1], rms(cur)) + dot(W_down[row, D..2D-1], rms(msg))
- * Because cur and msg are only 9 KB each (L1-resident), computing inv_rms_c and
- * inv_rms_m alongside the dot product in ONE pass eliminates control_prep + barrier
- * + 18 KB DRAM write/read!
- * Dispatch: (rank = 64, 1, 1), local_size_x = 64 (1 wave64 per row, zero barriers). */
+/* Fused decode (n_tok == 1) control_prep + loop_down matmul (1-way or 3-way Q/K/V):
+ *   h[j, row] = dot(W_down_j[row, 0..D-1], rms(cur_j)) + dot(W_down_j[row, D..2D-1], rms(msg_j))
+ * Dispatch: (rank = 64, n_way = 1 or 3, 1), local_size_x = 64 (1 wave64 per row, zero barriers). */
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer DownW { vec4 wd[]; };
+layout(set = 0, binding = 0) readonly buffer DownW0 { vec4 wd0[]; };
 layout(set = 0, binding = 1) readonly buffer Cur { vec4 cur[]; };
 layout(set = 0, binding = 2) readonly buffer Msg { vec4 msg[]; };
 layout(set = 0, binding = 3) writeonly buffer OutH { float h[]; };
+layout(set = 0, binding = 4) readonly buffer DownW1 { vec4 wd1[]; };
+layout(set = 0, binding = 5) readonly buffer DownW2 { vec4 wd2[]; };
 
 layout(push_constant) uniform Push {
-    uint n_embd;   /* 2304 */
+    uint n_embd;       /* 2304 */
+    uint cur_stride4;  /* vec4 stride between j=0,1,2 in cur (0 if shared) */
+    uint msg_stride4;  /* vec4 stride between j=0,1,2 in msg */
+    uint h_stride;     /* float stride between j=0,1,2 in h */
 } pc;
 
 void main(void) {
     uint row = gl_WorkGroupID.x;
+    uint j = gl_WorkGroupID.y;
     uint tid = gl_LocalInvocationID.x;
     uint d4 = pc.n_embd >> 2u;      /* 576 = 9 * 64 */
     uint w_base_c = row * (2u * d4);
     uint w_base_m = w_base_c + d4;
+    uint c_base = j * pc.cur_stride4;
+    uint m_base = j * pc.msg_stride4;
 
     float sum_cc = 0.0;
     float sum_mm = 0.0;
     float dot_c = 0.0;
     float dot_m = 0.0;
 
-    [[unroll]] for (uint c = 0u; c < 9u; c++) {
-        uint idx = c * 64u + tid;
-        vec4 vc = cur[idx];
-        vec4 vm = msg[idx];
-        sum_cc += dot(vc, vc);
-        sum_mm += dot(vm, vm);
-        dot_c += dot(vc, wd[w_base_c + idx]);
-        dot_m += dot(vm, wd[w_base_m + idx]);
+    if (j == 0u) {
+        [[unroll]] for (uint c = 0u; c < 9u; c++) {
+            uint idx = c * 64u + tid;
+            vec4 vc = cur[c_base + idx];
+            vec4 vm = msg[m_base + idx];
+            sum_cc += dot(vc, vc);
+            sum_mm += dot(vm, vm);
+            dot_c += dot(vc, wd0[w_base_c + idx]);
+            dot_m += dot(vm, wd0[w_base_m + idx]);
+        }
+    } else if (j == 1u) {
+        [[unroll]] for (uint c = 0u; c < 9u; c++) {
+            uint idx = c * 64u + tid;
+            vec4 vc = cur[c_base + idx];
+            vec4 vm = msg[m_base + idx];
+            sum_cc += dot(vc, vc);
+            sum_mm += dot(vm, vm);
+            dot_c += dot(vc, wd1[w_base_c + idx]);
+            dot_m += dot(vm, wd1[w_base_m + idx]);
+        }
+    } else {
+        [[unroll]] for (uint c = 0u; c < 9u; c++) {
+            uint idx = c * 64u + tid;
+            vec4 vc = cur[c_base + idx];
+            vec4 vm = msg[m_base + idx];
+            sum_cc += dot(vc, vc);
+            sum_mm += dot(vm, vm);
+            dot_c += dot(vc, wd2[w_base_c + idx]);
+            dot_m += dot(vm, wd2[w_base_m + idx]);
+        }
     }
 
     float inv_c = inversesqrt(subgroupAdd(sum_cc) / float(pc.n_embd) + 1.0e-6);
@@ -49,6 +76,6 @@ void main(void) {
     float total = subgroupAdd(dot_c) * inv_c + subgroupAdd(dot_m) * inv_m;
 
     if (tid == 0u) {
-        h[row] = total;
+        h[j * pc.h_stride + row] = total;
     }
 }

@@ -1,0 +1,110 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Fused Q4_K decode for Inkling-2-Mini attention projections: Q + K + V + rel in ONE dispatch!
+ * 64 threads = 4 output rows x 16 lanes/row (16 lanes cover 1 full 256-element Q4_K superblock,
+ * looping b = 0..blocks-1 -> 9 exact iterations for D=2304, ZERO idle-lane tail!).
+ * Eliminates 144 dispatches/tok (48 logical layers x 3 saved dispatches) and tail-wave waste.
+ * Dispatch: ((out_q + out_k + out_v + out_r) / 4, 1, 1) = (1376, 1, 1). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Wq { uint wq[]; };
+layout(set = 0, binding = 1) readonly buffer Wk { uint wk[]; };
+layout(set = 0, binding = 2) readonly buffer Wv { uint wv[]; };
+layout(set = 0, binding = 3) readonly buffer Wr { uint wr[]; };
+layout(set = 0, binding = 4) readonly buffer Q8_0 { uint q8_0[]; };
+layout(set = 0, binding = 5) readonly buffer Q8_1 { uint q8_1[]; };
+layout(set = 0, binding = 6) readonly buffer Q8_2 { uint q8_2[]; };
+layout(set = 0, binding = 7) writeonly buffer Yq { float yq[]; };
+layout(set = 0, binding = 8) writeonly buffer Yk { float yk[]; };
+layout(set = 0, binding = 9) writeonly buffer Yv { float yv[]; };
+layout(set = 0, binding = 10) writeonly buffer Yr { float yr[]; };
+
+layout(push_constant) uniform Push {
+    uint blocks;     /* 9 */
+    uint row_words;  /* 9 * 36 = 324 */
+    uint wg_q;       /* out_q / 4 = 768 */
+    uint wg_qk;      /* (out_q + out_k) / 4 = 1024 */
+    uint wg_qkv;     /* (out_q + out_k + out_v) / 4 = 1280 */
+} pc;
+
+const uint Q8K_WORDS = 74u;
+
+float sum16(float v) {
+    v += subgroupShuffleXor(v, 8u);
+    v += subgroupShuffleXor(v, 4u);
+    v += subgroupShuffleXor(v, 2u);
+    v += subgroupShuffleXor(v, 1u);
+    return v;
+}
+
+#define RUN_Q4K(WBUF, Q8BUF, YBUF, ROW_EXPR) do { \
+    uint row = (ROW_EXPR); \
+    uint row_w0 = row * pc.row_words; \
+    float acc = 0.0; \
+    for (uint b = 0u; b < pc.blocks; b++) { \
+        uint qbase = b * Q8K_WORDS; \
+        float yd = uintBitsToFloat(Q8BUF[qbase]); \
+        float qsum = float(bitfieldExtract(int(Q8BUF[qbase + bsum_off]), bsum_bit, 16)); \
+        uint w0 = row_w0 + 36u * b; \
+        vec2 d2 = unpackHalf2x16(WBUF[w0]); \
+        uint s0 = WBUF[w0 + 1u]; \
+        uint s1 = WBUF[w0 + 2u]; \
+        uint sc; \
+        uint mn; \
+        if (group < 4u) { \
+            uint sh = group * 8u; \
+            sc = (s0 >> sh) & 63u; \
+            mn = (s1 >> sh) & 63u; \
+        } else { \
+            uint sh = (group - 4u) * 8u; \
+            uint s2 = WBUF[w0 + 3u]; \
+            sc = ((s2 >> sh) & 15u) | (((s0 >> (sh + 6u)) & 3u) << 4u); \
+            mn = ((s2 >> (sh + 4u)) & 15u) | (((s1 >> (sh + 6u)) & 3u) << 4u); \
+        } \
+        uint qw = w0 + qw_off; \
+        float qdot = 0.0; \
+        [[unroll]] for (uint i = 0u; i < 4u; i++) { \
+            uint ql = (WBUF[qw + i] >> nshift) & 0x0f0f0f0fu; \
+            vec4 wvec = vec4(float(ql & 15u), float((ql >> 8u) & 15u), \
+                             float((ql >> 16u) & 15u), float((ql >> 24u) & 15u)); \
+            uint qv = Q8BUF[qbase + 2u + 4u * itid + i]; \
+            vec4 av = vec4(float(bitfieldExtract(int(qv), 0, 8)), \
+                           float(bitfieldExtract(int(qv), 8, 8)), \
+                           float(bitfieldExtract(int(qv), 16, 8)), \
+                           float(bitfieldExtract(int(qv), 24, 8))); \
+            qdot += dot(wvec, av); \
+        } \
+        float part = d2.x * float(sc) * qdot - d2.y * float(mn) * qsum; \
+        acc = fma(yd, part, acc); \
+    } \
+    acc = sum16(acc); \
+    if (itid == 0u) YBUF[row] = acc; \
+} while (false)
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint r_local = tid >> 4u;
+    uint itid = tid & 15u;
+    uint group = itid >> 1u;
+    uint nshift = (group & 1u) * 4u;
+    uint qw_off = 4u + (group >> 1u) * 8u + (itid & 1u) * 4u;
+    uint bsum_off = 66u + (itid >> 1u);
+    int bsum_bit = int((itid & 1u) * 16u);
+    uint wg = gl_WorkGroupID.x;
+
+    if (wg < pc.wg_q) {
+        RUN_Q4K(wq, q8_0, yq, wg * 4u + r_local);
+    } else if (wg < pc.wg_qk) {
+        RUN_Q4K(wk, q8_1, yk, (wg - pc.wg_q) * 4u + r_local);
+    } else if (wg < pc.wg_qkv) {
+        RUN_Q4K(wv, q8_2, yv, (wg - pc.wg_qk) * 4u + r_local);
+    } else {
+        RUN_Q4K(wr, q8_0, yr, (wg - pc.wg_qkv) * 4u + r_local);
+    }
+}
