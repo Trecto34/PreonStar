@@ -4334,7 +4334,12 @@ static eval_run_result run_one_case(p36_engine *engine, p36_session *session,
     bool generation_in_think = p36_think_mode_enabled(think_mode);
     eval_think_close_info think_close = {0};
     p36_tokens think_close_tokens = {0};
-    if (generation_in_think) p36_tokenize_text(engine, "</think>", &think_close_tokens);
+    if (generation_in_think) {
+        /* The model's own close marker: Inkling closes thinking with <|end_message|>, not "</think>". */
+        const int think_end = p36_token_think_end(engine);
+        if (think_end >= 0) p36_tokens_push(&think_close_tokens, think_end);
+        else p36_tokenize_text(engine, "</think>", &think_close_tokens);
+    }
     if (!tty && plain_in_think) plain_set_thinking_color(use_plain_color);
     tui_refresh(ui, "thinking");
 
@@ -4424,7 +4429,10 @@ static eval_run_result run_one_case(p36_engine *engine, p36_session *session,
          * top of the distribution.  The hard limit is a uniform benchmark rule:
          * leave a fixed answer reserve instead of failing a case because all
          * tokens were spent before the visible answer could start. */
-        if (generation_in_think && think_close_tokens.len > 0) {
+        /* Act only while the session is really inside a think block: Inkling has no
+         * "</think>" text, so the strstr() check below never ends generation_in_think. */
+        if (generation_in_think && think_close_tokens.len > 0 &&
+            (forced_close_pos >= 0 || p36_session_in_think(session))) {
             if (forced_close_pos >= 0) {
                 token = think_close_tokens.v[forced_close_pos++];
                 if (forced_close_pos >= think_close_tokens.len) forced_close_pos = -1;
@@ -4455,6 +4463,8 @@ static eval_run_result run_one_case(p36_engine *engine, p36_session *session,
             token = p36_session_eos_to_think_close(session, token);
             if (token != eos) close_kind = EVAL_THINK_CLOSE_EOS;
         }
+        if (generation_in_think && remaining_budget <= cfg->hard_limit_reply_budget)
+            token = p36_session_think_reopen_to_text(session, token);
         if (token == eos) break;
         p36_tokens_push(&history, token);
         if (close_kind != EVAL_THINK_CLOSE_NONE &&

@@ -376,6 +376,7 @@ static void vocab_load(p36_vocab *vocab, const p36_model *model) {
         vocab->im_end_id = vocab_lookup_opt(vocab, "<|end_message|>");
         vocab->think_start_id = vocab_lookup_opt(vocab, "<|content_thinking|>");
         vocab->think_end_id = vocab_lookup_opt(vocab, "<|end_message|>");
+        vocab->text_start_id = vocab_lookup_opt(vocab, "<|content_text|>");
         vocab->vision_start_id = vocab_lookup_opt(vocab, "<|content_image|>");
         vocab->vision_end_id = vocab_lookup_opt(vocab, "<|end_message|>");
         vocab->image_pad_id = vocab->vision_start_id;
@@ -385,6 +386,7 @@ static void vocab_load(p36_vocab *vocab, const p36_model *model) {
         vocab->im_end_id = vocab_lookup(vocab, "<|im_end|>");
         vocab->think_start_id = vocab_lookup(vocab, "<think>");
         vocab->think_end_id = vocab_lookup(vocab, "</think>");
+        vocab->text_start_id = -1;
         vocab->vision_start_id = vocab_lookup(vocab, "<|vision_start|>");
         vocab->vision_end_id = vocab_lookup(vocab, "<|vision_end|>");
         vocab->image_pad_id = vocab_lookup(vocab, "<|image_pad|>");
@@ -840,6 +842,10 @@ char *p36_token_text(p36_engine *e, int token, size_t *len) {
 
 int p36_token_eos(p36_engine *e) {
     return e ? e->vocab.eos_id : -1;
+}
+
+int p36_token_think_end(p36_engine *e) {
+    return e ? e->vocab.think_end_id : -1;
 }
 
 static int sample_argmax(const float *logits, uint32_t n_vocab) {

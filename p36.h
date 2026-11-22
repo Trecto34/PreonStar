@@ -310,6 +310,7 @@ void p36_chat_append_assistant_prefix(p36_engine *e, p36_tokens *tokens, p36_thi
 
 char *p36_token_text(p36_engine *e, int token, size_t *len);
 int p36_token_eos(p36_engine *e);
+int p36_token_think_end(p36_engine *e);
 
 int p36_session_create(p36_session **out, p36_engine *e, int ctx_size);
 void p36_session_free(p36_session *s);
@@ -376,6 +377,7 @@ uint32_t p36_test_kv_next_cap(uint32_t cap, uint32_t need, uint32_t limit);
 #endif
 bool p36_session_in_think(p36_session *s);
 int p36_session_eos_to_think_close(p36_session *s, int token);
+int p36_session_think_reopen_to_text(p36_session *s, int token);
 int p36_session_token_rank(p36_session *s, int token, int max_rank);
 int p36_session_top_logprobs(p36_session *s, p36_token_score *out, int k);
 int p36_session_eval(p36_session *s, int token, char *err, size_t errlen);

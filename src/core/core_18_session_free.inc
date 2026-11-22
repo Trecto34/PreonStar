@@ -632,6 +632,17 @@ int p36_session_eos_to_think_close(p36_session *s, int token) {
     return close;
 }
 
+/* Once a thinking budget is spent, every new think block is closed at once.  Inkling
+ * can open a new thinking message right after the forced close, so the reply loops
+ * "<think></think>" until the token cap and never answers.  Callers pass the sampled
+ * token while the budget is spent: a new thinking message becomes a text message.
+ * Models without that marker (text_start_id < 0) are unchanged. */
+int p36_session_think_reopen_to_text(p36_session *s, int token) {
+    if (!s || token < 0 || token != s->engine->vocab.think_start_id) return token;
+    const int text = s->engine->vocab.text_start_id;
+    return text >= 0 ? text : token;
+}
+
 int p36_session_token_rank(p36_session *s, int token, int max_rank) {
     if (!s || !s->logits || token < 0 || token >= (int)P36_N_VOCAB ||
         max_rank <= 0) return 0;

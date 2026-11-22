@@ -288,6 +288,13 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 agent_trace(w, "closing thinking at hard token budget=%d",
                             max_tokens);
             token = p36_session_eos_to_think_close(w->session, token);
+            if (agent_think_hard_budget_reached(thinking_tokens, think_budget) ||
+                repetition_close_thinking) {
+                const int t = p36_session_think_reopen_to_text(w->session, token);
+                if (t != token)
+                    agent_trace(w, "thinking closed for good: new thinking message turned into text");
+                token = t;
+            }
             if (token == p36_token_eos(w->engine)) {
                 model_stopped = true;
                 break;

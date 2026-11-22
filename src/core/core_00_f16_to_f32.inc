@@ -584,6 +584,7 @@ typedef struct p36_vocab {
     int im_end_id;
     int think_start_id;
     int think_end_id;
+    int text_start_id;      /* Inkling <|content_text|>; -1 for other models */
     int vision_start_id;
     int vision_end_id;
     int image_pad_id;
