@@ -8286,6 +8286,168 @@ done:
     p36_engine_close(engine);
 }
 
+static void test_inkling2_strided_views(void) {
+#ifdef P36_NO_GPU
+    test_skip("inkling2-strided-views", "CPU-only build");
+    return;
+#else
+    if (!p36_gpu_init()) {
+        test_skip("inkling2-strided-views", "Vulkan unavailable");
+        return;
+    }
+    const uint32_t D = 2304u;
+    const uint32_t R = 64u;
+    const uint64_t slice_bytes = (uint64_t)D * sizeof(float);
+    const uint64_t h_slice_bytes = (uint64_t)R * sizeof(float);
+    const uint64_t q8_slice_bytes = (uint64_t)(D / 256u) * 292u;
+
+    /* Synthetic F32 weights: 2 queries, 3 down[2*D*R], 3 forget[D*R], 3 gain[D*R], 3 norm[D] */
+    const uint64_t q_bytes = 2u * slice_bytes;
+    const uint64_t down_bytes = (uint64_t)2u * D * R * sizeof(float);
+    const uint64_t fg_bytes = (uint64_t)D * R * sizeof(float);
+    const uint64_t off_q = 0;
+    const uint64_t off_d0 = off_q + q_bytes;
+    const uint64_t off_d1 = off_d0 + down_bytes;
+    const uint64_t off_d2 = off_d1 + down_bytes;
+    const uint64_t off_f0 = off_d2 + down_bytes;
+    const uint64_t off_g0 = off_f0 + fg_bytes;
+    const uint64_t off_f1 = off_g0 + fg_bytes;
+    const uint64_t off_g1 = off_f1 + fg_bytes;
+    const uint64_t off_f2 = off_g1 + fg_bytes;
+    const uint64_t off_g2 = off_f2 + fg_bytes;
+    const uint64_t off_n0 = off_g2 + fg_bytes;
+    const uint64_t off_n1 = off_n0 + slice_bytes;
+    const uint64_t off_n2 = off_n1 + slice_bytes;
+    const uint64_t total_w_bytes = off_n2 + slice_bytes;
+
+    float *wbuf = (float *)malloc((size_t)total_w_bytes);
+    TEST_ASSERT(wbuf != NULL);
+    for (uint64_t i = 0; i < total_w_bytes / sizeof(float); i++) {
+        wbuf[i] = 0.02f * sinf((float)(i * 13u + 7u));
+    }
+    TEST_ASSERT(p36_gpu_set_model_map(wbuf, total_w_bytes) != 0);
+
+    p36_gpu_tensor *blocks = p36_gpu_tensor_alloc(2u * slice_bytes);
+    p36_gpu_tensor *cur3 = p36_gpu_tensor_alloc(3u * slice_bytes);
+    p36_gpu_tensor *msg4 = p36_gpu_tensor_alloc(4u * slice_bytes);
+    p36_gpu_tensor *out3 = p36_gpu_tensor_alloc(3u * slice_bytes);
+    p36_gpu_tensor *ref3 = p36_gpu_tensor_alloc(3u * slice_bytes);
+    p36_gpu_tensor *h3 = p36_gpu_tensor_alloc(3u * h_slice_bytes);
+    p36_gpu_tensor *q8_3 = p36_gpu_tensor_alloc(3u * q8_slice_bytes);
+    TEST_ASSERT(blocks && cur3 && msg4 && out3 && ref3 && h3 && q8_3);
+
+    p36_gpu_tensor *cur_v0 = p36_gpu_tensor_view(cur3, 0, slice_bytes);
+    p36_gpu_tensor *cur_v1 = p36_gpu_tensor_view(cur3, slice_bytes, slice_bytes);
+    p36_gpu_tensor *cur_v2 = p36_gpu_tensor_view(cur3, 2u * slice_bytes, slice_bytes);
+    p36_gpu_tensor *msg_v0 = p36_gpu_tensor_view(msg4, 0, slice_bytes);
+    p36_gpu_tensor *msg_v1 = p36_gpu_tensor_view(msg4, slice_bytes, slice_bytes);
+    p36_gpu_tensor *msg_v2 = p36_gpu_tensor_view(msg4, 2u * slice_bytes, slice_bytes);
+    p36_gpu_tensor *msg_v12 = p36_gpu_tensor_view(msg4, slice_bytes, 2u * slice_bytes);
+    p36_gpu_tensor *ref_v0 = p36_gpu_tensor_view(ref3, 0, slice_bytes);
+    p36_gpu_tensor *ref_v1 = p36_gpu_tensor_view(ref3, slice_bytes, slice_bytes);
+    p36_gpu_tensor *ref_v2 = p36_gpu_tensor_view(ref3, 2u * slice_bytes, slice_bytes);
+    p36_gpu_tensor *h_v0 = p36_gpu_tensor_view(h3, 0, h_slice_bytes);
+    TEST_ASSERT(cur_v0 && cur_v1 && cur_v2 && msg_v0 && msg_v1 && msg_v2 && msg_v12 &&
+                ref_v0 && ref_v1 && ref_v2 && h_v0);
+
+    float *host_in = (float *)malloc((size_t)(4u * slice_bytes));
+    float *host_a = (float *)malloc((size_t)(3u * slice_bytes));
+    float *host_b = (float *)malloc((size_t)(3u * slice_bytes));
+    TEST_ASSERT(host_in && host_a && host_b);
+    for (uint32_t i = 0; i < 4u * D; i++) host_in[i] = 0.5f * cosf((float)(i * 7u + 3u));
+    TEST_ASSERT(p36_gpu_tensor_write(blocks, 0, host_in, 2u * slice_bytes) != 0);
+    TEST_ASSERT(p36_gpu_tensor_write(cur3, 0, host_in + D, 3u * slice_bytes) != 0);
+    TEST_ASSERT(p36_gpu_tensor_write(msg4, 0, host_in, 4u * slice_bytes) != 0);
+
+    /* 1. Undersized 1-slice views MUST be rejected by strided/multi-slice wrappers */
+    TEST_ASSERT(p36_gpu_inkling2_mix_tensor(blocks, cur_v0, wbuf, total_w_bytes,
+                                            off_q, q_bytes, msg_v1, 1u, D, 2u, 0u, 2u, 0u,
+                                            D, D, 0xffffffffu) == 0);
+    TEST_ASSERT(p36_gpu_inkling2_control_prep_down3_tensor(h3, wbuf, total_w_bytes,
+                                                           off_d0, off_d1, off_d2,
+                                                           cur_v0, msg4, D, R, D, D, R) == 0);
+    TEST_ASSERT(p36_gpu_inkling2_control_gate3_tensor(out3, wbuf, total_w_bytes,
+                                                      off_f0, off_g0, off_f1, off_g1, off_f2, off_g2,
+                                                      h3, cur_v0, msg4, D, R, D, D, R, D) == 0);
+    TEST_ASSERT(p36_gpu_inkling2_rms_norm_q8k3_tensor(out3, q8_3, cur_v0, wbuf, total_w_bytes,
+                                                      off_n0, off_n1, off_n2, D, D, D / 256u, 1.0e-6f) == 0);
+
+    /* 2. Parity: mix_tensor(n_q=2) into 2-slice view matches two 1-slice calls */
+    TEST_ASSERT(p36_gpu_inkling2_mix_tensor(blocks, cur_v0, wbuf, total_w_bytes,
+                                            off_q, q_bytes, msg_v12, 1u, D, 2u, 0u, 2u, 0u,
+                                            D, D, 0xffffffffu) != 0);
+    TEST_ASSERT(p36_gpu_inkling2_mix_tensor(blocks, cur_v0, wbuf, total_w_bytes,
+                                            off_q, q_bytes, ref_v0, 1u, D, 2u, 0u, 1u, 0u,
+                                            D, D, 0xffffffffu) != 0);
+    TEST_ASSERT(p36_gpu_inkling2_mix_tensor(blocks, cur_v0, wbuf, total_w_bytes,
+                                            off_q, q_bytes, ref_v1, 1u, D, 2u, 0u, 1u, 1u,
+                                            D, D, 0xffffffffu) != 0);
+    TEST_ASSERT(p36_gpu_tensor_read(msg_v12, 0, host_a, 2u * slice_bytes) != 0);
+    TEST_ASSERT(p36_gpu_tensor_read(ref3, 0, host_b, 2u * slice_bytes) != 0);
+    float max_mix_err = 0.0f;
+    for (uint32_t i = 0; i < 2u * D; i++) {
+        float e = fabsf(host_a[i] - host_b[i]);
+        if (e > max_mix_err) max_mix_err = e;
+    }
+    TEST_ASSERT(max_mix_err < 1.0e-5f);
+
+    /* 3. Parity: 3-way ctrl_pd3 + ctrl_g3 (cur_stride=D) matches 3 separate 1-way calls */
+    TEST_ASSERT(p36_gpu_inkling2_control_prep_down3_tensor(h3, wbuf, total_w_bytes,
+                                                           off_d0, off_d1, off_d2,
+                                                           cur3, msg4, D, R, D, D, R) != 0);
+    TEST_ASSERT(p36_gpu_inkling2_control_gate3_tensor(out3, wbuf, total_w_bytes,
+                                                      off_f0, off_g0, off_f1, off_g1, off_f2, off_g2,
+                                                      h3, cur3, msg4, D, R, D, D, R, D) != 0);
+    const uint64_t d_offs[3] = { off_d0, off_d1, off_d2 };
+    const uint64_t f_offs[3] = { off_f0, off_f1, off_f2 };
+    const uint64_t g_offs[3] = { off_g0, off_g1, off_g2 };
+    p36_gpu_tensor *cv[3] = { cur_v0, cur_v1, cur_v2 };
+    p36_gpu_tensor *mv[3] = { msg_v0, msg_v1, msg_v2 };
+    p36_gpu_tensor *rv[3] = { ref_v0, ref_v1, ref_v2 };
+    for (int j = 0; j < 3; j++) {
+        TEST_ASSERT(p36_gpu_inkling2_control_prep_down_tensor(h_v0, wbuf, total_w_bytes,
+                                                              d_offs[j], cv[j], mv[j], D, R) != 0);
+        TEST_ASSERT(p36_gpu_inkling2_control_gate_tensor(rv[j], wbuf, total_w_bytes,
+                                                         f_offs[j], g_offs[j], h_v0, cv[j], mv[j],
+                                                         1u, D, R) != 0);
+    }
+    TEST_ASSERT(p36_gpu_tensor_read(out3, 0, host_a, 3u * slice_bytes) != 0);
+    TEST_ASSERT(p36_gpu_tensor_read(ref3, 0, host_b, 3u * slice_bytes) != 0);
+    float max_ctrl_err = 0.0f;
+    for (uint32_t i = 0; i < 3u * D; i++) {
+        float e = fabsf(host_a[i] - host_b[i]);
+        if (e > max_ctrl_err) max_ctrl_err = e;
+    }
+    TEST_ASSERT(max_ctrl_err < 1.0e-5f);
+    fprintf(stderr, "p36-test: inkling2 strided views: 4 OOB rejections + parity mix=%.3g ctrl3=%.3g\n",
+            (double)max_mix_err, (double)max_ctrl_err);
+
+    p36_gpu_set_model_map(NULL, 0);
+    free(host_in);
+    free(host_a);
+    free(host_b);
+    free(wbuf);
+    p36_gpu_tensor_free(h_v0);
+    p36_gpu_tensor_free(ref_v2);
+    p36_gpu_tensor_free(ref_v1);
+    p36_gpu_tensor_free(ref_v0);
+    p36_gpu_tensor_free(msg_v12);
+    p36_gpu_tensor_free(msg_v2);
+    p36_gpu_tensor_free(msg_v1);
+    p36_gpu_tensor_free(msg_v0);
+    p36_gpu_tensor_free(cur_v2);
+    p36_gpu_tensor_free(cur_v1);
+    p36_gpu_tensor_free(cur_v0);
+    p36_gpu_tensor_free(q8_3);
+    p36_gpu_tensor_free(h3);
+    p36_gpu_tensor_free(ref3);
+    p36_gpu_tensor_free(out3);
+    p36_gpu_tensor_free(msg4);
+    p36_gpu_tensor_free(cur3);
+    p36_gpu_tensor_free(blocks);
+#endif
+}
+
 static void test_server_unit_group(void) {
     p36_server_unit_tests_run();
 }
@@ -8332,6 +8494,7 @@ static const p36_test_entry test_entries[] = {
     {"--pq2-0-layout-oracle", "pq2-0-layout-oracle", "PQ2_0 block layout against hand-built blocks", test_pq2_0_layout_oracle},
     {"--pq2-0-native-128", "pq2-0-native-128", "independent per-128 PQ2_0 scales: GPU decode+MMQ vs f16 contract", test_pq2_0_native_128},
     {"--ptq1-0-layout-oracle", "ptq1-0-layout-oracle", "PTQ1_0 block layout against hand-built blocks", test_ptq1_0_layout_oracle},
+    {"--inkling2-strided-views", "inkling2-strided-views", "Inkling-2 strided multi-slice descriptor bounds & parity", test_inkling2_strided_views},
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
 };
 

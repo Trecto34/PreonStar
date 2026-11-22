@@ -132,6 +132,37 @@ int p36_gpu_inkling2_mix_tensor(
         uint32_t              state_stride,
         uint32_t              out_stride,
         uint32_t              push_slot) {
+    if (n_tok == 0 || n_embd == 0) return 0;
+    uint64_t tok_bytes = (uint64_t)n_tok * n_embd * sizeof(float);
+    if ((include_cur != 0u || push_slot != 0xffffffffu) &&
+        !p36_gpu_tensor_range_ok(cur, 0, tok_bytes)) {
+        fprintf(stderr, "p36: inkling2_mix cur OOB (need %llu B)\n", (unsigned long long)tok_bytes);
+        return 0;
+    }
+    if (n_blocks > 0u || push_slot != 0xffffffffu) {
+        uint32_t max_blk = n_blocks > 0u ? (n_blocks - 1u) : 0u;
+        if (push_slot != 0xffffffffu && push_slot > max_blk) max_blk = push_slot;
+        uint64_t blk_need = ((uint64_t)max_blk * state_stride + (uint64_t)n_tok * n_embd) * sizeof(float);
+        if (!p36_gpu_tensor_range_ok(blocks_normed, 0, blk_need)) {
+            fprintf(stderr, "p36: inkling2_mix blocks_normed OOB (slot=%u stride=%u need=%llu B)\n",
+                    max_blk, state_stride, (unsigned long long)blk_need);
+            return 0;
+        }
+    }
+    if (n_q > 0u) {
+        uint64_t out_need = ((uint64_t)(n_q - 1u) * out_stride + (uint64_t)n_tok * n_embd) * sizeof(float);
+        if (!out || !p36_gpu_tensor_range_ok(out, 0, out_need)) {
+            fprintf(stderr, "p36: inkling2_mix out OOB (n_q=%u out_stride=%u need=%llu B)\n",
+                    n_q, out_stride, (unsigned long long)out_need);
+            return 0;
+        }
+        uint64_t q_need = (uint64_t)(q_offset + n_q) * n_embd * sizeof(float);
+        if (query_bytes < q_need) {
+            fprintf(stderr, "p36: inkling2_mix query OOB (q_off=%u n_q=%u need=%llu B got=%llu B)\n",
+                    q_offset, n_q, (unsigned long long)q_need, (unsigned long long)query_bytes);
+            return 0;
+        }
+    }
     int ok = 0;
     pthread_mutex_lock(&p36_vk_mu);
     if (!p36_vk.ready) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
@@ -173,6 +204,17 @@ int p36_gpu_inkling2_mix_norm_tensor(
         uint32_t              include_cur,
         uint32_t              state_stride,
         float                 eps) {
+    if (n_tok == 0 || n_embd == 0) return 0;
+    uint64_t tok_bytes = (uint64_t)n_tok * n_embd * sizeof(float);
+    if ((include_cur != 0u && !p36_gpu_tensor_range_ok(cur, 0, tok_bytes)) ||
+        !p36_gpu_tensor_range_ok(norm_out, 0, tok_bytes) ||
+        (n_blocks > 0u && !p36_gpu_tensor_range_ok(blocks_normed, 0,
+            ((uint64_t)(n_blocks - 1u) * state_stride + (uint64_t)n_tok * n_embd) * sizeof(float))) ||
+        (q8_out && !p36_gpu_tensor_range_ok(q8_out, 0, (uint64_t)n_tok * (n_embd / 256u) * sizeof(p36_vk_block_q8_K)))) {
+        fprintf(stderr, "p36: inkling2_mix_norm buffer OOB (n_tok=%u n_blocks=%u stride=%u)\n",
+                n_tok, n_blocks, state_stride);
+        return 0;
+    }
     int ok = 0;
     uint64_t nw_bytes = (uint64_t)n_embd * sizeof(float);
     pthread_mutex_lock(&p36_vk_mu);
@@ -311,6 +353,17 @@ int p36_gpu_inkling2_control_prep_down3_tensor(
         uint32_t              cur_stride,
         uint32_t              msg_stride,
         uint32_t              h_stride) {
+    if (n_embd == 0 || rank == 0) return 0;
+    uint64_t cur_need = ((uint64_t)2u * cur_stride + n_embd) * sizeof(float);
+    uint64_t msg_need = ((uint64_t)2u * msg_stride + n_embd) * sizeof(float);
+    uint64_t h_need   = ((uint64_t)2u * h_stride + rank) * sizeof(float);
+    if (!p36_gpu_tensor_range_ok(cur, 0, cur_need) ||
+        !p36_gpu_tensor_range_ok(msg, 0, msg_need) ||
+        !p36_gpu_tensor_range_ok(h_out, 0, h_need)) {
+        fprintf(stderr, "p36: inkling2_ctrl_pd3 OOB (cur_str=%u msg_str=%u h_str=%u)\n",
+                cur_stride, msg_stride, h_stride);
+        return 0;
+    }
     int ok = 0;
     uint64_t w_bytes = (uint64_t)2u * n_embd * rank * sizeof(float);
     pthread_mutex_lock(&p36_vk_mu);
@@ -439,6 +492,19 @@ int p36_gpu_inkling2_control_gate3_tensor(
         uint32_t              msg_stride,
         uint32_t              h_stride,
         uint32_t              out_stride) {
+    if (n_embd == 0 || rank == 0) return 0;
+    uint64_t h_need   = ((uint64_t)2u * h_stride + rank) * sizeof(float);
+    uint64_t cur_need = ((uint64_t)2u * cur_stride + n_embd) * sizeof(float);
+    uint64_t msg_need = ((uint64_t)2u * msg_stride + n_embd) * sizeof(float);
+    uint64_t out_need = ((uint64_t)2u * out_stride + n_embd) * sizeof(float);
+    if (!p36_gpu_tensor_range_ok(h, 0, h_need) ||
+        !p36_gpu_tensor_range_ok(cur, 0, cur_need) ||
+        !p36_gpu_tensor_range_ok(msg, 0, msg_need) ||
+        !p36_gpu_tensor_range_ok(out, 0, out_need)) {
+        fprintf(stderr, "p36: inkling2_ctrl_gate3 OOB (cur_str=%u msg_str=%u h_str=%u out_str=%u)\n",
+                cur_stride, msg_stride, h_stride, out_stride);
+        return 0;
+    }
     int ok = 0;
     uint64_t w_bytes = (uint64_t)n_embd * rank * sizeof(float);
     pthread_mutex_lock(&p36_vk_mu);
@@ -588,6 +654,16 @@ int p36_gpu_inkling2_rms_norm_q8k3_tensor(
         uint32_t              tok_stride,
         uint32_t              q8_stride_blocks,
         float                 eps) {
+    if (n_embd == 0 || (n_embd % 256u) != 0u) return 0;
+    uint64_t vec_need = ((uint64_t)2u * tok_stride + n_embd) * sizeof(float);
+    uint64_t q8_need  = ((uint64_t)2u * q8_stride_blocks + (n_embd / 256u)) * sizeof(p36_vk_block_q8_K);
+    if (!p36_gpu_tensor_range_ok(inp, 0, vec_need) ||
+        !p36_gpu_tensor_range_ok(norm_out, 0, vec_need) ||
+        !p36_gpu_tensor_range_ok(q8_out, 0, q8_need)) {
+        fprintf(stderr, "p36: inkling2_norm_q8k3 OOB (tok_str=%u q8_str_blks=%u)\n",
+                tok_stride, q8_stride_blocks);
+        return 0;
+    }
     int ok = 0;
     uint64_t w_bytes = (uint64_t)n_embd * sizeof(float);
     pthread_mutex_lock(&p36_vk_mu);
