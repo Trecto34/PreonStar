@@ -4,6 +4,9 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
 
 /* Fused K/V short-conv (l_cache=4, optional dynamic taps) + K L2-clip +
  * V RMSNorm + F16 KV cache store for Inkling-2-Mini.
@@ -22,8 +25,34 @@ layout(set = 0, binding = 4) buffer KState { float ks[]; };
 layout(set = 0, binding = 5) buffer VState { float vs[]; };
 layout(set = 0, binding = 6) readonly buffer KDyn { vec4 kdyn[]; };
 layout(set = 0, binding = 7) readonly buffer VDyn { vec4 vdyn[]; };
+#ifdef KV_Q8
+/* Int8 KV: per (slot, head) 34 words = 128 x int8 (dim d = byte d) + 4 x f16 scale (dims 32b..32b+31). */
+layout(set = 0, binding = 8) writeonly buffer CacheK { uint cache_k[]; };
+layout(set = 0, binding = 9) writeonly buffer CacheV { uint cache_v[]; };
+
+/* lane tid holds dims tid (block tid>>5) and tid+64 (block 2+(tid>>5)); lanes 0..33 write the 34 words. */
+void store_q8(float x0, float x1, uint tid, uint hb, bool is_k) {
+    float d0 = float(float16_t(subgroupClusteredMax(abs(x0), 32u) / 127.0));
+    float d1 = float(float16_t(subgroupClusteredMax(abs(x1), 32u) / 127.0));
+    int q0 = (d0 > 0.0) ? clamp(int(round(x0 / d0)), -127, 127) : 0;
+    int q1 = (d1 > 0.0) ? clamp(int(round(x1 / d1)), -127, 127) : 0;
+    uint pk = uint(q0 & 255) | (uint(q1 & 255) << 8u);
+    uint src = 4u * (tid & 15u);
+    uint sh = (tid < 16u) ? 0u : 8u;
+    uint w = 0u;
+    [[unroll]] for (uint i = 0u; i < 4u; i++) w |= ((subgroupShuffle(pk, src + i) >> sh) & 255u) << (8u * i);
+    float d0a = subgroupShuffle(d0, 0u), d0b = subgroupShuffle(d0, 32u);
+    float d1a = subgroupShuffle(d1, 0u), d1b = subgroupShuffle(d1, 32u);
+    if (tid < 34u) {
+        uint o = (tid < 32u) ? w : packHalf2x16((tid == 32u) ? vec2(d0a, d0b) : vec2(d1a, d1b));
+        if (is_k) cache_k[hb + tid] = o;
+        else      cache_v[hb + tid] = o;
+    }
+}
+#else
 layout(set = 0, binding = 8) writeonly buffer CacheK { float16_t cache_k[]; };
 layout(set = 0, binding = 9) writeonly buffer CacheV { float16_t cache_v[]; };
+#endif
 
 layout(push_constant) uniform Push {
     uint n_head_kv;
@@ -103,11 +132,17 @@ void main(void) {
 
         uint pos = pc.pos0 + t;
         uint slot = (pc.is_swa != 0u) ? (pos & mask) : pos;
+#ifdef KV_Q8
+        uint hb = (slot * pc.n_head_kv + h) * 34u;
+        store_q8(ko0 * kf, ko1 * kf, tid, hb, true);
+        store_q8(vo0 * v_inv, vo1 * v_inv, tid, hb, false);
+#else
         uint kv_base = (slot * pc.n_head_kv + h) * 128u;
         cache_k[kv_base + tid] = float16_t(ko0 * kf);
         cache_k[kv_base + tid + 64u] = float16_t(ko1 * kf);
         cache_v[kv_base + tid] = float16_t(vo0 * v_inv);
         cache_v[kv_base + tid + 64u] = float16_t(vo1 * v_inv);
+#endif
     }
 
     if (pc.n_tok < 3u) {

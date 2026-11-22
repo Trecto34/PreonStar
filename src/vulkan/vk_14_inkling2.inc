@@ -59,15 +59,17 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     p36_vk_ink_ctrl_gate      = P36_VK_KERNEL("vulkan/inkling2_control_gate.spv", 10, 28, 1u << 5);
     p36_vk_ink_ctrl_gate_dec  = P36_VK_KERNEL("vulkan/inkling2_control_gate_decode.spv", 10, 28, 1u << 5);
     p36_vk_ink_conv           = P36_VK_KERNEL("vulkan/inkling2_conv.spv", 6, 28, (1u << 2) | (1u << 5));
-    p36_vk_ink_conv_kv_store  = P36_VK_KERNEL("vulkan/inkling2_conv_kv_store.spv", 10, 32, (1u << 4) | (1u << 5) | (1u << 8) | (1u << 9));
+    /* Int8 KV by default; must match p36_ink_kv_row_bytes() in core_inkling2.inc. */
+    const bool kv_f16 = getenv("P36_INK_KV_F16") != NULL;
+    p36_vk_ink_conv_kv_store  = P36_VK_KERNEL(kv_f16 ? "vulkan/inkling2_conv_kv_store.spv" : "vulkan/inkling2_conv_kv_store_q8.spv", 10, 32, (1u << 4) | (1u << 5) | (1u << 8) | (1u << 9));
     p36_vk_ink_clip_norm      = P36_VK_KERNEL("vulkan/inkling2_clip_norm.spv", 4, 28, (1u << 0) | (1u << 1));
     p36_vk_ink_rms_norm_q8k   = P36_VK_KERNEL("vulkan/inkling2_rms_norm_q8k.spv", 6, 24, (1u << 2) | (1u << 3));
     p36_vk_ink_router_topk    = P36_VK_KERNEL("vulkan/inkling2_router_topk.spv", 4, 16, (1u << 2) | (1u << 3));
     p36_vk_ink_moe_reduce     = P36_VK_KERNEL("vulkan/inkling2_moe_reduce.spv", 3, 8, 1u << 2);
     p36_vk_ink_softcap        = P36_VK_KERNEL("vulkan/inkling2_softcap.spv", 1, 12, 1u << 0);
-    p36_vk_ink_attn_decode    = P36_VK_KERNEL("vulkan/inkling2_attn_decode.spv", 9, 32, (1u << 7) | (1u << 8));
+    p36_vk_ink_attn_decode    = P36_VK_KERNEL(kv_f16 ? "vulkan/inkling2_attn_decode.spv" : "vulkan/inkling2_attn_decode_q8.spv", 9, 32, (1u << 7) | (1u << 8));
     p36_vk_ink_attn_combine   = P36_VK_KERNEL("vulkan/inkling2_attn_combine.spv", 3, 4, 1u << 2);
-    p36_vk_ink_attn_prefill   = P36_VK_KERNEL("vulkan/inkling2_attn_prefill.spv", 10, 32, 1u << 7);
+    p36_vk_ink_attn_prefill   = P36_VK_KERNEL(kv_f16 ? "vulkan/inkling2_attn_prefill.spv" : "vulkan/inkling2_attn_prefill_q8.spv", 10, 32, 1u << 7);
     p36_vk_ink_gu_dec_iq2xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xxs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_dec_iq2xs   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_dec_iq2s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2s.spv", 6, 32, 1u << 3);
@@ -750,10 +752,11 @@ int p36_gpu_inkling2_attn_tensor(
     if (n_tok == 1u) {
         uint32_t k_len = (is_swa && pos0 >= rel_extent) ? rel_extent : (pos0 + 1u);
         uint32_t n_splits = (k_len >= 128u) ? ((k_len + 63u) / 64u) : 1u;
-        if (n_splits > 16u) n_splits = 16u;
+        /* 64 splits (512 keys each at 32k) beat 16 by -15% attn+combine GPU time with int8 KV; 128 loses in combine. */
+        if (n_splits > 64u) n_splits = 64u;
         if (n_splits > 1u && !p36_vk_ink_attn_parts) {
             pthread_mutex_unlock(&p36_vk_mu);
-            p36_gpu_tensor *p = p36_gpu_tensor_alloc_scratch((uint64_t)24u * 16u * 132u * sizeof(float));
+            p36_gpu_tensor *p = p36_gpu_tensor_alloc_scratch((uint64_t)24u * 64u * 132u * sizeof(float));
             pthread_mutex_lock(&p36_vk_mu);
             if (!p36_vk_ink_attn_parts) p36_vk_ink_attn_parts = p;
             else if (p) p36_vk_tensor_free_unlocked(p);

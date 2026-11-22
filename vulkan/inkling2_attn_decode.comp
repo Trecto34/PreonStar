@@ -17,13 +17,29 @@
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
+#ifdef KV_Q8
+/* Int8 KV: per (slot, head) 34 words = 128 x int8 + 4 x f16 scale (one per 32 dims = 8 lanes). */
+#define KV_HEAD(slot) (((slot) * pc.n_head_kv + kvh) * 34u)
+vec4 kvq8(uint w, uint sw, uint lane) {
+    float d = unpackHalf2x16(sw >> (16u * ((lane >> 3u) & 1u))).x;
+    return vec4(float(bitfieldExtract(int(w), 0, 8)), float(bitfieldExtract(int(w), 8, 8)),
+                float(bitfieldExtract(int(w), 16, 8)), float(bitfieldExtract(int(w), 24, 8))) * d;
+}
+#define LOAD_KV(BUF, hb) kvq8(BUF[(hb) + lane], BUF[(hb) + 32u + (lane >> 4u)], lane)
+#define KV_ELEM uint
+#else
+#define KV_HEAD(slot) (((slot) * pc.n_head_kv + kvh) * 32u)
+#define LOAD_KV(BUF, hb) vec4(BUF[(hb) + lane])
+#define KV_ELEM f16vec4
+#endif
+
 layout(set = 0, binding = 0) readonly buffer QBuf { vec4 q_buf[]; };
 layout(set = 0, binding = 1) readonly buffer RBuf { float r_buf[]; };
 layout(set = 0, binding = 2) readonly buffer RelBias { float rel_bias[]; };
 layout(set = 0, binding = 3) readonly buffer Sinks { float sinks[]; };
 layout(set = 0, binding = 4) readonly buffer GateBuf { vec4 gate_buf[]; };
-layout(set = 0, binding = 5) readonly buffer CacheK { f16vec4 cache_k[]; };
-layout(set = 0, binding = 6) readonly buffer CacheV { f16vec4 cache_v[]; };
+layout(set = 0, binding = 5) readonly buffer CacheK { KV_ELEM cache_k[]; };
+layout(set = 0, binding = 6) readonly buffer CacheV { KV_ELEM cache_v[]; };
 layout(set = 0, binding = 7) writeonly buffer OutBuf { vec4 out_buf[]; };
 layout(set = 0, binding = 8) writeonly buffer PartBuf { float part_buf[]; };
 
@@ -108,12 +124,12 @@ void main(void) {
         uint k1 = k + 8u;
         uint slot0 = (pc.is_swa != 0u) ? (k & mask) : k;
         uint slot1 = (pc.is_swa != 0u) ? (k1 & mask) : k1;
-        uint kv_base0 = (slot0 * pc.n_head_kv + kvh) * 32u + lane;
-        uint kv_base1 = (slot1 * pc.n_head_kv + kvh) * 32u + lane;
-        vec4 kv0 = vec4(cache_k[kv_base0]);
-        vec4 kv1 = vec4(cache_k[kv_base1]);
-        vec4 vv0 = vec4(cache_v[kv_base0]);
-        vec4 vv1 = vec4(cache_v[kv_base1]);
+        uint kv_base0 = KV_HEAD(slot0);
+        uint kv_base1 = KV_HEAD(slot1);
+        vec4 kv0 = LOAD_KV(cache_k, kv_base0);
+        vec4 kv1 = LOAD_KV(cache_k, kv_base1);
+        vec4 vv0 = LOAD_KV(cache_v, kv_base0);
+        vec4 vv1 = LOAD_KV(cache_v, kv_base1);
 
         uint dist0 = pc.pos - k;
         uint dist1 = pc.pos - k1;
@@ -175,13 +191,13 @@ void main(void) {
     }
     if (k < k_end) {
         uint slot = (pc.is_swa != 0u) ? (k & mask) : k;
-        uint kv_base = (slot * pc.n_head_kv + kvh) * 32u + lane;
-        vec4 kv = vec4(cache_k[kv_base]);
+        uint kv_base = KV_HEAD(slot);
+        vec4 kv = LOAD_KV(cache_k, kv_base);
 
         uint dist = pc.pos - k;
         float rb = (dist < pc.rel_extent && lane < 16u) ? rel_bias[dist * 16u + lane] : 0.0;
 
-        vec4 vv = vec4(cache_v[kv_base]);
+        vec4 vv = LOAD_KV(cache_v, kv_base);
         float s0 = fma(r0, rb, dot(q0, kv));
         float s1 = fma(r1, rb, dot(q1, kv));
         float s2 = fma(r2, rb, dot(q2, kv));

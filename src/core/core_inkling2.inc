@@ -327,8 +327,8 @@ typedef struct {
     p36_gpu_tensor *v_dyn;             /* [cap, 32] */
     p36_gpu_tensor *attn_out;          /* [cap, 3072] */
     p36_gpu_tensor *wo_out;            /* [cap, 2304] */
-    p36_gpu_tensor *swa_tmp_k;         /* [cap, 1024] f16 (prefill SWA staging) */
-    p36_gpu_tensor *swa_tmp_v;         /* [cap, 1024] f16 (prefill SWA staging) */
+    p36_gpu_tensor *swa_tmp_k;         /* [cap] KV rows, same format as kv_k/kv_v (prefill SWA staging) */
+    p36_gpu_tensor *swa_tmp_v;         /* [cap] KV rows, same format as kv_k/kv_v (prefill SWA staging) */
     p36_gpu_tensor *router_logits;     /* [cap, 128] */
     p36_gpu_tensor *selected;          /* [cap, 8] u32 (host-visible) */
     p36_gpu_tensor *router_w;          /* [cap, 8] f32 */
@@ -356,6 +356,14 @@ typedef struct {
     p36_inkling2_scratch decode;       /* permanent cap=1 (~0.3 MiB, zero false aliasing) */
     p36_inkling2_scratch prefill;      /* lazy aliased slab (freed on decode/reset) */
 } p36_inkling2_runtime;
+
+/* KV row = 8 heads x 128 dims. Default int8 (128 x int8 + 4 f16 scales = 136 B/head) halves the
+ * KV bytes that decode attention reads; P36_INK_KV_F16=1 keeps F16 (vk_14 reads the same env). */
+static inline uint64_t p36_ink_kv_row_bytes(void) {
+    static int q8 = -1;
+    if (q8 < 0) q8 = getenv("P36_INK_KV_F16") ? 0 : 1;
+    return q8 ? 8ull * 136ull : 1024ull * sizeof(uint16_t);
+}
 
 static inline uint64_t p36_ink_align256(uint64_t n) {
     return (n + 255ull) & ~255ull;
@@ -421,7 +429,7 @@ static bool p36_inkling2_scratch_init(p36_inkling2_scratch *sc, uint32_t cap, bo
     const uint64_t h_slice_bytes = (uint64_t)cap * 64u * sizeof(float);
     const uint64_t q_bytes = (uint64_t)cap * Q * sizeof(float);
     const uint64_t kv_f32_bytes = (uint64_t)cap * KV * sizeof(float);
-    const uint64_t kv_f16_bytes = (uint64_t)cap * KV * sizeof(uint16_t);
+    const uint64_t kv_cache_bytes = (uint64_t)cap * p36_ink_kv_row_bytes();
     const uint64_t r_bytes = (uint64_t)cap * 384u * sizeof(float);
     const uint64_t sinks_bytes = (uint64_t)cap * 24u * sizeof(float);
     const uint64_t dyn_bytes = (uint64_t)cap * 32u * sizeof(float);
@@ -475,8 +483,8 @@ static bool p36_inkling2_scratch_init(p36_inkling2_scratch *sc, uint32_t cap, bo
         uint64_t o_v_dyn = p2;          p2 += p36_ink_align256(dyn_bytes);
         uint64_t o_attn_out = p2;       p2 += p36_ink_align256(q_bytes);
         uint64_t o_wo_out = p2;         p2 += p36_ink_align256(tok_embd_bytes);
-        uint64_t o_swa_k = p2;          p2 += p36_ink_align256(kv_f16_bytes);
-        uint64_t o_swa_v = p2;          p2 += p36_ink_align256(kv_f16_bytes);
+        uint64_t o_swa_k = p2;          p2 += p36_ink_align256(kv_cache_bytes);
+        uint64_t o_swa_v = p2;          p2 += p36_ink_align256(kv_cache_bytes);
 
         uint64_t p3 = reg_b + p36_ink_align256(tok_embd_bytes);
         uint64_t o_rlog = p3;           p3 += p36_ink_align256(rlog_bytes);
@@ -519,8 +527,8 @@ static bool p36_inkling2_scratch_init(p36_inkling2_scratch *sc, uint32_t cap, bo
         sc->v_dyn = p36_gpu_tensor_view(sc->slab, o_v_dyn, dyn_bytes);
         sc->attn_out = p36_gpu_tensor_view(sc->slab, o_attn_out, q_bytes);
         sc->wo_out = p36_gpu_tensor_view(sc->slab, o_wo_out, tok_embd_bytes);
-        sc->swa_tmp_k = p36_gpu_tensor_view(sc->slab, o_swa_k, kv_f16_bytes);
-        sc->swa_tmp_v = p36_gpu_tensor_view(sc->slab, o_swa_v, kv_f16_bytes);
+        sc->swa_tmp_k = p36_gpu_tensor_view(sc->slab, o_swa_k, kv_cache_bytes);
+        sc->swa_tmp_v = p36_gpu_tensor_view(sc->slab, o_swa_v, kv_cache_bytes);
 
         sc->router_logits = p36_gpu_tensor_view(sc->slab, o_rlog, rlog_bytes);
         sc->router_w = p36_gpu_tensor_view(sc->slab, o_rw, rw_bytes);
@@ -600,7 +608,7 @@ static bool p36_inkling2_vulkan_runtime_reserve_kv(p36_vulkan_runtime *rt,
     p36_inkling2_runtime *ink = (p36_inkling2_runtime *)rt->ink;
     if (need <= ink->full_kv_cap) return true;
 
-    const uint64_t row_bytes = 1024ull * sizeof(uint16_t);
+    const uint64_t row_bytes = p36_ink_kv_row_bytes();
     uint32_t target_cap = p36_kv_next_cap(ink->full_kv_cap, need, limit);
     if (!target_cap) return false;
 
@@ -681,7 +689,7 @@ static bool p36_inkling2_vulkan_runtime_reset(p36_vulkan_runtime *rt) {
             }
         }
         if (any_grown) {
-            const uint64_t kv_bytes = (uint64_t)ink->full_kv_init_cap * 1024ull * sizeof(uint16_t);
+            const uint64_t kv_bytes = (uint64_t)ink->full_kv_init_cap * p36_ink_kv_row_bytes();
             p36_gpu_synchronize();
             for (uint32_t il = 0; il < ink->n_logical; il++) {
                 if (ink->is_swa_logical[il] || ink->full_kv_layer_cap[il] <= ink->full_kv_init_cap) continue;
@@ -769,7 +777,7 @@ static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint
     /* Permanent decode scratch (cap=1, ~0.3 MiB); prefill scratch is allocated lazily on n_tok > 1. */
     if (!p36_inkling2_scratch_init(&ink->decode, 1u, false)) goto fail;
 
-    /* Per-logical-layer KV cache (F16) and shortconv state (F32, 3 history slots). */
+    /* Per-logical-layer KV cache (int8 or F16, see p36_ink_kv_row_bytes) and shortconv state (F32, 3 history slots). */
     for (uint32_t il = 0; il < ink->n_logical; il++) {
         uint32_t ip;
         if (il < 6u) ip = il;
@@ -779,7 +787,7 @@ static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint
         ink->is_swa_logical[il] = is_swa;
         uint32_t cap = is_swa ? ink->swa_kv_cap : ink->full_kv_cap;
         if (!is_swa) ink->full_kv_layer_cap[il] = cap;
-        uint64_t kv_bytes = (uint64_t)cap * KV * sizeof(uint16_t);
+        uint64_t kv_bytes = (uint64_t)cap * p36_ink_kv_row_bytes();
         ink->kv_k[il] = p36_gpu_tensor_alloc_uninitialized(kv_bytes);
         ink->kv_v[il] = p36_gpu_tensor_alloc_uninitialized(kv_bytes);
         ink->conv_k[il] = p36_gpu_tensor_alloc(3u * KV * sizeof(float));
@@ -1195,7 +1203,7 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
             uint32_t start = pos0 & (ink->swa_kv_cap - 1u);
             uint32_t first = ink->swa_kv_cap - start;
             if (first > n_tok) first = n_tok;
-            uint64_t kv_row_bytes = (uint64_t)KV * sizeof(uint16_t);
+            uint64_t kv_row_bytes = p36_ink_kv_row_bytes();
             INK_CHK(p36_gpu_tensor_copy(ink->kv_k[il], (uint64_t)start * kv_row_bytes,
                                         sc->swa_tmp_k, 0, (uint64_t)first * kv_row_bytes), "swa_commit_k1");
             INK_CHK(p36_gpu_tensor_copy(ink->kv_v[il], (uint64_t)start * kv_row_bytes,

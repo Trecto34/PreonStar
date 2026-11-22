@@ -259,14 +259,17 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_control_gate_decode.spv \
 	vulkan/inkling2_conv.spv \
 	vulkan/inkling2_conv_kv_store.spv \
+	vulkan/inkling2_conv_kv_store_q8.spv \
 	vulkan/inkling2_clip_norm.spv \
 	vulkan/inkling2_rms_norm_q8k.spv \
 	vulkan/inkling2_router_topk.spv \
 	vulkan/inkling2_moe_reduce.spv \
 	vulkan/inkling2_softcap.spv \
 	vulkan/inkling2_attn_decode.spv \
+	vulkan/inkling2_attn_decode_q8.spv \
 	vulkan/inkling2_attn_combine.spv \
 	vulkan/inkling2_attn_prefill.spv \
+	vulkan/inkling2_attn_prefill_q8.spv \
 	vulkan/inkling2_moe_down_decode_iq4nl.spv \
 	vulkan/inkling2_moe_down_decode_q5_0.spv \
 	vulkan/inkling2_moe_down_decode_nvfp4.spv \
@@ -335,6 +338,10 @@ vulkan/inkling2_conv.spv: vulkan/inkling2_conv.comp
 vulkan/inkling2_conv_kv_store.spv: vulkan/inkling2_conv_kv_store.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
+# Int8 KV cache (32-value f16 scales); P36_INK_KV_F16=1 selects the F16 variant.
+vulkan/inkling2_conv_kv_store_q8.spv: vulkan/inkling2_conv_kv_store.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DKV_Q8 -o $@ $<
+
 vulkan/inkling2_clip_norm.spv: vulkan/inkling2_clip_norm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
@@ -353,11 +360,19 @@ vulkan/inkling2_softcap.spv: vulkan/inkling2_softcap.comp
 vulkan/inkling2_attn_decode.spv: vulkan/inkling2_attn_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
+# Int8 KV cache (32-value f16 scales); P36_INK_KV_F16=1 selects the F16 variant.
+vulkan/inkling2_attn_decode_q8.spv: vulkan/inkling2_attn_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DKV_Q8 -o $@ $<
+
 vulkan/inkling2_attn_combine.spv: vulkan/inkling2_attn_combine.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_attn_prefill.spv: vulkan/inkling2_attn_prefill.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+# Int8 KV cache (32-value f16 scales); P36_INK_KV_F16=1 selects the F16 variant.
+vulkan/inkling2_attn_prefill_q8.spv: vulkan/inkling2_attn_prefill.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DKV_Q8 -o $@ $<
 
 vulkan/inkling2_moe_down_decode_iq4nl.spv: vulkan/inkling2_moe_down_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ4NL -o $@ $<

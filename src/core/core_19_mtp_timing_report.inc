@@ -807,7 +807,7 @@ uint64_t p36_session_payload_bytes(p36_session *s) {
         for (uint32_t il = 0; il < 48u; il++) {
             bool is_swa = ((il % 6u) != 5u);
             uint32_t kv_rows = is_swa ? swa_rows : rows;
-            bytes += sizeof(uint32_t) + 2ull * (uint64_t)kv_rows * 1024ull * sizeof(uint16_t) + conv_layer_bytes;
+            bytes += sizeof(uint32_t) + 2ull * (uint64_t)kv_rows * p36_ink_kv_row_bytes() + conv_layer_bytes;
         }
         return bytes;
     }
@@ -1023,7 +1023,7 @@ int p36_session_save_payload(p36_session *s, FILE *fp, char *err, size_t errlen)
                 p36_payload_set_err(err, errlen, "Vulkan Inkling2 KV cache is shorter than checkpoint");
                 return 1;
             }
-            uint64_t kv_bytes = (uint64_t)kv_rows * 1024ull * sizeof(uint16_t);
+            uint64_t kv_bytes = (uint64_t)kv_rows * p36_ink_kv_row_bytes();
             if (p36_payload_write_u32(fp, kv_rows, err, errlen) != 0 ||
                 p36_payload_write_tensor(fp, ink->kv_k[il], kv_bytes, err, errlen) != 0 ||
                 p36_payload_write_tensor(fp, ink->kv_v[il], kv_bytes, err, errlen) != 0 ||
@@ -1214,7 +1214,7 @@ static int p36_session_load_payload_impl(p36_session *s, FILE *fp, uint64_t payl
                     p36_payload_set_err(err, errlen, "KV checkpoint Inkling2 KV length mismatch");
                     return 1;
                 }
-                uint64_t kv_bytes = (uint64_t)kv_rows * 1024ull * sizeof(uint16_t);
+                uint64_t kv_bytes = (uint64_t)kv_rows * p36_ink_kv_row_bytes();
                 if (p36_payload_read_tensor(ink->kv_k[il], fp, kv_bytes, &remaining, err, errlen) != 0 ||
                     p36_payload_read_tensor(ink->kv_v[il], fp, kv_bytes, &remaining, err, errlen) != 0 ||
                     p36_payload_read_tensor(ink->conv_k[il], fp, conv_kv_bytes, &remaining, err, errlen) != 0 ||
