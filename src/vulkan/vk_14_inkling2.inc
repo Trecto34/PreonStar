@@ -827,12 +827,12 @@ int p36_gpu_inkling2_moe_ffn_tensor(
     uint32_t tile_count = 0;
     if (n_tok > 1u) {
         uint32_t n_slot = n_tok * n_used;
-        tile_count = p36_vk_moe_tile_bound(n_slot, n_expert, 32u);
-        tiles = p36_vk_moe_tiles_gpu(selected, n_slot, n_expert, NULL, 32u);
+        tile_count = p36_vk_moe_tile_bound(n_slot, n_expert, 64u);
+        tiles = p36_vk_moe_tiles_gpu(selected, n_slot, n_expert, NULL, 64u);
         if (!tiles) {
             const uint32_t *sel_host = p36_vk_tensor_contents_labeled((p36_gpu_tensor *)selected, "ink_moe_sel");
             if (!sel_host) return 0;
-            tiles = p36_vk_moe_build_tiles_ex(sel_host, n_slot, n_expert, NULL, 32u, false, &tile_count);
+            tiles = p36_vk_moe_build_tiles_ex(sel_host, n_slot, n_expert, NULL, 64u, false, &tile_count);
             if (!tiles || tile_count == 0) {
                 p36_gpu_tensor_free(tiles);
                 return 0;
@@ -936,7 +936,7 @@ int p36_gpu_inkling2_moe_ffn_tensor(
             };
             const p36_gpu_tensor *dn_b[5] = { dn_t, mid_scratch, tiles, down_scratch, dn_sc_t };
             ok = p36_vk_run_unlocked("inkling2_moe_dn_gemm", dn_k, dn_b, &dn_pc, sizeof(dn_pc),
-                                     (out_dim + 127u) / 128u, tile_count, 1);
+                                     (out_dim + 63u) / 64u, tile_count, 1);
         }
         if (ok) {
             struct { uint32_t n, n_used; } red_pc = { out_dim, n_used };

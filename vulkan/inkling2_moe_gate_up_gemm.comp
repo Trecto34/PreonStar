@@ -45,7 +45,7 @@ const uint TAB_IQ3S_GRID = 2592u;
 const uint TAB_IQ3XXS_GRID = 3104u;
 const uint TAB_IQ2XS = 7456u;
 
-const uint SLOT_TILE = 32u;
+const uint SLOT_TILE = 64u;
 const uint TILE_WORDS = 1u + SLOT_TILE;
 const uint INVALID = 0xffffffffu;
 const uint BM = 64u;
@@ -142,16 +142,17 @@ void main(void) {
     uint ubase_bytes = u_row * pc.blocks * IQ3S_BYTES;
 #endif
 
-    uint bc = tid >> 3u;
+    uint bc0 = tid >> 3u;
+    uint bc1 = bc0 + 32u;
     uint bkk = tid & 7u;
     uint sl = tid & 15u;
     uint ry = tid >> 4u;
 
-    float accg[4][2];
-    float accu[4][2];
+    float accg[4][4];
+    float accu[4][4];
     [[unroll]] for (uint i = 0u; i < 4u; i++) {
-        accg[i][0] = 0.0; accg[i][1] = 0.0;
-        accu[i][0] = 0.0; accu[i][1] = 0.0;
+        accg[i][0] = 0.0; accg[i][1] = 0.0; accg[i][2] = 0.0; accg[i][3] = 0.0;
+        accu[i][0] = 0.0; accu[i][1] = 0.0; accu[i][2] = 0.0; accu[i][3] = 0.0;
     }
 
     uint sa = P36_SWZ(ar);
@@ -161,11 +162,14 @@ void main(void) {
     uint sub_word = sub >> 1u;
     uint sub_shift = 8u * (sub & 1u);
 
-    bool hi_live = false;
-    for (uint j = 16u; j < SLOT_TILE; j++) hi_live = hi_live || sh_slot[j] != INVALID;
-    bool live_b = (bc < SLOT_TILE) && (sh_slot[bc] != INVALID);
-    uint b_k = (bc < SLOT_TILE) ? (bkk ^ P36_SWZ(bc)) : 0u;
-    uint b_base = (bc < SLOT_TILE && live_b) ? (sh_x4[bc] + bkk) : 0u;
+    bool live1 = (sh_slot[16u] != INVALID);
+    bool live2 = (sh_slot[32u] != INVALID);
+    bool live3 = (sh_slot[48u] != INVALID);
+    bool live_b0 = (sh_slot[bc0] != INVALID);
+    bool live_b1 = (sh_slot[bc1] != INVALID);
+    uint b_k = bkk ^ P36_SWZ(bc0);
+    uint b_base0 = live_b0 ? (sh_x4[bc0] + bkk) : 0u;
+    uint b_base1 = live_b1 ? (sh_x4[bc1] + bkk) : 0u;
 
     uint swz_sl = P36_SWZ(sl);
     uint swz_ry = P36_SWZ(ry);
@@ -327,19 +331,81 @@ void main(void) {
         }
 #endif
 
-        if (bc < SLOT_TILE) {
-            Bs[bc][b_k] = live_b ? f16vec4(xv[b_base + kb * 8u]) : f16vec4(0.0hf);
+        Bs[bc0][b_k] = live_b0 ? f16vec4(xv[b_base0 + kb * 8u]) : f16vec4(0.0hf);
+        if (live2) {
+            Bs[bc1][b_k] = live_b1 ? f16vec4(xv[b_base1 + kb * 8u]) : f16vec4(0.0hf);
         }
         barrier();
 
-        f16vec2 pkg[4][2];
-        f16vec2 pku[4][2];
+        f16vec2 pkg[4][4];
+        f16vec2 pku[4][4];
         [[unroll]] for (uint i = 0u; i < 4u; i++) {
             pkg[i][0] = f16vec2(0.0hf); pkg[i][1] = f16vec2(0.0hf);
+            pkg[i][2] = f16vec2(0.0hf); pkg[i][3] = f16vec2(0.0hf);
             pku[i][0] = f16vec2(0.0hf); pku[i][1] = f16vec2(0.0hf);
+            pku[i][2] = f16vec2(0.0hf); pku[i][3] = f16vec2(0.0hf);
         }
 
-        if (hi_live) {
+        if (live3) {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk = kk ^ swz_ry ^ swz_sl;
+                f16vec4 bv0 = Bs[sl][bk];
+                f16vec4 bv1 = Bs[sl + 16u][bk];
+                f16vec4 bv2 = Bs[sl + 32u][bk];
+                f16vec4 bv3 = Bs[sl + 48u][bk];
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    f16vec4 ag = Ag[arow[i]][kk];
+                    f16vec4 au = Au[arow[i]][kk];
+                    pkg[i][0] = fma(ag.zw, bv0.zw, fma(ag.xy, bv0.xy, pkg[i][0]));
+                    pku[i][0] = fma(au.zw, bv0.zw, fma(au.xy, bv0.xy, pku[i][0]));
+                    pkg[i][1] = fma(ag.zw, bv1.zw, fma(ag.xy, bv1.xy, pkg[i][1]));
+                    pku[i][1] = fma(au.zw, bv1.zw, fma(au.xy, bv1.xy, pku[i][1]));
+                    pkg[i][2] = fma(ag.zw, bv2.zw, fma(ag.xy, bv2.xy, pkg[i][2]));
+                    pku[i][2] = fma(au.zw, bv2.zw, fma(au.xy, bv2.xy, pku[i][2]));
+                    pkg[i][3] = fma(ag.zw, bv3.zw, fma(ag.xy, bv3.xy, pkg[i][3]));
+                    pku[i][3] = fma(au.zw, bv3.zw, fma(au.xy, bv3.xy, pku[i][3]));
+                }
+            }
+            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                float dg = Dg[arow[i]];
+                float du = Du[arow[i]];
+                accg[i][0] = fma(dg, float(pkg[i][0].x) + float(pkg[i][0].y), accg[i][0]);
+                accu[i][0] = fma(du, float(pku[i][0].x) + float(pku[i][0].y), accu[i][0]);
+                accg[i][1] = fma(dg, float(pkg[i][1].x) + float(pkg[i][1].y), accg[i][1]);
+                accu[i][1] = fma(du, float(pku[i][1].x) + float(pku[i][1].y), accu[i][1]);
+                accg[i][2] = fma(dg, float(pkg[i][2].x) + float(pkg[i][2].y), accg[i][2]);
+                accu[i][2] = fma(du, float(pku[i][2].x) + float(pku[i][2].y), accu[i][2]);
+                accg[i][3] = fma(dg, float(pkg[i][3].x) + float(pkg[i][3].y), accg[i][3]);
+                accu[i][3] = fma(du, float(pku[i][3].x) + float(pku[i][3].y), accu[i][3]);
+            }
+        } else if (live2) {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk = kk ^ swz_ry ^ swz_sl;
+                f16vec4 bv0 = Bs[sl][bk];
+                f16vec4 bv1 = Bs[sl + 16u][bk];
+                f16vec4 bv2 = Bs[sl + 32u][bk];
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    f16vec4 ag = Ag[arow[i]][kk];
+                    f16vec4 au = Au[arow[i]][kk];
+                    pkg[i][0] = fma(ag.zw, bv0.zw, fma(ag.xy, bv0.xy, pkg[i][0]));
+                    pku[i][0] = fma(au.zw, bv0.zw, fma(au.xy, bv0.xy, pku[i][0]));
+                    pkg[i][1] = fma(ag.zw, bv1.zw, fma(ag.xy, bv1.xy, pkg[i][1]));
+                    pku[i][1] = fma(au.zw, bv1.zw, fma(au.xy, bv1.xy, pku[i][1]));
+                    pkg[i][2] = fma(ag.zw, bv2.zw, fma(ag.xy, bv2.xy, pkg[i][2]));
+                    pku[i][2] = fma(au.zw, bv2.zw, fma(au.xy, bv2.xy, pku[i][2]));
+                }
+            }
+            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                float dg = Dg[arow[i]];
+                float du = Du[arow[i]];
+                accg[i][0] = fma(dg, float(pkg[i][0].x) + float(pkg[i][0].y), accg[i][0]);
+                accu[i][0] = fma(du, float(pku[i][0].x) + float(pku[i][0].y), accu[i][0]);
+                accg[i][1] = fma(dg, float(pkg[i][1].x) + float(pkg[i][1].y), accg[i][1]);
+                accu[i][1] = fma(du, float(pku[i][1].x) + float(pku[i][1].y), accu[i][1]);
+                accg[i][2] = fma(dg, float(pkg[i][2].x) + float(pkg[i][2].y), accg[i][2]);
+                accu[i][2] = fma(du, float(pku[i][2].x) + float(pku[i][2].y), accu[i][2]);
+            }
+        } else if (live1) {
             [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
                 uint bk = kk ^ swz_ry ^ swz_sl;
                 f16vec4 bv0 = Bs[sl][bk];
@@ -347,19 +413,19 @@ void main(void) {
                 [[unroll]] for (uint i = 0u; i < 4u; i++) {
                     f16vec4 ag = Ag[arow[i]][kk];
                     f16vec4 au = Au[arow[i]][kk];
-                    pkg[i][0] = fma(ag.xy, bv0.xy, pkg[i][0]); pkg[i][0] = fma(ag.zw, bv0.zw, pkg[i][0]);
-                    pku[i][0] = fma(au.xy, bv0.xy, pku[i][0]); pku[i][0] = fma(au.zw, bv0.zw, pku[i][0]);
-                    pkg[i][1] = fma(ag.xy, bv1.xy, pkg[i][1]); pkg[i][1] = fma(ag.zw, bv1.zw, pkg[i][1]);
-                    pku[i][1] = fma(au.xy, bv1.xy, pku[i][1]); pku[i][1] = fma(au.zw, bv1.zw, pku[i][1]);
+                    pkg[i][0] = fma(ag.zw, bv0.zw, fma(ag.xy, bv0.xy, pkg[i][0]));
+                    pku[i][0] = fma(au.zw, bv0.zw, fma(au.xy, bv0.xy, pku[i][0]));
+                    pkg[i][1] = fma(ag.zw, bv1.zw, fma(ag.xy, bv1.xy, pkg[i][1]));
+                    pku[i][1] = fma(au.zw, bv1.zw, fma(au.xy, bv1.xy, pku[i][1]));
                 }
             }
             [[unroll]] for (uint i = 0u; i < 4u; i++) {
                 float dg = Dg[arow[i]];
                 float du = Du[arow[i]];
-                accg[i][0] += dg * (float(pkg[i][0].x) + float(pkg[i][0].y));
-                accu[i][0] += du * (float(pku[i][0].x) + float(pku[i][0].y));
-                accg[i][1] += dg * (float(pkg[i][1].x) + float(pkg[i][1].y));
-                accu[i][1] += du * (float(pku[i][1].x) + float(pku[i][1].y));
+                accg[i][0] = fma(dg, float(pkg[i][0].x) + float(pkg[i][0].y), accg[i][0]);
+                accu[i][0] = fma(du, float(pku[i][0].x) + float(pku[i][0].y), accu[i][0]);
+                accg[i][1] = fma(dg, float(pkg[i][1].x) + float(pkg[i][1].y), accg[i][1]);
+                accu[i][1] = fma(du, float(pku[i][1].x) + float(pku[i][1].y), accu[i][1]);
             }
         } else {
             [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
@@ -368,15 +434,15 @@ void main(void) {
                 [[unroll]] for (uint i = 0u; i < 4u; i++) {
                     f16vec4 ag = Ag[arow[i]][kk];
                     f16vec4 au = Au[arow[i]][kk];
-                    pkg[i][0] = fma(ag.xy, bv0.xy, pkg[i][0]); pkg[i][0] = fma(ag.zw, bv0.zw, pkg[i][0]);
-                    pku[i][0] = fma(au.xy, bv0.xy, pku[i][0]); pku[i][0] = fma(au.zw, bv0.zw, pku[i][0]);
+                    pkg[i][0] = fma(ag.zw, bv0.zw, fma(ag.xy, bv0.xy, pkg[i][0]));
+                    pku[i][0] = fma(au.zw, bv0.zw, fma(au.xy, bv0.xy, pku[i][0]));
                 }
             }
             [[unroll]] for (uint i = 0u; i < 4u; i++) {
                 float dg = Dg[arow[i]];
                 float du = Du[arow[i]];
-                accg[i][0] += dg * (float(pkg[i][0].x) + float(pkg[i][0].y));
-                accu[i][0] += du * (float(pku[i][0].x) + float(pku[i][0].y));
+                accg[i][0] = fma(dg, float(pkg[i][0].x) + float(pkg[i][0].y), accg[i][0]);
+                accu[i][0] = fma(du, float(pku[i][0].x) + float(pku[i][0].y), accu[i][0]);
             }
         }
         barrier();
@@ -384,7 +450,9 @@ void main(void) {
 
     float es = (pc.has_exp_scale != 0u) ? exp_scale[expert] : 1.0;
     uint s0 = sh_slot[sl];
-    uint s1 = hi_live ? sh_slot[sl + 16u] : INVALID;
+    uint s1 = live1 ? sh_slot[sl + 16u] : INVALID;
+    uint s2 = live2 ? sh_slot[sl + 32u] : INVALID;
+    uint s3 = live3 ? sh_slot[sl + 48u] : INVALID;
     [[unroll]] for (uint i = 0u; i < 4u; i++) {
         uint out_row = row0 + arow[i];
         if (out_row >= pc.mid_dim) continue;
@@ -397,6 +465,18 @@ void main(void) {
         if (s1 != INVALID) {
             float g = accg[i][1] * es, u = accu[i][1] * es;
             y[s1 * pc.mid_dim + out_row] =
+                (pc.situ_beta * tanh(g * pc.inv_beta) / (1.0 + exp(-g))) *
+                (pc.situ_lb * tanh(u * pc.inv_lb));
+        }
+        if (s2 != INVALID) {
+            float g = accg[i][2] * es, u = accu[i][2] * es;
+            y[s2 * pc.mid_dim + out_row] =
+                (pc.situ_beta * tanh(g * pc.inv_beta) / (1.0 + exp(-g))) *
+                (pc.situ_lb * tanh(u * pc.inv_lb));
+        }
+        if (s3 != INVALID) {
+            float g = accg[i][3] * es, u = accu[i][3] * es;
+            y[s3 * pc.mid_dim + out_row] =
                 (pc.situ_beta * tanh(g * pc.inv_beta) / (1.0 + exp(-g))) *
                 (pc.situ_lb * tanh(u * pc.inv_lb));
         }
