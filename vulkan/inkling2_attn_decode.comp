@@ -53,6 +53,20 @@ void sum32_3(inout float v0, inout float v1, inout float v2) {
     v0 += subgroupShuffleXor(v0,  1u); v1 += subgroupShuffleXor(v1,  1u); v2 += subgroupShuffleXor(v2,  1u);
 }
 
+void sum32_6(inout float a0, inout float a1, inout float a2,
+             inout float b0, inout float b1, inout float b2) {
+    a0 += subgroupShuffleXor(a0, 16u); a1 += subgroupShuffleXor(a1, 16u); a2 += subgroupShuffleXor(a2, 16u);
+    b0 += subgroupShuffleXor(b0, 16u); b1 += subgroupShuffleXor(b1, 16u); b2 += subgroupShuffleXor(b2, 16u);
+    a0 += subgroupShuffleXor(a0,  8u); a1 += subgroupShuffleXor(a1,  8u); a2 += subgroupShuffleXor(a2,  8u);
+    b0 += subgroupShuffleXor(b0,  8u); b1 += subgroupShuffleXor(b1,  8u); b2 += subgroupShuffleXor(b2,  8u);
+    a0 += subgroupShuffleXor(a0,  4u); a1 += subgroupShuffleXor(a1,  4u); a2 += subgroupShuffleXor(a2,  4u);
+    b0 += subgroupShuffleXor(b0,  4u); b1 += subgroupShuffleXor(b1,  4u); b2 += subgroupShuffleXor(b2,  4u);
+    a0 += subgroupShuffleXor(a0,  2u); a1 += subgroupShuffleXor(a1,  2u); a2 += subgroupShuffleXor(a2,  2u);
+    b0 += subgroupShuffleXor(b0,  2u); b1 += subgroupShuffleXor(b1,  2u); b2 += subgroupShuffleXor(b2,  2u);
+    a0 += subgroupShuffleXor(a0,  1u); a1 += subgroupShuffleXor(a1,  1u); a2 += subgroupShuffleXor(a2,  1u);
+    b0 += subgroupShuffleXor(b0,  1u); b1 += subgroupShuffleXor(b1,  1u); b2 += subgroupShuffleXor(b2,  1u);
+}
+
 void main(void) {
     uint kvh = gl_WorkGroupID.x;
     uint split = gl_WorkGroupID.y;
@@ -89,7 +103,77 @@ void main(void) {
     vec4 o2 = vec4(0.0);
 
     uint mask = pc.kv_cap - 1u;
-    for (uint k = k_begin + hw; k < k_end; k += 8u) {
+    uint k = k_begin + hw;
+    for (; k + 8u < k_end; k += 16u) {
+        uint k1 = k + 8u;
+        uint slot0 = (pc.is_swa != 0u) ? (k & mask) : k;
+        uint slot1 = (pc.is_swa != 0u) ? (k1 & mask) : k1;
+        uint kv_base0 = (slot0 * pc.n_head_kv + kvh) * 32u + lane;
+        uint kv_base1 = (slot1 * pc.n_head_kv + kvh) * 32u + lane;
+        vec4 kv0 = vec4(cache_k[kv_base0]);
+        vec4 kv1 = vec4(cache_k[kv_base1]);
+        vec4 vv0 = vec4(cache_v[kv_base0]);
+        vec4 vv1 = vec4(cache_v[kv_base1]);
+
+        uint dist0 = pc.pos - k;
+        uint dist1 = pc.pos - k1;
+        float rb0 = (dist0 < pc.rel_extent && lane < 16u) ? rel_bias[dist0 * 16u + lane] : 0.0;
+        float rb1 = (dist1 < pc.rel_extent && lane < 16u) ? rel_bias[dist1 * 16u + lane] : 0.0;
+
+        float s0a = fma(r0, rb0, dot(q0, kv0));
+        float s1a = fma(r1, rb0, dot(q1, kv0));
+        float s2a = fma(r2, rb0, dot(q2, kv0));
+        float s0b = fma(r0, rb1, dot(q0, kv1));
+        float s1b = fma(r1, rb1, dot(q1, kv1));
+        float s2b = fma(r2, rb1, dot(q2, kv1));
+        sum32_6(s0a, s1a, s2a, s0b, s1b, s2b);
+
+        float mp0 = max(s0a, s0b);
+        if (mp0 > m0) {
+            float a0 = exp2(m0 - mp0);
+            float pa = exp2(s0a - mp0);
+            float pb = exp2(s0b - mp0);
+            o0 = fma(o0, vec4(a0), fma(vv0, vec4(pa), vv1 * pb));
+            l0 = fma(l0, a0, pa + pb);
+            m0 = mp0;
+        } else {
+            float pa = exp2(s0a - m0);
+            float pb = exp2(s0b - m0);
+            o0 = fma(vv0, vec4(pa), fma(vv1, vec4(pb), o0));
+            l0 += pa + pb;
+        }
+
+        float mp1 = max(s1a, s1b);
+        if (mp1 > m1) {
+            float a1 = exp2(m1 - mp1);
+            float pa = exp2(s1a - mp1);
+            float pb = exp2(s1b - mp1);
+            o1 = fma(o1, vec4(a1), fma(vv0, vec4(pa), vv1 * pb));
+            l1 = fma(l1, a1, pa + pb);
+            m1 = mp1;
+        } else {
+            float pa = exp2(s1a - m1);
+            float pb = exp2(s1b - m1);
+            o1 = fma(vv0, vec4(pa), fma(vv1, vec4(pb), o1));
+            l1 += pa + pb;
+        }
+
+        float mp2 = max(s2a, s2b);
+        if (mp2 > m2) {
+            float a2 = exp2(m2 - mp2);
+            float pa = exp2(s2a - mp2);
+            float pb = exp2(s2b - mp2);
+            o2 = fma(o2, vec4(a2), fma(vv0, vec4(pa), vv1 * pb));
+            l2 = fma(l2, a2, pa + pb);
+            m2 = mp2;
+        } else {
+            float pa = exp2(s2a - m2);
+            float pb = exp2(s2b - m2);
+            o2 = fma(vv0, vec4(pa), fma(vv1, vec4(pb), o2));
+            l2 += pa + pb;
+        }
+    }
+    if (k < k_end) {
         uint slot = (pc.is_swa != 0u) ? (k & mask) : k;
         uint kv_base = (slot * pc.n_head_kv + kvh) * 32u + lane;
         vec4 kv = vec4(cache_k[kv_base]);
