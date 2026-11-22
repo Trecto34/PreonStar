@@ -1001,7 +1001,11 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
             p36_gpu_tensor_free(last);
             INK_CHK(ok, "lm_head");
             if (hp->final_logit_softcapping > 0.0f) {
-                INK_CHK(p36_gpu_inkling2_softcap_tensor(logits_out, rows * hp->n_vocab_unpadded, hp->final_logit_softcapping), "softcap");
+                /* Rows are n_vocab_padded apart; cover every row's real
+                 * vocab (the padded tail in between is capped harmlessly).
+                 * rows == 1 is unchanged: exactly n_vocab_unpadded. */
+                const uint32_t cap_n = (rows - 1u) * hp->n_vocab_padded + hp->n_vocab_unpadded;
+                INK_CHK(p36_gpu_inkling2_softcap_tensor(logits_out, cap_n, hp->final_logit_softcapping), "softcap");
             }
         }
     }

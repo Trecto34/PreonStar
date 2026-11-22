@@ -378,6 +378,13 @@ bool p36_session_in_think(p36_session *s);
 int p36_session_eos_to_think_close(p36_session *s, int token);
 int p36_session_token_rank(p36_session *s, int token, int max_rank);
 int p36_session_top_logprobs(p36_session *s, p36_token_score *out, int k);
+/* Teacher-forced scoring (perplexity): one batched prefill with logits for
+ * every row.  For each p in [first, tokens->len), writes NLL of tokens[p]
+ * given tokens[0..p) (+ optional argmax id / argmax probability) at index
+ * p - first.  Vulkan only; invalidates the session before and after. */
+int p36_session_score_tokens(p36_session *s, const p36_tokens *tokens, int first,
+                             float *nll_out, int *argmax_out, float *pmax_out,
+                             char *err, size_t errlen);
 int p36_session_eval(p36_session *s, int token, char *err, size_t errlen);
 int p36_sessions_eval_batch(p36_decode_item *items, int count,
                             char *err, size_t errlen);
