@@ -80,9 +80,9 @@ void main(void) {
     uint q_pos = pc.pos0 + t;
     float q_scale = pc.scale * LOG2E;
 
-    vec4 q0 = active_t ? q_buf[(t * pc.n_head + h0 + 0u) * 32u + lane] * q_scale : vec4(0.0);
-    vec4 q1 = active_t ? q_buf[(t * pc.n_head + h0 + 1u) * 32u + lane] * q_scale : vec4(0.0);
-    vec4 q2 = active_t ? q_buf[(t * pc.n_head + h0 + 2u) * 32u + lane] * q_scale : vec4(0.0);
+    f16vec4 q0 = active_t ? f16vec4(q_buf[(t * pc.n_head + h0 + 0u) * 32u + lane] * q_scale) : f16vec4(0.0hf);
+    f16vec4 q1 = active_t ? f16vec4(q_buf[(t * pc.n_head + h0 + 1u) * 32u + lane] * q_scale) : f16vec4(0.0hf);
+    f16vec4 q2 = active_t ? f16vec4(q_buf[(t * pc.n_head + h0 + 2u) * 32u + lane] * q_scale) : f16vec4(0.0hf);
 
     float r0 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 0u) * 16u + lane] * LOG2E : 0.0;
     float r1 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 1u) * 16u + lane] * LOG2E : 0.0;
@@ -139,17 +139,24 @@ void main(void) {
                 float rb0 = lane_lt16 ? sh_rb[rb_base - j][lane] : 0.0;
                 float rb1 = lane_lt16 ? sh_rb[rb_base - (j + 1u)][lane] : 0.0;
 
-                vec4 kv0 = vec4(sh_k[j][lane]);
-                vec4 kv1 = vec4(sh_k[j + 1u][lane]);
+                f16vec4 kv0 = sh_k[j][lane];
+                f16vec4 kv1 = sh_k[j + 1u][lane];
                 vec4 vv0 = vec4(sh_v[j][lane]);
                 vec4 vv1 = vec4(sh_v[j + 1u][lane]);
 
-                float s0a = fma(r0, rb0, dot(q0, kv0));
-                float s1a = fma(r1, rb0, dot(q1, kv0));
-                float s2a = fma(r2, rb0, dot(q2, kv0));
-                float s0b = fma(r0, rb1, dot(q0, kv1));
-                float s1b = fma(r1, rb1, dot(q1, kv1));
-                float s2b = fma(r2, rb1, dot(q2, kv1));
+                f16vec2 d0a = fma(q0.zw, kv0.zw, q0.xy * kv0.xy);
+                f16vec2 d1a = fma(q1.zw, kv0.zw, q1.xy * kv0.xy);
+                f16vec2 d2a = fma(q2.zw, kv0.zw, q2.xy * kv0.xy);
+                f16vec2 d0b = fma(q0.zw, kv1.zw, q0.xy * kv1.xy);
+                f16vec2 d1b = fma(q1.zw, kv1.zw, q1.xy * kv1.xy);
+                f16vec2 d2b = fma(q2.zw, kv1.zw, q2.xy * kv1.xy);
+
+                float s0a = fma(r0, rb0, float(d0a.x) + float(d0a.y));
+                float s1a = fma(r1, rb0, float(d1a.x) + float(d1a.y));
+                float s2a = fma(r2, rb0, float(d2a.x) + float(d2a.y));
+                float s0b = fma(r0, rb1, float(d0b.x) + float(d0b.y));
+                float s1b = fma(r1, rb1, float(d1b.x) + float(d1b.y));
+                float s2b = fma(r2, rb1, float(d2b.x) + float(d2b.y));
                 sum32_6(s0a, s1a, s2a, s0b, s1b, s2b);
 
                 float mp0 = max(s0a, s0b);
@@ -200,11 +207,14 @@ void main(void) {
             if (j < j_stop) {
                 float rb = lane_lt16 ? sh_rb[rb_base - j][lane] : 0.0;
 
-                vec4 kv = vec4(sh_k[j][lane]);
+                f16vec4 kv = sh_k[j][lane];
                 vec4 vv = vec4(sh_v[j][lane]);
-                float s0 = fma(r0, rb, dot(q0, kv));
-                float s1 = fma(r1, rb, dot(q1, kv));
-                float s2 = fma(r2, rb, dot(q2, kv));
+                f16vec2 d0 = fma(q0.zw, kv.zw, q0.xy * kv.xy);
+                f16vec2 d1 = fma(q1.zw, kv.zw, q1.xy * kv.xy);
+                f16vec2 d2 = fma(q2.zw, kv.zw, q2.xy * kv.xy);
+                float s0 = fma(r0, rb, float(d0.x) + float(d0.y));
+                float s1 = fma(r1, rb, float(d1.x) + float(d1.y));
+                float s2 = fma(r2, rb, float(d2.x) + float(d2.y));
                 sum32_3(s0, s1, s2);
 
                 if (s0 > m0) {
