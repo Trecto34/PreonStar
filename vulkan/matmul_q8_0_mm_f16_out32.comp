@@ -44,8 +44,9 @@ void main(void) {
 
     uint r_a = tid >> 3u;
     uint kk_a = tid & 7u;
+    bool live_a = r_a < pc.out_dim;
     uint swz_ra = kk_a ^ P36_SWZ(r_a);
-    uint base_a = (r_a * pc.blocks) * Q8_0_U16;
+    uint base_a = live_a ? (r_a * pc.blocks) * Q8_0_U16 : 0u;
     uint q_off_a = 1u + kk_a * 2u;
 
     uint c_b[2];
@@ -70,12 +71,15 @@ void main(void) {
     }
 
     for (uint kb = 0u; kb < pc.blocks; kb++) {
-        {
+        if (live_a) {
             uint q = base_a + q_off_a;
             uint p = uint(wb16[q]) | (uint(wb16[q + 1u]) << 16u);
             As[r_a][swz_ra] = f16vec4(unpack8(int(p))) * float16_t(0.0078125);
             if (kk_a == 0u) Ds[r_a] = unpackHalf2x16(uint(wb16[base_a])).x * 128.0;
             base_a += Q8_0_U16;
+        } else {
+            As[r_a][swz_ra] = f16vec4(0.0hf);
+            if (kk_a == 0u) Ds[r_a] = 0.0;
         }
         for (uint i = 0u; i < 2u; i++) {
             vec4 v = live_b[i] ? xv[xbase_b[i]] : vec4(0.0);
@@ -99,8 +103,10 @@ void main(void) {
         barrier();
     }
 
-    for (uint i = 0u; i < 8u; i++) {
-        uint col = col0 + col_lane + i * 8u;
-        if (col < pc.n_tok) y[col * pc.out_dim + row] = acc[i] * pc.scale;
+    if (row < pc.out_dim) {
+        for (uint i = 0u; i < 8u; i++) {
+            uint col = col0 + col_lane + i * 8u;
+            if (col < pc.n_tok) y[col * pc.out_dim + row] = acc[i] * pc.scale;
+        }
     }
 }

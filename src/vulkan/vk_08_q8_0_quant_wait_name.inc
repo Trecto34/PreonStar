@@ -122,7 +122,7 @@ static int p36_vk_matmul_q8_0_mm(p36_gpu_tensor *out,
     if (ok) {
         const p36_gpu_tensor *bindings[3] = { weights, x, out };
         const char *op = p36_vk.prof_ops ? p36_vk_q8_0_op_name(out_dim, blocks, n_tok) : "dense_q8_0";
-        int out32 = n_tok >= 32u && out_dim == 32u && p36_vk_use_q8_mm_f16() && p36_vk_use_q8_mm_f16_out32();
+        int out32 = n_tok >= 32u && out_dim <= 32u && p36_vk_use_q8_mm_f16() && p36_vk_use_q8_mm_f16_out32();
         int f16 = n_tok >= 32u && out_dim >= 64u && p36_vk_use_q8_mm_f16();
         p36_vk_kernel *kernel = out32 ? &p36_vk.matmul_q8_0_mm_f16_out32 :
                                 f16 ? &p36_vk.matmul_q8_0_mm_f16 :
