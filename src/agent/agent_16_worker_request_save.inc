@@ -84,7 +84,12 @@ static void worker_run_deferred_save(agent_worker *w) {
 static void worker_run_deferred_compact(agent_worker *w) {
     if (!worker_take_compact_requested(w)) return;
     if (w->cfg->server_url) {
-        agent_remote_compact(w, "user requested compaction");
+        pthread_mutex_lock(&w->mu);
+        bool had_error = w->status.state == AGENT_WORKER_ERROR;
+        pthread_mutex_unlock(&w->mu);
+        if (!agent_remote_compact(w, "user requested compaction"))
+            agent_publishf(w, "\ncompact skipped: nothing to compact\n");
+        agent_end_deferred(w, had_error);
         return;
     }
     if (!agent_worker_has_user_session(w)) {
@@ -321,7 +326,7 @@ static void worker_consume(agent_worker *w, char **out, size_t *out_len, agent_s
         w->out_len = 0;
         w->out_cap = 0;
     }
-    w->status.ctx_used = w->transcript.len;
+    w->status.ctx_used = w->cfg->server_url ? w->remote_used : w->transcript.len;
     w->status.ctx_size = w->cfg->gen.ctx_size;
     w->status.power_percent = worker_status_power_locked(w);
     w->status.think_mode = w->cfg->gen.think_mode;
@@ -334,7 +339,7 @@ static void worker_consume(agent_worker *w, char **out, size_t *out_len, agent_s
 
 static void worker_get_status(agent_worker *w, agent_status *status) {
     pthread_mutex_lock(&w->mu);
-    w->status.ctx_used = w->transcript.len;
+    w->status.ctx_used = w->cfg->server_url ? w->remote_used : w->transcript.len;
     w->status.ctx_size = w->cfg->gen.ctx_size;
     w->status.power_percent = worker_status_power_locked(w);
     w->status.think_mode = w->cfg->gen.think_mode;
@@ -357,7 +362,7 @@ static bool worker_is_idle(agent_worker *w) {
 
 static bool worker_is_initialized(agent_worker *w, agent_status *status) {
     pthread_mutex_lock(&w->mu);
-    w->status.ctx_used = w->transcript.len;
+    w->status.ctx_used = w->cfg->server_url ? w->remote_used : w->transcript.len;
     w->status.ctx_size = w->cfg->gen.ctx_size;
     w->status.power_percent = worker_status_power_locked(w);
     if (status) *status = w->status;

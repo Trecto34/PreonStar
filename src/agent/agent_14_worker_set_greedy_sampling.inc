@@ -254,12 +254,22 @@ static bool agent_remote_cancelled(void *ud) {
 }
 
 /* Compaction without a model call: system prompt + harness state + the last
- * few messages (never splitting an assistant/tool pair). */
-static void agent_remote_compact(agent_worker *w, const char *reason) {
-    if (w->nrmsg < 4 || agent_st_empty(&w->st)) return;
-    int keep = w->nrmsg - 4;
-    if (keep < 1) keep = 1;
-    while (keep > 1 && strstr(w->rmsg[keep], "\"role\":\"tool\"")) keep--;
+ * few messages (never splitting an assistant/tool pair, never touching rmsg[0],
+ * and always strictly shrinking nrmsg so retry loops cannot spin). */
+static bool agent_remote_compact(agent_worker *w, const char *reason) {
+    if (w->nrmsg < 3 || agent_st_empty(&w->st)) return false;
+    int keep = -1;
+    static const int tails[] = {4, 2, 1, 0};
+    for (size_t t = 0; t < sizeof(tails) / sizeof(tails[0]); t++) {
+        int k = w->nrmsg - tails[t];
+        if (k < 3) continue;
+        while (k < w->nrmsg && k > 1 && strstr(w->rmsg[k], "\"role\":\"tool\"")) k--;
+        if (k >= 3) {
+            keep = k;
+            break;
+        }
+    }
+    if (keep < 3) return false;
     char *state = agent_st_render(&w->st);
     agent_buf msg = {0};
     agent_buf_puts(&msg, "[p36-agent compacted earlier conversation. Durable task state follows.]\n");
@@ -269,14 +279,18 @@ static void agent_remote_compact(agent_worker *w, const char *reason) {
     char *state_msg = agent_rmsg_text("user", msg.ptr, NULL);
     free(msg.ptr);
     int old = w->nrmsg;
+    int tail_n = w->nrmsg - keep;
     for (int i = 1; i < keep; i++) free(w->rmsg[i]);
-    w->rmsg[keep - 1] = state_msg;
-    memmove(w->rmsg + 1, w->rmsg + keep - 1, (size_t)(w->nrmsg - keep + 1) * sizeof(w->rmsg[0]));
-    w->nrmsg -= keep - 2;
+    w->rmsg[1] = state_msg;
+    if (tail_n > 0)
+        memmove(w->rmsg + 2, w->rmsg + keep, (size_t)tail_n * sizeof(w->rmsg[0]));
+    w->nrmsg = 2 + tail_n;
+    w->remote_used = 0;
     w->m.compactions++;
     agent_trace(w, "[COMPACTION] reason=\"%s\" messages=%d->%d", reason, old, w->nrmsg);
     agent_publishf(w, "\n\x1b[1;95mCOMPACTING\x1b[0m %s: kept structured task state (%d -> %d messages)\n",
                    reason, old, w->nrmsg);
+    return true;
 }
 
 static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
@@ -328,8 +342,8 @@ static int worker_run_turn_remote(agent_worker *w, const char *user_text) {
                 worker_clear_interrupt(w);
                 agent_publish_system_status(w, "Stopped by user");
                 agent_set_status(w, AGENT_WORKER_IDLE);
-            } else if (strstr(res.err, "context") && w->nrmsg > 4 && !agent_st_empty(&w->st)) {
-                agent_remote_compact(w, "server rejected the context size");
+            } else if (strstr(res.err, "context") &&
+                       agent_remote_compact(w, "server rejected the context size")) {
                 p36_remote_result_free(&res);
                 continue;
             } else {

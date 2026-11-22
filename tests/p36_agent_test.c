@@ -2335,6 +2335,59 @@ static void test_inkling2_agent_protocol(void) {
     AGENT_TEST_ASSERT(hit != NULL && mk == AGENT_HISTORY_MARK_USER && mlen == 32);
 }
 
+static void test_remote_compact(void) {
+    agent_config cfg = {0};
+    cfg.server_url = "http://127.0.0.1:8000";
+    agent_worker w = {0};
+    w.cfg = &cfg;
+    pthread_mutex_init(&w.mu, NULL);
+    w.wake_fd[0] = w.wake_fd[1] = -1;
+    agent_st_note_goal(&w.st, "fix remote compact");
+
+    /* Case 1: nrmsg == 4 (previously hit keep == 1, clobbering rmsg[0] system prompt). */
+    agent_rmsg_push(&w, agent_rmsg_text("system", "SYSTEM_KEEP", NULL));
+    agent_rmsg_push(&w, agent_rmsg_text("user", "u1", NULL));
+    agent_rmsg_push(&w, agent_rmsg_text("assistant", "a1", NULL));
+    agent_rmsg_push(&w, agent_rmsg_text("tool", "t1", NULL));
+    w.remote_used = 50000;
+    AGENT_TEST_ASSERT(agent_remote_compact(&w, "test 4-msg"));
+    AGENT_TEST_ASSERT(w.nrmsg == 2);
+    AGENT_TEST_ASSERT(strstr(w.rmsg[0], "\"role\":\"system\"") && strstr(w.rmsg[0], "SYSTEM_KEEP"));
+    AGENT_TEST_ASSERT(strstr(w.rmsg[1], "[p36-agent compacted earlier conversation."));
+    AGENT_TEST_ASSERT(w.remote_used == 0);
+    /* Second compaction on 2 messages must skip (no infinite loop). */
+    AGENT_TEST_ASSERT(!agent_remote_compact(&w, "test skip"));
+    AGENT_TEST_ASSERT(w.nrmsg == 2);
+
+    /* Case 2: 6 messages with two assistant/tool pairs keeps the last pair intact. */
+    for (int i = 0; i < w.nrmsg; i++) free(w.rmsg[i]);
+    w.nrmsg = 0;
+    agent_rmsg_push(&w, agent_rmsg_text("system", "SYSTEM_KEEP", NULL));
+    agent_rmsg_push(&w, agent_rmsg_text("user", "u1", NULL));
+    agent_rmsg_push(&w, agent_rmsg_text("assistant", "a1", NULL));
+    agent_rmsg_push(&w, agent_rmsg_text("tool", "t1", NULL));
+    agent_rmsg_push(&w, agent_rmsg_text("assistant", "a2", NULL));
+    agent_rmsg_push(&w, agent_rmsg_text("tool", "t2", NULL));
+    w.remote_used = 48000;
+    AGENT_TEST_ASSERT(agent_remote_compact(&w, "test 6-msg"));
+    AGENT_TEST_ASSERT(w.nrmsg == 4);
+    AGENT_TEST_ASSERT(strstr(w.rmsg[0], "SYSTEM_KEEP"));
+    AGENT_TEST_ASSERT(strstr(w.rmsg[1], "[p36-agent compacted earlier conversation."));
+    AGENT_TEST_ASSERT(strstr(w.rmsg[2], "\"role\":\"assistant\"") && strstr(w.rmsg[2], "a2"));
+    AGENT_TEST_ASSERT(strstr(w.rmsg[3], "\"role\":\"tool\"") && strstr(w.rmsg[3], "t2"));
+    AGENT_TEST_ASSERT(w.remote_used == 0);
+    /* Repeated compaction shrinks 4 -> 2, then stops. */
+    AGENT_TEST_ASSERT(agent_remote_compact(&w, "test 4-to-2"));
+    AGENT_TEST_ASSERT(w.nrmsg == 2);
+    AGENT_TEST_ASSERT(strstr(w.rmsg[0], "SYSTEM_KEEP"));
+    AGENT_TEST_ASSERT(!agent_remote_compact(&w, "test 2-skip"));
+
+    for (int i = 0; i < w.nrmsg; i++) free(w.rmsg[i]);
+    free(w.rmsg);
+    free(w.out);
+    pthread_mutex_destroy(&w.mu);
+}
+
 int main(int argc, char **argv) {
     p36_cli_expand_long_equals(&argc, &argv, "p36_agent_test");
     if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
@@ -2417,6 +2470,7 @@ int main(int argc, char **argv) {
     test_footer_only_updates();
     test_bash_noninteractive();
     test_inkling2_agent_protocol();
+    test_remote_compact();
     if (agent_test_failures) {
         fprintf(stderr, "p36-agent tests: %d failure(s)\n",
                 agent_test_failures);
