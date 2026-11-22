@@ -35,56 +35,50 @@ layout(push_constant) uniform Push {
     uint out_stride;
 } pc;
 
-shared vec4 sh_h[16][16];
+#ifndef P36_DECODE
+shared vec4 sh_h[16][4];
+shared vec4 sh_wf[64][4];
+shared vec4 sh_wg[64][4];
+#endif
 
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
     uint r4 = pc.rank >> 2u; /* 16 */
 
-    if (pc.n_tok == 1u) {
-        /* 4 output rows per wave64, 16 lanes per row -> 100% coalesced vec4 loads */
-        uint j = gl_WorkGroupID.y;
-        uint row = gl_WorkGroupID.x * 4u + (tid >> 4u);
-        uint k = tid & 15u;
-        vec4 vh = hv[j * pc.h_stride4 + k];
-        uint widx = row * r4 + k;
-        float f;
-        float g;
-        if (j == 0u) {
-            f = dot(wf0[widx], vh);
-            g = dot(wg0[widx], vh);
-        } else if (j == 1u) {
-            f = dot(wf1[widx], vh);
-            g = dot(wg1[widx], vh);
-        } else {
-            f = dot(wf2[widx], vh);
-            g = dot(wg2[widx], vh);
-        }
-        f += subgroupShuffleXor(f, 8u); g += subgroupShuffleXor(g, 8u);
-        f += subgroupShuffleXor(f, 4u); g += subgroupShuffleXor(g, 4u);
-        f += subgroupShuffleXor(f, 2u); g += subgroupShuffleXor(g, 2u);
-        f += subgroupShuffleXor(f, 1u); g += subgroupShuffleXor(g, 1u);
-        if (k == 0u && row < pc.n_embd) {
-            out_buf[j * pc.out_stride + row] =
-                (1.0 - tanh(f)) * cur[j * pc.cur_stride + row] +
-                tanh(g) * msg[j * pc.msg_stride + row];
-        }
-        return;
+#ifdef P36_DECODE
+    /* 4 output rows per wave64, 16 lanes per row -> 100% coalesced vec4 loads, 0 B LDS! */
+    uint j = gl_WorkGroupID.y;
+    uint row = gl_WorkGroupID.x * 4u + (tid >> 4u);
+    uint k = tid & 15u;
+    vec4 vh = hv[j * pc.h_stride4 + k];
+    uint widx = row * r4 + k;
+    float f;
+    float g;
+    if (j == 0u) {
+        f = dot(wf0[widx], vh);
+        g = dot(wg0[widx], vh);
+    } else if (j == 1u) {
+        f = dot(wf1[widx], vh);
+        g = dot(wg1[widx], vh);
+    } else {
+        f = dot(wf2[widx], vh);
+        g = dot(wg2[widx], vh);
     }
-
-    /* Prefill: 64 cols x up to 16 tokens per WG */
-    uint col = gl_WorkGroupID.x * 64u + tid;
+    f += subgroupShuffleXor(f, 8u); g += subgroupShuffleXor(g, 8u);
+    f += subgroupShuffleXor(f, 4u); g += subgroupShuffleXor(g, 4u);
+    f += subgroupShuffleXor(f, 2u); g += subgroupShuffleXor(g, 2u);
+    f += subgroupShuffleXor(f, 1u); g += subgroupShuffleXor(g, 1u);
+    if (k == 0u && row < pc.n_embd) {
+        out_buf[j * pc.out_stride + row] =
+            (1.0 - tanh(f)) * cur[j * pc.cur_stride + row] +
+            tanh(g) * msg[j * pc.msg_stride + row];
+    }
+#else
+    /* Prefill: 64 cols x up to 16 tokens per WG, coalesced 4-vec4 K-tiles in LDS (9 KiB) */
+    uint col0 = gl_WorkGroupID.x * 64u;
+    uint col = col0 + tid;
     uint t0 = gl_WorkGroupID.y * 16u;
     uint nt = min(16u, pc.n_tok - t0);
-
-    for (uint i = tid; i < nt * 16u; i += 64u) {
-        uint lt = i >> 4u;
-        uint lk = i & 15u;
-        sh_h[lt][lk] = hv[(t0 + lt) * r4 + lk];
-    }
-    barrier();
-
-    if (col >= pc.n_embd) return;
 
     float f_acc[16];
     float g_acc[16];
@@ -93,19 +87,41 @@ void main(void) {
         g_acc[t] = 0.0;
     }
 
-    uint w_base = col * r4;
-    for (uint k = 0u; k < r4; k++) {
-        vec4 fw = wf0[w_base + k];
-        vec4 gw = wg0[w_base + k];
-        for (uint t = 0u; t < nt; t++) {
-            vec4 vh = sh_h[t][k];
-            f_acc[t] = fma(fw.x, vh.x, fma(fw.y, vh.y, fma(fw.z, vh.z, fma(fw.w, vh.w, f_acc[t]))));
-            g_acc[t] = fma(gw.x, vh.x, fma(gw.y, vh.y, fma(gw.z, vh.z, fma(gw.w, vh.w, g_acc[t]))));
+    uint lr = tid >> 2u;       /* 0..15: row offset within 16-row strip */
+    uint lk = tid & 3u;        /* 0..3: coalesced vec4 lane within 4-vec4 K-tile */
+
+    for (uint k0 = 0u; k0 < r4; k0 += 4u) {
+        sh_h[lr][lk] = (lr < nt) ? hv[(t0 + lr) * r4 + k0 + lk] : vec4(0.0);
+        [[unroll]] for (uint s = 0u; s < 4u; s++) {
+            uint r_loc = s * 16u + lr;
+            uint c_glob = col0 + r_loc;
+            if (c_glob < pc.n_embd) {
+                uint wi = c_glob * r4 + k0 + lk;
+                sh_wf[r_loc][lk] = wf0[wi];
+                sh_wg[r_loc][lk] = wg0[wi];
+            }
         }
+        barrier();
+
+        if (col < pc.n_embd) {
+            [[unroll]] for (uint k = 0u; k < 4u; k++) {
+                vec4 fw = sh_wf[tid][k];
+                vec4 gw = sh_wg[tid][k];
+                [[unroll]] for (uint t = 0u; t < 16u; t++) {
+                    vec4 vh = sh_h[t][k];
+                    f_acc[t] = fma(fw.x, vh.x, fma(fw.y, vh.y, fma(fw.z, vh.z, fma(fw.w, vh.w, f_acc[t]))));
+                    g_acc[t] = fma(gw.x, vh.x, fma(gw.y, vh.y, fma(gw.z, vh.z, fma(gw.w, vh.w, g_acc[t]))));
+                }
+            }
+        }
+        barrier();
     }
+
+    if (col >= pc.n_embd) return;
 
     for (uint t = 0u; t < nt; t++) {
         uint idx = (t0 + t) * pc.n_embd + col;
         out_buf[idx] = (1.0 - tanh(f_acc[t])) * cur[idx] + tanh(g_acc[t]) * msg[idx];
     }
+#endif
 }

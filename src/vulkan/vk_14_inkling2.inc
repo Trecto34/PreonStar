@@ -9,6 +9,7 @@ static p36_vk_kernel p36_vk_ink_f32_gemm;
 static p36_vk_kernel p36_vk_ink_ctrl_prep;
 static p36_vk_kernel p36_vk_ink_ctrl_prep_down;
 static p36_vk_kernel p36_vk_ink_ctrl_gate;
+static p36_vk_kernel p36_vk_ink_ctrl_gate_dec;
 static p36_vk_kernel p36_vk_ink_conv;
 static p36_vk_kernel p36_vk_ink_conv_kv_store;
 static p36_vk_kernel p36_vk_ink_clip_norm;
@@ -46,6 +47,7 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     p36_vk_ink_ctrl_prep      = P36_VK_KERNEL("vulkan/inkling2_control_prep.spv", 3, 4, 1u << 2);
     p36_vk_ink_ctrl_prep_down = P36_VK_KERNEL("vulkan/inkling2_control_prep_down.spv", 6, 16, 1u << 3);
     p36_vk_ink_ctrl_gate      = P36_VK_KERNEL("vulkan/inkling2_control_gate.spv", 10, 28, 1u << 5);
+    p36_vk_ink_ctrl_gate_dec  = P36_VK_KERNEL("vulkan/inkling2_control_gate_decode.spv", 10, 28, 1u << 5);
     p36_vk_ink_conv           = P36_VK_KERNEL("vulkan/inkling2_conv.spv", 6, 28, (1u << 2) | (1u << 5));
     p36_vk_ink_conv_kv_store  = P36_VK_KERNEL("vulkan/inkling2_conv_kv_store.spv", 10, 32, (1u << 4) | (1u << 5) | (1u << 8) | (1u << 9));
     p36_vk_ink_clip_norm      = P36_VK_KERNEL("vulkan/inkling2_clip_norm.spv", 4, 28, (1u << 0) | (1u << 1));
@@ -83,6 +85,7 @@ static void p36_vk_inkling2_cleanup_unlocked(void) {
     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_prep);
     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_prep_down);
     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_gate);
+    p36_vk_kernel_destroy(&p36_vk_ink_ctrl_gate_dec);
     p36_vk_kernel_destroy(&p36_vk_ink_conv);
     p36_vk_kernel_destroy(&p36_vk_ink_conv_kv_store);
     p36_vk_kernel_destroy(&p36_vk_ink_clip_norm);
@@ -467,8 +470,9 @@ int p36_gpu_inkling2_control_gate_tensor(
     };
     uint32_t gx = (n_tok == 1u) ? ((n_embd + 3u) / 4u) : ((n_embd + 63u) / 64u);
     uint32_t gy = (n_tok == 1u) ? 1u : ((n_tok + 15u) / 16u);
-    ok = p36_vk_run_unlocked("inkling2_ctrl_gate", &p36_vk_ink_ctrl_gate, bindings, &pc, sizeof(pc),
-                             gx, gy, 1);
+    ok = p36_vk_run_unlocked("inkling2_ctrl_gate",
+                             (n_tok == 1u) ? &p36_vk_ink_ctrl_gate_dec : &p36_vk_ink_ctrl_gate,
+                             bindings, &pc, sizeof(pc), gx, gy, 1);
     pthread_mutex_unlock(&p36_vk_mu);
     return ok;
 }
@@ -528,7 +532,7 @@ int p36_gpu_inkling2_control_gate3_tensor(
     struct { uint32_t n_embd, rank, n_tok, cur_stride, msg_stride, h_stride4, out_stride; } pc = {
         n_embd, rank, 1u, cur_stride, msg_stride, h_stride >> 2u, out_stride
     };
-    ok = p36_vk_run_unlocked("inkling2_ctrl_gate", &p36_vk_ink_ctrl_gate, bindings, &pc, sizeof(pc),
+    ok = p36_vk_run_unlocked("inkling2_ctrl_gate", &p36_vk_ink_ctrl_gate_dec, bindings, &pc, sizeof(pc),
                              (n_embd + 3u) / 4u, 3, 1);
     pthread_mutex_unlock(&p36_vk_mu);
     return ok;
