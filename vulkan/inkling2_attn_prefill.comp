@@ -4,16 +4,15 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_clustered : require
 #extension GL_EXT_control_flow_attributes : require
 
-/* Inkling-2-Mini GQA-3 FlashAttention prefill (head_dim == 128, F16 KV, BK == 32).
- * 1 workgroup owns 1 KV head (ALL 3 GQA query heads!) x 8 query tokens (8 half-waves of 32 lanes).
- * Optimizations:
- *  - Stages rel_bias[d_base..d_base+39][16] into LDS (2.5 KiB) -> ZERO global loads in inner loop!
- *  - Fused Q.K + R.rel_bias inside ONE sum32 (-15 ds_bpermute shuffles per key!)
- *  - Pre-scaled LOG2E for native hardware exp2() (v_exp_f32, -9 FMULs per key!)
- *  - Branchless j_start..j_stop causal/SWA inner loop.
+/* Inkling-2-Mini GQA-3 FlashAttention prefill (head_dim == 128, BK == 32), key-per-lane.
+ * 1 workgroup owns 1 KV head (all 3 GQA query heads) x 8 query tokens (8 half-waves of 32 lanes).
+ * For each 32-key tile, lane j of a half-wave scores key j for its query token against all
+ * 128 dims (Q broadcast from LDS), so the softmax needs one 32-lane max/sum per TILE instead of
+ * a 32-lane dot reduction plus redundant exp2 per KEY. P.V then uses 4 output dims per lane
+ * with P broadcast from LDS.
  * Dispatch: (n_head_kv = 8, ceil(n_tok / 8), 1). */
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -58,31 +57,22 @@ layout(push_constant) uniform Push {
 
 const uint BK = 32u;
 const uint RB_ROWS = 40u;
+const uint K_STRIDE = 65u;   /* f16x2 words per K row; +1 pad -> lane j reads bank (j + c) % 32 */
+const uint RB_STRIDE = 17u;  /* +1 pad for the per-lane rel_bias row reads */
 const float LOG2E = 1.4426950408889634;
-shared f16vec4 sh_k[BK][32];
+const float NEG = -1.0e30;
+
+shared uint sh_k[BK * K_STRIDE];
 shared f16vec4 sh_v[BK][32];
-shared float sh_rb[RB_ROWS][16];
+shared float sh_rb[RB_ROWS * RB_STRIDE];
+shared uvec4 sh_q[8][3][16];      /* per query token: 3 heads x 128 dims as f16, pre-scaled */
+shared float sh_r[8][3][16];      /* per query token: 3 heads x 16 rel coefs, pre-scaled */
+shared vec4 sh_p[8][BK];          /* per query token: P of 3 heads for each tile key */
 
-void sum32_3(inout float v0, inout float v1, inout float v2) {
-    v0 += subgroupShuffleXor(v0, 16u); v1 += subgroupShuffleXor(v1, 16u); v2 += subgroupShuffleXor(v2, 16u);
-    v0 += subgroupShuffleXor(v0,  8u); v1 += subgroupShuffleXor(v1,  8u); v2 += subgroupShuffleXor(v2,  8u);
-    v0 += subgroupShuffleXor(v0,  4u); v1 += subgroupShuffleXor(v1,  4u); v2 += subgroupShuffleXor(v2,  4u);
-    v0 += subgroupShuffleXor(v0,  2u); v1 += subgroupShuffleXor(v1,  2u); v2 += subgroupShuffleXor(v2,  2u);
-    v0 += subgroupShuffleXor(v0,  1u); v1 += subgroupShuffleXor(v1,  1u); v2 += subgroupShuffleXor(v2,  1u);
-}
-
-void sum32_6(inout float a0, inout float a1, inout float a2,
-             inout float b0, inout float b1, inout float b2) {
-    a0 += subgroupShuffleXor(a0, 16u); a1 += subgroupShuffleXor(a1, 16u); a2 += subgroupShuffleXor(a2, 16u);
-    b0 += subgroupShuffleXor(b0, 16u); b1 += subgroupShuffleXor(b1, 16u); b2 += subgroupShuffleXor(b2, 16u);
-    a0 += subgroupShuffleXor(a0,  8u); a1 += subgroupShuffleXor(a1,  8u); a2 += subgroupShuffleXor(a2,  8u);
-    b0 += subgroupShuffleXor(b0,  8u); b1 += subgroupShuffleXor(b1,  8u); b2 += subgroupShuffleXor(b2,  8u);
-    a0 += subgroupShuffleXor(a0,  4u); a1 += subgroupShuffleXor(a1,  4u); a2 += subgroupShuffleXor(a2,  4u);
-    b0 += subgroupShuffleXor(b0,  4u); b1 += subgroupShuffleXor(b1,  4u); b2 += subgroupShuffleXor(b2,  4u);
-    a0 += subgroupShuffleXor(a0,  2u); a1 += subgroupShuffleXor(a1,  2u); a2 += subgroupShuffleXor(a2,  2u);
-    b0 += subgroupShuffleXor(b0,  2u); b1 += subgroupShuffleXor(b1,  2u); b2 += subgroupShuffleXor(b2,  2u);
-    a0 += subgroupShuffleXor(a0,  1u); a1 += subgroupShuffleXor(a1,  1u); a2 += subgroupShuffleXor(a2,  1u);
-    b0 += subgroupShuffleXor(b0,  1u); b1 += subgroupShuffleXor(b1,  1u); b2 += subgroupShuffleXor(b2,  1u);
+float dot8(uvec4 q, uint k0, uint k1, uint k2, uint k3) {
+    f16vec2 a = fma(unpackFloat2x16(q.y), unpackFloat2x16(k1), unpackFloat2x16(q.x) * unpackFloat2x16(k0));
+    f16vec2 b = fma(unpackFloat2x16(q.w), unpackFloat2x16(k3), unpackFloat2x16(q.z) * unpackFloat2x16(k2));
+    return (float(a.x) + float(a.y)) + (float(b.x) + float(b.y));
 }
 
 void main(void) {
@@ -90,7 +80,7 @@ void main(void) {
     uint t0 = gl_WorkGroupID.y * 8u;
     uint tid = gl_LocalInvocationID.x;
     uint hw = tid >> 5u;       /* 0..7: query token within tile */
-    uint lane = tid & 31u;     /* 0..31: 4 dims per lane */
+    uint lane = tid & 31u;     /* key within tile (scores) / 4 output dims (P.V) */
     uint t = t0 + hw;
     bool active_t = (t < pc.n_tok);
 
@@ -98,17 +88,21 @@ void main(void) {
     uint q_pos = pc.pos0 + t;
     float q_scale = pc.scale * LOG2E;
 
-    f16vec4 q0 = active_t ? f16vec4(q_buf[(t * pc.n_head + h0 + 0u) * 32u + lane] * q_scale) : f16vec4(0.0hf);
-    f16vec4 q1 = active_t ? f16vec4(q_buf[(t * pc.n_head + h0 + 1u) * 32u + lane] * q_scale) : f16vec4(0.0hf);
-    f16vec4 q2 = active_t ? f16vec4(q_buf[(t * pc.n_head + h0 + 2u) * 32u + lane] * q_scale) : f16vec4(0.0hf);
+    /* Stage Q (f16, pre-scaled) and R for this half-wave's token. */
+    [[unroll]] for (uint hh = 0u; hh < 3u; hh++) {
+        vec4 qv = active_t ? q_buf[(t * pc.n_head + h0 + hh) * 32u + lane] * q_scale : vec4(0.0);
+        uint w0 = packFloat2x16(f16vec2(qv.xy));
+        uint w1 = packFloat2x16(f16vec2(qv.zw));
+        /* lane L holds dims 4L..4L+3 = words 2L, 2L+1 = uvec4 L/2, half (L&1) */
+        if ((lane & 1u) == 0u) { sh_q[hw][hh][lane >> 1u].x = w0; sh_q[hw][hh][lane >> 1u].y = w1; }
+        else                   { sh_q[hw][hh][lane >> 1u].z = w0; sh_q[hw][hh][lane >> 1u].w = w1; }
+        if (lane < 16u)
+            sh_r[hw][hh][lane] = active_t ? r_buf[(t * pc.n_head + h0 + hh) * 16u + lane] * LOG2E : 0.0;
+    }
 
-    float r0 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 0u) * 16u + lane] * LOG2E : 0.0;
-    float r1 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 1u) * 16u + lane] * LOG2E : 0.0;
-    float r2 = (active_t && lane < 16u) ? r_buf[(t * pc.n_head + h0 + 2u) * 16u + lane] * LOG2E : 0.0;
-
-    float m0 = active_t ? sinks[t * pc.n_head + h0 + 0u] * LOG2E : -1.0e30;
-    float m1 = active_t ? sinks[t * pc.n_head + h0 + 1u] * LOG2E : -1.0e30;
-    float m2 = active_t ? sinks[t * pc.n_head + h0 + 2u] * LOG2E : -1.0e30;
+    float m0 = active_t ? sinks[t * pc.n_head + h0 + 0u] * LOG2E : NEG;
+    float m1 = active_t ? sinks[t * pc.n_head + h0 + 1u] * LOG2E : NEG;
+    float m2 = active_t ? sinks[t * pc.n_head + h0 + 2u] * LOG2E : NEG;
     float l0 = active_t ? 1.0 : 0.0;
     float l1 = active_t ? 1.0 : 0.0;
     float l2 = active_t ? 1.0 : 0.0;
@@ -124,155 +118,88 @@ void main(void) {
                     ? (q_pos - pc.rel_extent + 1u) : 0u;
     uint mask = pc.kv_cap - 1u;
     uint q_pos0 = pc.pos0 + t0;
-    bool lane_lt16 = (lane < 16u);
 
-    /* 256 threads load 32 rows x 32 f16vec4 K/V + 40 rows x 16 float rel_bias into LDS */
     for (uint kb = k_min_tile; kb < k_end_tile; kb += BK) {
+        /* 256 threads load 32 rows x 32 lanes of K/V (+40 rel_bias rows) into LDS. */
         [[unroll]] for (uint r = 0u; r < 4u; r++) {
             uint row = hw + r * 8u;
             uint k_idx = kb + row;
+            vec4 kv = vec4(0.0), vv = vec4(0.0);
             if (k_idx < k_end_tile) {
                 if (pc.is_swa != 0u && k_idx >= pc.pos0) {
                     uint kv_base = KV_HEAD(k_idx - pc.pos0);
-                    sh_k[row][lane] = f16vec4(LOAD_KV(new_k, kv_base));
-                    sh_v[row][lane] = f16vec4(LOAD_KV(new_v, kv_base));
+                    kv = LOAD_KV(new_k, kv_base);
+                    vv = LOAD_KV(new_v, kv_base);
                 } else {
                     uint slot = (pc.is_swa != 0u) ? (k_idx & mask) : k_idx;
                     uint kv_base = KV_HEAD(slot);
-                    sh_k[row][lane] = f16vec4(LOAD_KV(cache_k, kv_base));
-                    sh_v[row][lane] = f16vec4(LOAD_KV(cache_v, kv_base));
+                    kv = LOAD_KV(cache_k, kv_base);
+                    vv = LOAD_KV(cache_v, kv_base);
                 }
             }
+            sh_k[row * K_STRIDE + 2u * lane]      = packFloat2x16(f16vec2(kv.xy));
+            sh_k[row * K_STRIDE + 2u * lane + 1u] = packFloat2x16(f16vec2(kv.zw));
+            sh_v[row][lane] = f16vec4(vv);
         }
         uint d_base = (q_pos0 >= kb + 31u) ? (q_pos0 - kb - 31u) : 0u;
         for (uint idx = tid; idx < RB_ROWS * 16u; idx += 256u) {
             uint rr = idx >> 4u;
             uint cc = idx & 15u;
             uint d = d_base + rr;
-            sh_rb[rr][cc] = (d < pc.rel_extent) ? rel_bias[d * 16u + cc] : 0.0;
+            sh_rb[rr * RB_STRIDE + cc] = (d < pc.rel_extent) ? rel_bias[d * 16u + cc] : 0.0;
         }
         barrier();
 
-        if (active_t) {
-            uint j_end = min(BK, k_end_tile - kb);
-            uint j_start = (my_k_start > kb) ? (my_k_start - kb) : 0u;
-            uint j_stop  = (q_pos >= kb) ? min(j_end, q_pos - kb + 1u) : 0u;
-            uint rb_base = q_pos - kb - d_base;
-            uint j = j_start;
-            for (; j + 1u < j_stop; j += 2u) {
-                float rb0 = lane_lt16 ? sh_rb[rb_base - j][lane] : 0.0;
-                float rb1 = lane_lt16 ? sh_rb[rb_base - (j + 1u)][lane] : 0.0;
-
-                f16vec4 kv0 = sh_k[j][lane];
-                f16vec4 kv1 = sh_k[j + 1u][lane];
-                vec4 vv0 = vec4(sh_v[j][lane]);
-                vec4 vv1 = vec4(sh_v[j + 1u][lane]);
-
-                f16vec2 d0a = fma(q0.zw, kv0.zw, q0.xy * kv0.xy);
-                f16vec2 d1a = fma(q1.zw, kv0.zw, q1.xy * kv0.xy);
-                f16vec2 d2a = fma(q2.zw, kv0.zw, q2.xy * kv0.xy);
-                f16vec2 d0b = fma(q0.zw, kv1.zw, q0.xy * kv1.xy);
-                f16vec2 d1b = fma(q1.zw, kv1.zw, q1.xy * kv1.xy);
-                f16vec2 d2b = fma(q2.zw, kv1.zw, q2.xy * kv1.xy);
-
-                float s0a = fma(r0, rb0, float(d0a.x) + float(d0a.y));
-                float s1a = fma(r1, rb0, float(d1a.x) + float(d1a.y));
-                float s2a = fma(r2, rb0, float(d2a.x) + float(d2a.y));
-                float s0b = fma(r0, rb1, float(d0b.x) + float(d0b.y));
-                float s1b = fma(r1, rb1, float(d1b.x) + float(d1b.y));
-                float s2b = fma(r2, rb1, float(d2b.x) + float(d2b.y));
-                sum32_6(s0a, s1a, s2a, s0b, s1b, s2b);
-
-                float mp0 = max(s0a, s0b);
-                if (mp0 > m0) {
-                    float a0 = exp2(m0 - mp0);
-                    float pa = exp2(s0a - mp0);
-                    float pb = exp2(s0b - mp0);
-                    o0 = fma(o0, vec4(a0), fma(vv0, vec4(pa), vv1 * pb));
-                    l0 = fma(l0, a0, pa + pb);
-                    m0 = mp0;
-                } else {
-                    float pa = exp2(s0a - m0);
-                    float pb = exp2(s0b - m0);
-                    o0 = fma(vv0, vec4(pa), fma(vv1, vec4(pb), o0));
-                    l0 += pa + pb;
+        {   /* Uniform per wave64 (inactive tokens: m = NEG, p = 0) so the cluster ops stay legal. */
+            /* Scores: lane = key kb + lane. */
+            uint key = kb + lane;
+            bool valid = active_t && key >= my_k_start && key <= q_pos && key < k_end_tile;
+            float s0 = NEG, s1 = NEG, s2 = NEG;
+            if (valid) {
+                uint kr = lane * K_STRIDE;
+                float a0 = 0.0, a1 = 0.0, a2 = 0.0;
+                [[unroll]] for (uint c = 0u; c < 16u; c++) {
+                    uint k0 = sh_k[kr + 4u * c], k1 = sh_k[kr + 4u * c + 1u];
+                    uint k2 = sh_k[kr + 4u * c + 2u], k3 = sh_k[kr + 4u * c + 3u];
+                    a0 += dot8(sh_q[hw][0][c], k0, k1, k2, k3);
+                    a1 += dot8(sh_q[hw][1][c], k0, k1, k2, k3);
+                    a2 += dot8(sh_q[hw][2][c], k0, k1, k2, k3);
                 }
-
-                float mp1 = max(s1a, s1b);
-                if (mp1 > m1) {
-                    float a1 = exp2(m1 - mp1);
-                    float pa = exp2(s1a - mp1);
-                    float pb = exp2(s1b - mp1);
-                    o1 = fma(o1, vec4(a1), fma(vv0, vec4(pa), vv1 * pb));
-                    l1 = fma(l1, a1, pa + pb);
-                    m1 = mp1;
-                } else {
-                    float pa = exp2(s1a - m1);
-                    float pb = exp2(s1b - m1);
-                    o1 = fma(vv0, vec4(pa), fma(vv1, vec4(pb), o1));
-                    l1 += pa + pb;
+                uint rbr = (q_pos - key - d_base) * RB_STRIDE;
+                [[unroll]] for (uint c = 0u; c < 16u; c++) {
+                    float rb = sh_rb[rbr + c];
+                    a0 = fma(sh_r[hw][0][c], rb, a0);
+                    a1 = fma(sh_r[hw][1][c], rb, a1);
+                    a2 = fma(sh_r[hw][2][c], rb, a2);
                 }
-
-                float mp2 = max(s2a, s2b);
-                if (mp2 > m2) {
-                    float a2 = exp2(m2 - mp2);
-                    float pa = exp2(s2a - mp2);
-                    float pb = exp2(s2b - mp2);
-                    o2 = fma(o2, vec4(a2), fma(vv0, vec4(pa), vv1 * pb));
-                    l2 = fma(l2, a2, pa + pb);
-                    m2 = mp2;
-                } else {
-                    float pa = exp2(s2a - m2);
-                    float pb = exp2(s2b - m2);
-                    o2 = fma(vv0, vec4(pa), fma(vv1, vec4(pb), o2));
-                    l2 += pa + pb;
-                }
+                s0 = a0; s1 = a1; s2 = a2;
             }
-            if (j < j_stop) {
-                float rb = lane_lt16 ? sh_rb[rb_base - j][lane] : 0.0;
 
-                f16vec4 kv = sh_k[j][lane];
+            /* Online softmax once per tile (cluster = this half-wave). */
+            float mn0 = max(m0, subgroupClusteredMax(s0, 32u));
+            float mn1 = max(m1, subgroupClusteredMax(s1, 32u));
+            float mn2 = max(m2, subgroupClusteredMax(s2, 32u));
+            float p0 = valid ? exp2(s0 - mn0) : 0.0;
+            float p1 = valid ? exp2(s1 - mn1) : 0.0;
+            float p2 = valid ? exp2(s2 - mn2) : 0.0;
+            float al0 = exp2(m0 - mn0), al1 = exp2(m1 - mn1), al2 = exp2(m2 - mn2);
+            l0 = fma(l0, al0, subgroupClusteredAdd(p0, 32u));
+            l1 = fma(l1, al1, subgroupClusteredAdd(p1, 32u));
+            l2 = fma(l2, al2, subgroupClusteredAdd(p2, 32u));
+            m0 = mn0; m1 = mn1; m2 = mn2;
+            o0 *= al0; o1 *= al1; o2 *= al2;
+            sh_p[hw][lane] = vec4(p0, p1, p2, 0.0);
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+
+            /* P.V: lane = 4 output dims. */
+            uint j_end = min(BK, k_end_tile - kb);
+            for (uint j = 0u; j < j_end; j++) {
+                vec4 p = sh_p[hw][j];
                 vec4 vv = vec4(sh_v[j][lane]);
-                f16vec2 d0 = fma(q0.zw, kv.zw, q0.xy * kv.xy);
-                f16vec2 d1 = fma(q1.zw, kv.zw, q1.xy * kv.xy);
-                f16vec2 d2 = fma(q2.zw, kv.zw, q2.xy * kv.xy);
-                float s0 = fma(r0, rb, float(d0.x) + float(d0.y));
-                float s1 = fma(r1, rb, float(d1.x) + float(d1.y));
-                float s2 = fma(r2, rb, float(d2.x) + float(d2.y));
-                sum32_3(s0, s1, s2);
-
-                if (s0 > m0) {
-                    float a0 = exp2(m0 - s0);
-                    o0 = fma(o0, vec4(a0), vv);
-                    l0 = fma(l0, a0, 1.0);
-                    m0 = s0;
-                } else {
-                    float p0 = exp2(s0 - m0);
-                    o0 = fma(vv, vec4(p0), o0);
-                    l0 += p0;
-                }
-
-                if (s1 > m1) {
-                    float a1 = exp2(m1 - s1);
-                    o1 = fma(o1, vec4(a1), vv);
-                    l1 = fma(l1, a1, 1.0);
-                    m1 = s1;
-                } else {
-                    float p1 = exp2(s1 - m1);
-                    o1 = fma(vv, vec4(p1), o1);
-                    l1 += p1;
-                }
-
-                if (s2 > m2) {
-                    float a2 = exp2(m2 - s2);
-                    o2 = fma(o2, vec4(a2), vv);
-                    l2 = fma(l2, a2, 1.0);
-                    m2 = s2;
-                } else {
-                    float p2 = exp2(s2 - m2);
-                    o2 = fma(vv, vec4(p2), o2);
-                    l2 += p2;
-                }
+                o0 = fma(vv, vec4(p.x), o0);
+                o1 = fma(vv, vec4(p.y), o1);
+                o2 = fma(vv, vec4(p.z), o2);
             }
         }
         barrier();
