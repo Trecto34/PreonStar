@@ -1,5 +1,7 @@
 #version 460
 
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
@@ -36,9 +38,9 @@ layout(push_constant) uniform Push {
 } pc;
 
 #ifndef P36_DECODE
-shared vec4 sh_h[16][4];
-shared vec4 sh_wf[64][4];
-shared vec4 sh_wg[64][4];
+shared f16vec4 sh_h[16][4];
+shared f16vec4 sh_wf[64][4];
+shared f16vec4 sh_wg[64][4];
 #endif
 
 void main(void) {
@@ -74,7 +76,7 @@ void main(void) {
             tanh(g) * msg[j * pc.msg_stride + row];
     }
 #else
-    /* Prefill: 64 cols x up to 16 tokens per WG, coalesced 4-vec4 K-tiles in LDS (9 KiB) */
+    /* Prefill: 64 cols x up to 16 tokens per WG, packed-f16 coalesced 4-vec4 K-tiles (4.5 KiB LDS) */
     uint col0 = gl_WorkGroupID.x * 64u;
     uint col = col0 + tid;
     uint t0 = gl_WorkGroupID.y * 16u;
@@ -91,27 +93,37 @@ void main(void) {
     uint lk = tid & 3u;        /* 0..3: coalesced vec4 lane within 4-vec4 K-tile */
 
     for (uint k0 = 0u; k0 < r4; k0 += 4u) {
-        sh_h[lr][lk] = (lr < nt) ? hv[(t0 + lr) * r4 + k0 + lk] : vec4(0.0);
+        sh_h[lr][lk] = (lr < nt) ? f16vec4(hv[(t0 + lr) * r4 + k0 + lk]) : f16vec4(0.0hf);
         [[unroll]] for (uint s = 0u; s < 4u; s++) {
             uint r_loc = s * 16u + lr;
             uint c_glob = col0 + r_loc;
             if (c_glob < pc.n_embd) {
                 uint wi = c_glob * r4 + k0 + lk;
-                sh_wf[r_loc][lk] = wf0[wi];
-                sh_wg[r_loc][lk] = wg0[wi];
+                sh_wf[r_loc][lk] = f16vec4(wf0[wi]);
+                sh_wg[r_loc][lk] = f16vec4(wg0[wi]);
             }
         }
         barrier();
 
         if (col < pc.n_embd) {
+            f16vec2 pf[16];
+            f16vec2 pg[16];
+            [[unroll]] for (uint t = 0u; t < 16u; t++) {
+                pf[t] = f16vec2(0.0hf);
+                pg[t] = f16vec2(0.0hf);
+            }
             [[unroll]] for (uint k = 0u; k < 4u; k++) {
-                vec4 fw = sh_wf[tid][k];
-                vec4 gw = sh_wg[tid][k];
+                f16vec4 fw = sh_wf[tid][k];
+                f16vec4 gw = sh_wg[tid][k];
                 [[unroll]] for (uint t = 0u; t < 16u; t++) {
-                    vec4 vh = sh_h[t][k];
-                    f_acc[t] = fma(fw.x, vh.x, fma(fw.y, vh.y, fma(fw.z, vh.z, fma(fw.w, vh.w, f_acc[t]))));
-                    g_acc[t] = fma(gw.x, vh.x, fma(gw.y, vh.y, fma(gw.z, vh.z, fma(gw.w, vh.w, g_acc[t]))));
+                    f16vec4 vh = sh_h[t][k];
+                    pf[t] = fma(fw.zw, vh.zw, fma(fw.xy, vh.xy, pf[t]));
+                    pg[t] = fma(gw.zw, vh.zw, fma(gw.xy, vh.xy, pg[t]));
                 }
+            }
+            [[unroll]] for (uint t = 0u; t < 16u; t++) {
+                f_acc[t] += float(pf[t].x) + float(pf[t].y);
+                g_acc[t] += float(pg[t].x) + float(pg[t].y);
             }
         }
         barrier();
