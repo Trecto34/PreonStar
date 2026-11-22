@@ -1,0 +1,81 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Direct F32-input Q4_K decode for Inkling-2-Mini SWA attn_output (40 layers/tok).
+ * Eliminates 40 quantize_q8_k dispatches + 40 barriers/tok AND avoids Q8_K unpacking.
+ * All 64 lanes cooperate on 1 row at a time (b = (tid >> 4) + 4*k -> 576 B contiguous burst,
+ * 12 / 4 = 3 exact iterations, 0% idle tail) and reuse F32 a0..a3 + xsum across 4 rows/WG.
+ * Dispatch: (out_dim / 4, 1, 1) = (576, 1, 1). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
+layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
+layout(set = 0, binding = 2) writeonly buffer Y { float y[]; };
+
+layout(push_constant) uniform Push {
+    uint blocks;     /* in_dim / 256 = 12 */
+    uint row_words;  /* blocks * 36 = 432 */
+} pc;
+
+const uint ROWS = 4u;
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint itid = tid & 15u;
+    uint group = itid >> 1u;
+    uint nshift = (group & 1u) * 4u;
+    uint qw_off = 4u + (group >> 1u) * 8u + (itid & 1u) * 4u;
+
+    uint first_row = gl_WorkGroupID.x * ROWS;
+    uint row0_w0 = first_row * pc.row_words;
+
+    float acc[ROWS];
+    [[unroll]] for (uint r = 0u; r < ROWS; r++) acc[r] = 0.0;
+
+    for (uint b = tid >> 4u; b < pc.blocks; b += 4u) {
+        uint x4 = b * 64u + itid * 4u;
+        vec4 a0 = xv[x4 + 0u];
+        vec4 a1 = xv[x4 + 1u];
+        vec4 a2 = xv[x4 + 2u];
+        vec4 a3 = xv[x4 + 3u];
+        float xsum = dot(a0 + a1 + a2 + a3, vec4(1.0));
+
+        [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+            uint wbase = row0_w0 + r * pc.row_words + 36u * b;
+            vec2 d2 = unpackHalf2x16(w[wbase]);
+            uint s0 = w[wbase + 1u];
+            uint s1 = w[wbase + 2u];
+            uint sc;
+            uint mn;
+            if (group < 4u) {
+                uint sh = group * 8u;
+                sc = (s0 >> sh) & 63u;
+                mn = (s1 >> sh) & 63u;
+            } else {
+                uint sh = (group - 4u) * 8u;
+                uint s2 = w[wbase + 3u];
+                sc = ((s2 >> sh) & 15u) | (((s0 >> (sh + 6u)) & 3u) << 4u);
+                mn = ((s2 >> (sh + 4u)) & 15u) | (((s1 >> (sh + 6u)) & 3u) << 4u);
+            }
+            uint qw = wbase + qw_off;
+            uint ql0 = (w[qw + 0u] >> nshift) & 0x0f0f0f0fu;
+            uint ql1 = (w[qw + 1u] >> nshift) & 0x0f0f0f0fu;
+            uint ql2 = (w[qw + 2u] >> nshift) & 0x0f0f0f0fu;
+            uint ql3 = (w[qw + 3u] >> nshift) & 0x0f0f0f0fu;
+            float qdot = dot(vec4(float(ql0 & 15u), float((ql0 >> 8u) & 15u), float((ql0 >> 16u) & 15u), float((ql0 >> 24u) & 15u)), a0)
+                       + dot(vec4(float(ql1 & 15u), float((ql1 >> 8u) & 15u), float((ql1 >> 16u) & 15u), float((ql1 >> 24u) & 15u)), a1)
+                       + dot(vec4(float(ql2 & 15u), float((ql2 >> 8u) & 15u), float((ql2 >> 16u) & 15u), float((ql2 >> 24u) & 15u)), a2)
+                       + dot(vec4(float(ql3 & 15u), float((ql3 >> 8u) & 15u), float((ql3 >> 16u) & 15u), float((ql3 >> 24u) & 15u)), a3);
+            acc[r] = fma(d2.x * float(sc), qdot, fma(-d2.y * float(mn), xsum, acc[r]));
+        }
+    }
+
+    [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+        float tot = subgroupAdd(acc[r]);
+        if (tid == 0u) y[first_row + r] = tot;
+    }
+}

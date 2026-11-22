@@ -869,7 +869,13 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                                              is_swa ? 1u : 0u, hp->n_relative_extent, attn_scale), "attn");
 
         /* Output projection */
-        INK_CHK(p36_gpu_tensor_matmul_scaled(m, l->attn_output, ink->attn_out, ink->wo_out, Q, D, n_tok, 1.0f), "attn_out");
+        if (n_tok == 1u && l->attn_output->type == P36_TENSOR_Q4_K &&
+            p36_gpu_inkling2_wo_q4k_decode_tensor(ink->wo_out, m->map, m->size,
+                                                  l->attn_output->abs_offset, ink->attn_out, Q, D)) {
+            /* Direct F32->Q4_K decode: eliminates 40 quantize_q8_k dispatches + barriers/tok */
+        } else {
+            INK_CHK(p36_gpu_tensor_matmul_scaled(m, l->attn_output, ink->attn_out, ink->wo_out, Q, D, n_tok, 1.0f), "attn_out");
+        }
 
         /* Block residual boundary + attn_post_conv + FFN mix (+ optional ffn_norm) */
         if (n_tok == 1u) {

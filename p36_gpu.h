@@ -1192,6 +1192,15 @@ int p36_gpu_inkling2_qkv_rel_q4k_decode_tensor(
         uint32_t              out_v,
         uint32_t              out_r);
 
+int p36_gpu_inkling2_wo_q4k_decode_tensor(
+        p36_gpu_tensor       *y,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              w_offset,
+        const p36_gpu_tensor *x,
+        uint32_t              in_dim,
+        uint32_t              out_dim);
+
 int p36_gpu_inkling2_post_attn_mix_tensor(
         p36_gpu_tensor       *blocks_normed,
         const p36_gpu_tensor *wo_out,
