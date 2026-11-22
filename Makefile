@@ -252,6 +252,7 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_mix.spv \
 	vulkan/inkling2_post_attn_mix.spv \
 	vulkan/inkling2_f32_gemm.spv \
+	vulkan/inkling2_f32_gemm_exact.spv \
 	vulkan/inkling2_control_prep.spv \
 	vulkan/inkling2_control_prep_down.spv \
 	vulkan/inkling2_control_gate.spv \
@@ -300,6 +301,9 @@ vulkan/inkling2_qkv_rel_q4k_decode.spv: vulkan/inkling2_qkv_rel_q4k_decode.comp
 
 vulkan/inkling2_f32_gemm.spv: vulkan/inkling2_f32_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_f32_gemm_exact.spv: vulkan/inkling2_f32_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_F32_EXACT -o $@ $<
 
 vulkan/inkling2_control_prep.spv: vulkan/inkling2_control_prep.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<

@@ -26,8 +26,13 @@ const uint BN = 32u;
 const uint KK = 8u;
 #define P36_SWZ(i) (((i) >> 1u) & 3u)
 
+#ifdef P36_F32_EXACT
+shared vec4 As[BM][KK];
+shared vec4 Bs[BN][KK];
+#else
 shared f16vec4 As[BM][KK];
 shared f16vec4 Bs[BN][KK];
+#endif
 
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
@@ -55,6 +60,35 @@ void main(void) {
     float acc1[4] = float[4](0.0, 0.0, 0.0, 0.0);
 
     for (uint kb = 0u; kb < k4; kb += KK) {
+#ifdef P36_F32_EXACT
+        As[ar][a_k0] = w[a_row_base + kb + 0u];
+        As[ar][a_k1] = w[a_row_base + kb + 1u];
+        Bs[ar][a_k0] = b_live ? xv[b_row_base + kb + 0u] : vec4(0.0);
+        Bs[ar][a_k1] = b_live ? xv[b_row_base + kb + 1u] : vec4(0.0);
+        barrier();
+
+        if (hi_live) {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk_idx = kk ^ swz_ry ^ swz_sl;
+                vec4 bv0 = Bs[sl][bk_idx];
+                vec4 bv1 = Bs[sl + 16u][bk_idx];
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    vec4 av = As[ry + 8u * i][kk];
+                    acc0[i] += dot(av, bv0);
+                    acc1[i] += dot(av, bv1);
+                }
+            }
+        } else {
+            [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
+                uint bk_idx = kk ^ swz_ry ^ swz_sl;
+                vec4 bv0 = Bs[sl][bk_idx];
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    vec4 av = As[ry + 8u * i][kk];
+                    acc0[i] += dot(av, bv0);
+                }
+            }
+        }
+#else
         As[ar][a_k0] = f16vec4(w[a_row_base + kb + 0u]);
         As[ar][a_k1] = f16vec4(w[a_row_base + kb + 1u]);
         Bs[ar][a_k0] = b_live ? f16vec4(xv[b_row_base + kb + 0u]) : f16vec4(0.0hf);
@@ -96,6 +130,7 @@ void main(void) {
                 acc0[i] += float(p0[i].x) + float(p0[i].y);
             }
         }
+#endif
         barrier();
     }
 

@@ -6,6 +6,7 @@ static p36_vk_kernel p36_vk_ink_mix;
 static p36_vk_kernel p36_vk_ink_post_attn_mix;
 static p36_vk_kernel p36_vk_ink_qkv_rel_q4k;
 static p36_vk_kernel p36_vk_ink_f32_gemm;
+static p36_vk_kernel p36_vk_ink_f32_gemm_exact;
 static p36_vk_kernel p36_vk_ink_ctrl_prep;
 static p36_vk_kernel p36_vk_ink_ctrl_prep_down;
 static p36_vk_kernel p36_vk_ink_ctrl_gate;
@@ -44,6 +45,7 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     p36_vk_ink_post_attn_mix  = P36_VK_KERNEL("vulkan/inkling2_post_attn_mix.spv", 9, 32, (1u << 0) | (1u << 4) | (1u << 5) | (1u << 8));
     p36_vk_ink_qkv_rel_q4k    = P36_VK_KERNEL("vulkan/inkling2_qkv_rel_q4k_decode.spv", 11, 20, (1u << 7) | (1u << 8) | (1u << 9) | (1u << 10));
     p36_vk_ink_f32_gemm       = P36_VK_KERNEL("vulkan/inkling2_f32_gemm.spv", 3, 12, 1u << 2);
+    p36_vk_ink_f32_gemm_exact = P36_VK_KERNEL("vulkan/inkling2_f32_gemm_exact.spv", 3, 12, 1u << 2);
     p36_vk_ink_ctrl_prep      = P36_VK_KERNEL("vulkan/inkling2_control_prep.spv", 3, 4, 1u << 2);
     p36_vk_ink_ctrl_prep_down = P36_VK_KERNEL("vulkan/inkling2_control_prep_down.spv", 6, 16, 1u << 3);
     p36_vk_ink_ctrl_gate      = P36_VK_KERNEL("vulkan/inkling2_control_gate.spv", 10, 28, 1u << 5);
@@ -82,6 +84,7 @@ static void p36_vk_inkling2_cleanup_unlocked(void) {
     p36_vk_kernel_destroy(&p36_vk_ink_post_attn_mix);
     p36_vk_kernel_destroy(&p36_vk_ink_qkv_rel_q4k);
     p36_vk_kernel_destroy(&p36_vk_ink_f32_gemm);
+    p36_vk_kernel_destroy(&p36_vk_ink_f32_gemm_exact);
     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_prep);
     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_prep_down);
     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_gate);
@@ -1043,7 +1046,9 @@ int p36_gpu_inkling2_f32_gemm_tensor(
     if (!w_t) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
     const p36_gpu_tensor *bindings[3] = { w_t, x, out };
     struct { uint32_t in_dim, out_dim, n_tok; } pc = { in_dim, out_dim, n_tok };
-    ok = p36_vk_run_unlocked("inkling2_f32_gemm", &p36_vk_ink_f32_gemm, bindings, &pc, sizeof(pc),
+    /* Keep MoE router (out_dim > 64) in exact F32 to preserve top-k routing; use packed f16 for loop_down. */
+    p36_vk_kernel *k = (out_dim > 64u) ? &p36_vk_ink_f32_gemm_exact : &p36_vk_ink_f32_gemm;
+    ok = p36_vk_run_unlocked("inkling2_f32_gemm", k, bindings, &pc, sizeof(pc),
                              out_dim / 32u, (n_tok + 31u) / 32u, 1);
     pthread_mutex_unlock(&p36_vk_mu);
     return ok;
