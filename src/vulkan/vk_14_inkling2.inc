@@ -929,7 +929,7 @@ int p36_gpu_inkling2_moe_ffn_tensor(
         } gu_pc = { mid_dim, in_dim / 256u, n_used, situ_beta, 1.0f / situ_beta, situ_lb, 1.0f / situ_lb, has_gate_up_scale ? 1u : 0u };
         const p36_gpu_tensor *gu_b[6] = { gu_t, x, tiles, mid_scratch, tables, gu_sc_t };
         ok = p36_vk_run_unlocked("inkling2_moe_gu_gemm", gu_k, gu_b, &gu_pc, sizeof(gu_pc),
-                                 (mid_dim + 63u) / 64u, tile_count, 1);
+                                 (mid_dim + 31u) / 32u, tile_count, 1);
         if (ok) {
             struct { uint32_t out_dim, in_dim, blocks, n_used, has_exp_scale; } dn_pc = {
                 out_dim, mid_dim, mid_dim / 32u, n_used, has_down_scale ? 1u : 0u

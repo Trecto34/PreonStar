@@ -6,13 +6,12 @@
 #extension GL_EXT_control_flow_attributes : require
 
 /* Inkling-2-Mini single-tensor MoE gate_up + SITU prefill GEMM.
- * Tile: BM = 64 mid rows x SLOT_TILE = 32 routed slots, swizzled f16vec4 LDS.
- * Optimizations:
- *  - LDS grid staging for IQ2_XXS (2 KiB), IQ3_XXS (1 KiB), IQ3_S (2 KiB).
- *  - IQ2_S bakes 16-elem sub-scale into Ag/Au -> unified single kk=0..7 FMA loop.
- *  - Aligned uint16_t loads for IQ3_XXS / IQ3_S (halving w_u8 shifts).
- *  - Separate hi_live / lo-only FMA loops (zero inner-loop branch overhead).
- * Compile with one of: P36_MOE_IQ2XXS, P36_MOE_IQ2S, P36_MOE_IQ3XXS, P36_MOE_IQ3S. */
+ * Tile: BM = 32 mid rows x SLOT_TILE = 64 routed slots, swizzled f16vec4 LDS.
+ * Parallel gate/up weight loader: threads 0..127 dequantize gate into Ag[32][8],
+ * threads 128..255 dequantize up into Au[32][8] -> halves dequant work & VGPRs!
+ * Compact 2x4x2 register tile (32 VGPR accumulators -> zero spill, high occupancy)
+ * and enough LDS headroom to stage IQ2_S uvec2 sh_grid[1024] (8 KiB -> 16 KiB total).
+ * Compile with: P36_MOE_IQ2XXS, P36_MOE_IQ2XS, P36_MOE_IQ2S, P36_MOE_IQ3XXS, or P36_MOE_IQ3S. */
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -48,7 +47,7 @@ const uint TAB_IQ2XS = 7456u;
 const uint SLOT_TILE = 64u;
 const uint TILE_WORDS = 1u + SLOT_TILE;
 const uint INVALID = 0xffffffffu;
-const uint BM = 64u;
+const uint BM = 32u;
 const uint KK = 8u;
 #define P36_SWZ(i) (((i) >> 1u) & 7u)
 
@@ -118,28 +117,25 @@ void main(void) {
 #endif
     barrier();
 
-    uint ar = tid >> 2u;
-    uint sub = tid & 3u;
+    /* Parallel gate (tid < 128) / up (tid >= 128) weight loader: 32 rows x 4 subs each */
+    bool is_up = (tid >= 128u);
+    uint t128 = tid & 127u;
+    uint ar = t128 >> 2u;       /* 0..31 */
+    uint sub = t128 & 3u;       /* 0..3 */
     uint row = row0 + ar;
     uint exp_row0 = expert * (2u * pc.mid_dim);
-    uint g_row = exp_row0 + (row < pc.mid_dim ? row : 0u);
-    uint u_row = exp_row0 + pc.mid_dim + (row < pc.mid_dim ? row : 0u);
+    uint w_row = exp_row0 + (is_up ? pc.mid_dim : 0u) + (row < pc.mid_dim ? row : 0u);
 
 #ifdef P36_MOE_IQ2XXS
-    uint gbase_u16 = g_row * pc.blocks * IQ2_U16;
-    uint ubase_u16 = u_row * pc.blocks * IQ2_U16;
+    uint wbase = w_row * pc.blocks * IQ2_U16;
 #elif defined(P36_MOE_IQ2XS)
-    uint gbase_u16 = g_row * pc.blocks * IQ2XS_U16;
-    uint ubase_u16 = u_row * pc.blocks * IQ2XS_U16;
+    uint wbase = w_row * pc.blocks * IQ2XS_U16;
 #elif defined(P36_MOE_IQ2S)
-    uint gbase_bytes = g_row * pc.blocks * IQ2S_BYTES;
-    uint ubase_bytes = u_row * pc.blocks * IQ2S_BYTES;
+    uint wbase = w_row * pc.blocks * IQ2S_BYTES;
 #elif defined(P36_MOE_IQ3XXS)
-    uint gbase_bytes = g_row * pc.blocks * IQ3XXS_BYTES;
-    uint ubase_bytes = u_row * pc.blocks * IQ3XXS_BYTES;
+    uint wbase = w_row * pc.blocks * IQ3XXS_BYTES;
 #elif defined(P36_MOE_IQ3S)
-    uint gbase_bytes = g_row * pc.blocks * IQ3S_BYTES;
-    uint ubase_bytes = u_row * pc.blocks * IQ3S_BYTES;
+    uint wbase = w_row * pc.blocks * IQ3S_BYTES;
 #endif
 
     uint bc0 = tid >> 3u;
@@ -148,9 +144,9 @@ void main(void) {
     uint sl = tid & 15u;
     uint ry = tid >> 4u;
 
-    float accg[4][4];
-    float accu[4][4];
-    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+    float accg[2][4];
+    float accu[2][4];
+    [[unroll]] for (uint i = 0u; i < 2u; i++) {
         accg[i][0] = 0.0; accg[i][1] = 0.0; accg[i][2] = 0.0; accg[i][3] = 0.0;
         accu[i][0] = 0.0; accu[i][1] = 0.0; accu[i][2] = 0.0; accu[i][3] = 0.0;
     }
@@ -173,163 +169,119 @@ void main(void) {
 
     uint swz_sl = P36_SWZ(sl);
     uint swz_ry = P36_SWZ(ry);
-    uint arow[4];
-    [[unroll]] for (uint i = 0u; i < 4u; i++) arow[i] = ry + 16u * i;
+    uint arow[2] = uint[2](ry, ry + 16u);
 
     uint n_kb = pc.blocks * 8u;
     for (uint kb = 0u; kb < n_kb; kb++) {
         uint sb = kb >> 3u;
         uint ib32 = kb & 7u;
 
+        f16vec4 v0, v1;
+        float d_val = 0.0;
+        bool write_d = false;
+
 #ifdef P36_MOE_IQ2XXS
         {
-            uint gb = gbase_u16 + sb * IQ2_U16;
-            uint ub = ubase_u16 + sb * IQ2_U16;
-            uint gq = gb + 1u + (ib32 << 2u);
-            uint uq = ub + 1u + (ib32 << 2u);
-            uint gss = uint(w[gq + 2u]) | (uint(w[gq + 3u]) << 16u);
-            uint uss = uint(w[uq + 2u]) | (uint(w[uq + 3u]) << 16u);
-            uint gqs = (uint(w[gq + sub_word]) >> sub_shift) & 255u;
-            uint uqs = (uint(w[uq + sub_word]) >> sub_shift) & 255u;
-            uint gsign = bitfieldExtract(gss, int(sbit), 7);
-            f16vec4 g0 = sh_grid0[gqs];
-            f16vec4 g1 = sh_grid1[gqs];
-            Ag[ar][a_k0] = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
-            Ag[ar][a_k1] = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (bitCount(gsign) & 1) != 0));
-            uint usign = bitfieldExtract(uss, int(sbit), 7);
-            f16vec4 u0 = sh_grid0[uqs];
-            f16vec4 u1 = sh_grid1[uqs];
-            Au[ar][a_k0] = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
-            Au[ar][a_k1] = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (bitCount(usign) & 1) != 0));
+            uint wb = wbase + sb * IQ2_U16;
+            uint wq = wb + 1u + (ib32 << 2u);
+            uint ss = uint(w[wq + 2u]) | (uint(w[wq + 3u]) << 16u);
+            uint qs = (uint(w[wq + sub_word]) >> sub_shift) & 255u;
+            uint sgn = bitfieldExtract(ss, int(sbit), 7);
+            f16vec4 g0 = sh_grid0[qs];
+            f16vec4 g1 = sh_grid1[qs];
+            v0 = mix(g0, -g0, bvec4((sgn & 1u) != 0u, (sgn & 2u) != 0u, (sgn & 4u) != 0u, (sgn & 8u) != 0u));
+            v1 = mix(g1, -g1, bvec4((sgn & 16u) != 0u, (sgn & 32u) != 0u, (sgn & 64u) != 0u, (bitCount(sgn) & 1) != 0));
             if (sub == 0u) {
-                Dg[ar] = unpackHalf2x16(uint(w[gb])).x * 16.0 * (0.5 + float(gss >> 28u));
-                Du[ar] = unpackHalf2x16(uint(w[ub])).x * 16.0 * (0.5 + float(uss >> 28u));
+                d_val = unpackHalf2x16(uint(w[wb])).x * 16.0 * (0.5 + float(ss >> 28u));
+                write_d = true;
             }
         }
 #elif defined(P36_MOE_IQ2XS)
         {
-            uint gb = gbase_u16 + sb * IQ2XS_U16;
-            uint ub = ubase_u16 + sb * IQ2XS_U16;
-            uint gsc_b = w_u8((gb + 33u) * 2u + ib32);
-            uint usc_b = w_u8((ub + 33u) * 2u + ib32);
-            uint gnib = sub < 2u ? (gsc_b & 15u) : (gsc_b >> 4u);
-            uint unib = sub < 2u ? (usc_b & 15u) : (usc_b >> 4u);
-            float gsc = (0.5 + float(gnib)) * 0.015625;
-            float usc = (0.5 + float(unib)) * 0.015625;
-            uint gq = uint(w[gb + 1u + 4u * ib32 + sub]);
-            uint uq = uint(w[ub + 1u + 4u * ib32 + sub]);
-            uint gsign = sh_ksigns[gq >> 9u];
-            uint usign = sh_ksigns[uq >> 9u];
-            uvec2 gg = sh_grid[gq & 511u];
-            uvec2 ug = sh_grid[uq & 511u];
+            uint wb = wbase + sb * IQ2XS_U16;
+            uint sc_b = w_u8((wb + 33u) * 2u + ib32);
+            uint nib = sub < 2u ? (sc_b & 15u) : (sc_b >> 4u);
+            float sc = (0.5 + float(nib)) * 0.015625;
+            uint q = uint(w[wb + 1u + 4u * ib32 + sub]);
+            uint sgn = sh_ksigns[q >> 9u];
+            uvec2 gg = sh_grid[q & 511u];
             vec4 g0 = vec4(unpack8(gg.x));
             vec4 g1 = vec4(unpack8(gg.y));
-            g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
-            g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (gsign & 128u) != 0u));
-            Ag[ar][a_k0] = f16vec4(g0 * gsc);
-            Ag[ar][a_k1] = f16vec4(g1 * gsc);
-            vec4 u0 = vec4(unpack8(ug.x));
-            vec4 u1 = vec4(unpack8(ug.y));
-            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
-            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (usign & 128u) != 0u));
-            Au[ar][a_k0] = f16vec4(u0 * usc);
-            Au[ar][a_k1] = f16vec4(u1 * usc);
+            g0 = mix(g0, -g0, bvec4((sgn & 1u) != 0u, (sgn & 2u) != 0u, (sgn & 4u) != 0u, (sgn & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((sgn & 16u) != 0u, (sgn & 32u) != 0u, (sgn & 64u) != 0u, (sgn & 128u) != 0u));
+            v0 = f16vec4(g0 * sc);
+            v1 = f16vec4(g1 * sc);
             if (sub == 0u && ib32 == 0u) {
-                Dg[ar] = unpackHalf2x16(uint(w[gb])).x * 16.0;
-                Du[ar] = unpackHalf2x16(uint(w[ub])).x * 16.0;
+                d_val = unpackHalf2x16(uint(w[wb])).x * 16.0;
+                write_d = true;
             }
         }
 #elif defined(P36_MOE_IQ2S)
         {
-            uint gbb = gbase_bytes + sb * IQ2S_BYTES;
-            uint ubb = ubase_bytes + sb * IQ2S_BYTES;
-            uint gsc_b = w_u8(gbb + 74u + ib32);
-            uint usc_b = w_u8(ubb + 74u + ib32);
-            uint gnib = sub < 2u ? (gsc_b & 15u) : (gsc_b >> 4u);
-            uint unib = sub < 2u ? (usc_b & 15u) : (usc_b >> 4u);
-            float gsc = (0.5 + float(gnib)) * 0.015625;
-            float usc = (0.5 + float(unib)) * 0.015625;
-            uint gsh = (8u - 2u * sub) & 31u;
-            uint gentry = w_u8(gbb + 2u + 4u * ib32 + sub) | ((w_u8(gbb + 66u + ib32) << gsh) & 0x300u);
-            uint uentry = w_u8(ubb + 2u + 4u * ib32 + sub) | ((w_u8(ubb + 66u + ib32) << gsh) & 0x300u);
-            uint gsign = w_u8(gbb + 34u + 4u * ib32 + sub);
-            uint usign = w_u8(ubb + 34u + 4u * ib32 + sub);
-            vec4 g0 = vec4(unpack8(tables[TAB_IQ2S + gentry * 2u]));
-            vec4 g1 = vec4(unpack8(tables[TAB_IQ2S + gentry * 2u + 1u]));
-            g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
-            g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (gsign & 128u) != 0u));
-            Ag[ar][a_k0] = f16vec4(g0 * gsc);
-            Ag[ar][a_k1] = f16vec4(g1 * gsc);
-            vec4 u0 = vec4(unpack8(tables[TAB_IQ2S + uentry * 2u]));
-            vec4 u1 = vec4(unpack8(tables[TAB_IQ2S + uentry * 2u + 1u]));
-            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
-            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (usign & 128u) != 0u));
-            Au[ar][a_k0] = f16vec4(u0 * usc);
-            Au[ar][a_k1] = f16vec4(u1 * usc);
+            uint wbb = wbase + sb * IQ2S_BYTES;
+            uint sc_b = w_u8(wbb + 74u + ib32);
+            uint nib = sub < 2u ? (sc_b & 15u) : (sc_b >> 4u);
+            float sc = (0.5 + float(nib)) * 0.015625;
+            uint sh = (8u - 2u * sub) & 31u;
+            uint entry = w_u8(wbb + 2u + 4u * ib32 + sub) | ((w_u8(wbb + 66u + ib32) << sh) & 0x300u);
+            uint sgn = w_u8(wbb + 34u + 4u * ib32 + sub);
+            vec4 g0 = vec4(unpack8(tables[TAB_IQ2S + entry * 2u]));
+            vec4 g1 = vec4(unpack8(tables[TAB_IQ2S + entry * 2u + 1u]));
+            g0 = mix(g0, -g0, bvec4((sgn & 1u) != 0u, (sgn & 2u) != 0u, (sgn & 4u) != 0u, (sgn & 8u) != 0u));
+            g1 = mix(g1, -g1, bvec4((sgn & 16u) != 0u, (sgn & 32u) != 0u, (sgn & 64u) != 0u, (sgn & 128u) != 0u));
+            v0 = f16vec4(g0 * sc);
+            v1 = f16vec4(g1 * sc);
             if (sub == 0u && ib32 == 0u) {
-                Dg[ar] = unpackHalf2x16(uint(w[gbb >> 1u])).x * 16.0;
-                Du[ar] = unpackHalf2x16(uint(w[ubb >> 1u])).x * 16.0;
+                d_val = unpackHalf2x16(uint(w[wbb >> 1u])).x * 16.0;
+                write_d = true;
             }
         }
 #elif defined(P36_MOE_IQ3XXS)
         {
-            uint gbb = gbase_bytes + sb * IQ3XXS_BYTES;
-            uint ubb = ubase_bytes + sb * IQ3XXS_BYTES;
-            uint gaux_h = (gbb + 66u + 4u * ib32) >> 1u;
-            uint uaux_h = (ubb + 66u + 4u * ib32) >> 1u;
-            uint gaux = uint(w[gaux_h]) | (uint(w[gaux_h + 1u]) << 16u);
-            uint uaux = uint(w[uaux_h]) | (uint(w[uaux_h + 1u]) << 16u);
-            uint gsi = (gaux >> sbit) & 127u;
-            uint usi = (uaux >> sbit) & 127u;
-            uint gsign = sh_ksigns[gsi];
-            uint usign = sh_ksigns[usi];
-            uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            f16vec4 g0 = sh_grid[ge01 & 255u];
-            f16vec4 g1 = sh_grid[ge01 >> 8u];
-            f16vec4 u0 = sh_grid[ue01 & 255u];
-            f16vec4 u1 = sh_grid[ue01 >> 8u];
-            Ag[ar][a_k0] = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
-            Ag[ar][a_k1] = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (gsign & 128u) != 0u));
-            Au[ar][a_k0] = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
-            Au[ar][a_k1] = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (usign & 128u) != 0u));
+            uint wbb = wbase + sb * IQ3XXS_BYTES;
+            uint aux_h = (wbb + 66u + 4u * ib32) >> 1u;
+            uint aux = uint(w[aux_h]) | (uint(w[aux_h + 1u]) << 16u);
+            uint si = (aux >> sbit) & 127u;
+            uint sgn = sh_ksigns[si];
+            uint e01 = uint(w[(wbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+            f16vec4 g0 = sh_grid[e01 & 255u];
+            f16vec4 g1 = sh_grid[e01 >> 8u];
+            v0 = mix(g0, -g0, bvec4((sgn & 1u) != 0u, (sgn & 2u) != 0u, (sgn & 4u) != 0u, (sgn & 8u) != 0u));
+            v1 = mix(g1, -g1, bvec4((sgn & 16u) != 0u, (sgn & 32u) != 0u, (sgn & 64u) != 0u, (sgn & 128u) != 0u));
             if (sub == 0u) {
-                Dg[ar] = unpackHalf2x16(uint(w[gbb >> 1u])).x * 0.25 * float(2u * (gaux >> 28u) + 1u);
-                Du[ar] = unpackHalf2x16(uint(w[ubb >> 1u])).x * 0.25 * float(2u * (uaux >> 28u) + 1u);
+                d_val = unpackHalf2x16(uint(w[wbb >> 1u])).x * 0.25 * float(2u * (aux >> 28u) + 1u);
+                write_d = true;
             }
         }
 #elif defined(P36_MOE_IQ3S)
         {
-            uint gbb = gbase_bytes + sb * IQ3S_BYTES;
-            uint ubb = ubase_bytes + sb * IQ3S_BYTES;
-            uint gqh = w_u8(gbb + 66u + ib32);
-            uint uqh = w_u8(ubb + 66u + ib32);
-            uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            uint ge0 = (ge01 & 255u) | (((gqh >> (2u * sub)) & 1u) << 8u);
-            uint ge1 = (ge01 >> 8u)  | (((gqh >> (2u * sub + 1u)) & 1u) << 8u);
-            uint ue0 = (ue01 & 255u) | (((uqh >> (2u * sub)) & 1u) << 8u);
-            uint ue1 = (ue01 >> 8u)  | (((uqh >> (2u * sub + 1u)) & 1u) << 8u);
-            f16vec4 g0 = sh_grid[ge0];
-            f16vec4 g1 = sh_grid[ge1];
-            f16vec4 u0 = sh_grid[ue0];
-            f16vec4 u1 = sh_grid[ue1];
-            uint gsgn = w_u8(gbb + 74u + 4u * ib32 + sub);
-            uint usgn = w_u8(ubb + 74u + 4u * ib32 + sub);
-            Ag[ar][a_k0] = mix(g0, -g0, bvec4((gsgn & 1u) != 0u, (gsgn & 2u) != 0u, (gsgn & 4u) != 0u, (gsgn & 8u) != 0u));
-            Ag[ar][a_k1] = mix(g1, -g1, bvec4((gsgn & 16u) != 0u, (gsgn & 32u) != 0u, (gsgn & 64u) != 0u, (gsgn & 128u) != 0u));
-            Au[ar][a_k0] = mix(u0, -u0, bvec4((usgn & 1u) != 0u, (usgn & 2u) != 0u, (usgn & 4u) != 0u, (usgn & 8u) != 0u));
-            Au[ar][a_k1] = mix(u1, -u1, bvec4((usgn & 16u) != 0u, (usgn & 32u) != 0u, (usgn & 64u) != 0u, (usgn & 128u) != 0u));
+            uint wbb = wbase + sb * IQ3S_BYTES;
+            uint qh = w_u8(wbb + 66u + ib32);
+            uint e01 = uint(w[(wbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+            uint e0 = (e01 & 255u) | (((qh >> (2u * sub)) & 1u) << 8u);
+            uint e1 = (e01 >> 8u)  | (((qh >> (2u * sub + 1u)) & 1u) << 8u);
+            f16vec4 g0 = sh_grid[e0];
+            f16vec4 g1 = sh_grid[e1];
+            uint sgn = w_u8(wbb + 74u + 4u * ib32 + sub);
+            v0 = mix(g0, -g0, bvec4((sgn & 1u) != 0u, (sgn & 2u) != 0u, (sgn & 4u) != 0u, (sgn & 8u) != 0u));
+            v1 = mix(g1, -g1, bvec4((sgn & 16u) != 0u, (sgn & 32u) != 0u, (sgn & 64u) != 0u, (sgn & 128u) != 0u));
             if (sub == 0u) {
-                uint gscb = w_u8(gbb + 106u + (ib32 >> 1u));
-                uint uscb = w_u8(ubb + 106u + (ib32 >> 1u));
-                uint gnib = (ib32 & 1u) != 0u ? (gscb >> 4u) : (gscb & 15u);
-                uint unib = (ib32 & 1u) != 0u ? (uscb >> 4u) : (uscb & 15u);
-                Dg[ar] = unpackHalf2x16(uint(w[gbb >> 1u])).x * float(2u * gnib + 1u);
-                Du[ar] = unpackHalf2x16(uint(w[ubb >> 1u])).x * float(2u * unib + 1u);
+                uint scb = w_u8(wbb + 106u + (ib32 >> 1u));
+                uint nib = (ib32 & 1u) != 0u ? (scb >> 4u) : (scb & 15u);
+                d_val = unpackHalf2x16(uint(w[wbb >> 1u])).x * float(2u * nib + 1u);
+                write_d = true;
             }
         }
 #endif
+        if (!is_up) {
+            Ag[ar][a_k0] = v0;
+            Ag[ar][a_k1] = v1;
+            if (write_d) Dg[ar] = d_val;
+        } else {
+            Au[ar][a_k0] = v0;
+            Au[ar][a_k1] = v1;
+            if (write_d) Du[ar] = d_val;
+        }
 
         Bs[bc0][b_k] = live_b0 ? f16vec4(xv[b_base0 + kb * 8u]) : f16vec4(0.0hf);
         if (live2) {
@@ -337,9 +289,9 @@ void main(void) {
         }
         barrier();
 
-        f16vec2 pkg[4][4];
-        f16vec2 pku[4][4];
-        [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        f16vec2 pkg[2][4];
+        f16vec2 pku[2][4];
+        [[unroll]] for (uint i = 0u; i < 2u; i++) {
             pkg[i][0] = f16vec2(0.0hf); pkg[i][1] = f16vec2(0.0hf);
             pkg[i][2] = f16vec2(0.0hf); pkg[i][3] = f16vec2(0.0hf);
             pku[i][0] = f16vec2(0.0hf); pku[i][1] = f16vec2(0.0hf);
@@ -353,7 +305,7 @@ void main(void) {
                 f16vec4 bv1 = Bs[sl + 16u][bk];
                 f16vec4 bv2 = Bs[sl + 32u][bk];
                 f16vec4 bv3 = Bs[sl + 48u][bk];
-                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                [[unroll]] for (uint i = 0u; i < 2u; i++) {
                     f16vec4 ag = Ag[arow[i]][kk];
                     f16vec4 au = Au[arow[i]][kk];
                     pkg[i][0] = fma(ag.zw, bv0.zw, fma(ag.xy, bv0.xy, pkg[i][0]));
@@ -366,7 +318,7 @@ void main(void) {
                     pku[i][3] = fma(au.zw, bv3.zw, fma(au.xy, bv3.xy, pku[i][3]));
                 }
             }
-            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            [[unroll]] for (uint i = 0u; i < 2u; i++) {
                 float dg = Dg[arow[i]];
                 float du = Du[arow[i]];
                 accg[i][0] = fma(dg, float(pkg[i][0].x) + float(pkg[i][0].y), accg[i][0]);
@@ -384,7 +336,7 @@ void main(void) {
                 f16vec4 bv0 = Bs[sl][bk];
                 f16vec4 bv1 = Bs[sl + 16u][bk];
                 f16vec4 bv2 = Bs[sl + 32u][bk];
-                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                [[unroll]] for (uint i = 0u; i < 2u; i++) {
                     f16vec4 ag = Ag[arow[i]][kk];
                     f16vec4 au = Au[arow[i]][kk];
                     pkg[i][0] = fma(ag.zw, bv0.zw, fma(ag.xy, bv0.xy, pkg[i][0]));
@@ -395,7 +347,7 @@ void main(void) {
                     pku[i][2] = fma(au.zw, bv2.zw, fma(au.xy, bv2.xy, pku[i][2]));
                 }
             }
-            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            [[unroll]] for (uint i = 0u; i < 2u; i++) {
                 float dg = Dg[arow[i]];
                 float du = Du[arow[i]];
                 accg[i][0] = fma(dg, float(pkg[i][0].x) + float(pkg[i][0].y), accg[i][0]);
@@ -410,7 +362,7 @@ void main(void) {
                 uint bk = kk ^ swz_ry ^ swz_sl;
                 f16vec4 bv0 = Bs[sl][bk];
                 f16vec4 bv1 = Bs[sl + 16u][bk];
-                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                [[unroll]] for (uint i = 0u; i < 2u; i++) {
                     f16vec4 ag = Ag[arow[i]][kk];
                     f16vec4 au = Au[arow[i]][kk];
                     pkg[i][0] = fma(ag.zw, bv0.zw, fma(ag.xy, bv0.xy, pkg[i][0]));
@@ -419,7 +371,7 @@ void main(void) {
                     pku[i][1] = fma(au.zw, bv1.zw, fma(au.xy, bv1.xy, pku[i][1]));
                 }
             }
-            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            [[unroll]] for (uint i = 0u; i < 2u; i++) {
                 float dg = Dg[arow[i]];
                 float du = Du[arow[i]];
                 accg[i][0] = fma(dg, float(pkg[i][0].x) + float(pkg[i][0].y), accg[i][0]);
@@ -431,14 +383,14 @@ void main(void) {
             [[unroll]] for (uint kk = 0u; kk < KK; kk++) {
                 uint bk = kk ^ swz_ry ^ swz_sl;
                 f16vec4 bv0 = Bs[sl][bk];
-                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                [[unroll]] for (uint i = 0u; i < 2u; i++) {
                     f16vec4 ag = Ag[arow[i]][kk];
                     f16vec4 au = Au[arow[i]][kk];
                     pkg[i][0] = fma(ag.zw, bv0.zw, fma(ag.xy, bv0.xy, pkg[i][0]));
                     pku[i][0] = fma(au.zw, bv0.zw, fma(au.xy, bv0.xy, pku[i][0]));
                 }
             }
-            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+            [[unroll]] for (uint i = 0u; i < 2u; i++) {
                 float dg = Dg[arow[i]];
                 float du = Du[arow[i]];
                 accg[i][0] = fma(dg, float(pkg[i][0].x) + float(pkg[i][0].y), accg[i][0]);
@@ -453,7 +405,7 @@ void main(void) {
     uint s1 = live1 ? sh_slot[sl + 16u] : INVALID;
     uint s2 = live2 ? sh_slot[sl + 32u] : INVALID;
     uint s3 = live3 ? sh_slot[sl + 48u] : INVALID;
-    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+    [[unroll]] for (uint i = 0u; i < 2u; i++) {
         uint out_row = row0 + arow[i];
         if (out_row >= pc.mid_dim) continue;
         if (s0 != INVALID) {
