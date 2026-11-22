@@ -16,6 +16,7 @@ static p36_vk_kernel p36_vk_ink_conv_kv_store;
 static p36_vk_kernel p36_vk_ink_clip_norm;
 static p36_vk_kernel p36_vk_ink_rms_norm_q8k;
 static p36_vk_kernel p36_vk_ink_router_topk;
+static p36_vk_kernel p36_vk_ink_moe_reduce;
 static p36_vk_kernel p36_vk_ink_softcap;
 static p36_vk_kernel p36_vk_ink_attn_decode;
 static p36_vk_kernel p36_vk_ink_attn_combine;
@@ -55,6 +56,7 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     p36_vk_ink_clip_norm      = P36_VK_KERNEL("vulkan/inkling2_clip_norm.spv", 4, 28, (1u << 0) | (1u << 1));
     p36_vk_ink_rms_norm_q8k   = P36_VK_KERNEL("vulkan/inkling2_rms_norm_q8k.spv", 6, 24, (1u << 2) | (1u << 3));
     p36_vk_ink_router_topk    = P36_VK_KERNEL("vulkan/inkling2_router_topk.spv", 4, 16, (1u << 2) | (1u << 3));
+    p36_vk_ink_moe_reduce     = P36_VK_KERNEL("vulkan/inkling2_moe_reduce.spv", 3, 8, 1u << 2);
     p36_vk_ink_softcap        = P36_VK_KERNEL("vulkan/inkling2_softcap.spv", 1, 12, 1u << 0);
     p36_vk_ink_attn_decode    = P36_VK_KERNEL("vulkan/inkling2_attn_decode.spv", 9, 32, (1u << 7) | (1u << 8));
     p36_vk_ink_attn_combine   = P36_VK_KERNEL("vulkan/inkling2_attn_combine.spv", 3, 4, 1u << 2);
@@ -94,6 +96,7 @@ static void p36_vk_inkling2_cleanup_unlocked(void) {
     p36_vk_kernel_destroy(&p36_vk_ink_clip_norm);
     p36_vk_kernel_destroy(&p36_vk_ink_rms_norm_q8k);
     p36_vk_kernel_destroy(&p36_vk_ink_router_topk);
+    p36_vk_kernel_destroy(&p36_vk_ink_moe_reduce);
     p36_vk_kernel_destroy(&p36_vk_ink_softcap);
     p36_vk_kernel_destroy(&p36_vk_ink_attn_decode);
     p36_vk_kernel_destroy(&p36_vk_ink_attn_combine);
@@ -942,10 +945,11 @@ int p36_gpu_inkling2_moe_ffn_tensor(
                                      (out_dim + 63u) / 64u, tile_count, 1);
         }
         if (ok) {
-            struct { uint32_t n, n_used; } red_pc = { out_dim, n_used };
+            uint32_t n4 = out_dim / 4u;
+            struct { uint32_t n4, n_used; } red_pc = { n4, n_used };
             const p36_gpu_tensor *red_b[3] = { down_scratch, weights, out };
-            ok = p36_vk_run_unlocked("inkling2_moe_reduce", &p36_vk.moe_reduce, red_b, &red_pc, sizeof(red_pc),
-                                     (out_dim + 255u) / 256u, n_tok, 1);
+            ok = p36_vk_run_unlocked("inkling2_moe_reduce", &p36_vk_ink_moe_reduce, red_b, &red_pc, sizeof(red_pc),
+                                     (n4 + 63u) / 64u, n_tok, 1);
         }
     }
     pthread_mutex_unlock(&p36_vk_mu);

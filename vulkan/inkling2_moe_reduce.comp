@@ -1,0 +1,31 @@
+#version 460
+
+#extension GL_EXT_control_flow_attributes : require
+
+/* Fast vec4 F32 routing-weighted MoE down reduction for Inkling-2-Mini prefill.
+ * Replaces FP64-emulated moe_reduce.comp (which runs at 1/16 rate on RDNA1).
+ * Dispatch: (ceil((out_dim / 4) / 64), n_tok, 1), local_size_x = 64. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer ExpertOut { vec4 xin[]; };
+layout(set = 0, binding = 1) readonly buffer Weights { float w[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { vec4 y[]; };
+
+layout(push_constant) uniform Push {
+    uint n4;      /* out_dim / 4 = 576 */
+    uint n_used;  /* 8 */
+} pc;
+
+void main(void) {
+    uint j4 = gl_GlobalInvocationID.x;
+    uint tok = gl_GlobalInvocationID.y;
+    if (j4 >= pc.n4) return;
+
+    uint base_slot = tok * pc.n_used;
+    vec4 acc = vec4(0.0);
+    for (uint i = 0u; i < pc.n_used; i++) {
+        acc = fma(xin[(base_slot + i) * pc.n4 + j4], vec4(w[base_slot + i]), acc);
+    }
+    y[tok * pc.n4 + j4] = acc;
+}

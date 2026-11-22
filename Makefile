@@ -262,6 +262,7 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_clip_norm.spv \
 	vulkan/inkling2_rms_norm_q8k.spv \
 	vulkan/inkling2_router_topk.spv \
+	vulkan/inkling2_moe_reduce.spv \
 	vulkan/inkling2_softcap.spv \
 	vulkan/inkling2_attn_decode.spv \
 	vulkan/inkling2_attn_combine.spv \
@@ -330,6 +331,9 @@ vulkan/inkling2_rms_norm_q8k.spv: vulkan/inkling2_rms_norm_q8k.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_router_topk.spv: vulkan/inkling2_router_topk.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_moe_reduce.spv: vulkan/inkling2_moe_reduce.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_softcap.spv: vulkan/inkling2_softcap.comp
