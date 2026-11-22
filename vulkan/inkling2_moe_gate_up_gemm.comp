@@ -57,15 +57,16 @@ uint w_u8(uint off) {
 }
 
 #ifdef P36_MOE_IQ2XXS
-shared uvec2 sh_grid[256];
+shared f16vec4 sh_grid0[256];
+shared f16vec4 sh_grid1[256];
 #elif defined(P36_MOE_IQ2XS)
 shared uvec2 sh_grid[512];
 shared uint sh_ksigns[128];
 #elif defined(P36_MOE_IQ3XXS)
-shared uint sh_grid[256];
+shared f16vec4 sh_grid[256];
 shared uint sh_ksigns[128];
 #elif defined(P36_MOE_IQ3S)
-shared uint sh_grid[512];
+shared f16vec4 sh_grid[512];
 #endif
 shared f16vec4 Ag[BM][KK];
 shared f16vec4 Au[BM][KK];
@@ -88,7 +89,8 @@ void main(void) {
         sh_x4[tid] = (slot != INVALID ? slot / pc.n_used : 0u) * pc.blocks * 64u;
     }
 #ifdef P36_MOE_IQ2XXS
-    sh_grid[tid] = uvec2(tables[2u * tid], tables[2u * tid + 1u]);
+    sh_grid0[tid] = f16vec4(vec4(unpack8(tables[2u * tid])) * 0.015625);
+    sh_grid1[tid] = f16vec4(vec4(unpack8(tables[2u * tid + 1u])) * 0.015625);
 #elif defined(P36_MOE_IQ2XS)
     for (uint i = tid; i < 512u; i += 256u) {
         sh_grid[i] = uvec2(tables[TAB_IQ2XS + 2u * i], tables[TAB_IQ2XS + 2u * i + 1u]);
@@ -101,7 +103,7 @@ void main(void) {
         sh_ksigns[4u * tid + 3u] = kw >> 24u;
     }
 #elif defined(P36_MOE_IQ3XXS)
-    sh_grid[tid] = tables[TAB_IQ3XXS_GRID + tid];
+    sh_grid[tid] = f16vec4(vec4(unpack8(tables[TAB_IQ3XXS_GRID + tid])));
     if (tid < 32u) {
         uint kw = tables[TAB_KSIGNS + tid];
         sh_ksigns[4u * tid + 0u] = kw & 255u;
@@ -110,7 +112,9 @@ void main(void) {
         sh_ksigns[4u * tid + 3u] = kw >> 24u;
     }
 #elif defined(P36_MOE_IQ3S)
-    for (uint i = tid; i < 512u; i += 256u) sh_grid[i] = tables[TAB_IQ3S_GRID + i];
+    for (uint i = tid; i < 512u; i += 256u) {
+        sh_grid[i] = f16vec4(vec4(unpack8(tables[TAB_IQ3S_GRID + i])));
+    }
 #endif
     barrier();
 
@@ -184,21 +188,15 @@ void main(void) {
             uint gqs = (uint(w[gq + sub_word]) >> sub_shift) & 255u;
             uint uqs = (uint(w[uq + sub_word]) >> sub_shift) & 255u;
             uint gsign = bitfieldExtract(gss, int(sbit), 7);
-            uvec2 gg = sh_grid[gqs];
-            vec4 g0 = vec4(unpack8(gg.x));
-            vec4 g1 = vec4(unpack8(gg.y));
-            g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
-            g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (bitCount(gsign) & 1) != 0));
-            Ag[ar][a_k0] = f16vec4(g0 * 0.015625);
-            Ag[ar][a_k1] = f16vec4(g1 * 0.015625);
+            f16vec4 g0 = sh_grid0[gqs];
+            f16vec4 g1 = sh_grid1[gqs];
+            Ag[ar][a_k0] = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
+            Ag[ar][a_k1] = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (bitCount(gsign) & 1) != 0));
             uint usign = bitfieldExtract(uss, int(sbit), 7);
-            uvec2 ug = sh_grid[uqs];
-            vec4 u0 = vec4(unpack8(ug.x));
-            vec4 u1 = vec4(unpack8(ug.y));
-            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
-            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (bitCount(usign) & 1) != 0));
-            Au[ar][a_k0] = f16vec4(u0 * 0.015625);
-            Au[ar][a_k1] = f16vec4(u1 * 0.015625);
+            f16vec4 u0 = sh_grid0[uqs];
+            f16vec4 u1 = sh_grid1[uqs];
+            Au[ar][a_k0] = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
+            Au[ar][a_k1] = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (bitCount(usign) & 1) != 0));
             if (sub == 0u) {
                 Dg[ar] = unpackHalf2x16(uint(w[gb])).x * 16.0 * (0.5 + float(gss >> 28u));
                 Du[ar] = unpackHalf2x16(uint(w[ub])).x * 16.0 * (0.5 + float(uss >> 28u));
@@ -283,18 +281,14 @@ void main(void) {
             uint usign = sh_ksigns[usi];
             uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
             uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            vec4 g0 = vec4(unpack8(sh_grid[ge01 & 255u]));
-            vec4 g1 = vec4(unpack8(sh_grid[ge01 >> 8u]));
-            vec4 u0 = vec4(unpack8(sh_grid[ue01 & 255u]));
-            vec4 u1 = vec4(unpack8(sh_grid[ue01 >> 8u]));
-            g0 = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
-            g1 = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (gsign & 128u) != 0u));
-            u0 = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
-            u1 = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (usign & 128u) != 0u));
-            Ag[ar][a_k0] = f16vec4(g0);
-            Ag[ar][a_k1] = f16vec4(g1);
-            Au[ar][a_k0] = f16vec4(u0);
-            Au[ar][a_k1] = f16vec4(u1);
+            f16vec4 g0 = sh_grid[ge01 & 255u];
+            f16vec4 g1 = sh_grid[ge01 >> 8u];
+            f16vec4 u0 = sh_grid[ue01 & 255u];
+            f16vec4 u1 = sh_grid[ue01 >> 8u];
+            Ag[ar][a_k0] = mix(g0, -g0, bvec4((gsign & 1u) != 0u, (gsign & 2u) != 0u, (gsign & 4u) != 0u, (gsign & 8u) != 0u));
+            Ag[ar][a_k1] = mix(g1, -g1, bvec4((gsign & 16u) != 0u, (gsign & 32u) != 0u, (gsign & 64u) != 0u, (gsign & 128u) != 0u));
+            Au[ar][a_k0] = mix(u0, -u0, bvec4((usign & 1u) != 0u, (usign & 2u) != 0u, (usign & 4u) != 0u, (usign & 8u) != 0u));
+            Au[ar][a_k1] = mix(u1, -u1, bvec4((usign & 16u) != 0u, (usign & 32u) != 0u, (usign & 64u) != 0u, (usign & 128u) != 0u));
             if (sub == 0u) {
                 Dg[ar] = unpackHalf2x16(uint(w[gbb >> 1u])).x * 0.25 * float(2u * (gaux >> 28u) + 1u);
                 Du[ar] = unpackHalf2x16(uint(w[ubb >> 1u])).x * 0.25 * float(2u * (uaux >> 28u) + 1u);
@@ -312,20 +306,16 @@ void main(void) {
             uint ge1 = (ge01 >> 8u)  | (((gqh >> (2u * sub + 1u)) & 1u) << 8u);
             uint ue0 = (ue01 & 255u) | (((uqh >> (2u * sub)) & 1u) << 8u);
             uint ue1 = (ue01 >> 8u)  | (((uqh >> (2u * sub + 1u)) & 1u) << 8u);
-            vec4 g0 = vec4(unpack8(sh_grid[ge0]));
-            vec4 g1 = vec4(unpack8(sh_grid[ge1]));
-            vec4 u0 = vec4(unpack8(sh_grid[ue0]));
-            vec4 u1 = vec4(unpack8(sh_grid[ue1]));
+            f16vec4 g0 = sh_grid[ge0];
+            f16vec4 g1 = sh_grid[ge1];
+            f16vec4 u0 = sh_grid[ue0];
+            f16vec4 u1 = sh_grid[ue1];
             uint gsgn = w_u8(gbb + 74u + 4u * ib32 + sub);
             uint usgn = w_u8(ubb + 74u + 4u * ib32 + sub);
-            g0 = mix(g0, -g0, bvec4((gsgn & 1u) != 0u, (gsgn & 2u) != 0u, (gsgn & 4u) != 0u, (gsgn & 8u) != 0u));
-            g1 = mix(g1, -g1, bvec4((gsgn & 16u) != 0u, (gsgn & 32u) != 0u, (gsgn & 64u) != 0u, (gsgn & 128u) != 0u));
-            u0 = mix(u0, -u0, bvec4((usgn & 1u) != 0u, (usgn & 2u) != 0u, (usgn & 4u) != 0u, (usgn & 8u) != 0u));
-            u1 = mix(u1, -u1, bvec4((usgn & 16u) != 0u, (usgn & 32u) != 0u, (usgn & 64u) != 0u, (usgn & 128u) != 0u));
-            Ag[ar][a_k0] = f16vec4(g0);
-            Ag[ar][a_k1] = f16vec4(g1);
-            Au[ar][a_k0] = f16vec4(u0);
-            Au[ar][a_k1] = f16vec4(u1);
+            Ag[ar][a_k0] = mix(g0, -g0, bvec4((gsgn & 1u) != 0u, (gsgn & 2u) != 0u, (gsgn & 4u) != 0u, (gsgn & 8u) != 0u));
+            Ag[ar][a_k1] = mix(g1, -g1, bvec4((gsgn & 16u) != 0u, (gsgn & 32u) != 0u, (gsgn & 64u) != 0u, (gsgn & 128u) != 0u));
+            Au[ar][a_k0] = mix(u0, -u0, bvec4((usgn & 1u) != 0u, (usgn & 2u) != 0u, (usgn & 4u) != 0u, (usgn & 8u) != 0u));
+            Au[ar][a_k1] = mix(u1, -u1, bvec4((usgn & 16u) != 0u, (usgn & 32u) != 0u, (usgn & 64u) != 0u, (usgn & 128u) != 0u));
             if (sub == 0u) {
                 uint gscb = w_u8(gbb + 106u + (ib32 >> 1u));
                 uint uscb = w_u8(ubb + 106u + (ib32 >> 1u));
