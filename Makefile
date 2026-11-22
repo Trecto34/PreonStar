@@ -270,6 +270,7 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_moe_down_decode_iq4nl.spv \
 	vulkan/inkling2_moe_down_decode_q5_0.spv \
 	vulkan/inkling2_moe_down_decode_nvfp4.spv \
+	vulkan/inkling2_moe_down_reduce_conv.spv \
 	vulkan/inkling2_moe_down_gemm_iq4nl.spv \
 	vulkan/inkling2_moe_down_gemm_q5_0.spv \
 	vulkan/inkling2_moe_down_gemm_nvfp4.spv \
@@ -356,6 +357,9 @@ vulkan/inkling2_moe_down_decode_q5_0.spv: vulkan/inkling2_moe_down_decode.comp
 
 vulkan/inkling2_moe_down_decode_nvfp4.spv: vulkan/inkling2_moe_down_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_NVFP4 -o $@ $<
+
+vulkan/inkling2_moe_down_reduce_conv.spv: vulkan/inkling2_moe_down_reduce_conv.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_moe_down_gemm_iq4nl.spv: vulkan/inkling2_moe_down_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ4NL -o $@ $<

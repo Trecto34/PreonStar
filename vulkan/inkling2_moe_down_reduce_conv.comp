@@ -1,0 +1,42 @@
+#version 460
+
+#extension GL_EXT_control_flow_attributes : require
+
+/* Pass 2 of expert-major Inkling-2-Mini MoE down decode:
+ * Reduces 8 pre-weighted expert outputs [n_used, out_dim] (73.7 KiB, L2-resident)
+ * and fuses ffn_post_conv (kernel=4 depthwise conv) + scaled residual add.
+ * Dispatch: (out_dim / 64, 1, 1), local_size_x = 64. */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer ExpertOut { float xin[]; };
+layout(set = 0, binding = 1) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 2) readonly buffer ConvW { vec4 cw[]; };
+layout(set = 0, binding = 3) buffer ConvState { float cs[]; };
+layout(set = 0, binding = 4) readonly buffer Res { float res[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint n_used;
+    float inv_scale;
+} pc;
+
+void main(void) {
+    uint c = gl_GlobalInvocationID.x;
+    if (c >= pc.out_dim) return;
+
+    float my_x3 = 0.0;
+    for (uint s = 0u; s < pc.n_used; s++) {
+        my_x3 += xin[s * pc.out_dim + c];
+    }
+
+    vec4 kw = cw[c];
+    float s0 = cs[c];
+    float s1 = cs[pc.out_dim + c];
+    float s2 = cs[2u * pc.out_dim + c];
+    float conv_acc = s0 * kw.x + s1 * kw.y + s2 * kw.z + my_x3 * kw.w;
+    y[c] = (my_x3 + conv_acc) * pc.inv_scale + res[c];
+    cs[c] = s1;
+    cs[pc.out_dim + c] = s2;
+    cs[2u * pc.out_dim + c] = my_x3;
+}
