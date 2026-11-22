@@ -329,6 +329,12 @@ static int server_session_sync_multimodal(server *s, server_slot *slot,
     int common = p36_session_common_prefix(slot->session, prompt);
     int done = common == live && prompt->len >= live &&
                p36_session_vision_prefix_matches(slot->session, images, count) ? live : 0;
+    /* Recurrent state cannot rewind: this replays the whole context.  Say so,
+     * or a long rebuild after a tool call looks like a frozen server. */
+    if (live > 0 && done == 0)
+        server_log(P36_LOG_KVCACHE,
+                   "p36-server: vision checkpoint rebuild from token 0 (live=%d common=%d prompt=%d)",
+                   live, common, prompt->len);
     bool called = false;
     while (!g_stop_requested && (!called || done < prompt->len)) {
         int quantum = s->batched_mode ? server_prefill_quantum(s) : prompt->len;
@@ -982,6 +988,10 @@ static bool request_continue_vision(server *s, server_slot *slot, request *r) {
 static void slot_remember_vision_tools(server *s, server_slot *slot,
                                        const request *r, const tool_calls *calls) {
     if (!r->image_count || !calls->len || calls->len > 16) return;
+    /* The close below is Qwen's <|im_end|>.  Inkling-2 and --chat-template end a
+     * turn with other bytes: a foreign marker breaks the canonical byte prefix
+     * and canonicalize_tool_checkpoint then re-prefills the whole vision context. */
+    if (r->inkling2 || r->chat_template) return;
     p36_tokens closed = {0};
     const p36_tokens *live = p36_session_tokens(slot->session);
     if (!live || !p36_session_vision_prefix_matches(slot->session, r->images, r->image_count)) return;

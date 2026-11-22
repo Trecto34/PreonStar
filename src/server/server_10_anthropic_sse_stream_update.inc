@@ -289,7 +289,9 @@ typedef struct {
 } tool_memory;
 
 #define SERVER_IMAGE_CACHE_ENTRIES 32
-#define SERVER_IMAGE_CACHE_BYTES (32u * 1024u * 1024u)
+/* One 1600x1000 screenshot is ~10 MB (fp32 embedding + PNG).  Hold the 16-image
+ * request limit, or an agent with 4+ screenshots re-encodes all of them each turn. */
+#define SERVER_IMAGE_CACHE_BYTES (192u * 1024u * 1024u)
 
 typedef struct {
     uint8_t *encoded;
