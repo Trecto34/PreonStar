@@ -104,14 +104,38 @@ void main(void) {
 
         vec4 vv = vec4(cache_v[kv_base]);
 
-        float mn0 = max(m0, s0); float a0 = exp2(m0 - mn0); float p0 = exp2(s0 - mn0);
-        o0 = o0 * a0 + vv * p0; l0 = l0 * a0 + p0; m0 = mn0;
+        if (s0 > m0) {
+            float a0 = exp2(m0 - s0);
+            o0 = fma(o0, vec4(a0), vv);
+            l0 = fma(l0, a0, 1.0);
+            m0 = s0;
+        } else {
+            float p0 = exp2(s0 - m0);
+            o0 = fma(vv, vec4(p0), o0);
+            l0 += p0;
+        }
 
-        float mn1 = max(m1, s1); float a1 = exp2(m1 - mn1); float p1 = exp2(s1 - mn1);
-        o1 = o1 * a1 + vv * p1; l1 = l1 * a1 + p1; m1 = mn1;
+        if (s1 > m1) {
+            float a1 = exp2(m1 - s1);
+            o1 = fma(o1, vec4(a1), vv);
+            l1 = fma(l1, a1, 1.0);
+            m1 = s1;
+        } else {
+            float p1 = exp2(s1 - m1);
+            o1 = fma(vv, vec4(p1), o1);
+            l1 += p1;
+        }
 
-        float mn2 = max(m2, s2); float a2 = exp2(m2 - mn2); float p2 = exp2(s2 - mn2);
-        o2 = o2 * a2 + vv * p2; l2 = l2 * a2 + p2; m2 = mn2;
+        if (s2 > m2) {
+            float a2 = exp2(m2 - s2);
+            o2 = fma(o2, vec4(a2), vv);
+            l2 = fma(l2, a2, 1.0);
+            m2 = s2;
+        } else {
+            float p2 = exp2(s2 - m2);
+            o2 = fma(vv, vec4(p2), o2);
+            l2 += p2;
+        }
     }
 
     if (lane == 0u) {
