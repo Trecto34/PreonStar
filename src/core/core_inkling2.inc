@@ -313,6 +313,7 @@ typedef struct {
     p36_gpu_tensor *bank_normed;       /* [4, prefill_cap, n_embd] */
     p36_gpu_tensor *msg_buf;           /* [4, prefill_cap, n_embd] */
     p36_gpu_tensor *msg_view[4];
+    p36_gpu_tensor *msg_view_12;       /* [2, prefill_cap, n_embd] view of slices 1..2 */
     p36_gpu_tensor *attn_in_buf;       /* [3, prefill_cap, n_embd] */
     p36_gpu_tensor *attn_in_view[3];
     p36_gpu_tensor *ctrl_in;           /* [prefill_cap, 2 * n_embd] */
@@ -372,6 +373,7 @@ static void p36_inkling2_vulkan_runtime_free(p36_vulkan_runtime *rt) {
             p36_gpu_tensor_free(ink->msg_view[i]);
             p36_gpu_tensor_free(ink->ctrl_out[i]);
         }
+        p36_gpu_tensor_free(ink->msg_view_12);
         for (int i = 0; i < 3; i++) {
             p36_gpu_tensor_free(ink->attn_in_view[i]);
             p36_gpu_tensor_free(ink->ctrl_h[i]);
@@ -505,6 +507,8 @@ static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint
         ink->ctrl_out[i] = p36_gpu_tensor_view(ink->ctrl_out_buf, (uint64_t)i * tok_embd_bytes, tok_embd_bytes);
         if (!ink->msg_view[i] || !ink->ctrl_out[i]) goto fail;
     }
+    ink->msg_view_12 = p36_gpu_tensor_view(ink->msg_buf, tok_embd_bytes, 2u * tok_embd_bytes);
+    if (!ink->msg_view_12) goto fail;
     for (int i = 0; i < 3; i++) {
         ink->attn_in_view[i] = p36_gpu_tensor_view(ink->attn_in_buf, (uint64_t)i * tok_embd_bytes, tok_embd_bytes);
         ink->ctrl_h[i] = p36_gpu_tensor_view(ink->ctrl_h_buf, (uint64_t)i * h_slice_bytes, h_slice_bytes);
@@ -686,7 +690,7 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                                                     state_stride, state_stride, 0xffffffffu), "loop_msg3");
                 INK_CHK(p36_gpu_inkling2_mix_tensor(ink->bank_normed, ink->cur, m->map, m->size,
                                                     w->loop_kv_res_query->abs_offset, w->loop_kv_res_query->bytes,
-                                                    ink->msg_view[1], n_tok, D, bank_n, 0, 2, row,
+                                                    ink->msg_view_12, n_tok, D, bank_n, 0, 2, row,
                                                     state_stride, state_stride, 0xffffffffu), "loop_msg12");
             }
         }
@@ -727,17 +731,18 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                     /* Fused 3-way Q/K/V loop controllers: 2 dispatches instead of 6! (-96 disp/tok) */
                     uint32_t cur_str = is_swa ? 0u : state_stride;
                     uint32_t h_str = ink->prefill_cap * 64u;
+                    const p36_gpu_tensor *ctrl_cur = is_swa ? inp[0] : ink->attn_in_buf;
                     INK_CHK(p36_gpu_inkling2_control_prep_down3_tensor(
                                 ink->ctrl_h_buf, m->map, m->size,
                                 l->loop_down[0]->abs_offset, l->loop_down[1]->abs_offset, l->loop_down[2]->abs_offset,
-                                inp[0], ink->msg_buf, D, hp->loop_gate_rank,
+                                ctrl_cur, ink->msg_buf, D, hp->loop_gate_rank,
                                 cur_str, state_stride, h_str), "ctrl_pd3");
                     INK_CHK(p36_gpu_inkling2_control_gate3_tensor(
                                 ink->ctrl_out_buf, m->map, m->size,
                                 l->loop_forget[0]->abs_offset, l->loop_gain[0]->abs_offset,
                                 l->loop_forget[1]->abs_offset, l->loop_gain[1]->abs_offset,
                                 l->loop_forget[2]->abs_offset, l->loop_gain[2]->abs_offset,
-                                ink->ctrl_h_buf, inp[0], ink->msg_buf, D, hp->loop_gate_rank,
+                                ink->ctrl_h_buf, ctrl_cur, ink->msg_buf, D, hp->loop_gate_rank,
                                 cur_str, state_stride, h_str, state_stride), "ctrl_g3");
                     inp[0] = ink->ctrl_out[0];
                     inp[1] = ink->ctrl_out[1];
