@@ -901,6 +901,9 @@ p36-agent: p36_agent.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p3
 p36-eval: p36_eval.o p36_eval_cases.o p36_help.o p36_ssd.o p36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ p36_eval.o p36_eval_cases.o p36_help.o p36_ssd.o p36_prompt_prefix.o $(CORE_OBJS) $(GPU_LDLIBS)
 
+p36-perplexity: p36_perplexity.o p36_ssd.o p36_prompt_prefix.o $(CORE_OBJS)
+	$(CC) $(GPU_CFLAGS) -o $@ p36_perplexity.o p36_ssd.o p36_prompt_prefix.o $(CORE_OBJS) $(GPU_LDLIBS)
+
 p36_test: p36_test.o rax.o p36_ssd.o p36_prompt_prefix.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ p36_test.o rax.o p36_ssd.o p36_prompt_prefix.o $(CORE_OBJS) $(GPU_LDLIBS)
 
@@ -1400,7 +1403,7 @@ p36_agent_test_metal: p36_agent_test_metal.o p36_help.o p36_kvstore.o p36_ssd.o 
 	$(CC) $(METAL_LDFLAGS) -o $@ p36_agent_test_metal.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o $(METAL_CORE_OBJS) $(METAL_LDLIBS)
 
 clean:
-	rm -f p36 p36-server p36-bench p36-agent p36-eval p36_test p36_reference_test p36_llama_test p36_agent_test p36_agent_test_metal $(SAMPLING_TEST) tests/test_sampling.o tests/test_prompt_prefix tests/test_quality_api gguf-tools/quality-testing/score_openrouter gguf-tools/quality-testing/score_openrouter.o *.o $(VULKAN_SHADERS)
+	rm -f p36 p36-server p36-perplexity p36-bench p36-agent p36-eval p36_test p36_reference_test p36_llama_test p36_agent_test p36_agent_test_metal $(SAMPLING_TEST) tests/test_sampling.o tests/test_prompt_prefix tests/test_quality_api gguf-tools/quality-testing/score_openrouter gguf-tools/quality-testing/score_openrouter.o *.o $(VULKAN_SHADERS)
 
 p36_prompt_prefix.o: p36_prompt_prefix.c p36_prompt_prefix.h p36.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ p36_prompt_prefix.c

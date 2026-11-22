@@ -1385,3 +1385,98 @@ int p36_compare_prefill_layers(p36_engine *p36_e,
     (void)other_logits;
     return p36_unsupported_runtime(err, errlen);
 }
+
+/* Teacher-forced scoring for perplexity.  Runs tokens[0..len) through the
+ * batched prefill graph with logits for every row, and for each position
+ * p in [first, len) writes the negative log-likelihood of tokens[p] given
+ * tokens[0..p), the argmax token, and the argmax probability.  Output arrays
+ * hold len - first entries (any may be NULL except nll_out).  The session is
+ * invalidated before and after: this is a measurement path, not a cache. */
+int p36_session_score_tokens(p36_session *s, const p36_tokens *tokens, int first,
+                             float *nll_out, int *argmax_out, float *pmax_out,
+                             char *err, size_t errlen) {
+    if (!s || !tokens || !nll_out || first < 1 || first >= tokens->len) {
+        if (err && errlen) snprintf(err, errlen, "bad score arguments");
+        return 1;
+    }
+#ifndef P36_NO_GPU
+    if (!p36_engine_uses_vulkan_runtime(s->engine)) {
+        if (err && errlen) snprintf(err, errlen, "scoring needs the Vulkan backend");
+        return 1;
+    }
+    p36_engine *e = s->engine;
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    const uint32_t n_vocab = P36_N_VOCAB;
+    uint32_t stride = n_vocab;
+    if (e->variant == P36_VARIANT_INKLING2_LOOP && e->ink_hparams) {
+        stride = ((const p36_inkling2_hparams *)e->ink_hparams)->n_vocab_padded;
+    }
+    const uint32_t cap = rt ? rt->prefill_cap : 0u;
+    if (!cap) {
+        if (err && errlen) snprintf(err, errlen, "no Vulkan runtime");
+        return 1;
+    }
+    p36_gpu_tensor *all = p36_gpu_tensor_alloc_scratch((uint64_t)cap * stride * sizeof(float));
+    float *row = malloc((size_t)stride * sizeof(float) * cap);
+    if (!all || !row) {
+        p36_gpu_tensor_free(all);
+        free(row);
+        if (err && errlen) snprintf(err, errlen, "out of memory for %u-row logits", cap);
+        return 1;
+    }
+    int rc = 0;
+    p36_session_invalidate(s);
+    p36_gpu_stream_expert_cache_reset_route_hotness();
+    for (int i = 0; i < tokens->len && rc == 0; ) {
+        int n = tokens->len - i;
+        if (n > (int)cap) n = (int)cap;
+        /* Row r predicts tokens[i + r + 1]; only keep rows feeding [first, len). */
+        int r0 = first - 1 - i;
+        if (r0 < 0) r0 = 0;
+        int r1 = tokens->len - 1 - i;      /* exclusive */
+        if (r1 > n) r1 = n;
+        const bool want = r0 < r1;
+        if (!p36_session_reserve_kv(s, (uint32_t)(i + n), (uint32_t)s->checkpoint.len) ||
+            !p36_forward_tokens_vulkan_into(s, tokens->v + i, NULL, NULL, (uint32_t)n,
+                                            (uint32_t)i, want ? all : NULL, want)) {
+            if (err && errlen) snprintf(err, errlen, "score forward failed at token %d", i);
+            rc = 1;
+            break;
+        }
+        for (int j = 0; j < n; j++) p36_tokens_push(&s->checkpoint, tokens->v[i + j]);
+        s->checkpoint_valid = true;
+        if (want) {
+            if (!p36_gpu_tensor_read(all, (uint64_t)r0 * stride * sizeof(float), row,
+                                     (uint64_t)(r1 - r0) * stride * sizeof(float))) {
+                if (err && errlen) snprintf(err, errlen, "logits readback failed");
+                rc = 1;
+                break;
+            }
+            for (int r = r0; r < r1; r++) {
+                const float *lg = row + (size_t)(r - r0) * stride;
+                const int target = tokens->v[i + r + 1];
+                float mx = -INFINITY;
+                int am = 0;
+                for (uint32_t k = 0; k < n_vocab; k++) if (lg[k] > mx) { mx = lg[k]; am = (int)k; }
+                double sum = 0.0;
+                for (uint32_t k = 0; k < n_vocab; k++) sum += exp((double)lg[k] - mx);
+                const double lse = (double)mx + log(sum);
+                const int o = i + r + 1 - first;
+                nll_out[o] = (target >= 0 && (uint32_t)target < n_vocab)
+                    ? (float)(lse - lg[target]) : NAN;
+                if (argmax_out) argmax_out[o] = am;
+                if (pmax_out) pmax_out[o] = (float)exp((double)mx - lse);
+            }
+        }
+        i += n;
+    }
+    p36_gpu_tensor_free(all);
+    free(row);
+    p36_session_invalidate(s);
+    return rc;
+#else
+    (void)argmax_out;
+    (void)pmax_out;
+    return p36_unsupported_runtime(err, errlen);
+#endif
+}
