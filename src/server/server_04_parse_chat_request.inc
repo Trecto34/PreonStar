@@ -145,6 +145,13 @@ static bool parse_chat_request(p36_engine *e, server *s, const char *body, int d
                 free(key);
                 goto bad;
             }
+        } else if (!strcmp(key, "cache_prompt")) {
+            bool on = true;
+            if (!json_bool(&p, &on)) {
+                free(key);
+                goto bad;
+            }
+            r->cache_prompt_off = !on;
         } else if (!strcmp(key, "stream")) {
             if (!json_bool(&p, &r->stream)) {
                 free(key);
@@ -547,6 +554,13 @@ static bool parse_responses_request(p36_engine *e, server *s, const char *body,
                 free(key);
                 goto bad;
             }
+        } else if (!strcmp(key, "cache_prompt")) {
+            bool on = true;
+            if (!json_bool(&p, &on)) {
+                free(key);
+                goto bad;
+            }
+            r->cache_prompt_off = !on;
         } else if (!strcmp(key, "stream")) {
             if (!json_bool(&p, &r->stream)) {
                 free(key);

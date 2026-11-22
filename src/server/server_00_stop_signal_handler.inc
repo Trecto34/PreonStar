@@ -844,6 +844,7 @@ typedef struct {
     bool stream;
     bool stream_include_usage;
     bool ignore_eos;
+    bool cache_prompt_off;     /* "cache_prompt": false: no prefix reuse, same answer whatever ran before */
     p36_think_mode think_mode;
     int thinking_budget;
     /* Agent-control extensions (chat only, all off by default). */

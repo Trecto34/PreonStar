@@ -28,6 +28,14 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         p36_session_invalidate(slot->session);
         pthread_mutex_unlock(&s->inference_mu);
     }
+    /* Reused prefix KV was computed in another batch: its last bits differ, and a long
+     * greedy answer can follow another path.  Benchmarks ask for a clean start. */
+    if (j->req.cache_prompt_off) {
+        pthread_mutex_lock(&s->inference_mu);
+        p36_session_invalidate(slot->session);
+        pthread_mutex_unlock(&s->inference_mu);
+    }
+    const bool kv_on = s->kv.enabled && !j->req.cache_prompt_off;
     const int old_pos = p36_session_pos(slot->session);
     const int common = p36_session_common_prefix(slot->session, &j->req.prompt);
     trace_cache_diag cache_diag = {0};
@@ -41,7 +49,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
     const char *cache_source = cached > 0 ? "memory-token" : "none";
     int disk_cached = 0;
     char *disk_cache_path = NULL;
-    if (cached == 0) {
+    if (cached == 0 && !j->req.cache_prompt_off) {
         int text_cached = live_text_prefix_prompt(s, slot, &j->req, &effective_prompt);
         if (text_cached > 0) {
             cached = text_cached;
@@ -55,15 +63,15 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         }
     }
     if (cached == 0) slot->continued_last_store_tokens = 0;
-    if (!multimodal && s->kv.enabled && cached == 0 && old_pos >= s->kv.opt.min_tokens) {
+    if (!multimodal && kv_on && cached == 0 && old_pos >= s->kv.opt.min_tokens) {
         /* Loading a disk snapshot replaces the resident slot. Persist the
          * current checkpoint first, otherwise a cache hit for an older prefix
          * would silently discard the newer conversation state. */
         server_kv_store_current(s, slot, "evict");
     }
-    const int sys_len = (!multimodal && s->kv.enabled && s->kv.opt.system_checkpoint &&
+    const int sys_len = (!multimodal && kv_on && s->kv.opt.system_checkpoint &&
                          j->req.kind == REQ_CHAT) ? request_system_boundary(s, &j->req) : 0;
-    j->req.sys_ckpt.enabled = s->kv.enabled && s->kv.opt.system_checkpoint && j->req.kind == REQ_CHAT;
+    j->req.sys_ckpt.enabled = kv_on && s->kv.opt.system_checkpoint && j->req.kind == REQ_CHAT;
     j->req.sys_ckpt.tokens = sys_len;
     if (!multimodal && cached == 0) {
         const double restore_t0 = now_sec();
@@ -112,7 +120,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
      * then keep going (same forward-only pattern as the cold store below).  A
      * conversation that restored anything from disk or memory skips this. */
     int sys_built_len = 0;
-    if (cached == 0 && sys_len > 0 && s->kv.enabled && sys_len >= s->kv.opt.min_tokens &&
+    if (cached == 0 && sys_len > 0 && kv_on && sys_len >= s->kv.opt.min_tokens &&
         sys_len < prompt_for_sync->len &&
         prompt_for_sync == &j->req.prompt)
     {
@@ -137,7 +145,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
 
     int cold_store_len = 0;
     if (!multimodal && cached == 0 &&
-        s->kv.enabled &&
+        kv_on &&
         prompt_for_sync->len >= s->kv.opt.min_tokens &&
         s->kv.opt.cold_max_tokens > 0 &&
         prompt_for_sync->len <= s->kv.opt.cold_max_tokens)
@@ -148,7 +156,7 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         if (sys_built_len && cold_store_len <= sys_built_len) cold_store_len = 0;
     }
 
-    if (s->kv.enabled &&
+    if (kv_on &&
         cold_store_len >= s->kv.opt.min_tokens &&
         cold_store_len < prompt_for_sync->len)
     {
