@@ -1552,7 +1552,9 @@ static bool p36_forward_tokens_vulkan_into(p36_session *s,
 }
 
 static bool p36_vulkan_update_last_h(p36_vulkan_runtime *rt, uint32_t row) {
-    if (!rt || !rt->last_h) return false;
+    if (!rt) return false;
+    if (rt->ink) return true;
+    if (!rt->last_h) return false;
     if (p36_gpu_tensor_copy(rt->last_h,
                             0,
                             rt->norm,

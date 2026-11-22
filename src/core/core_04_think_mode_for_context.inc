@@ -148,12 +148,13 @@ p36_context_memory p36_context_memory_estimate_configured(
         if (g_p36_shape.variant == P36_VARIANT_INKLING2_LOOP) {
             uint64_t full_layers = 8ull;
             uint64_t swa_layers = 40ull;
-            uint64_t swa_cap = 2048ull;
+            uint64_t swa_cap = 1024ull;
             uint64_t kv_row = 1024ull * sizeof(uint16_t);
             uint64_t conv_per_layer = (2ull * 3ull * 1024ull + 2ull * 3ull * 2304ull) * sizeof(float);
             m.raw_bytes = full_layers * (uint64_t)ctx_size * (2ull * kv_row);
             m.compressed_bytes = swa_layers * swa_cap * (2ull * kv_row) + 48ull * conv_per_layer;
-            m.scratch_bytes = (uint64_t)m.prefill_cap * 195328ull + 200058ull * sizeof(float);
+            /* Decode keeps ~1 MiB permanent scratch; prefill lazily aliases ~234 MiB at cap=1024. */
+            m.scratch_bytes = (uint64_t)m.prefill_cap * 240000ull + 201024ull * sizeof(float);
         } else {
             uint64_t full_layers = P36_N_LAYER / P36_FULL_ATTENTION_INTERVAL;
             uint64_t recurrent_layers = P36_N_LAYER - full_layers;

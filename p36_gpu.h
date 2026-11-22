@@ -1235,6 +1235,8 @@ int p36_gpu_inkling2_attn_tensor(
         const p36_gpu_tensor *gate,
         const p36_gpu_tensor *cache_k,
         const p36_gpu_tensor *cache_v,
+        const p36_gpu_tensor *new_k,
+        const p36_gpu_tensor *new_v,
         uint32_t              n_head,
         uint32_t              n_head_kv,
         uint32_t              n_tok,

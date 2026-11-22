@@ -26,6 +26,8 @@ layout(set = 0, binding = 4) readonly buffer GateBuf { vec4 gate_buf[]; };
 layout(set = 0, binding = 5) readonly buffer CacheK { f16vec4 cache_k[]; };
 layout(set = 0, binding = 6) readonly buffer CacheV { f16vec4 cache_v[]; };
 layout(set = 0, binding = 7) writeonly buffer OutBuf { vec4 out_buf[]; };
+layout(set = 0, binding = 8) readonly buffer NewK { f16vec4 new_k[]; };
+layout(set = 0, binding = 9) readonly buffer NewV { f16vec4 new_v[]; };
 
 layout(push_constant) uniform Push {
     uint n_head;
@@ -114,10 +116,16 @@ void main(void) {
             uint row = hw + r * 8u;
             uint k_idx = kb + row;
             if (k_idx < k_end_tile) {
-                uint slot = (pc.is_swa != 0u) ? (k_idx & mask) : k_idx;
-                uint kv_base = (slot * pc.n_head_kv + kvh) * 32u + lane;
-                sh_k[row][lane] = cache_k[kv_base];
-                sh_v[row][lane] = cache_v[kv_base];
+                if (pc.is_swa != 0u && k_idx >= pc.pos0) {
+                    uint kv_base = ((k_idx - pc.pos0) * pc.n_head_kv + kvh) * 32u + lane;
+                    sh_k[row][lane] = new_k[kv_base];
+                    sh_v[row][lane] = new_v[kv_base];
+                } else {
+                    uint slot = (pc.is_swa != 0u) ? (k_idx & mask) : k_idx;
+                    uint kv_base = (slot * pc.n_head_kv + kvh) * 32u + lane;
+                    sh_k[row][lane] = cache_k[kv_base];
+                    sh_v[row][lane] = cache_v[kv_base];
+                }
             }
         }
         uint d_base = (q_pos0 >= kb + 31u) ? (q_pos0 - kb - 31u) : 0u;

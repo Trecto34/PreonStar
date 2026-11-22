@@ -63,7 +63,7 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     p36_vk_ink_softcap        = P36_VK_KERNEL("vulkan/inkling2_softcap.spv", 1, 12, 1u << 0);
     p36_vk_ink_attn_decode    = P36_VK_KERNEL("vulkan/inkling2_attn_decode.spv", 9, 32, (1u << 7) | (1u << 8));
     p36_vk_ink_attn_combine   = P36_VK_KERNEL("vulkan/inkling2_attn_combine.spv", 3, 4, 1u << 2);
-    p36_vk_ink_attn_prefill   = P36_VK_KERNEL("vulkan/inkling2_attn_prefill.spv", 8, 32, 1u << 7);
+    p36_vk_ink_attn_prefill   = P36_VK_KERNEL("vulkan/inkling2_attn_prefill.spv", 10, 32, 1u << 7);
     p36_vk_ink_gu_dec_iq2xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xxs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_dec_iq2xs   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_dec_iq2s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2s.spv", 6, 32, 1u << 3);
@@ -716,6 +716,8 @@ int p36_gpu_inkling2_attn_tensor(
         const p36_gpu_tensor *gate,
         const p36_gpu_tensor *cache_k,
         const p36_gpu_tensor *cache_v,
+        const p36_gpu_tensor *new_k,
+        const p36_gpu_tensor *new_v,
         uint32_t              n_head,
         uint32_t              n_head_kv,
         uint32_t              n_tok,
@@ -732,7 +734,10 @@ int p36_gpu_inkling2_attn_tensor(
     if (!rb_src) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
     p36_gpu_tensor *rb_t = p36_vk_weight_get_unlocked(rb_src, rel_bias_bytes);
     if (!rb_t) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
-    const p36_gpu_tensor *bindings[8] = { q, r, rb_t, sinks, gate, cache_k, cache_v, out };
+    const p36_gpu_tensor *bindings[10] = {
+        q, r, rb_t, sinks, gate, cache_k, cache_v, out,
+        new_k ? new_k : cache_k, new_v ? new_v : cache_v
+    };
     if (n_tok == 1u) {
         uint32_t k_len = (is_swa && pos0 >= rel_extent) ? rel_extent : (pos0 + 1u);
         uint32_t n_splits = (k_len >= 128u) ? ((k_len + 63u) / 64u) : 1u;

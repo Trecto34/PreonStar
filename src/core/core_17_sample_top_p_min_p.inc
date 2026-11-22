@@ -918,6 +918,7 @@ int p36_engine_generate_argmax(p36_engine *e, const p36_tokens *prompt,
             t_decode1 > t_decode0 ? (double)generated / (t_decode1 - t_decode0) : 0.0);
     rc = 0;
 done:
+    if (rc != 0 && err[0]) fprintf(stderr, "p36: %s\n", err);
     p36_session_free(s);
     return rc;
 }

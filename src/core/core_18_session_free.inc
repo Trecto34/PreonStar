@@ -30,7 +30,15 @@ int p36_session_power(p36_session *s) {
 static bool p36_session_reserve_kv(p36_session *s, uint32_t need,
                                    uint32_t rows) {
     if (!s || need > (uint32_t)s->ctx_size) return false;
-    if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) return true;
+    if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) {
+#ifdef P36_NO_GPU
+        return false;
+#else
+        return p36_inkling2_vulkan_runtime_reserve_kv(
+            (p36_vulkan_runtime *)s->runtime, need,
+            (uint32_t)s->ctx_size, rows);
+#endif
+    }
 #ifdef P36_NO_GPU
     (void)rows;
 #endif
@@ -96,6 +104,13 @@ static int p36_session_prefill_range(p36_session *s, const p36_tokens *prompt, i
         p36_gpu_stream_expert_cache_reset_route_hotness();
     }
 #endif
+    /* Reserve KV for the full incoming prompt upfront so multi-chunk prefills
+     * grow once (0 copies when starting from empty) instead of per-chunk. */
+    if (prompt->len > start &&
+        !p36_session_reserve_kv(s, (uint32_t)prompt->len, (uint32_t)s->checkpoint.len)) {
+        if (err && errlen) snprintf(err, errlen, "failed to grow KV cache");
+        return 1;
+    }
     while (i < prompt->len) {
         if (s->cancel && s->cancel(s->cancel_ud)) {
             if (err && errlen) snprintf(err, errlen, "interrupted");

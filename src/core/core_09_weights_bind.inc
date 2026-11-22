@@ -1017,6 +1017,19 @@ static void p36_vulkan_prewarm_weights(const p36_engine *e) {
         if (p36_vulkan_prewarm_skip_tensor(e, t)) continue;
         (void)p36_gpu_cache_model_range(e->model.map, e->model.size, t->abs_offset, t->bytes, NULL);
         __atomic_add_fetch(&reader.staged, t->bytes, __ATOMIC_RELAXED);
+#ifdef MADV_DONTNEED
+        {
+            uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+            uintptr_t start = ((uintptr_t)e->model.map + (uintptr_t)t->abs_offset + page - 1u) & ~(page - 1u);
+            uintptr_t end = ((uintptr_t)e->model.map + (uintptr_t)t->abs_offset + (uintptr_t)t->bytes) & ~(page - 1u);
+            if (end > start) (void)madvise((void *)start, (size_t)(end - start), MADV_DONTNEED);
+        }
+#endif
+#ifdef POSIX_FADV_DONTNEED
+        if (e->model.fd >= 0 && t->bytes >= (1u << 20)) {
+            (void)posix_fadvise(e->model.fd, (off_t)t->abs_offset, (off_t)t->bytes, POSIX_FADV_DONTNEED);
+        }
+#endif
     }
     if (threaded) {
         __atomic_store_n(&reader.staged, UINT64_MAX, __ATOMIC_RELAXED);

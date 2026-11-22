@@ -297,6 +297,7 @@ static bool p36_gpu_tensor_matmul_dense_q8_scaled(const p36_model *m,
 static bool p36_inkling2_vulkan_runtime_reset(p36_vulkan_runtime *rt);
 static void p36_inkling2_vulkan_runtime_free(p36_vulkan_runtime *rt);
 static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint32_t prefill_cap);
+static bool p36_inkling2_vulkan_runtime_reserve_kv(p36_vulkan_runtime *rt, uint32_t need, uint32_t limit, uint32_t rows);
 
 static bool p36_vulkan_runtime_reset(p36_vulkan_runtime *rt) {
     uint64_t state_dim = (uint64_t)P36_N_SSM_STATE * P36_N_SSM_STATE * P36_N_SSM_DT_RANK;
