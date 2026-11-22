@@ -1107,6 +1107,16 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                                                        q8_in[0], q8_in[1], q8_in[2],
                                                        D, Q, KV, KV, hp->n_head * hp->n_relative)) {
             /* Fused 0%-tail Q4_K decode: Q + K + V + rel in 1 dispatch! (-144 disp/tok) */
+        } else if (n_tok == 1u &&
+            l->attn_q->type == P36_TENSOR_Q6_K && l->attn_k->type == P36_TENSOR_Q6_K &&
+            l->attn_v->type == P36_TENSOR_Q6_K && l->attn_rel->type == P36_TENSOR_Q6_K &&
+            p36_gpu_inkling2_qkv_rel_q6k_decode_tensor(sc->q_buf, sc->k_buf, sc->v_buf, sc->r_buf,
+                                                       m->map, m->size,
+                                                       l->attn_q->abs_offset, l->attn_k->abs_offset,
+                                                       l->attn_v->abs_offset, l->attn_rel->abs_offset,
+                                                       q8_in[0], q8_in[1], q8_in[2],
+                                                       D, Q, KV, KV, hp->n_head * hp->n_relative)) {
+            /* Fused 0%-tail Q6_K decode: Q + K + V + rel in 1 dispatch! (-144 disp/tok) */
         } else {
             if (n_tok == 1u &&
                 l->attn_q->type == P36_TENSOR_Q8_0 && l->attn_gate->type == P36_TENSOR_Q8_0 &&

@@ -1,0 +1,134 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Fused Q6_K decode for Inkling-2-Mini attention projections: Q + K + V + rel in ONE dispatch!
+ * 64 threads = 4 sub-groups x 16 lanes/sub-group, 2 rows/sub-group -> 8 output rows/WG!
+ * Reuses unpacked Q8_K activations (yd, qsum, av0..3) across 2 rows -> halves Q8_K loads & ALU.
+ * Uses 16-bit aligned weight loads (210 B = 105 u16/block, zero unaligned load_u32 branches).
+ * Eliminates 144 dispatches/tok (48 logical layers x 3 saved dispatches) on MiniPlus-R2.
+ * Dispatch: ((out_q + out_k + out_v + out_r) / 8, 1, 1) = (688, 1, 1). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Wq { uint16_t wq[]; };
+layout(set = 0, binding = 1) readonly buffer Wk { uint16_t wk[]; };
+layout(set = 0, binding = 2) readonly buffer Wv { uint16_t wv[]; };
+layout(set = 0, binding = 3) readonly buffer Wr { uint16_t wr[]; };
+layout(set = 0, binding = 4) readonly buffer Q8_0 { uint q8_0[]; };
+layout(set = 0, binding = 5) readonly buffer Q8_1 { uint q8_1[]; };
+layout(set = 0, binding = 6) readonly buffer Q8_2 { uint q8_2[]; };
+layout(set = 0, binding = 7) writeonly buffer Yq { float yq[]; };
+layout(set = 0, binding = 8) writeonly buffer Yk { float yk[]; };
+layout(set = 0, binding = 9) writeonly buffer Yv { float yv[]; };
+layout(set = 0, binding = 10) writeonly buffer Yr { float yr[]; };
+
+layout(push_constant) uniform Push {
+    uint blocks;     /* 9 */
+    uint row_u16;    /* 9 * 105 = 945 */
+    uint wg_q;       /* out_q / 8 = 384 */
+    uint wg_qk;      /* (out_q + out_k) / 8 = 512 */
+    uint wg_qkv;     /* (out_q + out_k + out_v) / 8 = 640 */
+} pc;
+
+const uint Q8K_WORDS = 74u;
+const uint Q6K_U16 = 105u;
+
+float sum16(float v) {
+    v += subgroupShuffleXor(v, 8u);
+    v += subgroupShuffleXor(v, 4u);
+    v += subgroupShuffleXor(v, 2u);
+    v += subgroupShuffleXor(v, 1u);
+    return v;
+}
+
+#define Q6K_DOT4(WBUF, QLB, QHB, IDX2, AV, QDOT) do { \
+    uint ql = uint(WBUF[QLB + (IDX2)]) | (uint(WBUF[QLB + (IDX2) + 1u]) << 16u); \
+    uint qh = uint(WBUF[QHB + (IDX2)]) | (uint(WBUF[QHB + (IDX2) + 1u]) << 16u); \
+    uint low = (ql >> ql_shift) & 0x0f0f0f0fu; \
+    uint packed = low | (((qh >> qh_shift) & 0x03030303u) << 4u); \
+    vec4 wv = vec4(float(packed & 255u), float((packed >> 8u) & 255u), \
+                   float((packed >> 16u) & 255u), float(packed >> 24u)); \
+    QDOT += dot(wv, AV); \
+} while (false)
+
+#define Q6K_ROW_PART(WBUF, WBASE, AV0, AV1, AV2, AV3, QSUM, PART_OUT) do { \
+    uint qlb = (WBASE) + ql_u16; \
+    uint qhb = (WBASE) + qh_u16; \
+    float qdot = 0.0; \
+    Q6K_DOT4(WBUF, qlb, qhb, 0u, AV0, qdot); \
+    Q6K_DOT4(WBUF, qlb, qhb, 2u, AV1, qdot); \
+    Q6K_DOT4(WBUF, qlb, qhb, 4u, AV2, qdot); \
+    Q6K_DOT4(WBUF, qlb, qhb, 6u, AV3, qdot); \
+    float d = unpackHalf2x16(uint(WBUF[(WBASE) + 104u])).x; \
+    int sc = bitfieldExtract(int(WBUF[(WBASE) + sc_u16]), sc_bit, 8); \
+    PART_OUT = (d * float(sc)) * (qdot - 32.0 * QSUM); \
+} while (false)
+
+#define RUN_Q6K2(WBUF, Q8BUF, YBUF, ROW0_EXPR) do { \
+    uint row0 = (ROW0_EXPR); \
+    uint row0_w0 = row0 * pc.row_u16; \
+    uint row1_w0 = row0_w0 + pc.row_u16; \
+    float acc0 = 0.0; \
+    float acc1 = 0.0; \
+    for (uint b = 0u; b < pc.blocks; b++) { \
+        uint qbase = b * Q8K_WORDS; \
+        float yd = uintBitsToFloat(Q8BUF[qbase]); \
+        float qsum = float(bitfieldExtract(int(Q8BUF[qbase + bsum_off]), bsum_bit, 16)); \
+        uint qv0 = Q8BUF[qbase + 2u + 4u * itid + 0u]; \
+        uint qv1 = Q8BUF[qbase + 2u + 4u * itid + 1u]; \
+        uint qv2 = Q8BUF[qbase + 2u + 4u * itid + 2u]; \
+        uint qv3 = Q8BUF[qbase + 2u + 4u * itid + 3u]; \
+        vec4 av0 = vec4(float(bitfieldExtract(int(qv0), 0, 8)), float(bitfieldExtract(int(qv0), 8, 8)), \
+                        float(bitfieldExtract(int(qv0), 16, 8)), float(bitfieldExtract(int(qv0), 24, 8))); \
+        vec4 av1 = vec4(float(bitfieldExtract(int(qv1), 0, 8)), float(bitfieldExtract(int(qv1), 8, 8)), \
+                        float(bitfieldExtract(int(qv1), 16, 8)), float(bitfieldExtract(int(qv1), 24, 8))); \
+        vec4 av2 = vec4(float(bitfieldExtract(int(qv2), 0, 8)), float(bitfieldExtract(int(qv2), 8, 8)), \
+                        float(bitfieldExtract(int(qv2), 16, 8)), float(bitfieldExtract(int(qv2), 24, 8))); \
+        vec4 av3 = vec4(float(bitfieldExtract(int(qv3), 0, 8)), float(bitfieldExtract(int(qv3), 8, 8)), \
+                        float(bitfieldExtract(int(qv3), 16, 8)), float(bitfieldExtract(int(qv3), 24, 8))); \
+        float p0, p1; \
+        Q6K_ROW_PART(WBUF, row0_w0 + Q6K_U16 * b, av0, av1, av2, av3, qsum, p0); \
+        Q6K_ROW_PART(WBUF, row1_w0 + Q6K_U16 * b, av0, av1, av2, av3, qsum, p1); \
+        acc0 = fma(yd, p0, acc0); \
+        acc1 = fma(yd, p1, acc1); \
+    } \
+    acc0 = sum16(acc0); \
+    acc1 = sum16(acc1); \
+    if (itid == 0u) { \
+        YBUF[row0] = acc0; \
+        YBUF[row0 + 1u] = acc1; \
+    } \
+} while (false)
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint r_local = tid >> 4u;
+    uint itid = tid & 15u;
+    uint half_block = itid >> 3u;
+    uint sel = (itid >> 1u) & 3u;
+    uint l0 = (itid & 1u) * 16u;
+    uint ql_u16 = (half_block * 64u + ((sel & 1u) != 0u ? 32u : 0u) + l0) >> 1u;
+    uint qh_u16 = (128u + half_block * 32u + l0) >> 1u;
+    uint ql_shift = (sel >= 2u) ? 4u : 0u;
+    uint qh_shift = 2u * sel;
+    uint sc_u16 = 96u + (itid >> 1u);
+    int sc_bit = int((itid & 1u) * 8u);
+    uint bsum_off = 66u + (itid >> 1u);
+    int bsum_bit = int((itid & 1u) * 16u);
+    uint wg = gl_WorkGroupID.x;
+
+    if (wg < pc.wg_q) {
+        RUN_Q6K2(wq, q8_0, yq, wg * 8u + 2u * r_local);
+    } else if (wg < pc.wg_qk) {
+        RUN_Q6K2(wk, q8_1, yk, (wg - pc.wg_q) * 8u + 2u * r_local);
+    } else if (wg < pc.wg_qkv) {
+        RUN_Q6K2(wv, q8_2, yv, (wg - pc.wg_qk) * 8u + 2u * r_local);
+    } else {
+        RUN_Q6K2(wr, q8_0, yr, (wg - pc.wg_qkv) * 8u + 2u * r_local);
+    }
+}

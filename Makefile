@@ -287,6 +287,7 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_moe_gate_up_gemm_iq3s.spv \
 	vulkan/inkling2_moe_gate_up_gemm_q4k.spv \
 	vulkan/inkling2_qkv_rel_q4k_decode.spv \
+	vulkan/inkling2_qkv_rel_q6k_decode.spv \
 	vulkan/inkling2_wo_q4k_decode.spv
 
 vulkan/inkling2_mix.spv: vulkan/inkling2_mix.comp
@@ -302,6 +303,9 @@ vulkan/inkling2_post_attn_mix.spv: vulkan/inkling2_post_attn_mix.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_qkv_rel_q4k_decode.spv: vulkan/inkling2_qkv_rel_q4k_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+
+vulkan/inkling2_qkv_rel_q6k_decode.spv: vulkan/inkling2_qkv_rel_q6k_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_wo_q4k_decode.spv: vulkan/inkling2_wo_q4k_decode.comp

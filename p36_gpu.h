@@ -1192,6 +1192,26 @@ int p36_gpu_inkling2_qkv_rel_q4k_decode_tensor(
         uint32_t              out_v,
         uint32_t              out_r);
 
+int p36_gpu_inkling2_qkv_rel_q6k_decode_tensor(
+        p36_gpu_tensor       *yq,
+        p36_gpu_tensor       *yk,
+        p36_gpu_tensor       *yv,
+        p36_gpu_tensor       *yr,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              wq_offset,
+        uint64_t              wk_offset,
+        uint64_t              wv_offset,
+        uint64_t              wr_offset,
+        const p36_gpu_tensor *q8_0,
+        const p36_gpu_tensor *q8_1,
+        const p36_gpu_tensor *q8_2,
+        uint32_t              in_dim,
+        uint32_t              out_q,
+        uint32_t              out_k,
+        uint32_t              out_v,
+        uint32_t              out_r);
+
 int p36_gpu_inkling2_wo_q4k_decode_tensor(
         p36_gpu_tensor       *y,
         const void           *model_map,
