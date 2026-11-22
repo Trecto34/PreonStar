@@ -15,7 +15,11 @@
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
+#ifdef P36_MOE_Q4K
+layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
+#else
 layout(set = 0, binding = 0) readonly buffer Weights { uint16_t w[]; };
+#endif
 layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
 layout(set = 0, binding = 2) readonly buffer Tiles { uint tiles[]; };
 layout(set = 0, binding = 3) writeonly buffer Output { float y[]; };
@@ -38,6 +42,7 @@ const uint IQ2XS_U16 = 37u;
 const uint IQ2S_BYTES = 82u;
 const uint IQ3XXS_BYTES = 98u;
 const uint IQ3S_BYTES = 110u;
+const uint Q4K_WORDS = 36u;
 const uint TAB_KSIGNS = 512u;
 const uint TAB_IQ2S = 544u;
 const uint TAB_IQ3S_GRID = 2592u;
@@ -51,9 +56,11 @@ const uint BM = 32u;
 const uint KK = 8u;
 #define P36_SWZ(i) (((i) >> 1u) & 7u)
 
+#ifndef P36_MOE_Q4K
 uint w_u8(uint off) {
     return (uint(w[off >> 1u]) >> (8u * (off & 1u))) & 255u;
 }
+#endif
 
 #ifdef P36_MOE_IQ2XXS
 shared f16vec4 sh_grid0[256];
@@ -136,6 +143,8 @@ void main(void) {
     uint wbase = w_row * pc.blocks * IQ3XXS_BYTES;
 #elif defined(P36_MOE_IQ3S)
     uint wbase = w_row * pc.blocks * IQ3S_BYTES;
+#elif defined(P36_MOE_Q4K)
+    uint wbase = w_row * pc.blocks * Q4K_WORDS;
 #endif
 
     uint bc0 = tid >> 3u;
@@ -269,6 +278,38 @@ void main(void) {
                 uint scb = w_u8(wbb + 106u + (ib32 >> 1u));
                 uint nib = (ib32 & 1u) != 0u ? (scb >> 4u) : (scb & 15u);
                 d_val = unpackHalf2x16(uint(w[wbb >> 1u])).x * float(2u * nib + 1u);
+                write_d = true;
+            }
+        }
+#elif defined(P36_MOE_Q4K)
+        {
+            uint wb = wbase + sb * Q4K_WORDS;
+            vec2 d2 = unpackHalf2x16(w[wb]);
+            uint s0 = w[wb + 1u];
+            uint s1 = w[wb + 2u];
+            uint sc, mn;
+            if (ib32 < 4u) {
+                uint sh = ib32 * 8u;
+                sc = (s0 >> sh) & 63u;
+                mn = (s1 >> sh) & 63u;
+            } else {
+                uint sh = (ib32 - 4u) * 8u;
+                uint s2 = w[wb + 3u];
+                sc = ((s2 >> sh) & 15u) | (((s0 >> (sh + 6u)) & 3u) << 4u);
+                mn = ((s2 >> (sh + 4u)) & 15u) | (((s1 >> (sh + 6u)) & 3u) << 4u);
+            }
+            float ds = d2.x * float(sc);
+            float dm = -d2.y * float(mn);
+            uint nshift = (ib32 & 1u) * 4u;
+            uint qw = wb + 4u + (ib32 >> 1u) * 8u + sub * 2u;
+            uint ql0 = (w[qw + 0u] >> nshift) & 0x0f0f0f0fu;
+            uint ql1 = (w[qw + 1u] >> nshift) & 0x0f0f0f0fu;
+            vec4 q0 = vec4(float(ql0 & 15u), float((ql0 >> 8u) & 15u), float((ql0 >> 16u) & 15u), float((ql0 >> 24u) & 15u));
+            vec4 q1 = vec4(float(ql1 & 15u), float((ql1 >> 8u) & 15u), float((ql1 >> 16u) & 15u), float((ql1 >> 24u) & 15u));
+            v0 = f16vec4(fma(vec4(ds), q0, vec4(dm)));
+            v1 = f16vec4(fma(vec4(ds), q1, vec4(dm)));
+            if (sub == 0u && kb == 0u) {
+                d_val = 1.0;
                 write_d = true;
             }
         }

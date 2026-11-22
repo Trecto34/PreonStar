@@ -279,11 +279,13 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_moe_gate_up_decode_iq2s.spv \
 	vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv \
 	vulkan/inkling2_moe_gate_up_decode_iq3s.spv \
+	vulkan/inkling2_moe_gate_up_decode_q4k.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq2xxs.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq2xs.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq2s.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq3s.spv \
+	vulkan/inkling2_moe_gate_up_gemm_q4k.spv \
 	vulkan/inkling2_qkv_rel_q4k_decode.spv \
 	vulkan/inkling2_wo_q4k_decode.spv
 
@@ -389,6 +391,9 @@ vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv: vulkan/inkling2_moe_gate_up_decod
 vulkan/inkling2_moe_gate_up_decode_iq3s.spv: vulkan/inkling2_moe_gate_up_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3S -o $@ $<
 
+vulkan/inkling2_moe_gate_up_decode_q4k.spv: vulkan/inkling2_moe_gate_up_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q4K -o $@ $<
+
 vulkan/inkling2_moe_gate_up_gemm_iq2xxs.spv: vulkan/inkling2_moe_gate_up_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ2XXS -o $@ $<
 
@@ -403,6 +408,9 @@ vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv: vulkan/inkling2_moe_gate_up_gemm.co
 
 vulkan/inkling2_moe_gate_up_gemm_iq3s.spv: vulkan/inkling2_moe_gate_up_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3S -o $@ $<
+
+vulkan/inkling2_moe_gate_up_gemm_q4k.spv: vulkan/inkling2_moe_gate_up_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q4K -o $@ $<
 
 vulkan/moe_matvec_fast.spv: vulkan/moe_matvec_fast.comp
 	$(GLSLC) -O --target-env=vulkan1.1 -o $@ $<

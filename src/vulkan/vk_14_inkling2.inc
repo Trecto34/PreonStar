@@ -28,11 +28,13 @@ static p36_vk_kernel p36_vk_ink_gu_dec_iq2xs;
 static p36_vk_kernel p36_vk_ink_gu_dec_iq2s;
 static p36_vk_kernel p36_vk_ink_gu_dec_iq3xxs;
 static p36_vk_kernel p36_vk_ink_gu_dec_iq3s;
+static p36_vk_kernel p36_vk_ink_gu_dec_q4k;
 static p36_vk_kernel p36_vk_ink_gu_gemm_iq2xxs;
 static p36_vk_kernel p36_vk_ink_gu_gemm_iq2xs;
 static p36_vk_kernel p36_vk_ink_gu_gemm_iq2s;
 static p36_vk_kernel p36_vk_ink_gu_gemm_iq3xxs;
 static p36_vk_kernel p36_vk_ink_gu_gemm_iq3s;
+static p36_vk_kernel p36_vk_ink_gu_gemm_q4k;
 static p36_vk_kernel p36_vk_ink_down_dec_iq4nl;
 static p36_vk_kernel p36_vk_ink_down_dec_q5_0;
 static p36_vk_kernel p36_vk_ink_down_dec_nvfp4;
@@ -69,11 +71,13 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     p36_vk_ink_gu_dec_iq2s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2s.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_dec_iq3xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_dec_iq3s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3s.spv", 6, 32, 1u << 3);
+    p36_vk_ink_gu_dec_q4k     = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_q4k.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq2xxs = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq2xxs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq2xs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq2xs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq2s   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq2s.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq3xxs = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq3s   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq3s.spv", 6, 32, 1u << 3);
+    p36_vk_ink_gu_gemm_q4k    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_q4k.spv", 6, 32, 1u << 3);
     p36_vk_ink_down_dec_iq4nl = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_iq4nl.spv", 6, 20, 1u << 4);
     p36_vk_ink_down_dec_q5_0  = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_q5_0.spv", 6, 20, 1u << 4);
     p36_vk_ink_down_dec_nvfp4 = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_nvfp4.spv", 6, 20, 1u << 4);
@@ -115,11 +119,13 @@ static void p36_vk_inkling2_cleanup_unlocked(void) {
     p36_vk_kernel_destroy(&p36_vk_ink_gu_dec_iq2s);
     p36_vk_kernel_destroy(&p36_vk_ink_gu_dec_iq3xxs);
     p36_vk_kernel_destroy(&p36_vk_ink_gu_dec_iq3s);
+    p36_vk_kernel_destroy(&p36_vk_ink_gu_dec_q4k);
     p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_iq2xxs);
     p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_iq2xs);
     p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_iq2s);
     p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_iq3xxs);
     p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_iq3s);
+    p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_q4k);
     p36_vk_kernel_destroy(&p36_vk_ink_down_dec_iq4nl);
     p36_vk_kernel_destroy(&p36_vk_ink_down_dec_q5_0);
     p36_vk_kernel_destroy(&p36_vk_ink_down_dec_nvfp4);
@@ -893,6 +899,7 @@ int p36_gpu_inkling2_moe_ffn_tensor(
             case P36_VK_TENSOR_IQ2_S:   gu_k = &p36_vk_ink_gu_dec_iq2s; break;
             case P36_VK_TENSOR_IQ3_XXS: gu_k = &p36_vk_ink_gu_dec_iq3xxs; break;
             case P36_VK_TENSOR_IQ3_S:   gu_k = &p36_vk_ink_gu_dec_iq3s; break;
+            case P36_VK_TENSOR_Q4_K:    gu_k = &p36_vk_ink_gu_dec_q4k; break;
             default: pthread_mutex_unlock(&p36_vk_mu); return 0;
         }
         switch (down_type) {
@@ -941,6 +948,7 @@ int p36_gpu_inkling2_moe_ffn_tensor(
             case P36_VK_TENSOR_IQ2_S:   gu_k = &p36_vk_ink_gu_gemm_iq2s; break;
             case P36_VK_TENSOR_IQ3_XXS: gu_k = &p36_vk_ink_gu_gemm_iq3xxs; break;
             case P36_VK_TENSOR_IQ3_S:   gu_k = &p36_vk_ink_gu_gemm_iq3s; break;
+            case P36_VK_TENSOR_Q4_K:    gu_k = &p36_vk_ink_gu_gemm_q4k; break;
             default: pthread_mutex_unlock(&p36_vk_mu); p36_gpu_tensor_free(tiles); return 0;
         }
         switch (down_type) {
