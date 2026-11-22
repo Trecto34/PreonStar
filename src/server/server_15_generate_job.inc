@@ -278,6 +278,20 @@ static void generate_job(server *s, server_slot *slot, job *j) {
         if (close.len == 1) think_close_id = close.v[0];
         p36_tokens_free(&close);
     }
+    /* Inkling can open a new thinking message after the hard cap closed one.  The cap
+     * closes it again at once, so the reply loops "<think></think>" until max_tokens and
+     * never answers.  Once the budget is spent, a new thinking message becomes text. */
+    int ink_thinking_id = -1, ink_text_id = -1;
+    if (j->req.inkling2 && effective_thinking_budget_hard && effective_thinking_budget > 0) {
+        p36_tokens t = {0};
+        p36_tokenize_rendered_chat(s->engine, "<|content_thinking|>", &t);
+        if (t.len == 1) ink_thinking_id = t.v[0];
+        p36_tokens_free(&t);
+        p36_tokens u = {0};
+        p36_tokenize_rendered_chat(s->engine, "<|content_text|>", &u);
+        if (u.len == 1) ink_text_id = u.v[0];
+        p36_tokens_free(&u);
+    }
     enum {
         INK_OUT_IDLE = 0,
         INK_OUT_AFTER_MSG_MODEL,
@@ -362,6 +376,11 @@ static void generate_job(server *s, server_slot *slot, job *j) {
                 generated_tokens.v, generated_tokens.len, presence_penalty, frequency_penalty,
                 repeat_penalty, &bias);
         else token = p36_session_eos_to_think_close(slot->session, token);
+        if (token >= 0 && token == ink_thinking_id && ink_text_id >= 0 &&
+            thinking_tokens >= effective_thinking_budget) {
+            token = ink_text_id;
+            trace_event(s, trace_id, "thinking budget spent: new thinking message turned into text");
+        }
         if (token < 0) {
             finish = "error";
             snprintf(err, sizeof(err), "failed to select a token");
