@@ -8,11 +8,11 @@
 #extension GL_EXT_control_flow_attributes : require
 
 /* Inkling-2-Mini single-tensor MoE gate_up + SITU decode kernel (100% lane-balanced).
- * 64 threads = 4 output rows x 16 lanes/row (16 lanes cover 1 full 256-superblock,
- * looping i = 0..blocks-1 -> 9 exact iterations, ZERO idle-lane tail, 4x lower VGPRs!).
- * All 4 rows share the same L1-resident activation vector and same expert base.
- * Uses IEEE float sign-bit XOR instead of bvec4/mix.
- * Dispatch: (mid_dim / 4, n_used, 1). */
+ * 64 threads (256 for IQ2_S) = WG_ROWS output rows x 16 lanes/row (9 exact iterations).
+ * Pre-packs uint8 IQ grids into exact fp16 pairs (uvec2/uvec4) in LDS and applies
+ * sign flips via 32-bit XOR on fp16 sign bits + unpackHalf2x16 -> cuts VALU ~3x with
+ * 100% exact F32 accumulation!
+ * Dispatch: (mid_dim / WG_ROWS, n_used, 1). */
 
 #if defined(P36_MOE_IQ2S)
 const uint WG_THREADS = 256u;
@@ -57,8 +57,15 @@ uint w_u8(uint off) {
     return (uint(w[off >> 1u]) >> (8u * (off & 1u))) & 255u;
 }
 
-vec4 neg4(vec4 v, uint m) {
-    return mix(v, -v, bvec4((m & 1u) != 0u, (m & 2u) != 0u, (m & 4u) != 0u, (m & 8u) != 0u));
+uvec2 pack4h(uint u) {
+    vec4 v = vec4(unpack8(u));
+    return uvec2(packHalf2x16(v.xy), packHalf2x16(v.zw));
+}
+
+float dot4h(uvec2 p, uint m, vec4 a) {
+    vec2 w0 = unpackHalf2x16(p.x ^ (((m & 1u) << 15u) | ((m & 2u) << 30u)));
+    vec2 w1 = unpackHalf2x16(p.y ^ (((m & 4u) << 13u) | ((m & 8u) << 28u)));
+    return dot(w0, a.xy) + dot(w1, a.zw);
 }
 
 float sum16(float v) {
@@ -70,17 +77,17 @@ float sum16(float v) {
 }
 
 #ifdef P36_MOE_IQ2XXS
-shared uvec2 sh_grid[256];
+shared uvec4 sh_grid[256];
 #elif defined(P36_MOE_IQ2XS)
-shared uvec2 sh_grid[512];
+shared uvec4 sh_grid[512];
 shared uint sh_ksigns[128];
 #elif defined(P36_MOE_IQ2S)
-shared uvec2 sh_grid[1024];
+shared uvec4 sh_grid[1024];
 #elif defined(P36_MOE_IQ3XXS)
-shared uint sh_grid[256];
+shared uvec2 sh_grid[256];
 shared uint sh_ksigns[128];
 #elif defined(P36_MOE_IQ3S)
-shared uint sh_grid[512];
+shared uvec2 sh_grid[512];
 #endif
 
 void main(void) {
@@ -94,12 +101,12 @@ void main(void) {
 
 #ifdef P36_MOE_IQ2XXS
     for (uint i = tid; i < 256u; i += WG_THREADS) {
-        sh_grid[i] = uvec2(tables[2u * i], tables[2u * i + 1u]);
+        sh_grid[i] = uvec4(pack4h(tables[2u * i]), pack4h(tables[2u * i + 1u]));
     }
     barrier();
 #elif defined(P36_MOE_IQ2XS)
     for (uint i = tid; i < 512u; i += WG_THREADS) {
-        sh_grid[i] = uvec2(tables[TAB_IQ2XS + 2u * i], tables[TAB_IQ2XS + 2u * i + 1u]);
+        sh_grid[i] = uvec4(pack4h(tables[TAB_IQ2XS + 2u * i]), pack4h(tables[TAB_IQ2XS + 2u * i + 1u]));
     }
     if (tid < 32u) {
         uint kw = tables[TAB_KSIGNS + tid];
@@ -111,11 +118,13 @@ void main(void) {
     barrier();
 #elif defined(P36_MOE_IQ2S)
     for (uint i = tid; i < 1024u; i += WG_THREADS) {
-        sh_grid[i] = uvec2(tables[TAB_IQ2S + 2u * i], tables[TAB_IQ2S + 2u * i + 1u]);
+        sh_grid[i] = uvec4(pack4h(tables[TAB_IQ2S + 2u * i]), pack4h(tables[TAB_IQ2S + 2u * i + 1u]));
     }
     barrier();
 #elif defined(P36_MOE_IQ3XXS)
-    for (uint i = tid; i < 256u; i += WG_THREADS) sh_grid[i] = tables[TAB_IQ3XXS_GRID + i];
+    for (uint i = tid; i < 256u; i += WG_THREADS) {
+        sh_grid[i] = pack4h(tables[TAB_IQ3XXS_GRID + i]);
+    }
     if (tid < 32u) {
         uint kw = tables[TAB_KSIGNS + tid];
         sh_ksigns[4u * tid + 0u] = kw & 255u;
@@ -125,7 +134,9 @@ void main(void) {
     }
     barrier();
 #elif defined(P36_MOE_IQ3S)
-    for (uint i = tid; i < 512u; i += WG_THREADS) sh_grid[i] = tables[TAB_IQ3S_GRID + i];
+    for (uint i = tid; i < 512u; i += WG_THREADS) {
+        sh_grid[i] = pack4h(tables[TAB_IQ3S_GRID + i]);
+    }
     barrier();
 #endif
 
@@ -184,19 +195,15 @@ void main(void) {
             uint gqs = (gidx_w >> (8u * l)) & 255u;
             uint gsign = bitfieldExtract(gss, int(sbit), 7);
             uint gsign_hi = (gsign >> 4u) | ((uint(bitCount(gsign)) & 1u) << 3u);
-            uvec2 gg = sh_grid[gqs];
-            vec4 g0 = neg4(vec4(unpack8(gg.x)), gsign);
-            vec4 g1 = neg4(vec4(unpack8(gg.y)), gsign_hi);
+            uvec4 gg = sh_grid[gqs];
             uint uqs = (uidx_w >> (8u * l)) & 255u;
             uint usign = bitfieldExtract(uss, int(sbit), 7);
             uint usign_hi = (usign >> 4u) | ((uint(bitCount(usign)) & 1u) << 3u);
-            uvec2 ug = sh_grid[uqs];
-            vec4 u0 = neg4(vec4(unpack8(ug.x)), usign);
-            vec4 u1 = neg4(vec4(unpack8(ug.y)), usign_hi);
+            uvec4 ug = sh_grid[uqs];
             vec4 b0 = (l == 0u) ? a0 : a2;
             vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot(b0, g0) + dot(b4, g1);
-            us += dot(b0, u0) + dot(b4, u1);
+            gs += dot4h(gg.xy, gsign, b0) + dot4h(gg.zw, gsign_hi, b4);
+            us += dot4h(ug.xy, usign, b0) + dot4h(ug.zw, usign_hi, b4);
         }
         gate_acc = fma(gdb, gs, gate_acc);
         up_acc = fma(udb, us, up_acc);
@@ -217,16 +224,12 @@ void main(void) {
             uint uq = uint(w[ub + 1u + 4u * ib32 + sub]);
             uint gsign = sh_ksigns[gq >> 9u];
             uint usign = sh_ksigns[uq >> 9u];
-            uvec2 gg = sh_grid[gq & 511u];
-            uvec2 ug = sh_grid[uq & 511u];
-            vec4 g0 = neg4(vec4(unpack8(gg.x)), gsign);
-            vec4 g1 = neg4(vec4(unpack8(gg.y)), gsign >> 4u);
-            vec4 u0 = neg4(vec4(unpack8(ug.x)), usign);
-            vec4 u1 = neg4(vec4(unpack8(ug.y)), usign >> 4u);
+            uvec4 gg = sh_grid[gq & 511u];
+            uvec4 ug = sh_grid[uq & 511u];
             vec4 b0 = (l == 0u) ? a0 : a2;
             vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot(b0, g0) + dot(b4, g1);
-            us += dot(b0, u0) + dot(b4, u1);
+            gs += dot4h(gg.xy, gsign, b0) + dot4h(gg.zw, gsign >> 4u, b4);
+            us += dot4h(ug.xy, usign, b0) + dot4h(ug.zw, usign >> 4u, b4);
         }
         gate_acc = fma(gdb, gs, gate_acc);
         up_acc = fma(udb, us, up_acc);
@@ -253,16 +256,12 @@ void main(void) {
             uint usig = (usig01 >> (8u * l)) & 255u;
             uint gidx = ((gidx01 >> (8u * l)) & 255u) | ((gqh << (8u - 2u * p)) & 0x300u);
             uint uidx = ((uidx01 >> (8u * l)) & 255u) | ((uqh << (8u - 2u * p)) & 0x300u);
-            uvec2 gg = sh_grid[gidx];
-            uvec2 ug = sh_grid[uidx];
-            vec4 g0 = neg4(vec4(unpack8(gg.x)), gsig);
-            vec4 g1 = neg4(vec4(unpack8(gg.y)), gsig >> 4u);
-            vec4 u0 = neg4(vec4(unpack8(ug.x)), usig);
-            vec4 u1 = neg4(vec4(unpack8(ug.y)), usig >> 4u);
+            uvec4 gg = sh_grid[gidx];
+            uvec4 ug = sh_grid[uidx];
             vec4 b0 = (l == 0u) ? a0 : a2;
             vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot(b0, g0) + dot(b4, g1);
-            us += dot(b0, u0) + dot(b4, u1);
+            gs += dot4h(gg.xy, gsig, b0) + dot4h(gg.zw, gsig >> 4u, b4);
+            us += dot4h(ug.xy, usig, b0) + dot4h(ug.zw, usig >> 4u, b4);
         }
         gate_acc = fma(gdb, gs, gate_acc);
         up_acc = fma(udb, us, up_acc);
@@ -285,14 +284,10 @@ void main(void) {
             uint usign = sh_ksigns[usi];
             uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
             uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            vec4 g0 = neg4(vec4(unpack8(sh_grid[ge01 & 255u])), gsign);
-            vec4 g1 = neg4(vec4(unpack8(sh_grid[ge01 >> 8u])), gsign >> 4u);
-            vec4 u0 = neg4(vec4(unpack8(sh_grid[ue01 & 255u])), usign);
-            vec4 u1 = neg4(vec4(unpack8(sh_grid[ue01 >> 8u])), usign >> 4u);
             vec4 b0 = (l == 0u) ? a0 : a2;
             vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot(b0, g0) + dot(b4, g1);
-            us += dot(b0, u0) + dot(b4, u1);
+            gs += dot4h(sh_grid[ge01 & 255u], gsign, b0) + dot4h(sh_grid[ge01 >> 8u], gsign >> 4u, b4);
+            us += dot4h(sh_grid[ue01 & 255u], usign, b0) + dot4h(sh_grid[ue01 >> 8u], usign >> 4u, b4);
         }
         gate_acc = fma(gd, gs, gate_acc);
         up_acc = fma(ud, us, up_acc);
@@ -321,19 +316,15 @@ void main(void) {
             uint ge1 = (ge01 >> 8u)  | (((gqh >> (2u * sub + 1u)) & 1u) << 8u);
             uint ue0 = (ue01 & 255u) | (((uqh >> (2u * sub)) & 1u) << 8u);
             uint ue1 = (ue01 >> 8u)  | (((uqh >> (2u * sub + 1u)) & 1u) << 8u);
-            vec4 g0 = neg4(vec4(unpack8(sh_grid[ge0])), gsgn);
-            vec4 g1 = neg4(vec4(unpack8(sh_grid[ge1])), gsgn >> 4u);
-            vec4 u0 = neg4(vec4(unpack8(sh_grid[ue0])), usgn);
-            vec4 u1 = neg4(vec4(unpack8(sh_grid[ue1])), usgn >> 4u);
             vec4 b0 = (l == 0u) ? a0 : a2;
             vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot(b0, g0) + dot(b4, g1);
-            us += dot(b0, u0) + dot(b4, u1);
+            gs += dot4h(sh_grid[ge0], gsgn, b0) + dot4h(sh_grid[ge1], gsgn >> 4u, b4);
+            us += dot4h(sh_grid[ue0], usgn, b0) + dot4h(sh_grid[ue1], usgn >> 4u, b4);
         }
         gate_acc = fma(gd, gs, gate_acc);
         up_acc = fma(ud, us, up_acc);
 #else
-#error "Define P36_MOE_IQ2XXS, P36_MOE_IQ2S, P36_MOE_IQ3XXS, or P36_MOE_IQ3S"
+#error "Define P36_MOE_IQ2XXS, P36_MOE_IQ2XS, P36_MOE_IQ2S, P36_MOE_IQ3XXS, or P36_MOE_IQ3S"
 #endif
     }
 
