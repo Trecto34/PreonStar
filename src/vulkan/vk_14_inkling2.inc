@@ -981,8 +981,8 @@ int p36_gpu_inkling2_qkv_rel_q4k_decode_tensor(
         uint32_t              out_k,
         uint32_t              out_v,
         uint32_t              out_r) {
-    if ((in_dim % 256u) != 0u || (out_q % 4u) != 0u || (out_k % 4u) != 0u ||
-        (out_v % 4u) != 0u || (out_r % 4u) != 0u) return 0;
+    if ((in_dim % 256u) != 0u || (out_q % 8u) != 0u || (out_k % 8u) != 0u ||
+        (out_v % 8u) != 0u || (out_r % 8u) != 0u) return 0;
     uint32_t blocks = in_dim / 256u;
     uint64_t row_bytes = (uint64_t)blocks * 144u;
     uint64_t q_bytes = row_bytes * out_q;
@@ -1006,10 +1006,10 @@ int p36_gpu_inkling2_qkv_rel_q4k_decode_tensor(
     const p36_gpu_tensor *bindings[11] = {
         wq_t, wk_t, wv_t, wr_t, q8_0, q8_1, q8_2, yq, yk, yv, yr
     };
-    uint32_t wg_q = out_q / 4u;
-    uint32_t wg_qk = wg_q + out_k / 4u;
-    uint32_t wg_qkv = wg_qk + out_v / 4u;
-    uint32_t wg_tot = wg_qkv + out_r / 4u;
+    uint32_t wg_q = out_q / 8u;
+    uint32_t wg_qk = wg_q + out_k / 8u;
+    uint32_t wg_qkv = wg_qk + out_v / 8u;
+    uint32_t wg_tot = wg_qkv + out_r / 8u;
     struct { uint32_t blocks, row_words, wg_q, wg_qk, wg_qkv; } pc = {
         blocks, (uint32_t)(row_bytes / 4u), wg_q, wg_qk, wg_qkv
     };
