@@ -4,38 +4,48 @@
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
 /* Builds [rms(cur, 1e-6); rms(msg, 1e-6)] of width 2 * n_embd per token.
- * One wave64 per token, zero barriers. */
+ * 576 threads = 9 wave64s = 1 vec4/thread (D = 2304): zero loops, register-cached
+ * cur/msg (single DRAM read pass!), 1 barrier. Dispatch: (n_tok, 1, 1). */
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 576, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer Cur { float cur[]; };
-layout(set = 0, binding = 1) readonly buffer Msg { float msg[]; };
-layout(set = 0, binding = 2) writeonly buffer Out { float out_buf[]; };
+layout(set = 0, binding = 0) readonly buffer Cur { vec4 cur[]; };
+layout(set = 0, binding = 1) readonly buffer Msg { vec4 msg[]; };
+layout(set = 0, binding = 2) writeonly buffer Out { vec4 out_buf[]; };
 
 layout(push_constant) uniform Push {
     uint n_embd;
 } pc;
 
+shared float sh_c[9];
+shared float sh_m[9];
+
 void main(void) {
     uint tok = gl_WorkGroupID.x;
     uint tid = gl_LocalInvocationID.x;
-    uint n_embd = pc.n_embd;
-    uint in_base = tok * n_embd;
-    uint out_base = tok * (2u * n_embd);
+    uint w = tid >> 6u;
+    uint lane = tid & 63u;
+    uint d4 = pc.n_embd >> 2u; /* 576 */
+    uint in_base4 = tok * d4;
+    uint out_base4 = tok * (2u * d4);
 
-    float sum_c = 0.0;
-    float sum_m = 0.0;
-    for (uint i = tid; i < n_embd; i += 64u) {
-        float vc = cur[in_base + i];
-        float vm = msg[in_base + i];
-        sum_c += vc * vc;
-        sum_m += vm * vm;
+    vec4 vc = cur[in_base4 + tid];
+    vec4 vm = msg[in_base4 + tid];
+    float sc = subgroupAdd(dot(vc, vc));
+    float sm = subgroupAdd(dot(vm, vm));
+    if (lane == 0u) {
+        sh_c[w] = sc;
+        sh_m[w] = sm;
     }
-    float inv_c = inversesqrt(subgroupAdd(sum_c) / float(n_embd) + 1.0e-6);
-    float inv_m = inversesqrt(subgroupAdd(sum_m) / float(n_embd) + 1.0e-6);
+    barrier();
 
-    for (uint i = tid; i < n_embd; i += 64u) {
-        out_buf[out_base + i] = cur[in_base + i] * inv_c;
-        out_buf[out_base + n_embd + i] = msg[in_base + i] * inv_m;
-    }
+    float sum_c = sh_c[0] + sh_c[1] + sh_c[2] + sh_c[3] + sh_c[4]
+                + sh_c[5] + sh_c[6] + sh_c[7] + sh_c[8];
+    float sum_m = sh_m[0] + sh_m[1] + sh_m[2] + sh_m[3] + sh_m[4]
+                + sh_m[5] + sh_m[6] + sh_m[7] + sh_m[8];
+    float inv_c = inversesqrt(sum_c / float(pc.n_embd) + 1.0e-6);
+    float inv_m = inversesqrt(sum_m / float(pc.n_embd) + 1.0e-6);
+
+    out_buf[out_base4 + tid] = vc * inv_c;
+    out_buf[out_base4 + d4 + tid] = vm * inv_m;
 }
