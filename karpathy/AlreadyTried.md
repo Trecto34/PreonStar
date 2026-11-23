@@ -4840,3 +4840,13 @@ f16 (packed-f16 GEMM / f16 LDS staging); decode read F32. Evidence:
   count with profile-gap arithmetic.
 * Also here, unbenched: Q4_K qkv uvec4 loads + 9-block unroll (`qkv-q4k-wide-unroll.patch`): bit-identical,
   kernel -1.5% (23.5 -> 23.1 us, NanoPlus), far below decode noise.
+
+## 2026-11-23 Inkling-2-Mini decode barrier audit (no change) — why dispatch fusion keeps showing nothing
+
+* `P36_VK_PROF_OP=1`, MiniPlus-R2, 64 tokens: every decode op records a barrier on every dispatch (a true RAW
+  chain: norm -> qkv -> conv_kv -> attn -> q8_k_quant -> wo -> post_attn_mix -> router -> gate_up -> down -> reduce
+  -> mix ...) EXCEPT `dense_q8_0_d_pair` (0 barriers / 3072) and `inkling2_clip_qr` (48 / 3120): those already run
+  concurrently with `qkv_rel` and `conv_kv` via the hazard tracker. Decode scratch is unaliased, so root-level
+  tracking is exact.
+* The kernel timeline (`P36_VK_PROF_KERNEL`) serializes dispatches, so it shows ~1.3 us gaps and makes
+  overlapping kernels look sequential. Do not estimate fusion wins from its gaps; check `barriers=` per op first.
