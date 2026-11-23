@@ -1,0 +1,45 @@
+diff --git a/vulkan/matmul_q8_0_f32b_pair.comp b/vulkan/matmul_q8_0_f32b_pair.comp
+index 718ad36..edcf766 100644
+--- a/vulkan/matmul_q8_0_f32b_pair.comp
++++ b/vulkan/matmul_q8_0_f32b_pair.comp
+@@ -12,6 +12,11 @@ layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+ 
+ layout(set = 0, binding = 0) readonly buffer WeightsA { uint16_t wa[]; };
+ layout(set = 0, binding = 1) readonly buffer WeightsB { uint16_t wb[]; };
++/* Dword views of the same descriptors: a 34 B Q8_0 block is only 2 B-aligned,
++ * so each lane's 8 quant bytes come from 3 dwords + a branchless funnel shift
++ * (lanes in a wave sit on blocks of both parities) instead of 4 u16 loads. */
++layout(set = 0, binding = 0) readonly buffer WeightsAW { uint waw[]; };
++layout(set = 0, binding = 1) readonly buffer WeightsBW { uint wbw[]; };
+ layout(set = 0, binding = 2) readonly buffer X { vec4 xv[]; };
+ layout(set = 0, binding = 3) writeonly buffer OutputA { float ya[]; };
+ layout(set = 0, binding = 4) writeonly buffer OutputB { float yb[]; };
+@@ -43,8 +48,14 @@ void main(void) {
+     for (uint b = boff; b < pc.blocks; b += bstep) {
+         uint base = row_base + b * Q8_0_U16;
+         uint q = base + 1u + (eoff >> 1u);
+-        uint a0 = uint(wa[q]) | (uint(wa[q + 1u]) << 16u);
+-        uint a1 = uint(wa[q + 2u]) | (uint(wa[q + 3u]) << 16u);
++        uint qw = q >> 1u;
++        uint sh = (q & 1u) << 4u;
++        uint a0, a1;
++        {
++            uint r0 = waw[qw], r1 = waw[qw + 1u], r2 = waw[qw + 2u];
++            a0 = (r0 >> sh) | ((r1 << 16u) << (16u - sh));
++            a1 = (r1 >> sh) | ((r2 << 16u) << (16u - sh));
++        }
+         uint xi = (b * 32u + eoff) >> 2u;
+         vec4 x0 = xv[xi];
+         vec4 x1 = xv[xi + 1u];
+@@ -52,8 +63,9 @@ void main(void) {
+         aa += da * (dot(vec4(unpack8(int(a0))), x0) +
+                     dot(vec4(unpack8(int(a1))), x1));
+         if (live_b) {
+-            uint b0 = uint(wb[q]) | (uint(wb[q + 1u]) << 16u);
+-            uint b1 = uint(wb[q + 2u]) | (uint(wb[q + 3u]) << 16u);
++            uint r0 = wbw[qw], r1 = wbw[qw + 1u], r2 = wbw[qw + 2u];
++            uint b0 = (r0 >> sh) | ((r1 << 16u) << (16u - sh));
++            uint b1 = (r1 >> sh) | ((r2 << 16u) << (16u - sh));
+             float db = unpackHalf2x16(uint(wb[base])).x;
+             ab += db * (dot(vec4(unpack8(int(b0))), x0) +
+                         dot(vec4(unpack8(int(b1))), x1));

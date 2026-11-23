@@ -4818,3 +4818,10 @@ f16 (packed-f16 GEMM / f16 LDS staging); decode read F32. Evidence:
 * **Speed** (skill bench.py ctl/cand/ctl, 6 samples): 77.87 / 78.40 / 78.41 t/s — does not beat the second control.
   Patch: `evidence/raw/ink-dkq-q6k-16b-20261123/dense-q6k-load16b.patch`. Could be re-tested stacked with other
   sub-noise kernel wins.
+
+## 2026-11-23 matmul_q8_0_f32b_pair: 3 dword loads + branchless funnel shift — REJECTED (kernel +0.6%), bit-identical
+
+* Q8_0 attn gate+sink pair decode (Inkling, Qwen-family). Each lane's 8 quant bytes from 3 dwords instead of 4 u16.
+  MiniPlus-R2 22.14 -> 22.27 us/dispatch over two profiles. Patch in `evidence/raw/ink-dkq-q6k-16b-20261123/`.
+* Lesson: once a lane's loads are 8 B or less, u16 vs dword load shape is not the limit; the 16 B/lane kernels
+  (qkv Q6_K, gate_up Q4_K) were the only ones where it paid.
