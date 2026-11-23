@@ -4757,7 +4757,9 @@ Evidence + patch + shader: `evidence/raw/ink-wo-q6k-direct-20261123/`.
   and NanoPlus, kernel **143.3 -> 159.6 ms (+11%)**. Halving the grid costs
   more memory-level parallelism than the activation reuse saves. Patch:
   `rpl2-rejected.patch`.
-* Conclusion: the down kernel is limited by in-flight memory requests, not
-  ALU/LDS or activation traffic. reconsider_if: a layout with *more*
-  independent row streams per CU (e.g. 8 lanes x 8 rows, 2304 WGs, contiguous
-  144-B row bursts) — not bit-identical (lane partial order changes).
+* **8 lanes x 8 rows** (2304 WGs, 144-B contiguous row bursts, 11% lane
+  tail): kernel **143.3 -> 234.4 ms (+64%)**. Patch: `8x8-rejected.patch`.
+* Conclusion: Exp 78's 16 rows x 4 lanes, 1152 WGs is a local optimum — both
+  fewer and more workgroups lose. Not LDS-, ALU- or activation-bound.
+  reconsider_if: a different weight layout (repacked IQ4_NL with 16-B aligned
+  blocks for vector loads) at load time.

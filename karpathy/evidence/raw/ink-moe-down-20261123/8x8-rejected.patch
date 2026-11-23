@@ -1,0 +1,48 @@
+diff --git a/src/vulkan/vk_14_inkling2.inc b/src/vulkan/vk_14_inkling2.inc
+index 4aec0cc..0c0b179 100644
+--- a/src/vulkan/vk_14_inkling2.inc
++++ b/src/vulkan/vk_14_inkling2.inc
+@@ -931,7 +931,7 @@ int p36_gpu_inkling2_moe_ffn_tensor(
+                 dn_t, mid_scratch, selected, weights, down_scratch, dn_sc_t
+             };
+             ok = p36_vk_run_unlocked("inkling2_moe_dn_dec", dn_k, dn_b, &dn_pc, sizeof(dn_pc),
+-                                     out_dim / 16u, n_used, 1);
++                                     out_dim / 8u, n_used, 1);   /* 8 rows x 8 lanes per WG */
+             if (ok) {
+                 uint64_t cw_bytes = (uint64_t)out_dim * 4u * sizeof(float);
+                 const unsigned char *cw_src = p36_gpu_weight_bytes(model_map, model_size, conv_w_offset, cw_bytes);
+diff --git a/vulkan/inkling2_moe_down_decode.comp b/vulkan/inkling2_moe_down_decode.comp
+index d8c4533..4a34fa4 100644
+--- a/vulkan/inkling2_moe_down_decode.comp
++++ b/vulkan/inkling2_moe_down_decode.comp
+@@ -52,10 +52,10 @@ shared float sh_ue4m3[256];
+ 
+ void main(void) {
+     uint tid = gl_LocalInvocationID.x;
+-    uint r_local = tid >> 2u;   /* 0..15 */
+-    uint blane = tid & 3u;      /* 0..3 */
++    uint r_local = tid >> 3u;   /* 0..7  (8 rows x 8 lanes) */
++    uint blane = tid & 7u;      /* 0..7 */
+     bool odd = (blane & 1u) != 0u; /* row_u16 is even -> parity is loop-invariant */
+-    uint row = gl_WorkGroupID.x * 16u + r_local;
++    uint row = gl_WorkGroupID.x * 8u + r_local;
+     uint slot = gl_WorkGroupID.y;
+ 
+ #ifdef P36_MOE_IQ4NL
+@@ -91,7 +91,7 @@ void main(void) {
+ 
+     float acc = 0.0;
+ 
+-    for (uint b = blane; b < pc.blocks; b += 4u) {
++    for (uint b = blane; b < pc.blocks; b += 8u) {
+         uint x4 = x_base + b * 8u;
+         vec4 a0 = xv[x4 + 0u];
+         vec4 a1 = xv[x4 + 1u];
+@@ -229,6 +229,7 @@ void main(void) {
+ #endif
+     }
+ 
++    acc += subgroupShuffleXor(acc, 4u);
+     acc += subgroupShuffleXor(acc, 2u);
+     acc += subgroupShuffleXor(acc, 1u);
+     if (blane == 0u) {
