@@ -1,0 +1,215 @@
+diff --git a/Makefile b/Makefile
+index 515d6c9..9db33c9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -291,7 +291,8 @@ VULKAN_SHADERS := \
+ 	vulkan/inkling2_moe_gate_up_gemm_q4k.spv \
+ 	vulkan/inkling2_qkv_rel_q4k_decode.spv \
+ 	vulkan/inkling2_qkv_rel_q6k_decode.spv \
+-	vulkan/inkling2_wo_q4k_decode.spv
++	vulkan/inkling2_wo_q4k_decode.spv \
++	vulkan/inkling2_wo_q6k_decode.spv
+ 
+ vulkan/inkling2_mix.spv: vulkan/inkling2_mix.comp
+ 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+@@ -314,6 +315,9 @@ vulkan/inkling2_qkv_rel_q6k_decode.spv: vulkan/inkling2_qkv_rel_q6k_decode.comp
+ vulkan/inkling2_wo_q4k_decode.spv: vulkan/inkling2_wo_q4k_decode.comp
+ 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+ 
++vulkan/inkling2_wo_q6k_decode.spv: vulkan/inkling2_wo_q6k_decode.comp
++	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
++
+ vulkan/inkling2_f32_gemm.spv: vulkan/inkling2_f32_gemm.comp
+ 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
+ 
+diff --git a/p36_gpu.h b/p36_gpu.h
+index 22c8a86..51e02ad 100644
+--- a/p36_gpu.h
++++ b/p36_gpu.h
+@@ -1212,11 +1212,13 @@ int p36_gpu_inkling2_qkv_rel_q6k_decode_tensor(
+         uint32_t              out_v,
+         uint32_t              out_r);
+ 
+-int p36_gpu_inkling2_wo_q4k_decode_tensor(
++/* w_type: ggml type id, Q4_K (12) or Q6_K (14); anything else returns 0. */
++int p36_gpu_inkling2_wo_kquant_decode_tensor(
+         p36_gpu_tensor       *y,
+         const void           *model_map,
+         uint64_t              model_size,
+         uint64_t              w_offset,
++        uint32_t              w_type,
+         const p36_gpu_tensor *x,
+         uint32_t              in_dim,
+         uint32_t              out_dim);
+diff --git a/src/core/core_inkling2.inc b/src/core/core_inkling2.inc
+index 4390f9c..9045520 100644
+--- a/src/core/core_inkling2.inc
++++ b/src/core/core_inkling2.inc
+@@ -1218,10 +1218,11 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
+         }
+ 
+         /* Output projection */
+-        if (n_tok == 1u && l->attn_output->type == P36_TENSOR_Q4_K &&
+-            p36_gpu_inkling2_wo_q4k_decode_tensor(sc->wo_out, m->map, m->size,
+-                                                  l->attn_output->abs_offset, sc->attn_out, Q, D)) {
+-            /* Direct F32->Q4_K decode: eliminates 40 quantize_q8_k dispatches + barriers/tok */
++        if (n_tok == 1u &&
++            p36_gpu_inkling2_wo_kquant_decode_tensor(sc->wo_out, m->map, m->size,
++                                                     l->attn_output->abs_offset, l->attn_output->type,
++                                                     sc->attn_out, Q, D)) {
++            /* Direct F32->Q4_K/Q6_K decode: no quantize_q8_k dispatch + barrier per layer */
+         } else {
+             INK_CHK(p36_gpu_tensor_matmul_scaled(m, l->attn_output, sc->attn_out, sc->wo_out, Q, D, n_tok, 1.0f), "attn_out");
+         }
+diff --git a/src/vulkan/vk_14_inkling2.inc b/src/vulkan/vk_14_inkling2.inc
+index 4aec0cc..d468adc 100644
+--- a/src/vulkan/vk_14_inkling2.inc
++++ b/src/vulkan/vk_14_inkling2.inc
+@@ -7,6 +7,7 @@ static p36_vk_kernel p36_vk_ink_post_attn_mix;
+ static p36_vk_kernel p36_vk_ink_qkv_rel_q4k;
+ static p36_vk_kernel p36_vk_ink_qkv_rel_q6k;
+ static p36_vk_kernel p36_vk_ink_wo_q4k_dec;
++static p36_vk_kernel p36_vk_ink_wo_q6k_dec;
+ static p36_vk_kernel p36_vk_ink_f32_gemm;
+ static p36_vk_kernel p36_vk_ink_f32_gemm_exact;
+ static p36_vk_kernel p36_vk_ink_ctrl_prep;
+@@ -52,6 +53,7 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
+     p36_vk_ink_qkv_rel_q4k    = P36_VK_KERNEL("vulkan/inkling2_qkv_rel_q4k_decode.spv", 11, 20, (1u << 7) | (1u << 8) | (1u << 9) | (1u << 10));
+     p36_vk_ink_qkv_rel_q6k    = P36_VK_KERNEL("vulkan/inkling2_qkv_rel_q6k_decode.spv", 11, 20, (1u << 7) | (1u << 8) | (1u << 9) | (1u << 10));
+     p36_vk_ink_wo_q4k_dec     = P36_VK_KERNEL("vulkan/inkling2_wo_q4k_decode.spv", 3, 8, 1u << 2);
++    p36_vk_ink_wo_q6k_dec     = P36_VK_KERNEL("vulkan/inkling2_wo_q6k_decode.spv", 3, 8, 1u << 2);
+     p36_vk_ink_f32_gemm       = P36_VK_KERNEL("vulkan/inkling2_f32_gemm.spv", 3, 12, 1u << 2);
+     p36_vk_ink_f32_gemm_exact = P36_VK_KERNEL("vulkan/inkling2_f32_gemm_exact.spv", 3, 12, 1u << 2);
+     p36_vk_ink_ctrl_prep      = P36_VK_KERNEL("vulkan/inkling2_control_prep.spv", 3, 4, 1u << 2);
+@@ -99,6 +101,7 @@ static void p36_vk_inkling2_cleanup_unlocked(void) {
+     p36_vk_kernel_destroy(&p36_vk_ink_qkv_rel_q4k);
+     p36_vk_kernel_destroy(&p36_vk_ink_qkv_rel_q6k);
+     p36_vk_kernel_destroy(&p36_vk_ink_wo_q4k_dec);
++    p36_vk_kernel_destroy(&p36_vk_ink_wo_q6k_dec);
+     p36_vk_kernel_destroy(&p36_vk_ink_f32_gemm);
+     p36_vk_kernel_destroy(&p36_vk_ink_f32_gemm_exact);
+     p36_vk_kernel_destroy(&p36_vk_ink_ctrl_prep);
+@@ -1122,17 +1125,21 @@ int p36_gpu_inkling2_qkv_rel_q6k_decode_tensor(
+     return ok;
+ }
+ 
+-int p36_gpu_inkling2_wo_q4k_decode_tensor(
++int p36_gpu_inkling2_wo_kquant_decode_tensor(
+         p36_gpu_tensor       *y,
+         const void           *model_map,
+         uint64_t              model_size,
+         uint64_t              w_offset,
++        uint32_t              w_type,
+         const p36_gpu_tensor *x,
+         uint32_t              in_dim,
+         uint32_t              out_dim) {
+-    if ((in_dim % 256u) != 0u || (out_dim % 4u) != 0u) return 0;
++    if (w_type != P36_VK_TENSOR_Q4_K && w_type != P36_VK_TENSOR_Q6_K) return 0;
++    const bool q6k = w_type == P36_VK_TENSOR_Q6_K;
++    const uint32_t rows_per_wg = 4u;   /* ROWS in both .comp files */
++    if ((in_dim % 256u) != 0u || (out_dim % rows_per_wg) != 0u) return 0;
+     uint32_t blocks = in_dim / 256u;
+-    uint64_t row_bytes = (uint64_t)blocks * 144u;
++    uint64_t row_bytes = (uint64_t)blocks * (q6k ? 210u : 144u);
+     uint64_t w_bytes = row_bytes * out_dim;
+     int ok = 0;
+     pthread_mutex_lock(&p36_vk_mu);
+@@ -1143,9 +1150,11 @@ int p36_gpu_inkling2_wo_q4k_decode_tensor(
+     p36_gpu_tensor *w_t = p36_vk_weight_get_unlocked(w_src, w_bytes);
+     if (!w_t) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
+     const p36_gpu_tensor *bindings[3] = { w_t, x, y };
+-    struct { uint32_t blocks, row_words; } pc = { blocks, (uint32_t)(row_bytes / 4u) };
+-    ok = p36_vk_run_unlocked("inkling2_wo_q4k_dec", &p36_vk_ink_wo_q4k_dec, bindings, &pc, sizeof(pc),
+-                             out_dim / 4u, 1, 1);
++    /* Q4_K kernel takes the row stride in u32 words, Q6_K (2-byte aligned blocks) in u16. */
++    struct { uint32_t blocks, row_stride; } pc = { blocks, (uint32_t)(row_bytes / (q6k ? 2u : 4u)) };
++    ok = p36_vk_run_unlocked(q6k ? "inkling2_wo_q6k_dec" : "inkling2_wo_q4k_dec",
++                             q6k ? &p36_vk_ink_wo_q6k_dec : &p36_vk_ink_wo_q4k_dec,
++                             bindings, &pc, sizeof(pc), out_dim / rows_per_wg, 1, 1);
+     pthread_mutex_unlock(&p36_vk_mu);
+     return ok;
+ }
+diff --git a/tests/p36_test.c b/tests/p36_test.c
+index 948c86a..e37e977 100644
+--- a/tests/p36_test.c
++++ b/tests/p36_test.c
+@@ -8286,6 +8286,71 @@ done:
+     p36_engine_close(engine);
+ }
+ 
++/* Direct F32-input Q6_K attn_output decode vs an independent ggml-layout
++ * dequant reference. in_dim 3072 = 12 blocks of 210 B, so odd blocks sit at
++ * 2-byte (not 4-byte) alignment and both Q6_K halves / both scale indices run. */
++static void test_inkling2_wo_q6k(void) {
++#ifdef P36_NO_GPU
++    test_skip("inkling2-wo-q6k", "CPU-only build");
++    return;
++#else
++    if (!p36_gpu_init()) {
++        test_skip("inkling2-wo-q6k", "Vulkan unavailable");
++        return;
++    }
++    const uint32_t in_dim = 3072u, out_dim = 16u, nb = in_dim / 256u;
++    const uint64_t w_bytes = (uint64_t)out_dim * nb * 210u;
++    uint8_t *w = (uint8_t *)malloc((size_t)w_bytes);
++    float *x = (float *)malloc(in_dim * sizeof(float));
++    float *ref = (float *)calloc(out_dim, sizeof(float));
++    float *got = (float *)malloc(out_dim * sizeof(float));
++    TEST_ASSERT(w && x && ref && got);
++    uint32_t seed = 12345u;
++    for (uint64_t i = 0; i < w_bytes; i++) { seed = seed * 1664525u + 1013904223u; w[i] = (uint8_t)(seed >> 24); }
++    for (uint32_t i = 0; i < in_dim; i++) x[i] = sinf((float)i * 0.37f);
++    for (uint32_t r = 0; r < out_dim; r++) {
++        for (uint32_t b = 0; b < nb; b++) {
++            uint8_t *blk = w + ((uint64_t)r * nb + b) * 210u;
++            uint16_t dh = test_float_to_f16(0.001f * (float)(1 + (r + b) % 7));
++            memcpy(blk + 208, &dh, 2);
++            const uint8_t *ql = blk, *qh = blk + 128;
++            const int8_t *sc = (const int8_t *)(blk + 192);
++            float d = p36_quant_f16_to_f32(dh);
++            for (uint32_t n = 0; n < 2u; n++, ql += 64, qh += 32, sc += 8) {
++                for (uint32_t l = 0; l < 32u; l++) {
++                    uint32_t is = l / 16u, o = b * 256u + n * 128u + l;
++                    int q1 = (int)((ql[l] & 15) | (((qh[l] >> 0) & 3) << 4)) - 32;
++                    int q2 = (int)((ql[l + 32] & 15) | (((qh[l] >> 2) & 3) << 4)) - 32;
++                    int q3 = (int)((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
++                    int q4 = (int)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
++                    ref[r] += d * sc[is] * q1 * x[o] + d * sc[is + 2] * q2 * x[o + 32]
++                            + d * sc[is + 4] * q3 * x[o + 64] + d * sc[is + 6] * q4 * x[o + 96];
++                }
++            }
++        }
++    }
++    TEST_ASSERT(p36_gpu_set_model_map(w, w_bytes) != 0);
++    p36_gpu_tensor *xt = p36_gpu_tensor_alloc(in_dim * sizeof(float));
++    p36_gpu_tensor *yt = p36_gpu_tensor_alloc(out_dim * sizeof(float));
++    TEST_ASSERT(xt && yt);
++    TEST_ASSERT(p36_gpu_tensor_write(xt, 0, x, in_dim * sizeof(float)) != 0);
++    TEST_ASSERT(p36_gpu_inkling2_wo_kquant_decode_tensor(yt, w, w_bytes, 0, 14u, xt, in_dim, out_dim) != 0);
++    TEST_ASSERT(p36_gpu_tensor_read(yt, 0, got, out_dim * sizeof(float)) != 0);
++    float max_rel = 0.0f;
++    for (uint32_t r = 0; r < out_dim; r++) {
++        float e = fabsf(got[r] - ref[r]) / (fabsf(ref[r]) + 1e-3f);
++        if (e > max_rel) max_rel = e;
++    }
++    fprintf(stderr, "p36-test: inkling2 wo q6k: max rel err %.3g (y0 gpu %.5f ref %.5f)\n",
++            (double)max_rel, (double)got[0], (double)ref[0]);
++    TEST_ASSERT(max_rel < 1.0e-4f);
++    p36_gpu_set_model_map(NULL, 0);
++    p36_gpu_tensor_free(xt);
++    p36_gpu_tensor_free(yt);
++    free(w); free(x); free(ref); free(got);
++#endif
++}
++
+ static void test_inkling2_strided_views(void) {
+ #ifdef P36_NO_GPU
+     test_skip("inkling2-strided-views", "CPU-only build");
+@@ -8494,6 +8559,7 @@ static const p36_test_entry test_entries[] = {
+     {"--pq2-0-layout-oracle", "pq2-0-layout-oracle", "PQ2_0 block layout against hand-built blocks", test_pq2_0_layout_oracle},
+     {"--pq2-0-native-128", "pq2-0-native-128", "independent per-128 PQ2_0 scales: GPU decode+MMQ vs f16 contract", test_pq2_0_native_128},
+     {"--ptq1-0-layout-oracle", "ptq1-0-layout-oracle", "PTQ1_0 block layout against hand-built blocks", test_ptq1_0_layout_oracle},
++    {"--inkling2-wo-q6k", "inkling2-wo-q6k", "Inkling-2 direct F32 Q6_K attn_output decode vs reference", test_inkling2_wo_q6k},
+     {"--inkling2-strided-views", "inkling2-strided-views", "Inkling-2 strided multi-slice descriptor bounds & parity", test_inkling2_strided_views},
+     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
+ };

@@ -4720,3 +4720,24 @@ token). Patch: `evidence/raw/ink-fused-topk-20261123/fused-topk-rejected.patch`.
   Same lesson as the Axion MoE ticket: do not put sync or redundant work on
   every workgroup of the big kernel to delete a small one.
 * reconsider_if: the gate_up decode grid shrinks to ~hundreds of workgroups.
+
+## 2026-11-23 Inkling-2-Mini: direct F32->Q6_K attn_output decode (MiniPlus-R2) — DELAYED, +0.67% decode, below gate
+
+Extends Exp 80c (direct F32->Q4_K `attn_output`) to Q6_K, which MiniPlus-R2
+uses for all 24 `attn_output` tensors (NanoPlus/MiniPlus-V2.1: 4 of 24).
+Evidence + patch + shader: `evidence/raw/ink-wo-q6k-direct-20261123/`.
+
+* **Change.** `inkling2_wo_q6k_decode.comp`: 64 lanes, 4 rows/WG, uint16 loads
+  (210-B blocks are 2-byte aligned), F32 activations; drops 48 `quantize_q8_k`
+  dispatches + barriers per token. Unit test `p36_test --inkling2-wo-q6k`
+  (in the patch): max rel err 3.7e-6 vs an independent ggml-layout dequant.
+* **Numerics.** Not bit-identical by design (F32 instead of Q8_K activations).
+  MiniPlus-R2 greedy top-1 identical over 64 steps, plausible-token logprob
+  |diff| median 0.031 / p95 0.20. NanoPlus diverges at step 47 (4 Q6_K layers).
+* **Kernel.** O projection 66.6 -> 60.5 ms / 64 tok (q8_k_quant 4.6 + Q6_K
+  matvec 62.0 -> 60.5); ROWS=8 per WG slower (62.4). Total GPU 857.8 -> 850.9.
+* **A/B.** MiniPlus-R2 `bench_ab.sh` ctx 1024, gen 128, 3 reps: decode
+  **73.60 -> 74.09 t/s (+0.67%)**, under the +1.25% gate.
+* reconsider_if: stacked with another R2 decode win, or if F32 activations are
+  wanted for quality on their own; the kernel reaches only ~294 GB/s, so a
+  u32-load variant (handle odd-block 2-byte offset) may lift it.

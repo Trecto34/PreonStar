@@ -1,0 +1,94 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Direct F32-input Q6_K decode for Inkling-2-Mini attn_output (MiniPlus-R2 ships
+ * it as Q6_K). Same idea as inkling2_wo_q4k_decode: skip the quantize_q8_k
+ * dispatch + barrier in front of every layer's O projection and read the F32
+ * attention output directly (also exact F32 activations instead of Q8_K).
+ *
+ * Q6_K block (210 B): ql[128] | qh[64] | scales[16] int8 | d f16. Blocks are
+ * only 2-byte aligned, so weights are read as uint16.
+ * Lanes: tid>>4 picks the block (stride 4, 12 blocks -> 3 exact iterations);
+ * itid = tid & 15 -> half h = itid>>3, j = itid&7 covers l = 4j..4j+3 of that
+ * half, i.e. values l, l+32, l+64, l+96 (4 sub-blocks sharing scale index j>>2).
+ * 4 rows per workgroup reuse the F32 activations.
+ * Dispatch: (out_dim / 4, 1, 1). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint16_t w[]; };
+layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
+layout(set = 0, binding = 2) writeonly buffer Y { float y[]; };
+
+layout(push_constant) uniform Push {
+    uint blocks;     /* in_dim / 256 */
+    uint row_u16;    /* blocks * 105 */
+} pc;
+
+const uint ROWS = 4u;
+const uint BLK_U16 = 105u;
+
+uint ld32(uint o) { return uint(w[o]) | (uint(w[o + 1u]) << 16u); }
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint itid = tid & 15u;
+    uint h = itid >> 3u;
+    uint j = itid & 7u;
+    uint is = j >> 2u;
+
+    uint first_row = gl_WorkGroupID.x * ROWS;
+
+    float acc[ROWS];
+    [[unroll]] for (uint r = 0u; r < ROWS; r++) acc[r] = 0.0;
+
+    for (uint b = tid >> 4u; b < pc.blocks; b += 4u) {
+        uint x4 = (b * 256u + h * 128u + 4u * j) >> 2u;
+        vec4 a0 = xv[x4 + 0u];
+        vec4 a1 = xv[x4 + 8u];
+        vec4 a2 = xv[x4 + 16u];
+        vec4 a3 = xv[x4 + 24u];
+        vec4 one = vec4(1.0);
+        float s0 = dot(a0, one), s1 = dot(a1, one), s2 = dot(a2, one), s3 = dot(a3, one);
+
+        [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+            uint base = (first_row + r) * pc.row_u16 + b * BLK_U16;
+            /* byte offsets: ql h*64 + 4j (+32), qh 128 + h*32 + 4j, scales 192 + h*8 + is */
+            uint qlo = ld32(base + ((h * 64u + 4u * j) >> 1u));
+            uint qhi = ld32(base + ((h * 64u + 32u + 4u * j) >> 1u));
+            uint qh  = ld32(base + ((128u + h * 32u + 4u * j) >> 1u));
+            uint scw = ld32(base + ((192u + h * 8u) >> 1u));       /* scales h*8 .. h*8+3 */
+            uint scw2 = ld32(base + ((192u + h * 8u + 4u) >> 1u)); /* scales h*8+4 .. +7 */
+            float d = unpackHalf2x16(uint(w[base + 104u])).x;
+
+            uvec4 l4 = uvec4(qlo, qlo >> 8u, qlo >> 16u, qlo >> 24u) & 255u;
+            uvec4 u4 = uvec4(qhi, qhi >> 8u, qhi >> 16u, qhi >> 24u) & 255u;
+            uvec4 h4 = uvec4(qh, qh >> 8u, qh >> 16u, qh >> 24u) & 255u;
+            vec4 q0 = vec4((l4 & 15u) | ((h4 & 3u) << 4u));
+            vec4 q1 = vec4((u4 & 15u) | (((h4 >> 2u) & 3u) << 4u));
+            vec4 q2 = vec4((l4 >> 4u) | (((h4 >> 4u) & 3u) << 4u));
+            vec4 q3 = vec4((u4 >> 4u) | (((h4 >> 6u) & 3u) << 4u));
+
+            /* sc[is + 2g], g = 0..3, signed int8 */
+            float c0 = float(bitfieldExtract(int(is == 0u ? scw : scw >> 8u), 0, 8));
+            float c1 = float(bitfieldExtract(int(is == 0u ? scw >> 16u : scw >> 24u), 0, 8));
+            float c2 = float(bitfieldExtract(int(is == 0u ? scw2 : scw2 >> 8u), 0, 8));
+            float c3 = float(bitfieldExtract(int(is == 0u ? scw2 >> 16u : scw2 >> 24u), 0, 8));
+
+            float t = c0 * (dot(q0, a0) - 32.0 * s0)
+                    + c1 * (dot(q1, a1) - 32.0 * s1)
+                    + c2 * (dot(q2, a2) - 32.0 * s2)
+                    + c3 * (dot(q3, a3) - 32.0 * s3);
+            acc[r] = fma(d, t, acc[r]);
+        }
+    }
+
+    [[unroll]] for (uint r = 0u; r < ROWS; r++) {
+        float tot = subgroupAdd(acc[r]);
+        if (tid == 0u) y[first_row + r] = tot;
+    }
+}
