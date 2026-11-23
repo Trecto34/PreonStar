@@ -9,16 +9,17 @@
 /* Fused Q6_K decode for Inkling-2-Mini attention projections: Q + K + V + rel in ONE dispatch!
  * 64 threads = 4 sub-groups x 16 lanes/sub-group, 2 rows/sub-group -> 8 output rows/WG!
  * Reuses unpacked Q8_K activations (yd, qsum, av0..3) across 2 rows -> halves Q8_K loads & ALU.
- * Uses 16-bit aligned weight loads (210 B = 105 u16/block, zero unaligned load_u32 branches).
+ * A 210 B Q6_K block is only 2 B-aligned: each lane's 16 B ql/qh slices are fetched as
+ * 4-5 dword loads, funnel-shifted when odd (was eight u16 loads each). Math order unchanged.
  * Eliminates 144 dispatches/tok (48 logical layers x 3 saved dispatches) on MiniPlus-R2.
  * Dispatch: ((out_q + out_k + out_v + out_r) / 8, 1, 1) = (688, 1, 1). */
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer Wq { uint16_t wq[]; };
-layout(set = 0, binding = 1) readonly buffer Wk { uint16_t wk[]; };
-layout(set = 0, binding = 2) readonly buffer Wv { uint16_t wv[]; };
-layout(set = 0, binding = 3) readonly buffer Wr { uint16_t wr[]; };
+layout(set = 0, binding = 0) readonly buffer Wq { uint wq[]; };
+layout(set = 0, binding = 1) readonly buffer Wk { uint wk[]; };
+layout(set = 0, binding = 2) readonly buffer Wv { uint wv[]; };
+layout(set = 0, binding = 3) readonly buffer Wr { uint wr[]; };
 layout(set = 0, binding = 4) readonly buffer Q8_0 { uint q8_0[]; };
 layout(set = 0, binding = 5) readonly buffer Q8_1 { uint q8_1[]; };
 layout(set = 0, binding = 6) readonly buffer Q8_2 { uint q8_2[]; };
@@ -46,26 +47,38 @@ float sum16(float v) {
     return v;
 }
 
-#define Q6K_DOT4(WBUF, QLB, QHB, IDX2, AV, QDOT) do { \
-    uint ql = uint(WBUF[QLB + (IDX2)]) | (uint(WBUF[QLB + (IDX2) + 1u]) << 16u); \
-    uint qh = uint(WBUF[QHB + (IDX2)]) | (uint(WBUF[QHB + (IDX2) + 1u]) << 16u); \
-    uint low = (ql >> ql_shift) & 0x0f0f0f0fu; \
-    uint packed = low | (((qh >> qh_shift) & 0x03030303u) << 4u); \
+/* 16 bytes starting at u16 index U16 of a dword-typed buffer. */
+#define LOAD16B(WBUF, U16, OUT) do { \
+    uint w_ = (U16) >> 1u; \
+    OUT = uvec4(WBUF[w_], WBUF[w_ + 1u], WBUF[w_ + 2u], WBUF[w_ + 3u]); \
+    if (((U16) & 1u) != 0u) { \
+        uint w4_ = WBUF[w_ + 4u]; \
+        OUT = uvec4((OUT.x >> 16u) | (OUT.y << 16u), (OUT.y >> 16u) | (OUT.z << 16u), \
+                    (OUT.z >> 16u) | (OUT.w << 16u), (OUT.w >> 16u) | (w4_ << 16u)); \
+    } \
+} while (false)
+
+#define U16AT(WBUF, U16) ((WBUF[(U16) >> 1u] >> (((U16) & 1u) * 16u)) & 0xffffu)
+
+#define Q6K_DOT4(QL, QH, AV, QDOT) do { \
+    uint low = ((QL) >> ql_shift) & 0x0f0f0f0fu; \
+    uint packed = low | ((((QH) >> qh_shift) & 0x03030303u) << 4u); \
     vec4 wv = vec4(float(packed & 255u), float((packed >> 8u) & 255u), \
                    float((packed >> 16u) & 255u), float(packed >> 24u)); \
     QDOT += dot(wv, AV); \
 } while (false)
 
 #define Q6K_ROW_PART(WBUF, WBASE, AV0, AV1, AV2, AV3, QSUM, PART_OUT) do { \
-    uint qlb = (WBASE) + ql_u16; \
-    uint qhb = (WBASE) + qh_u16; \
+    uvec4 qlv, qhv; \
+    LOAD16B(WBUF, (WBASE) + ql_u16, qlv); \
+    LOAD16B(WBUF, (WBASE) + qh_u16, qhv); \
     float qdot = 0.0; \
-    Q6K_DOT4(WBUF, qlb, qhb, 0u, AV0, qdot); \
-    Q6K_DOT4(WBUF, qlb, qhb, 2u, AV1, qdot); \
-    Q6K_DOT4(WBUF, qlb, qhb, 4u, AV2, qdot); \
-    Q6K_DOT4(WBUF, qlb, qhb, 6u, AV3, qdot); \
-    float d = unpackHalf2x16(uint(WBUF[(WBASE) + 104u])).x; \
-    int sc = bitfieldExtract(int(WBUF[(WBASE) + sc_u16]), sc_bit, 8); \
+    Q6K_DOT4(qlv.x, qhv.x, AV0, qdot); \
+    Q6K_DOT4(qlv.y, qhv.y, AV1, qdot); \
+    Q6K_DOT4(qlv.z, qhv.z, AV2, qdot); \
+    Q6K_DOT4(qlv.w, qhv.w, AV3, qdot); \
+    float d = unpackHalf2x16(U16AT(WBUF, (WBASE) + 104u)).x; \
+    int sc = bitfieldExtract(int(U16AT(WBUF, (WBASE) + sc_u16)), sc_bit, 8); \
     PART_OUT = (d * float(sc)) * (qdot - 32.0 * QSUM); \
 } while (false)
 
@@ -75,7 +88,9 @@ float sum16(float v) {
     uint row1_w0 = row0_w0 + pc.row_u16; \
     float acc0 = 0.0; \
     float acc1 = 0.0; \
-    for (uint b = 0u; b < pc.blocks; b++) { \
+    /* 9 blocks = hidden 2304 (host refuses other in_dim); unrolled so later blocks' \
+     * weight loads issue early.  Accumulation order is unchanged. */ \
+    [[unroll]] for (uint b = 0u; b < 9u; b++) { \
         uint qbase = b * Q8K_WORDS; \
         float yd = uintBitsToFloat(Q8BUF[qbase]); \
         float qsum = float(bitfieldExtract(int(Q8BUF[qbase + bsum_off]), bsum_bit, 16)); \

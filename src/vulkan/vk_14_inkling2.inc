@@ -1140,7 +1140,9 @@ int p36_gpu_inkling2_qkv_rel_q6k_decode_tensor(
         uint32_t              out_k,
         uint32_t              out_v,
         uint32_t              out_r) {
-    if ((in_dim % 256u) != 0u || (out_q % 8u) != 0u || (out_k % 8u) != 0u ||
+    /* The shader's block loop is unrolled for in_dim 2304 (9 blocks); anything
+     * else takes the generic per-matrix path. */
+    if (in_dim != 2304u || (out_q % 8u) != 0u || (out_k % 8u) != 0u ||
         (out_v % 8u) != 0u || (out_r % 8u) != 0u) return 0;
     uint32_t blocks = in_dim / 256u;
     uint64_t row_bytes = (uint64_t)blocks * 210u;

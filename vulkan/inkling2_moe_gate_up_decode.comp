@@ -25,7 +25,10 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 #endif
 
 #ifdef P36_MOE_Q4K
-layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
+/* Q4_K blocks are 144 B (9 x 16 B) and rows start 16 B-aligned, so the header
+ * (d/dmin + scales, words 0..3) and each lane's 16 B quant slice are single
+ * 128-bit loads instead of 4 dword loads. */
+layout(set = 0, binding = 0) readonly buffer Weights { uvec4 w4[]; };
 #else
 layout(set = 0, binding = 0) readonly buffer Weights { uint16_t w[]; };
 #endif
@@ -97,14 +100,23 @@ shared uint sh_ksigns[128];
 shared uvec2 sh_grid[512];
 #endif
 
+/* Per-lane state shared by main() and gu_block() (inlined; private, not LDS). */
+uint itid, x4, ib32, qpair, gbase, ubase;
+float gate_acc, up_acc;
+#ifdef P36_MOE_Q4K
+uint q4_nshift, q4_qw_off;
+#endif
+
+void gu_block(uint i);
+
 void main(void) {
     uint tid = gl_LocalInvocationID.x;
     uint r_local = tid >> 4u;
-    uint itid = tid & 15u;       /* 0..15 */
+    itid = tid & 15u;            /* 0..15 */
     uint row = gl_WorkGroupID.x * WG_ROWS + r_local;
     uint pair = gl_WorkGroupID.y;
     uint expert = selected[pair];
-    uint x4 = (pair / pc.n_used) * pc.blocks * 64u;
+    x4 = (pair / pc.n_used) * pc.blocks * 64u;
 
 #ifdef P36_MOE_IQ2XXS
     for (uint i = tid; i < 256u; i += WG_THREADS) {
@@ -147,240 +159,50 @@ void main(void) {
     barrier();
 #endif
 
-    uint ib32 = itid >> 1u;
-    uint qpair = itid & 1u;
-    float gate_acc = 0.0;
-    float up_acc = 0.0;
+    ib32 = itid >> 1u;
+    qpair = itid & 1u;
+    gate_acc = 0.0;
+    up_acc = 0.0;
 
     uint exp_row0 = expert * (2u * pc.mid_dim);
 #ifdef P36_MOE_IQ2XXS
     uint row_u16 = pc.blocks * IQ2_U16;
-    uint gbase = (exp_row0 + row) * row_u16;
-    uint ubase = (exp_row0 + pc.mid_dim + row) * row_u16;
+    gbase = (exp_row0 + row) * row_u16;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_u16;
 #elif defined(P36_MOE_IQ2XS)
     uint row_u16 = pc.blocks * IQ2XS_U16;
-    uint gbase = (exp_row0 + row) * row_u16;
-    uint ubase = (exp_row0 + pc.mid_dim + row) * row_u16;
+    gbase = (exp_row0 + row) * row_u16;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_u16;
 #elif defined(P36_MOE_IQ2S)
     uint row_bytes = pc.blocks * IQ2S_BYTES;
-    uint gbase = (exp_row0 + row) * row_bytes;
-    uint ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
+    gbase = (exp_row0 + row) * row_bytes;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
 #elif defined(P36_MOE_IQ3XXS)
     uint row_bytes = pc.blocks * IQ3XXS_BYTES;
-    uint gbase = (exp_row0 + row) * row_bytes;
-    uint ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
+    gbase = (exp_row0 + row) * row_bytes;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
 #elif defined(P36_MOE_IQ3S)
     uint row_bytes = pc.blocks * IQ3S_BYTES;
-    uint gbase = (exp_row0 + row) * row_bytes;
-    uint ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
+    gbase = (exp_row0 + row) * row_bytes;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
 #elif defined(P36_MOE_Q4K)
     uint row_words = pc.blocks * Q4K_WORDS;
-    uint gbase = (exp_row0 + row) * row_words;
-    uint ubase = (exp_row0 + pc.mid_dim + row) * row_words;
-    uint q4_nshift = (ib32 & 1u) * 4u;
-    uint q4_qw_off = 4u + (ib32 >> 1u) * 8u + qpair * 4u;
+    gbase = (exp_row0 + row) * row_words;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_words;
+    q4_nshift = (ib32 & 1u) * 4u;
+    q4_qw_off = 4u + (ib32 >> 1u) * 8u + qpair * 4u;
 #endif
 
-    for (uint i = 0u; i < pc.blocks; i++) {
-        uint y4 = (i * 256u + 16u * itid) >> 2u;
-        vec4 a0 = xv[x4 + y4 + 0u];
-        vec4 a1 = xv[x4 + y4 + 1u];
-        vec4 a2 = xv[x4 + y4 + 2u];
-        vec4 a3 = xv[x4 + y4 + 3u];
-
-#ifdef P36_MOE_IQ2XXS
-        uint gb = gbase + i * IQ2_U16;
-        uint ub = ubase + i * IQ2_U16;
-        float gd = unpackHalf2x16(uint(w[gb])).x;
-        float ud = unpackHalf2x16(uint(w[ub])).x;
-        uint gq = gb + 1u + 4u * ib32;
-        uint uq = ub + 1u + 4u * ib32;
-        uint gss = uint(w[gq + 2u]) | (uint(w[gq + 3u]) << 16u);
-        uint uss = uint(w[uq + 2u]) | (uint(w[uq + 3u]) << 16u);
-        float gdb = gd * 0.25 * (0.5 + float(gss >> 28u));
-        float udb = ud * 0.25 * (0.5 + float(uss >> 28u));
-        uint gidx_w = uint(w[gq + qpair]);
-        uint uidx_w = uint(w[uq + qpair]);
-        float gs = 0.0;
-        float us = 0.0;
-        [[unroll]] for (uint l = 0u; l < 2u; l++) {
-            uint sbit = 7u * (2u * qpair + l);
-            uint gqs = (gidx_w >> (8u * l)) & 255u;
-            uint gsign = bitfieldExtract(gss, int(sbit), 7);
-            uint gsign_hi = (gsign >> 4u) | ((uint(bitCount(gsign)) & 1u) << 3u);
-            uvec4 gg = sh_grid[gqs];
-            uint uqs = (uidx_w >> (8u * l)) & 255u;
-            uint usign = bitfieldExtract(uss, int(sbit), 7);
-            uint usign_hi = (usign >> 4u) | ((uint(bitCount(usign)) & 1u) << 3u);
-            uvec4 ug = sh_grid[uqs];
-            vec4 b0 = (l == 0u) ? a0 : a2;
-            vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot4h(gg.xy, gsign, b0) + dot4h(gg.zw, gsign_hi, b4);
-            us += dot4h(ug.xy, usign, b0) + dot4h(ug.zw, usign_hi, b4);
-        }
-        gate_acc = fma(gdb, gs, gate_acc);
-        up_acc = fma(udb, us, up_acc);
-#elif defined(P36_MOE_IQ2XS)
-        uint gb = gbase + i * IQ2XS_U16;
-        uint ub = ubase + i * IQ2XS_U16;
-        float gd = unpackHalf2x16(uint(w[gb])).x;
-        float ud = unpackHalf2x16(uint(w[ub])).x;
-        uint gsc = w_u8((gb + 33u) * 2u + ib32);
-        uint usc = w_u8((ub + 33u) * 2u + ib32);
-        float gdb = gd * 0.25 * (0.5 + float(qpair == 0u ? (gsc & 15u) : (gsc >> 4u)));
-        float udb = ud * 0.25 * (0.5 + float(qpair == 0u ? (usc & 15u) : (usc >> 4u)));
-        float gs = 0.0;
-        float us = 0.0;
-        [[unroll]] for (uint l = 0u; l < 2u; l++) {
-            uint sub = 2u * qpair + l;
-            uint gq = uint(w[gb + 1u + 4u * ib32 + sub]);
-            uint uq = uint(w[ub + 1u + 4u * ib32 + sub]);
-            uint gsign = sh_ksigns[gq >> 9u];
-            uint usign = sh_ksigns[uq >> 9u];
-            uvec4 gg = sh_grid[gq & 511u];
-            uvec4 ug = sh_grid[uq & 511u];
-            vec4 b0 = (l == 0u) ? a0 : a2;
-            vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot4h(gg.xy, gsign, b0) + dot4h(gg.zw, gsign >> 4u, b4);
-            us += dot4h(ug.xy, usign, b0) + dot4h(ug.zw, usign >> 4u, b4);
-        }
-        gate_acc = fma(gdb, gs, gate_acc);
-        up_acc = fma(udb, us, up_acc);
-#elif defined(P36_MOE_IQ2S)
-        uint gbb = gbase + i * IQ2S_BYTES;
-        uint ubb = ubase + i * IQ2S_BYTES;
-        float gd = unpackHalf2x16(uint(w[gbb >> 1u])).x;
-        float ud = unpackHalf2x16(uint(w[ubb >> 1u])).x;
-        uint gqh = w_u8(gbb + 66u + ib32);
-        uint uqh = w_u8(ubb + 66u + ib32);
-        uint gsc = w_u8(gbb + 74u + ib32);
-        uint usc = w_u8(ubb + 74u + ib32);
-        float gdb = gd * 0.25 * (0.5 + float(qpair == 0u ? (gsc & 15u) : (gsc >> 4u)));
-        float udb = ud * 0.25 * (0.5 + float(qpair == 0u ? (usc & 15u) : (usc >> 4u)));
-        uint gsig01 = uint(w[(gbb + 34u + 4u * ib32 + 2u * qpair) >> 1u]);
-        uint usig01 = uint(w[(ubb + 34u + 4u * ib32 + 2u * qpair) >> 1u]);
-        uint gidx01 = uint(w[(gbb + 2u + 4u * ib32 + 2u * qpair) >> 1u]);
-        uint uidx01 = uint(w[(ubb + 2u + 4u * ib32 + 2u * qpair) >> 1u]);
-        float gs = 0.0;
-        float us = 0.0;
-        [[unroll]] for (uint l = 0u; l < 2u; l++) {
-            uint p = 2u * qpair + l;
-            uint gsig = (gsig01 >> (8u * l)) & 255u;
-            uint usig = (usig01 >> (8u * l)) & 255u;
-            uint gidx = ((gidx01 >> (8u * l)) & 255u) | ((gqh << (8u - 2u * p)) & 0x300u);
-            uint uidx = ((uidx01 >> (8u * l)) & 255u) | ((uqh << (8u - 2u * p)) & 0x300u);
-            uvec4 gg = sh_grid[gidx];
-            uvec4 ug = sh_grid[uidx];
-            vec4 b0 = (l == 0u) ? a0 : a2;
-            vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot4h(gg.xy, gsig, b0) + dot4h(gg.zw, gsig >> 4u, b4);
-            us += dot4h(ug.xy, usig, b0) + dot4h(ug.zw, usig >> 4u, b4);
-        }
-        gate_acc = fma(gdb, gs, gate_acc);
-        up_acc = fma(udb, us, up_acc);
-#elif defined(P36_MOE_IQ3XXS)
-        uint gbb = gbase + i * IQ3XXS_BYTES;
-        uint ubb = ubase + i * IQ3XXS_BYTES;
-        uint gaux_h = (gbb + 66u + 4u * ib32) >> 1u;
-        uint uaux_h = (ubb + 66u + 4u * ib32) >> 1u;
-        uint gaux = uint(w[gaux_h]) | (uint(w[gaux_h + 1u]) << 16u);
-        uint uaux = uint(w[uaux_h]) | (uint(w[uaux_h + 1u]) << 16u);
-        float gd = unpackHalf2x16(uint(w[gbb >> 1u])).x * 0.25 * float(2u * (gaux >> 28u) + 1u);
-        float ud = unpackHalf2x16(uint(w[ubb >> 1u])).x * 0.25 * float(2u * (uaux >> 28u) + 1u);
-        float gs = 0.0;
-        float us = 0.0;
-        [[unroll]] for (uint l = 0u; l < 2u; l++) {
-            uint sub = 2u * qpair + l;
-            uint gsi = (gaux >> (7u * sub)) & 127u;
-            uint usi = (uaux >> (7u * sub)) & 127u;
-            uint gsign = sh_ksigns[gsi];
-            uint usign = sh_ksigns[usi];
-            uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            vec4 b0 = (l == 0u) ? a0 : a2;
-            vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot4h(sh_grid[ge01 & 255u], gsign, b0) + dot4h(sh_grid[ge01 >> 8u], gsign >> 4u, b4);
-            us += dot4h(sh_grid[ue01 & 255u], usign, b0) + dot4h(sh_grid[ue01 >> 8u], usign >> 4u, b4);
-        }
-        gate_acc = fma(gd, gs, gate_acc);
-        up_acc = fma(ud, us, up_acc);
-#elif defined(P36_MOE_IQ3S)
-        uint gbb = gbase + i * IQ3S_BYTES;
-        uint ubb = ubase + i * IQ3S_BYTES;
-        uint gqh = w_u8(gbb + 66u + ib32);
-        uint uqh = w_u8(ubb + 66u + ib32);
-        uint gscb = w_u8(gbb + 106u + (ib32 >> 1u));
-        uint uscb = w_u8(ubb + 106u + (ib32 >> 1u));
-        uint gnib = (ib32 & 1u) != 0u ? (gscb >> 4u) : (gscb & 15u);
-        uint unib = (ib32 & 1u) != 0u ? (uscb >> 4u) : (uscb & 15u);
-        float gd = unpackHalf2x16(uint(w[gbb >> 1u])).x * float(2u * gnib + 1u);
-        float ud = unpackHalf2x16(uint(w[ubb >> 1u])).x * float(2u * unib + 1u);
-        uint gsgn01 = uint(w[(gbb + 74u + 4u * ib32 + 2u * qpair) >> 1u]);
-        uint usgn01 = uint(w[(ubb + 74u + 4u * ib32 + 2u * qpair) >> 1u]);
-        float gs = 0.0;
-        float us = 0.0;
-        [[unroll]] for (uint l = 0u; l < 2u; l++) {
-            uint sub = 2u * qpair + l;
-            uint gsgn = (gsgn01 >> (8u * l)) & 255u;
-            uint usgn = (usgn01 >> (8u * l)) & 255u;
-            uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
-            uint ge0 = (ge01 & 255u) | (((gqh >> (2u * sub)) & 1u) << 8u);
-            uint ge1 = (ge01 >> 8u)  | (((gqh >> (2u * sub + 1u)) & 1u) << 8u);
-            uint ue0 = (ue01 & 255u) | (((uqh >> (2u * sub)) & 1u) << 8u);
-            uint ue1 = (ue01 >> 8u)  | (((uqh >> (2u * sub + 1u)) & 1u) << 8u);
-            vec4 b0 = (l == 0u) ? a0 : a2;
-            vec4 b4 = (l == 0u) ? a1 : a3;
-            gs += dot4h(sh_grid[ge0], gsgn, b0) + dot4h(sh_grid[ge1], gsgn >> 4u, b4);
-            us += dot4h(sh_grid[ue0], usgn, b0) + dot4h(sh_grid[ue1], usgn >> 4u, b4);
-        }
-        gate_acc = fma(gd, gs, gate_acc);
-        up_acc = fma(ud, us, up_acc);
-#elif defined(P36_MOE_Q4K)
-        float xsum = dot(a0 + a1 + a2 + a3, vec4(1.0));
-        uint gb = gbase + i * Q4K_WORDS;
-        uint ub = ubase + i * Q4K_WORDS;
-        vec2 gd2 = unpackHalf2x16(w[gb]);
-        vec2 ud2 = unpackHalf2x16(w[ub]);
-        uint gs0 = w[gb + 1u], gs1 = w[gb + 2u];
-        uint us0 = w[ub + 1u], us1 = w[ub + 2u];
-        uint gsc, gmn, usc, umn;
-        if (ib32 < 4u) {
-            uint sh = ib32 * 8u;
-            gsc = (gs0 >> sh) & 63u; gmn = (gs1 >> sh) & 63u;
-            usc = (us0 >> sh) & 63u; umn = (us1 >> sh) & 63u;
-        } else {
-            uint sh = (ib32 - 4u) * 8u;
-            uint gs2 = w[gb + 3u];
-            uint us2 = w[ub + 3u];
-            gsc = ((gs2 >> sh) & 15u) | (((gs0 >> (sh + 6u)) & 3u) << 4u);
-            gmn = ((gs2 >> (sh + 4u)) & 15u) | (((gs1 >> (sh + 6u)) & 3u) << 4u);
-            usc = ((us2 >> sh) & 15u) | (((us0 >> (sh + 6u)) & 3u) << 4u);
-            umn = ((us2 >> (sh + 4u)) & 15u) | (((us1 >> (sh + 6u)) & 3u) << 4u);
-        }
-        uint gqw = gb + q4_qw_off;
-        uint uqw = ub + q4_qw_off;
-        uint gql0 = (w[gqw + 0u] >> q4_nshift) & 0x0f0f0f0fu;
-        uint gql1 = (w[gqw + 1u] >> q4_nshift) & 0x0f0f0f0fu;
-        uint gql2 = (w[gqw + 2u] >> q4_nshift) & 0x0f0f0f0fu;
-        uint gql3 = (w[gqw + 3u] >> q4_nshift) & 0x0f0f0f0fu;
-        float gdot = dot(vec4(float(gql0 & 15u), float((gql0 >> 8u) & 15u), float((gql0 >> 16u) & 15u), float((gql0 >> 24u) & 15u)), a0)
-                   + dot(vec4(float(gql1 & 15u), float((gql1 >> 8u) & 15u), float((gql1 >> 16u) & 15u), float((gql1 >> 24u) & 15u)), a1)
-                   + dot(vec4(float(gql2 & 15u), float((gql2 >> 8u) & 15u), float((gql2 >> 16u) & 15u), float((gql2 >> 24u) & 15u)), a2)
-                   + dot(vec4(float(gql3 & 15u), float((gql3 >> 8u) & 15u), float((gql3 >> 16u) & 15u), float((gql3 >> 24u) & 15u)), a3);
-        uint uql0 = (w[uqw + 0u] >> q4_nshift) & 0x0f0f0f0fu;
-        uint uql1 = (w[uqw + 1u] >> q4_nshift) & 0x0f0f0f0fu;
-        uint uql2 = (w[uqw + 2u] >> q4_nshift) & 0x0f0f0f0fu;
-        uint uql3 = (w[uqw + 3u] >> q4_nshift) & 0x0f0f0f0fu;
-        float udot = dot(vec4(float(uql0 & 15u), float((uql0 >> 8u) & 15u), float((uql0 >> 16u) & 15u), float((uql0 >> 24u) & 15u)), a0)
-                   + dot(vec4(float(uql1 & 15u), float((uql1 >> 8u) & 15u), float((uql1 >> 16u) & 15u), float((uql1 >> 24u) & 15u)), a1)
-                   + dot(vec4(float(uql2 & 15u), float((uql2 >> 8u) & 15u), float((uql2 >> 16u) & 15u), float((uql2 >> 24u) & 15u)), a2)
-                   + dot(vec4(float(uql3 & 15u), float((uql3 >> 8u) & 15u), float((uql3 >> 16u) & 15u), float((uql3 >> 24u) & 15u)), a3);
-        gate_acc = fma(gd2.x * float(gsc), gdot, fma(-gd2.y * float(gmn), xsum, gate_acc));
-        up_acc = fma(ud2.x * float(usc), udot, fma(-ud2.y * float(umn), xsum, up_acc));
-#else
-#error "Define P36_MOE_IQ2XXS, P36_MOE_IQ2XS, P36_MOE_IQ2S, P36_MOE_IQ3XXS, P36_MOE_IQ3S, or P36_MOE_Q4K"
+    /* Every Inkling-2-Mini has hidden 2304 = 9 blocks.  Fully unrolled, the
+     * compiler hoists later blocks' weight loads (bit-identical: same order).
+     * IQ3_S measured slower unrolled (+2%), so it keeps the rolled loop. */
+#ifndef P36_MOE_IQ3S
+    if (pc.blocks == 9u) {
+        [[unroll]] for (uint i = 0u; i < 9u; i++) gu_block(i);
+    } else
 #endif
+    {
+        for (uint i = 0u; i < pc.blocks; i++) gu_block(i);
     }
 
     float g = sum16(gate_acc);
@@ -395,4 +217,202 @@ void main(void) {
         float su = pc.situ_lb * tanh(u * pc.inv_lb);
         y[pair * pc.mid_dim + row] = sg * su;
     }
+}
+
+void gu_block(uint i) {
+    uint y4 = (i * 256u + 16u * itid) >> 2u;
+    vec4 a0 = xv[x4 + y4 + 0u];
+    vec4 a1 = xv[x4 + y4 + 1u];
+    vec4 a2 = xv[x4 + y4 + 2u];
+    vec4 a3 = xv[x4 + y4 + 3u];
+
+#ifdef P36_MOE_IQ2XXS
+    uint gb = gbase + i * IQ2_U16;
+    uint ub = ubase + i * IQ2_U16;
+    float gd = unpackHalf2x16(uint(w[gb])).x;
+    float ud = unpackHalf2x16(uint(w[ub])).x;
+    uint gq = gb + 1u + 4u * ib32;
+    uint uq = ub + 1u + 4u * ib32;
+    uint gss = uint(w[gq + 2u]) | (uint(w[gq + 3u]) << 16u);
+    uint uss = uint(w[uq + 2u]) | (uint(w[uq + 3u]) << 16u);
+    float gdb = gd * 0.25 * (0.5 + float(gss >> 28u));
+    float udb = ud * 0.25 * (0.5 + float(uss >> 28u));
+    uint gidx_w = uint(w[gq + qpair]);
+    uint uidx_w = uint(w[uq + qpair]);
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sbit = 7u * (2u * qpair + l);
+        uint gqs = (gidx_w >> (8u * l)) & 255u;
+        uint gsign = bitfieldExtract(gss, int(sbit), 7);
+        uint gsign_hi = (gsign >> 4u) | ((uint(bitCount(gsign)) & 1u) << 3u);
+        uvec4 gg = sh_grid[gqs];
+        uint uqs = (uidx_w >> (8u * l)) & 255u;
+        uint usign = bitfieldExtract(uss, int(sbit), 7);
+        uint usign_hi = (usign >> 4u) | ((uint(bitCount(usign)) & 1u) << 3u);
+        uvec4 ug = sh_grid[uqs];
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(gg.xy, gsign, b0) + dot4h(gg.zw, gsign_hi, b4);
+        us += dot4h(ug.xy, usign, b0) + dot4h(ug.zw, usign_hi, b4);
+    }
+    gate_acc = fma(gdb, gs, gate_acc);
+    up_acc = fma(udb, us, up_acc);
+#elif defined(P36_MOE_IQ2XS)
+    uint gb = gbase + i * IQ2XS_U16;
+    uint ub = ubase + i * IQ2XS_U16;
+    float gd = unpackHalf2x16(uint(w[gb])).x;
+    float ud = unpackHalf2x16(uint(w[ub])).x;
+    uint gsc = w_u8((gb + 33u) * 2u + ib32);
+    uint usc = w_u8((ub + 33u) * 2u + ib32);
+    float gdb = gd * 0.25 * (0.5 + float(qpair == 0u ? (gsc & 15u) : (gsc >> 4u)));
+    float udb = ud * 0.25 * (0.5 + float(qpair == 0u ? (usc & 15u) : (usc >> 4u)));
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sub = 2u * qpair + l;
+        uint gq = uint(w[gb + 1u + 4u * ib32 + sub]);
+        uint uq = uint(w[ub + 1u + 4u * ib32 + sub]);
+        uint gsign = sh_ksigns[gq >> 9u];
+        uint usign = sh_ksigns[uq >> 9u];
+        uvec4 gg = sh_grid[gq & 511u];
+        uvec4 ug = sh_grid[uq & 511u];
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(gg.xy, gsign, b0) + dot4h(gg.zw, gsign >> 4u, b4);
+        us += dot4h(ug.xy, usign, b0) + dot4h(ug.zw, usign >> 4u, b4);
+    }
+    gate_acc = fma(gdb, gs, gate_acc);
+    up_acc = fma(udb, us, up_acc);
+#elif defined(P36_MOE_IQ2S)
+    uint gbb = gbase + i * IQ2S_BYTES;
+    uint ubb = ubase + i * IQ2S_BYTES;
+    float gd = unpackHalf2x16(uint(w[gbb >> 1u])).x;
+    float ud = unpackHalf2x16(uint(w[ubb >> 1u])).x;
+    uint gqh = w_u8(gbb + 66u + ib32);
+    uint uqh = w_u8(ubb + 66u + ib32);
+    uint gsc = w_u8(gbb + 74u + ib32);
+    uint usc = w_u8(ubb + 74u + ib32);
+    float gdb = gd * 0.25 * (0.5 + float(qpair == 0u ? (gsc & 15u) : (gsc >> 4u)));
+    float udb = ud * 0.25 * (0.5 + float(qpair == 0u ? (usc & 15u) : (usc >> 4u)));
+    uint gsig01 = uint(w[(gbb + 34u + 4u * ib32 + 2u * qpair) >> 1u]);
+    uint usig01 = uint(w[(ubb + 34u + 4u * ib32 + 2u * qpair) >> 1u]);
+    uint gidx01 = uint(w[(gbb + 2u + 4u * ib32 + 2u * qpair) >> 1u]);
+    uint uidx01 = uint(w[(ubb + 2u + 4u * ib32 + 2u * qpair) >> 1u]);
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint p = 2u * qpair + l;
+        uint gsig = (gsig01 >> (8u * l)) & 255u;
+        uint usig = (usig01 >> (8u * l)) & 255u;
+        uint gidx = ((gidx01 >> (8u * l)) & 255u) | ((gqh << (8u - 2u * p)) & 0x300u);
+        uint uidx = ((uidx01 >> (8u * l)) & 255u) | ((uqh << (8u - 2u * p)) & 0x300u);
+        uvec4 gg = sh_grid[gidx];
+        uvec4 ug = sh_grid[uidx];
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(gg.xy, gsig, b0) + dot4h(gg.zw, gsig >> 4u, b4);
+        us += dot4h(ug.xy, usig, b0) + dot4h(ug.zw, usig >> 4u, b4);
+    }
+    gate_acc = fma(gdb, gs, gate_acc);
+    up_acc = fma(udb, us, up_acc);
+#elif defined(P36_MOE_IQ3XXS)
+    uint gbb = gbase + i * IQ3XXS_BYTES;
+    uint ubb = ubase + i * IQ3XXS_BYTES;
+    uint gaux_h = (gbb + 66u + 4u * ib32) >> 1u;
+    uint uaux_h = (ubb + 66u + 4u * ib32) >> 1u;
+    uint gaux = uint(w[gaux_h]) | (uint(w[gaux_h + 1u]) << 16u);
+    uint uaux = uint(w[uaux_h]) | (uint(w[uaux_h + 1u]) << 16u);
+    float gd = unpackHalf2x16(uint(w[gbb >> 1u])).x * 0.25 * float(2u * (gaux >> 28u) + 1u);
+    float ud = unpackHalf2x16(uint(w[ubb >> 1u])).x * 0.25 * float(2u * (uaux >> 28u) + 1u);
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sub = 2u * qpair + l;
+        uint gsi = (gaux >> (7u * sub)) & 127u;
+        uint usi = (uaux >> (7u * sub)) & 127u;
+        uint gsign = sh_ksigns[gsi];
+        uint usign = sh_ksigns[usi];
+        uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+        uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(sh_grid[ge01 & 255u], gsign, b0) + dot4h(sh_grid[ge01 >> 8u], gsign >> 4u, b4);
+        us += dot4h(sh_grid[ue01 & 255u], usign, b0) + dot4h(sh_grid[ue01 >> 8u], usign >> 4u, b4);
+    }
+    gate_acc = fma(gd, gs, gate_acc);
+    up_acc = fma(ud, us, up_acc);
+#elif defined(P36_MOE_IQ3S)
+    uint gbb = gbase + i * IQ3S_BYTES;
+    uint ubb = ubase + i * IQ3S_BYTES;
+    uint gqh = w_u8(gbb + 66u + ib32);
+    uint uqh = w_u8(ubb + 66u + ib32);
+    uint gscb = w_u8(gbb + 106u + (ib32 >> 1u));
+    uint uscb = w_u8(ubb + 106u + (ib32 >> 1u));
+    uint gnib = (ib32 & 1u) != 0u ? (gscb >> 4u) : (gscb & 15u);
+    uint unib = (ib32 & 1u) != 0u ? (uscb >> 4u) : (uscb & 15u);
+    float gd = unpackHalf2x16(uint(w[gbb >> 1u])).x * float(2u * gnib + 1u);
+    float ud = unpackHalf2x16(uint(w[ubb >> 1u])).x * float(2u * unib + 1u);
+    uint gsgn01 = uint(w[(gbb + 74u + 4u * ib32 + 2u * qpair) >> 1u]);
+    uint usgn01 = uint(w[(ubb + 74u + 4u * ib32 + 2u * qpair) >> 1u]);
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sub = 2u * qpair + l;
+        uint gsgn = (gsgn01 >> (8u * l)) & 255u;
+        uint usgn = (usgn01 >> (8u * l)) & 255u;
+        uint ge01 = uint(w[(gbb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+        uint ue01 = uint(w[(ubb + 2u + 8u * ib32 + 2u * sub) >> 1u]);
+        uint ge0 = (ge01 & 255u) | (((gqh >> (2u * sub)) & 1u) << 8u);
+        uint ge1 = (ge01 >> 8u)  | (((gqh >> (2u * sub + 1u)) & 1u) << 8u);
+        uint ue0 = (ue01 & 255u) | (((uqh >> (2u * sub)) & 1u) << 8u);
+        uint ue1 = (ue01 >> 8u)  | (((uqh >> (2u * sub + 1u)) & 1u) << 8u);
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(sh_grid[ge0], gsgn, b0) + dot4h(sh_grid[ge1], gsgn >> 4u, b4);
+        us += dot4h(sh_grid[ue0], usgn, b0) + dot4h(sh_grid[ue1], usgn >> 4u, b4);
+    }
+    gate_acc = fma(gd, gs, gate_acc);
+    up_acc = fma(ud, us, up_acc);
+#elif defined(P36_MOE_Q4K)
+    float xsum = dot(a0 + a1 + a2 + a3, vec4(1.0));
+    uint gb = (gbase + i * Q4K_WORDS) >> 2u;
+    uint ub = (ubase + i * Q4K_WORDS) >> 2u;
+    uvec4 gh = w4[gb];
+    uvec4 uh = w4[ub];
+    vec2 gd2 = unpackHalf2x16(gh.x);
+    vec2 ud2 = unpackHalf2x16(uh.x);
+    uint gs0 = gh.y, gs1 = gh.z;
+    uint us0 = uh.y, us1 = uh.z;
+    uint gsc, gmn, usc, umn;
+    if (ib32 < 4u) {
+        uint sh = ib32 * 8u;
+        gsc = (gs0 >> sh) & 63u; gmn = (gs1 >> sh) & 63u;
+        usc = (us0 >> sh) & 63u; umn = (us1 >> sh) & 63u;
+    } else {
+        uint sh = (ib32 - 4u) * 8u;
+        uint gs2 = gh.w;
+        uint us2 = uh.w;
+        gsc = ((gs2 >> sh) & 15u) | (((gs0 >> (sh + 6u)) & 3u) << 4u);
+        gmn = ((gs2 >> (sh + 4u)) & 15u) | (((gs1 >> (sh + 6u)) & 3u) << 4u);
+        usc = ((us2 >> sh) & 15u) | (((us0 >> (sh + 6u)) & 3u) << 4u);
+        umn = ((us2 >> (sh + 4u)) & 15u) | (((us1 >> (sh + 6u)) & 3u) << 4u);
+    }
+    uvec4 gq = (w4[gb + (q4_qw_off >> 2u)] >> q4_nshift) & 0x0f0f0f0fu;
+    uvec4 uq = (w4[ub + (q4_qw_off >> 2u)] >> q4_nshift) & 0x0f0f0f0fu;
+    uint gql0 = gq.x, gql1 = gq.y, gql2 = gq.z, gql3 = gq.w;
+    uint uql0 = uq.x, uql1 = uq.y, uql2 = uq.z, uql3 = uq.w;
+    float gdot = dot(vec4(float(gql0 & 15u), float((gql0 >> 8u) & 15u), float((gql0 >> 16u) & 15u), float((gql0 >> 24u) & 15u)), a0)
+               + dot(vec4(float(gql1 & 15u), float((gql1 >> 8u) & 15u), float((gql1 >> 16u) & 15u), float((gql1 >> 24u) & 15u)), a1)
+               + dot(vec4(float(gql2 & 15u), float((gql2 >> 8u) & 15u), float((gql2 >> 16u) & 15u), float((gql2 >> 24u) & 15u)), a2)
+               + dot(vec4(float(gql3 & 15u), float((gql3 >> 8u) & 15u), float((gql3 >> 16u) & 15u), float((gql3 >> 24u) & 15u)), a3);
+    float udot = dot(vec4(float(uql0 & 15u), float((uql0 >> 8u) & 15u), float((uql0 >> 16u) & 15u), float((uql0 >> 24u) & 15u)), a0)
+               + dot(vec4(float(uql1 & 15u), float((uql1 >> 8u) & 15u), float((uql1 >> 16u) & 15u), float((uql1 >> 24u) & 15u)), a1)
+               + dot(vec4(float(uql2 & 15u), float((uql2 >> 8u) & 15u), float((uql2 >> 16u) & 15u), float((uql2 >> 24u) & 15u)), a2)
+               + dot(vec4(float(uql3 & 15u), float((uql3 >> 8u) & 15u), float((uql3 >> 16u) & 15u), float((uql3 >> 24u) & 15u)), a3);
+    gate_acc = fma(gd2.x * float(gsc), gdot, fma(-gd2.y * float(gmn), xsum, gate_acc));
+    up_acc = fma(ud2.x * float(usc), udot, fma(-ud2.y * float(umn), xsum, up_acc));
+#else
+#error "Define P36_MOE_IQ2XXS, P36_MOE_IQ2XS, P36_MOE_IQ2S, P36_MOE_IQ3XXS, P36_MOE_IQ3S, or P36_MOE_Q4K"
+#endif
 }

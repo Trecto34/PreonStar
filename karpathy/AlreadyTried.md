@@ -4791,3 +4791,18 @@ f16 (packed-f16 GEMM / f16 LDS staging); decode read F32. Evidence:
   **74.02 -> 75.61 (+2.15%)**, MAD 0.20/0.12; NanoPlus **80.96 -> 82.42
   (+1.80%)**, MAD 0.02/0.03. Prefill unchanged (inside noise).
 * **Memory.** +57 MB GPU (F32 copies stay for prefill).
+
+## 2026-11-23 Inkling-2-Mini: wide loads + 9-block unroll in qkv Q6_K / MoE gate_up decode — ACCEPTED (MiniPlus-R2 +0.7%), bit-identical
+
+* **Change.** `inkling2_qkv_rel_q6k_decode`: 16 B ql/qh slices fetched as 4-5 dword loads, funnel-shifted when the
+  2 B-aligned block is odd (the Q3_K `load_16b` pattern; was eight u16 loads each), block loop fully unrolled for
+  in_dim 2304 (host now declines other in_dim -> generic path). `inkling2_moe_gate_up_decode`: Q4_K header and quant
+  slice as one uvec4 load each; block loop unrolled when `pc.blocks == 9` (all variants except IQ3_S).
+* **Parity.** 64-step greedy top-20 logprob md5 identical on MiniPlus-R2, NanoPlus, APEX-I MiniPlus, UD-IQ3_XXS.
+* **Kernel (MiniPlus-R2, us/dispatch).** qkv_rel_q6k 33.0 -> 31.7 (-4%), gate_up q4k 79.1 -> 74.7 (-5.6%);
+  NanoPlus gate_up iq2s -3.4%, iq2xxs -2.5%.
+* **Speed** (inference-optimisation skill bench.py, p36-server, control/candidate/control, 6 greedy c1 samples, 512 tok):
+  MiniPlus-R2 77.63 / **78.28** / 77.79 t/s (beats both controls); NanoPlus 85.69 / 86.27 / 86.41 (neutral).
+  The repo bench_ab gate read +0.53% / +0.81% (below +1.25%).
+* **Rejected on the way.** Unrolling the MoE down IQ4_NL loop (9 iterations): 46.6 -> 71.6 us (+54%, likely VGPR /
+  occupancy). Unrolling IQ3_S gate_up: +2%. Evidence: `evidence/raw/ink-wide-unroll-20261123/`.
