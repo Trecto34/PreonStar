@@ -48,6 +48,13 @@ float sum16(float v) {
 }
 
 /* 16 bytes starting at u16 index U16 of a dword-typed buffer. */
+#ifdef P36_ABLATE_MATH
+#define LOAD16B(WBUF, U16, OUT) do { \
+    uint w_ = (U16) ^ tid; \
+    OUT = uvec4(w_, w_ + 1u, w_ + 2u, w_ + 3u); \
+} while (false)
+#define U16AT(WBUF, U16) (((U16) ^ tid) & 0xffffu)
+#else
 #define LOAD16B(WBUF, U16, OUT) do { \
     uint w_ = (U16) >> 1u; \
     OUT = uvec4(WBUF[w_], WBUF[w_ + 1u], WBUF[w_ + 2u], WBUF[w_ + 3u]); \
@@ -59,6 +66,7 @@ float sum16(float v) {
 } while (false)
 
 #define U16AT(WBUF, U16) ((WBUF[(U16) >> 1u] >> (((U16) & 1u) * 16u)) & 0xffffu)
+#endif
 
 #define Q6K_DOT4(QL, QH, AV, QDOT) do { \
     uint low = ((QL) >> ql_shift) & 0x0f0f0f0fu; \
@@ -68,6 +76,15 @@ float sum16(float v) {
     QDOT += dot(wv, AV); \
 } while (false)
 
+#ifdef P36_ABLATE_LOADS
+#define Q6K_ROW_PART(WBUF, WBASE, AV0, AV1, AV2, AV3, QSUM, PART_OUT) do { \
+    uvec4 qlv, qhv; \
+    LOAD16B(WBUF, (WBASE) + ql_u16, qlv); \
+    LOAD16B(WBUF, (WBASE) + qh_u16, qhv); \
+    uint ds_ = U16AT(WBUF, (WBASE) + 104u) ^ U16AT(WBUF, (WBASE) + sc_u16); \
+    PART_OUT = float(qlv.x ^ qlv.y ^ qlv.z ^ qlv.w ^ qhv.x ^ qhv.y ^ qhv.z ^ qhv.w ^ ds_); \
+} while (false)
+#else
 #define Q6K_ROW_PART(WBUF, WBASE, AV0, AV1, AV2, AV3, QSUM, PART_OUT) do { \
     uvec4 qlv, qhv; \
     LOAD16B(WBUF, (WBASE) + ql_u16, qlv); \
@@ -81,6 +98,7 @@ float sum16(float v) {
     int sc = bitfieldExtract(int(U16AT(WBUF, (WBASE) + sc_u16)), sc_bit, 8); \
     PART_OUT = (d * float(sc)) * (qdot - 32.0 * QSUM); \
 } while (false)
+#endif
 
 #define RUN_Q6K2(WBUF, Q8BUF, YBUF, ROW0_EXPR) do { \
     uint row0 = (ROW0_EXPR); \
@@ -121,6 +139,9 @@ float sum16(float v) {
 } while (false)
 
 void main(void) {
+#ifdef P36_ABLATE_EMPTY
+    return;
+#endif
     uint tid = gl_LocalInvocationID.x;
     uint r_local = tid >> 4u;
     uint itid = tid & 15u;

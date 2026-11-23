@@ -384,6 +384,8 @@ int p36_gpu_delta_net_decode_tensor(p36_gpu_tensor *state,
         }
     }
     pthread_mutex_lock(&p36_vk_mu);
+    if (p36_vk.prof_kernel && bindings[0])
+        p36_vk_prof_next_bytes = 2u * bindings[0]->bytes;
     int ok = p36_vk_run_unlocked(name, kernel, bindings, &push, sizeof(push),
                                  n_heads, groups_y, 1);
     pthread_mutex_unlock(&p36_vk_mu);

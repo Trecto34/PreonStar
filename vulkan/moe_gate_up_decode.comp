@@ -15,6 +15,13 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer GateWeights { uint16_t gw[]; };
 layout(set = 0, binding = 1) readonly buffer UpWeights { uint16_t uw[]; };
+#ifdef P36_ABLATE_MATH
+#define GW_LOAD(i) (((i) ^ gl_LocalInvocationID.x) & 0xffffu)
+#define UW_LOAD(i) (((i) ^ gl_LocalInvocationID.x) & 0xffffu)
+#else
+#define GW_LOAD(i) uint(gw[i])
+#define UW_LOAD(i) uint(uw[i])
+#endif
 layout(set = 0, binding = 2) readonly buffer X { vec4 xv[]; };
 layout(set = 0, binding = 3) readonly buffer Selected { uint selected[]; };
 layout(set = 0, binding = 4) readonly buffer GateScales { float gate_scales[]; };
@@ -40,11 +47,11 @@ const uint IQ2S_BYTES = 82u;
 const uint TAB_IQ2S = 544u;
 
 uint g_u8(uint off) {
-    return (uint(gw[off >> 1u]) >> (8u * (off & 1u))) & 255u;
+    return (GW_LOAD(off >> 1u) >> (8u * (off & 1u))) & 255u;
 }
 
 uint u_u8(uint off) {
-    return (uint(uw[off >> 1u]) >> (8u * (off & 1u))) & 255u;
+    return (UW_LOAD(off >> 1u) >> (8u * (off & 1u))) & 255u;
 }
 #endif
 #ifdef P36_MOE_Q3K
@@ -101,6 +108,9 @@ shared float sh_gr_gate[2u * P36_GU_ROWS];
 shared float sh_gr_up[2u * P36_GU_ROWS];
 
 void main(void) {
+#ifdef P36_ABLATE_EMPTY
+    return;
+#endif
     uint tid = gl_LocalInvocationID.x;
     uint row0 = gl_WorkGroupID.x * GR;
     uint pair = gl_WorkGroupID.y;
@@ -130,14 +140,28 @@ void main(void) {
             uint ubase_u16 = (expert * pc.mid_dim + row) * pc.blocks * IQ2_U16;
             uint gbb = gbase_bytes + i * IQ2S_BYTES;
             uint ub = ubase_u16 + i * IQ2_U16;
-            float gd = unpackHalf2x16(uint(gw[gbb >> 1u])).x;
-            float ud = unpackHalf2x16(uint(uw[ub])).x;
+#ifdef P36_ABLATE_LOADS
             uint gqh = g_u8(gbb + 66u + ib32);
             uint gsc = g_u8(gbb + 74u + ib32);
             uint uq = ub + 1u + 4u * ib32;
-            uint uss = uint(uw[uq + 2u]) | (uint(uw[uq + 3u]) << 16u);
+            uint uss = UW_LOAD(uq + 2u) | (UW_LOAD(uq + 3u) << 16u);
+            uint uidx_w = UW_LOAD(uq + qpair);
+            uint gs_l = GW_LOAD(gbb >> 1u) ^ gqh ^ gsc;
+            for (uint l = 0u; l < 2u; l++) {
+                uint p = 2u * qpair + l;
+                gs_l ^= g_u8(gbb + 34u + 4u * ib32 + p) ^ g_u8(gbb + 2u + 4u * ib32 + p);
+            }
+            gate_acc[r] += float(gs_l);
+            up_acc[r] += float(UW_LOAD(ub) ^ uss ^ uidx_w);
+#else
+            float gd = unpackHalf2x16(GW_LOAD(gbb >> 1u)).x;
+            float ud = unpackHalf2x16(UW_LOAD(ub)).x;
+            uint gqh = g_u8(gbb + 66u + ib32);
+            uint gsc = g_u8(gbb + 74u + ib32);
+            uint uq = ub + 1u + 4u * ib32;
+            uint uss = UW_LOAD(uq + 2u) | (UW_LOAD(uq + 3u) << 16u);
             float udb = ud * 0.25 * (0.5 + float(uss >> 28u));
-            uint uidx_w = uint(uw[uq + qpair]);
+            uint uidx_w = UW_LOAD(uq + qpair);
             for (uint l = 0u; l < 2u; l++) {
                 uint p = 2u * qpair + l;
                 uint gsig = g_u8(gbb + 34u + 4u * ib32 + p);
@@ -159,12 +183,28 @@ void main(void) {
                 gate_acc[r] = fma(gdb, dot(b0, g0) + dot(b4, g1), gate_acc[r]);
                 up_acc[r] = fma(udb, dot(b0, u0) + dot(b4, u1), up_acc[r]);
             }
+#endif
 #else
             uint row_bytes = pc.blocks * IQ2S_BYTES;
             uint base_bytes = (expert * pc.mid_dim + row) * row_bytes;
             uint bb = base_bytes + i * IQ2S_BYTES;
-            float gd = unpackHalf2x16(uint(gw[bb >> 1u])).x;
-            float ud = unpackHalf2x16(uint(uw[bb >> 1u])).x;
+#ifdef P36_ABLATE_LOADS
+            uint gqh = g_u8(bb + 66u + ib32);
+            uint uqh = u_u8(bb + 66u + ib32);
+            uint gsc = g_u8(bb + 74u + ib32);
+            uint usc = u_u8(bb + 74u + ib32);
+            uint gs_l = GW_LOAD(bb >> 1u) ^ gqh ^ gsc;
+            uint us_l = UW_LOAD(bb >> 1u) ^ uqh ^ usc;
+            for (uint l = 0u; l < 2u; l++) {
+                uint p = 2u * qpair + l;
+                gs_l ^= g_u8(bb + 34u + 4u * ib32 + p) ^ g_u8(bb + 2u + 4u * ib32 + p);
+                us_l ^= u_u8(bb + 34u + 4u * ib32 + p) ^ u_u8(bb + 2u + 4u * ib32 + p);
+            }
+            gate_acc[r] += float(gs_l);
+            up_acc[r] += float(us_l);
+#else
+            float gd = unpackHalf2x16(GW_LOAD(bb >> 1u)).x;
+            float ud = unpackHalf2x16(UW_LOAD(bb >> 1u)).x;
             uint gqh = g_u8(bb + 66u + ib32);
             uint uqh = u_u8(bb + 66u + ib32);
             uint gsc = g_u8(bb + 74u + ib32);
@@ -194,6 +234,7 @@ void main(void) {
                 gate_acc[r] = fma(gdb, dot(b0, g0) + dot(b4, g1), gate_acc[r]);
                 up_acc[r] = fma(udb, dot(b0, u0) + dot(b4, u1), up_acc[r]);
             }
+#endif
 #endif
         }
     }

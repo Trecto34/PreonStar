@@ -15,6 +15,11 @@
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
+#ifdef P36_ABLATE_MATH
+#define W_LOAD(i) ((i) ^ (tid * 17u))
+#else
+#define W_LOAD(i) w[i]
+#endif
 layout(set = 0, binding = 1) readonly buffer Act { vec4 xv[]; };
 layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
 layout(set = 0, binding = 3) readonly buffer RouterW { float rw[]; };
@@ -51,6 +56,9 @@ shared float sh_ue4m3[256];
 #endif
 
 void main(void) {
+#ifdef P36_ABLATE_EMPTY
+    return;
+#endif
     uint tid = gl_LocalInvocationID.x;
     uint r_local = tid >> 2u;   /* 0..15 */
     uint blane = tid & 3u;      /* 0..3 */
@@ -137,11 +145,15 @@ void main(void) {
         float s = 0.0;
 
 #ifdef P36_MOE_IQ4NL
-        uint u0 = w[wi + 0u];
-        uint u1 = w[wi + 1u];
-        uint u2 = w[wi + 2u];
-        uint u3 = w[wi + 3u];
-        uint u4 = w[wi + 4u];
+        uint u0 = W_LOAD(wi + 0u);
+        uint u1 = W_LOAD(wi + 1u);
+        uint u2 = W_LOAD(wi + 2u);
+        uint u3 = W_LOAD(wi + 3u);
+        uint u4 = W_LOAD(wi + 4u);
+#ifdef P36_ABLATE_LOADS
+        d = 1.0;
+        s = float(u0 ^ u1 ^ u2 ^ u3 ^ u4);
+#else
         uint q0, q1, q2, q3;
         if (odd) {
             d = unpackHalf2x16(u0 >> 16u).x;
@@ -171,6 +183,7 @@ void main(void) {
                       sh_lut[(q2 >> 20u) & 15u], sh_lut[(q2 >> 28u) & 15u]), a6);
         s += dot(vec4(sh_lut[(q3 >>  4u) & 15u], sh_lut[(q3 >> 12u) & 15u],
                       sh_lut[(q3 >> 20u) & 15u], sh_lut[(q3 >> 28u) & 15u]), a7);
+#endif
 #elif defined(P36_MOE_Q5_0)
         uint u0 = w[wi + 0u];
         uint u1 = w[wi + 1u];

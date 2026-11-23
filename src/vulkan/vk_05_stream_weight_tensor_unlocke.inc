@@ -58,7 +58,9 @@ static int p36_vk_run_unlocked(
         uint32_t                    groups_x,
         uint32_t                    groups_y,
         uint32_t                    groups_z) {
-    if (p36_vk_device_lost) return 0;
+    if (p36_vk_device_lost) { p36_vk_prof_next_bytes = 0; return 0; }
+    uint64_t prof_bytes = p36_vk_prof_next_bytes;
+    p36_vk_prof_next_bytes = 0;
     const char *prof_op = p36_vk_prof_op_name(op);
     uint64_t prof_t0 = p36_vk_now_ns();
     uint64_t groups_total = (uint64_t)groups_x * groups_y * groups_z;
@@ -165,6 +167,7 @@ static int p36_vk_run_unlocked(
                 p36_vk_prof_query_path[q0 / 2u] = kernel->path;
                 p36_vk_prof_query_op[q0 / 2u] = prof_op;
                 p36_vk_prof_query_groups[q0 / 2u] = 0;
+                p36_vk_prof_query_bytes[q0 / 2u] = 0;
                 p36_vk_prof_query_host_ns[q0 / 2u] = p36_vk_now_ns();
                 /* Reset exactly the pair about to be written.  Resetting the
                  * whole pool once per command buffer hangs the RADV device
@@ -175,8 +178,22 @@ static int p36_vk_run_unlocked(
                 p36_vk_prof_grp_path = kernel->path;
             }
         }
-        if (p36_vk_prof_grp_base != UINT32_MAX)
+        if (p36_vk_prof_grp_base != UINT32_MAX) {
+            if (prof_bytes == 0u) {
+                for (uint32_t i = 0; i < kernel->bindings; i++) {
+                    if ((kernel->write_mask >> i) & 1u) continue;
+                    if (!roots[i] || !roots[i]->weight_only) continue;
+                    if (bindings[i] == p36_vk.iq_tables) continue;
+                    bool dup = false;
+                    for (uint32_t j = 0; j < i; j++) {
+                        if (bindings[j] == bindings[i]) { dup = true; break; }
+                    }
+                    if (!dup && bindings[i]) prof_bytes += bindings[i]->bytes;
+                }
+            }
             p36_vk_prof_query_groups[p36_vk_prof_grp_base / 2u] += groups_total;
+            p36_vk_prof_query_bytes[p36_vk_prof_grp_base / 2u] += prof_bytes;
+        }
     }
     p36_vk_prof_wg_hist_add(prof_op, groups_total);
     vkCmdDispatch(cmd, groups_x, groups_y, groups_z);

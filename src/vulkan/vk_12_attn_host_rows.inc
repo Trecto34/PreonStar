@@ -259,6 +259,8 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
             ok = part != NULL && sinks_t != NULL;
             if (ok) {
                 const p36_gpu_tensor *qbind[5] = { q, k_cache, v_cache, sinks_t, part };
+                if (p36_vk.prof_kernel)
+                    p36_vk_prof_next_bytes = (uint64_t)(pos0 + 1u) * ((uint64_t)k_cache_row_bytes + v_cache_row_bytes);
                 ok = p36_vk_run_unlocked("attn_decode_fa",
                                          fa_ratio == 6u ? &p36_vk.attn_decode_fa_gqa6
                                                         : &p36_vk.attn_decode_fa_gqa8,
@@ -322,6 +324,8 @@ int p36_gpu_attn_decode_tensor(p36_gpu_tensor *out,
             ok = part != NULL && sinks_t != NULL;
             if (ok) {
                 const p36_gpu_tensor *sbind[5] = { q, k_cache, v_cache, sinks_t, part };
+                if (p36_vk.prof_kernel)
+                    p36_vk_prof_next_bytes = (uint64_t)(pos0 + 1u) * ((uint64_t)k_cache_row_bytes + v_cache_row_bytes);
                 ok = p36_vk_run_unlocked("attn_decode_split", &p36_vk.attn_decode_split,
                                          sbind, &spush, sizeof(spush),
                                          n_head, n_tok, n_spans);

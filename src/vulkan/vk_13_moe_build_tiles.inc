@@ -1662,6 +1662,8 @@ int p36_gpu_moe_ffn_f32_tail_tensor(p36_gpu_tensor *out,
                 }
                 const uint32_t gu_rows = !gemm && identity && (gu_iq2s_iq2xxs || gu_iq2s) &&
                                          (mid_dim % (uint32_t)gu_rows_env) == 0u ? (uint32_t)gu_rows_env : 1u;
+                if (p36_vk.prof_kernel)
+                    p36_vk_prof_next_bytes = (gate_stride + up_stride) * (gemm ? unique : n_used);
                 ok = gemm ? p36_vk_run_unlocked(gu_q3k ? "moe_q3k_gate_up_gemm" :
                                                 gu_iq3xxs ? "moe_iq3xxs_gate_up_gemm" :
                                                 (gu_iq2s_iq2xxs ? "moe_iq2s_iq2xxs_gate_up_gemm" :
@@ -1738,6 +1740,8 @@ int p36_gpu_moe_ffn_f32_tail_tensor(p36_gpu_tensor *out,
                                           down_iq3s ? &p36_vk.moe_down_q2k_sum_decode_iq3s :
                                           down_iq2s ? &p36_vk.moe_down_q2k_sum_decode_iq2s :
                                                        &p36_vk.moe_down_q2k_sum_decode;
+                if (p36_vk.prof_kernel)
+                    p36_vk_prof_next_bytes = down_stride * n_used;
                 ok = p36_vk_run_unlocked(dname, dkernel,
                                          db, &dpush, sizeof(dpush),
                                          out_dim / down_rows,

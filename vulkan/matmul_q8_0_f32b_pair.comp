@@ -12,6 +12,13 @@ layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer WeightsA { uint16_t wa[]; };
 layout(set = 0, binding = 1) readonly buffer WeightsB { uint16_t wb[]; };
+#ifdef P36_ABLATE_MATH
+#define WA_LOAD(i) (((i) ^ tid) & 0xffffu)
+#define WB_LOAD(i) (((i) ^ tid) & 0xffffu)
+#else
+#define WA_LOAD(i) uint(wa[i])
+#define WB_LOAD(i) uint(wb[i])
+#endif
 layout(set = 0, binding = 2) readonly buffer X { vec4 xv[]; };
 layout(set = 0, binding = 3) writeonly buffer OutputA { float ya[]; };
 layout(set = 0, binding = 4) writeonly buffer OutputB { float yb[]; };
@@ -29,6 +36,9 @@ shared float sh_a[4];
 shared float sh_b[4];
 
 void main(void) {
+#ifdef P36_ABLATE_EMPTY
+    return;
+#endif
     uint tid = gl_LocalInvocationID.x;
     uint row = gl_WorkGroupID.x;
     if (row >= pc.out_a) return;
@@ -43,21 +53,30 @@ void main(void) {
     for (uint b = boff; b < pc.blocks; b += bstep) {
         uint base = row_base + b * Q8_0_U16;
         uint q = base + 1u + (eoff >> 1u);
-        uint a0 = uint(wa[q]) | (uint(wa[q + 1u]) << 16u);
-        uint a1 = uint(wa[q + 2u]) | (uint(wa[q + 3u]) << 16u);
+        uint a0 = WA_LOAD(q) | (WA_LOAD(q + 1u) << 16u);
+        uint a1 = WA_LOAD(q + 2u) | (WA_LOAD(q + 3u) << 16u);
+#ifdef P36_ABLATE_LOADS
+        aa += float(a0 ^ a1 ^ WA_LOAD(base));
+        if (live_b) {
+            uint b0 = WB_LOAD(q) | (WB_LOAD(q + 1u) << 16u);
+            uint b1 = WB_LOAD(q + 2u) | (WB_LOAD(q + 3u) << 16u);
+            ab += float(b0 ^ b1 ^ WB_LOAD(base));
+        }
+#else
         uint xi = (b * 32u + eoff) >> 2u;
         vec4 x0 = xv[xi];
         vec4 x1 = xv[xi + 1u];
-        float da = unpackHalf2x16(uint(wa[base])).x;
+        float da = unpackHalf2x16(WA_LOAD(base)).x;
         aa += da * (dot(vec4(unpack8(int(a0))), x0) +
                     dot(vec4(unpack8(int(a1))), x1));
         if (live_b) {
-            uint b0 = uint(wb[q]) | (uint(wb[q + 1u]) << 16u);
-            uint b1 = uint(wb[q + 2u]) | (uint(wb[q + 3u]) << 16u);
-            float db = unpackHalf2x16(uint(wb[base])).x;
+            uint b0 = WB_LOAD(q) | (WB_LOAD(q + 1u) << 16u);
+            uint b1 = WB_LOAD(q + 2u) | (WB_LOAD(q + 3u) << 16u);
+            float db = unpackHalf2x16(WB_LOAD(base)).x;
             ab += db * (dot(vec4(unpack8(int(b0))), x0) +
                         dot(vec4(unpack8(int(b1))), x1));
         }
+#endif
     }
 
     aa = subgroupAdd(aa);

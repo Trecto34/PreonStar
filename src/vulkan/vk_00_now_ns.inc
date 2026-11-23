@@ -636,6 +636,8 @@ static const char *p36_vk_prof_query_path[P36_VK_PROF_QUERY_CAP / 2];
 static const char *p36_vk_prof_query_op[P36_VK_PROF_QUERY_CAP / 2];
 static uint64_t p36_vk_prof_query_groups[P36_VK_PROF_QUERY_CAP / 2];
 static uint64_t p36_vk_prof_query_host_ns[P36_VK_PROF_QUERY_CAP / 2];
+static uint64_t p36_vk_prof_query_bytes[P36_VK_PROF_QUERY_CAP / 2];
+static uint64_t p36_vk_prof_next_bytes;
 static uint32_t p36_vk_prof_query_count;
 /* Open op-group bracket: one timestamp pair per run of consecutive dispatches
  * of the same kernel.  Bracket indices, not dispatch indices. */

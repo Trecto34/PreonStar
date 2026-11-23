@@ -16,6 +16,11 @@ layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0) readonly buffer Weights {
     uint16_t wb16[];
 };
+#ifdef P36_ABLATE_MATH
+#define WB_LOAD(i) (((i) ^ tid) & 0xffffu)
+#else
+#define WB_LOAD(i) uint(wb16[i])
+#endif
 
 layout(set = 0, binding = 1) readonly buffer X {
     vec4 xv[];
@@ -39,6 +44,9 @@ const uint Q8_0_U16 = 17u;
 shared float sh_sub[4];
 
 void main(void) {
+#ifdef P36_ABLATE_EMPTY
+    return;
+#endif
     uint tid = gl_LocalInvocationID.x;
     /* y splits the row range so the vocab head fits the 65535 group limit. */
     uint row = gl_WorkGroupID.y * 16384u + gl_WorkGroupID.x;
@@ -53,14 +61,21 @@ void main(void) {
 
     for (uint b = boff; b < pc.blocks; b += bstep) {
         uint base = row_base + b * Q8_0_U16;
-        float d = unpackHalf2x16(uint(wb16[base])).x;
+#ifdef P36_ABLATE_LOADS
         uint q = base + 1u + (eoff >> 1u);
-        uint p0 = uint(wb16[q + 0u]) | (uint(wb16[q + 1u]) << 16u);
-        uint p1 = uint(wb16[q + 2u]) | (uint(wb16[q + 3u]) << 16u);
+        uint p0 = WB_LOAD(q + 0u) | (WB_LOAD(q + 1u) << 16u);
+        uint p1 = WB_LOAD(q + 2u) | (WB_LOAD(q + 3u) << 16u);
+        acc += float(p0 ^ p1 ^ WB_LOAD(base));
+#else
+        float d = unpackHalf2x16(WB_LOAD(base)).x;
+        uint q = base + 1u + (eoff >> 1u);
+        uint p0 = WB_LOAD(q + 0u) | (WB_LOAD(q + 1u) << 16u);
+        uint p1 = WB_LOAD(q + 2u) | (WB_LOAD(q + 3u) << 16u);
         vec4 w0 = vec4(unpack8(int(p0)));
         vec4 w1 = vec4(unpack8(int(p1)));
         uint xi = (b * 32u + eoff) >> 2u;
         acc += d * (dot(w0, xv[xi]) + dot(w1, xv[xi + 1u]));
+#endif
     }
 
     acc = subgroupAdd(acc);

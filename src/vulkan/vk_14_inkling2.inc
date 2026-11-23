@@ -824,6 +824,8 @@ int p36_gpu_inkling2_attn_tensor(
             uint32_t n_head, n_head_kv, pos, kv_cap, is_swa, rel_extent, n_splits;
             float scale;
         } pc = { n_head, n_head_kv, pos0, kv_cap, is_swa, rel_extent, n_splits, scale };
+        if (p36_vk.prof_kernel && kv_cap)
+            p36_vk_prof_next_bytes = ((cache_k->bytes + cache_v->bytes) / kv_cap) * k_len;
         ok = p36_vk_run_unlocked("inkling2_attn_dec", &p36_vk_ink_attn_decode, dec_b, &pc, sizeof(pc),
                                  n_head_kv, n_splits, 1);
         if (ok && n_splits > 1u) {
@@ -977,6 +979,8 @@ int p36_gpu_inkling2_moe_ffn_tensor(
         } gu_pc = { mid_dim, in_dim / 256u, n_used, situ_beta, 1.0f / situ_beta, situ_lb, 1.0f / situ_lb, has_gate_up_scale ? 1u : 0u };
         const p36_gpu_tensor *gu_b[6] = { gu_t, x, selected, mid_scratch, tables, gu_sc_t };
         uint32_t gu_rows = (gate_up_type == P36_VK_TENSOR_IQ2_S) ? 16u : 4u;
+        if (p36_vk.prof_kernel && n_expert)
+            p36_vk_prof_next_bytes = (gate_up_bytes / n_expert) * n_used;
         ok = p36_vk_run_unlocked("inkling2_moe_gu_dec", gu_k, gu_b, &gu_pc, sizeof(gu_pc),
                                  mid_dim / gu_rows, n_used, 1);
         if (ok) {
@@ -986,6 +990,8 @@ int p36_gpu_inkling2_moe_ffn_tensor(
             const p36_gpu_tensor *dn_b[6] = {
                 dn_t, mid_scratch, selected, weights, down_scratch, dn_sc_t
             };
+            if (p36_vk.prof_kernel && n_expert)
+                p36_vk_prof_next_bytes = (down_bytes / n_expert) * n_used;
             ok = p36_vk_run_unlocked("inkling2_moe_dn_dec", dn_k, dn_b, &dn_pc, sizeof(dn_pc),
                                      out_dim / 16u, n_used, 1);
             if (ok) {

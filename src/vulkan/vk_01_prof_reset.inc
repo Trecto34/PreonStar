@@ -258,7 +258,7 @@ static void p36_vk_prof_kernel_collect_unlocked(void) {
                 fprintf(p36_vk_prof_timeline_fp,
                         "# p36 vulkan dispatch timeline v1\n"
                         "# tick_period_ns=%.6f valid_bits=%u\n"
-                        "# columns: seq flush path groups start_tick end_tick dur_ns host_ns\n",
+                        "# columns: seq flush path groups start_tick end_tick dur_ns host_ns bytes\n",
                         (double)p36_vk.props.limits.timestampPeriod,
                         p36_vk.timestamp_valid_bits);
             }
@@ -273,7 +273,7 @@ static void p36_vk_prof_kernel_collect_unlocked(void) {
         p36_vk_prof_op_add(p36_vk_prof_query_op[q / 2u], 0, 0, 0, 0, 0, ns, 0);
         if (p36_vk_prof_timeline_fp) {
             fprintf(p36_vk_prof_timeline_fp,
-                    "%" PRIu64 " %" PRIu64 " %s %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+                    "%" PRIu64 " %" PRIu64 " %s %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
                     p36_vk_prof_timeline_seq++,
                     p36_vk_prof_flushes,
                     p36_vk_prof_query_path[q / 2u],
@@ -281,7 +281,8 @@ static void p36_vk_prof_kernel_collect_unlocked(void) {
                     a,
                     b,
                     ns,
-                    p36_vk_prof_query_host_ns[q / 2u]);
+                    p36_vk_prof_query_host_ns[q / 2u],
+                    p36_vk_prof_query_bytes[q / 2u]);
         }
     }
     if (p36_vk_prof_timeline_fp) fflush(p36_vk_prof_timeline_fp);
