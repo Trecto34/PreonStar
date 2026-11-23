@@ -4745,3 +4745,40 @@ decode step. Evidence: `karpathy/evidence/raw/ink-smallbatch-20261123/`.
   DSpark verify on Inkling first needs conv + SWA ring rollback.
 * reconsider_if: a router or model where (token, expert) pairs overlap a lot
   (then an expert-grouped small tile beats per-pair decode kernels).
+
+## 2026-11-23 Prompt-lookup speculation on Inkling-2-Mini (spec rollback + one-forward cycle) — REJECTED, opt-in lookup 25-35% slower on copy-heavy output; rollback kept
+
+Branch `experiment/ink-lookup` (on top of the 2..16-row micro-batch forward).
+Evidence: `karpathy/evidence/raw/ink-lookup-20261123/`.
+
+* **Change.** Inkling spec rollback: `p36_vulkan_spec_frontier_snapshot` /
+  `_restore` copy all 48 layers' shortconv state (`spec_conv`), and
+  `p36_vulkan_verify_suffix_tops` saves the SWA ring slots the verify rows
+  overwrite (the 1024-slot ring is exactly the window). Partial commits
+  restore and replay the kept prefix; `p36_vulkan_spec_rewind` does the same.
+  `argmax_rows` / `p36_gpu_spec_verify_tops` take a row stride (Inkling
+  logits rows are 201024 floats, the vocab is 200058); multi-row softcap
+  covers every padded row. Verify and replay open the wide-rows window on
+  Inkling. Lookup on Inkling uses a one-forward cycle (pending token in
+  verify row 0) with an adaptive draft length. Spec buffers are allocated
+  only with `--lookup-k`; Qwen lookup is unchanged.
+* **Rollback is correct.** Forcing a 1-row commit every cycle gave output
+  byte-identical to plain decode on four prompts (654 and 1473 rollbacks, past
+  the SWA ring wrap). With lookup off, frontier logits are byte-identical to
+  `main` at chunk 1 and 8; `make check` ok.
+* **Speed, `--lookup-k 8`, decode t/s (plain -> lookup):** edit 74.2 -> 48-51,
+  tooljson 74.4 -> 51-55, newcode 75.7 -> 62-65, prose 75.6 -> 71-75. The
+  decode-then-verify cycle was 67.6 / 62.8 on edit / tooljson.
+* **Why.** Verify 3/5/9 rows = 36/53/106 ms (9 rows leave the 2..8-row Q8_0
+  nx route); a partial-accept replay costs 20-30 ms; acceptance is ~3 tokens
+  per cycle; multi-row attention (`attn_prefill`) is 6.8 / 11.7 ms per 4-row
+  forward at ctx 2048 / 8192 against 0.7 / 1.0 ms for decode, so long agent
+  contexts are worse.
+* **What break-even would need:** cap verify at 8 rows; a replay-free partial
+  commit (capture per-row shortconv inputs during verify); decode-style
+  attention for 2..8 rows. Estimate after all three: +10-20% on copy-heavy
+  output, ~0 otherwise. Not pursued (owner decision, 2026-11-23); DSpark on
+  Inkling is out for the same per-row cost.
+* reconsider_if: Inkling verify rows get cheap (expert-shared small batches,
+  decode-style multi-row attention), or a dense target (DSpark / lookup on
+  Qwen3.8-27B, where verify rows share all weights).

@@ -65,10 +65,10 @@ files only with memory headroom.
 ## Speculative verify on Inkling-2-Mini — `karpathy/AlreadyTried.md` (2026-11-23)
 
 - [x] 2..16-row micro-batch forward: MoE on the decode kernels (pair-major) + per-token reduce-conv — 8-row forward **174 → 59 ms**, 4-row 98 → 34, 2-row 78 → 23; decode and normal prefill bit-identical
-- [ ] Spec frontier snapshot/rollback for Inkling conv state + SWA KV ring (blocks lookup, MTP and DSpark on Inkling)
-- [ ] Prompt-lookup verify on Inkling once rollback lands (no draft RAM)
+- [x] Spec frontier snapshot/rollback for Inkling conv state + SWA KV ring — byte-identical to decode under forced 1-row commits (branch `experiment/ink-lookup`)
+- [x] Prompt-lookup verify on Inkling — **rejected**: edit 74 → 48-51 t/s, tooljson 74 → 51-55 (verify rows ~0.5 decode each, replay 20-30 ms, multi-row attention grows with context)
 - [ ] Row-count overheads: decode-style attention for 2..4 rows (2.34 → ~0.8 ms), `dense_q6k_rows2` vs fused decode (4.78 vs 2.57 ms)
-- [ ] DSpark draft (`mtp.safetensors`, 3 dense layers + rnn Markov head) — estimate ±0% average / ~+25% code on BC-250; MoE adds ~4.6 ms per verify row
+- [x] DSpark draft on Inkling — **not pursued**: same per-row verify cost (±0% average / ~+25% code at best); reconsider on a dense target (Qwen3.8-27B DSpark GGUF exists)
 
 ## Prefill kernels
 

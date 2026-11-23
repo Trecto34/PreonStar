@@ -719,10 +719,11 @@ int p36_gpu_top2_tensor(p36_gpu_tensor *out_ids,
 
 int p36_gpu_spec_verify_tops(p36_gpu_tensor *last_logits, p36_gpu_tensor *out_ids,
                              const p36_gpu_tensor *spec_logits,
-                             uint32_t rows, uint32_t count) {
+                             uint32_t rows, uint32_t count, uint32_t stride) {
     const uint64_t row_bytes = (uint64_t)count * sizeof(float);
-    if (rows == 0u || count == 0u) return 0;
-    if (!p36_gpu_tensor_range_ok(spec_logits, 0, (uint64_t)rows * row_bytes) ||
+    const uint64_t stride_bytes = (uint64_t)stride * sizeof(float);
+    if (rows == 0u || count == 0u || stride < count) return 0;
+    if (!p36_gpu_tensor_range_ok(spec_logits, 0, (uint64_t)(rows - 1u) * stride_bytes + row_bytes) ||
         !p36_gpu_tensor_range_ok(last_logits, 0, row_bytes) ||
         !p36_gpu_tensor_range_ok(out_ids, 0, (uint64_t)rows * 2u * sizeof(int32_t))) return 0;
     /* One pair of dispatches for the whole batch: the row-wise reduction
@@ -747,7 +748,8 @@ int p36_gpu_spec_verify_tops(p36_gpu_tensor *last_logits, p36_gpu_tensor *out_id
             uint32_t count;
             uint32_t groups;
             uint32_t pass;
-        } push = { count, groups, 0u };
+            uint32_t stride;
+        } push = { count, groups, 0u, stride };
         ok = p36_vk_run_unlocked("argmax_rows_part", &p36_vk.argmax_rows,
                                  bindings, &push, sizeof(push), groups, rows, 1);
         if (ok) {
@@ -760,8 +762,8 @@ int p36_gpu_spec_verify_tops(p36_gpu_tensor *last_logits, p36_gpu_tensor *out_id
     if (!ok) return 0;
     {
         p36_gpu_tensor last = *spec_logits;
-        last.offset += (uint64_t)(rows - 1u) * row_bytes;
-        last.bytes -= (uint64_t)(rows - 1u) * row_bytes;
+        last.offset += (uint64_t)(rows - 1u) * stride_bytes;
+        last.bytes -= (uint64_t)(rows - 1u) * stride_bytes;
         if (!p36_gpu_tensor_copy(last_logits, 0, &last, 0, row_bytes)) return 0;
     }
     return 1;

@@ -1,0 +1,1387 @@
+#ifndef P36_NO_GPU
+static void p36_mtp_timing_report(uint32_t pos, const char *exit_reason,
+                                  int verify_n, int commit_n, int n_draft,
+                                  double c0, double c_fwd, double c_draft,
+                                  double c_snap, double c_verify, double c_commit,
+                                  uint64_t r0, uint64_t f0) {
+    fprintf(stderr,
+            "p36: mtp cycle pos=%u %-12s verify_n=%d commit_n=%d drafts=%d "
+            "fwd=%.2f draft=%.2f snap=%.2f verify=%.2f commit=%.2f total=%.2f ms "
+            "read_kb=%.0f drains=%" PRIu64 "\n",
+            pos, exit_reason ? exit_reason : "-", verify_n, commit_n, n_draft,
+            (c_fwd - c0) * 1000.0, (c_draft - c_fwd) * 1000.0,
+            (c_snap - c_draft) * 1000.0, (c_verify - c_snap) * 1000.0,
+            (c_commit - c_verify) * 1000.0, (c_commit - c0) * 1000.0,
+            (double)(p36_gpu_read_bytes() - r0) / 1024.0,
+            p36_gpu_read_flushes() - f0);
+}
+
+/* Shared speculative commit: verify[] has just been forwarded as one batch
+ * from start_pos, with row_tops[i] the argmax predicted after verify[i].
+ * Accepts the longest prefix the target agrees with, leaves the KV frontier
+ * and s->logits consistent with that prefix, and pushes it into the
+ * checkpoint.  Both draft sources (MTP head, prompt lookup) end here so the
+ * accept/rollback numerics exist once.  Returns 1 + commit_n, or -1. */
+static int p36_spec_commit_tokens(p36_session *s, const int *verify, int verify_n,
+                                  uint32_t start_pos, const int *row_tops,
+                                  int eos_token, int *accepted,
+                                  char *err, size_t errlen) {
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int commit_n = 1;
+    if (!rt) return -1;
+
+    for (int i = 1; i < verify_n; i++) {
+        if (row_tops[i - 1] != verify[i]) break;
+        commit_n++;
+    }
+    for (int i = 0; i < commit_n; i++) {
+        if (verify[i] == eos_token) {
+            commit_n = i + 1;
+            break;
+        }
+    }
+
+    if (commit_n == verify_n) {
+        /* Full accept: the verify pass already ran every committed token's
+         * forward and left the last row's logits in s->logits; adopting its
+         * KV/recurrent frontier makes the replay free. */
+        if (!p36_vulkan_update_last_h(rt, (uint32_t)verify_n - 1u)) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec frontier adopt failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+    } else if (!p36_vulkan_spec_commit_partial(s, (uint32_t)commit_n)) {
+        if (!p36_vulkan_spec_frontier_restore(rt)) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec rollback failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+        /* Replay the accepted prefix as one batch; refreshes s->logits
+         * and last_h from the last accepted row. */
+        bool replay;
+        p36_spec_rows_window(s, true);
+        replay = p36_forward_tokens_vulkan(s, verify, (uint32_t)commit_n, start_pos, true);
+        p36_spec_rows_window(s, false);
+        if (!replay) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec accepted-prefix replay failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+    }
+
+    for (int i = 0; i < commit_n; i++) {
+        accepted[1 + i] = verify[i];
+        p36_tokens_push(&s->checkpoint, verify[i]);
+    }
+    s->checkpoint_valid = true;
+    p36_mtp_stats_add(verify_n, commit_n, commit_n == verify_n);
+    return 1 + commit_n;
+}
+
+/* Commit for the one-forward cycle: verify[0] is the pending token, so the
+ * accepted count is also the number of tokens handed back.  row_tops[i] is the
+ * target's argmax after verify[i], which is what validates verify[i + 1]. */
+static int p36_spec_commit_pending(p36_session *s, const int *verify, int verify_n,
+                                   uint32_t start_pos, const int *row_tops,
+                                   int eos_token, int *accepted,
+                                   int head_covered, int n_lookup,
+                                   char *err, size_t errlen) {
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int commit_n = 1;
+    if (!rt) return -1;
+    for (int i = 1; i < verify_n; i++) {
+        if (row_tops[i - 1] != verify[i]) break;
+        commit_n++;
+    }
+    for (int i = 0; i < commit_n; i++) {
+        if (verify[i] == eos_token) {
+            commit_n = i + 1;
+            break;
+        }
+    }
+    if (commit_n == verify_n) {
+        /* Every row was committed: the verify pass already ran each token's
+         * forward, so adopting its frontier and logits is free. */
+        if (!p36_vulkan_update_last_h(rt, (uint32_t)verify_n - 1u)) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec frontier adopt failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+    } else if (!p36_vulkan_spec_commit_partial(s, (uint32_t)commit_n)) {
+        if (!p36_vulkan_spec_frontier_restore(rt)) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec rollback failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+        bool replay;
+        p36_spec_rows_window(s, true);
+        replay = p36_forward_tokens_vulkan(s, verify, (uint32_t)commit_n, start_pos, true);
+        p36_spec_rows_window(s, false);
+        if (!replay) {
+            if (err && errlen)
+                snprintf(err, errlen, "spec accepted-prefix replay failed at pos %u", start_pos);
+            p36_session_invalidate(s);
+            return -1;
+        }
+    }
+    for (int i = 0; i < commit_n; i++) {
+        accepted[i] = verify[i];
+        p36_tokens_push(&s->checkpoint, verify[i]);
+    }
+    s->checkpoint_valid = true;
+    p36_mtp_stats_add(verify_n, commit_n, commit_n == verify_n);
+    if (n_lookup > 0 && commit_n > head_covered) {
+        /* Lookup rows were committed without a head forward; fill the head's
+         * KV for them (no output projection needed) so the next cycle's drafts
+         * attend over the whole accepted prefix. */
+        for (int i = head_covered; i < commit_n; i++) {
+            p36_gpu_tensor *row_h = p36_vulkan_row(rt->next_hidden,
+                                                   (uint32_t)(i - 1), P36_N_EMBD);
+            bool ok = row_h && p36_mtp_forward_vulkan(s, verify[i],
+                                                      start_pos + (uint32_t)i,
+                                                      row_h, false);
+            p36_gpu_tensor_free(row_h);
+            if (!ok) break;
+        }
+    }
+    return commit_n;
+}
+
+/* Prompt lookup: the newest earlier copy of the last `order` tokens predicts
+ * the continuation.  Pure host work over the live token history -- no model,
+ * no GPU -- so a repeat-heavy turn (code blocks, file rewrites, echoed tool
+ * output) gets drafts for free.  Returns the number of proposed tokens. */
+static int p36_lookup_propose(const p36_session *s, int order, int k, int *out) {
+    const int *v;
+    uint32_t len, suffix, i, avail;
+    if (!s || !out || order <= 0 || k <= 0) return 0;
+    v = s->checkpoint.v;
+    len = s->checkpoint.len;
+    if (!v || len <= (uint32_t)order) return 0;
+    suffix = len - (uint32_t)order;
+    for (i = suffix; i-- > 0u; ) {
+        if (memcmp(v + i, v + suffix, (size_t)order * sizeof(*v)) != 0) continue;
+        avail = len - (i + (uint32_t)order);
+        if (avail == 0u) continue;
+        if (avail > (uint32_t)k) avail = (uint32_t)k;
+        memcpy(out, v + i + (uint32_t)order, (size_t)avail * sizeof(*out));
+        return (int)avail;
+    }
+    return 0;
+}
+
+/* One prompt-lookup speculative step: evaluate the pending token, draft from
+ * the token history, then reuse the MTP verifier and commit path so the
+ * accept/rollback numerics never fork by draft source. */
+static int p36_session_eval_lookup(p36_session *s, int first_token, int max_tokens,
+                                   int eos_token, int *accepted, int accepted_cap,
+                                   char *err, size_t errlen) {
+    p36_engine *e = s->engine;
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int verify[P36_MTP_MAX_DRAFT];
+    int row_tops[P36_MTP_MAX_DRAFT];
+    int k, verify_n, rc;
+    uint32_t start_pos;
+    if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+    accepted[0] = first_token;
+    if (!rt || !rt->last_h || !rt->logits) return 1;
+    k = e->lookup_k;
+    if (k > P36_MTP_MAX_DRAFT) k = P36_MTP_MAX_DRAFT;
+    if (k > accepted_cap - 1) k = accepted_cap - 1;
+    if (k > max_tokens - 1) k = max_tokens - 1;
+    if (k > s->ctx_size - s->checkpoint.len) k = s->ctx_size - s->checkpoint.len;
+    if (first_token == eos_token || k <= 1) return 1;
+    verify_n = p36_lookup_propose(s, e->lookup_order, k, verify);
+    if (verify_n <= 1) return 1;
+    /* The greedy token at this position is already known from the logits of
+     * the token just committed.  A proposal that disagrees cannot be right,
+     * so skip the verify batch rather than pay for it. */
+    if (verify[0] != p36_session_argmax(s)) return 1;
+    start_pos = (uint32_t)s->checkpoint.len;
+    if (!p36_vulkan_spec_frontier_snapshot(rt)) return 1;
+    if (!p36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
+        if (!p36_vulkan_spec_frontier_restore(rt)) p36_session_invalidate(s);
+        if (err && errlen) snprintf(err, errlen, "lookup verifier failed at pos %u", start_pos);
+        return -1;
+    }
+    rc = p36_spec_commit_tokens(s, verify, verify_n, start_pos, row_tops,
+                                eos_token, accepted, err, errlen);
+    if (rc > 1) {
+        s->spec_tail_valid = true;
+        s->spec_tail_start = start_pos;
+        s->spec_tail_commit = rc - 1;
+    }
+    return rc < 0 ? -1 : rc;
+}
+#endif /* !P36_NO_GPU: speculative helpers need the Vulkan runtime */
+#ifndef P36_NO_GPU
+/* Clover block-diffusion self-speculative step (draft-self):
+ * 1. Run a bidirectional block-diffusion preview over [first_token, mask, ..., mask]
+ *    of length `block_len` (divisor of clover_block_size, up to 16) without mutating
+ *    recurrent state or advancing full-attention KV cache.
+ * 2. Read the argmax of the masked rows as `draft[0 .. block_len - 2]`.
+ * 3. Verify `[first_token, draft[0], ..., draft[block_len - 2]]` causally in one
+ *    batch and commit the accepted prefix via p36_spec_commit_pending (which uses
+ *    p36_vulkan_spec_commit_partial to replay only the 30 lightweight GDN state
+ *    kernels on partial accept instead of re-running the 40-layer forward pass). */
+static int p36_session_eval_clover_step(p36_session *s, int first_token, int max_tokens,
+                                        int eos_token, int *accepted, int accepted_cap,
+                                        char *err, size_t errlen) {
+    p36_engine *e = s->engine;
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int draft[P36_MTP_MAX_DRAFT];
+    int verify[P36_MTP_MAX_DRAFT];
+    int row_tops[P36_MTP_MAX_DRAFT];
+    int target_block = 8;
+    const char *env_bs = getenv("P36_CLOVER_BLOCK");
+    if (env_bs && env_bs[0]) {
+        int v = atoi(env_bs);
+        if (v >= 2 && v <= P36_MTP_MAX_DRAFT) target_block = v;
+    }
+    if (!rt || !rt->logits) return 0;
+    int draft_cap = target_block;
+    if (draft_cap > P36_MTP_MAX_DRAFT) draft_cap = P36_MTP_MAX_DRAFT;
+    if (draft_cap > accepted_cap) draft_cap = accepted_cap;
+    if (draft_cap > max_tokens) draft_cap = max_tokens;
+    if (draft_cap > s->ctx_size - s->checkpoint.len) draft_cap = s->ctx_size - s->checkpoint.len;
+    if (rt->prefill_cap > 0 && draft_cap > (int)rt->prefill_cap) draft_cap = (int)rt->prefill_cap;
+    uint32_t cbs = e->clover_block_size ? e->clover_block_size : 32u;
+    int block_len = 0;
+    static const int cand_lens[] = { 16, 8, 4, 2 };
+    for (size_t ci = 0; ci < sizeof(cand_lens) / sizeof(cand_lens[0]); ci++) {
+        int c = cand_lens[ci];
+        if (c <= draft_cap && (cbs % (uint32_t)c) == 0u) {
+            block_len = c;
+            break;
+        }
+    }
+    if (first_token == eos_token || block_len <= 1 || getenv("P36_CLOVER_DISABLE") != NULL) {
+        if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+        accepted[0] = first_token;
+        return 1;
+    }
+    uint32_t start_pos = (uint32_t)s->checkpoint.len;
+    if (!p36_session_reserve_kv(s, start_pos + (uint32_t)block_len, start_pos)) {
+        if (err && errlen) snprintf(err, errlen, "failed to grow Clover KV cache");
+        return -1;
+    }
+    const bool mtp_timing = getenv("P36_MTP_TIMING") != NULL;
+    double tc0 = 0.0, tc_draft = 0.0, tc_snap = 0.0, tc_verify = 0.0;
+    uint64_t tr0 = 0, tf0 = 0;
+    if (mtp_timing) {
+        tc0 = p36_now_sec();
+        tr0 = p36_gpu_read_bytes();
+        tf0 = p36_gpu_read_flushes();
+    }
+    int n_draft = p36_clover_preview_draft(s, first_token, start_pos, (uint32_t)block_len, draft);
+    if (mtp_timing) tc_draft = p36_now_sec();
+    if (n_draft <= 0) {
+        if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+        accepted[0] = first_token;
+        return 1;
+    }
+    verify[0] = first_token;
+    int verify_n = 1;
+    for (int i = 0; i < n_draft && verify_n < block_len; i++) {
+        verify[verify_n++] = draft[i];
+        if (draft[i] == eos_token) break;
+    }
+    if (!p36_vulkan_spec_frontier_snapshot(rt)) {
+        if (err && errlen) snprintf(err, errlen, "Clover state snapshot failed");
+        return -1;
+    }
+    if (mtp_timing) tc_snap = p36_now_sec();
+    if (!p36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
+        if (!p36_vulkan_spec_frontier_restore(rt)) p36_session_invalidate(s);
+        if (err && errlen) snprintf(err, errlen, "Clover target verifier failed at pos %u", start_pos);
+        return -1;
+    }
+    if (mtp_timing) tc_verify = p36_now_sec();
+    int commit_n = p36_spec_commit_pending(s, verify, verify_n, start_pos, row_tops,
+                                           eos_token, accepted, verify_n, 0,
+                                           err, errlen);
+    if (commit_n < 0) return -1;
+    if (mtp_timing) {
+        p36_mtp_timing_report(start_pos,
+                              commit_n == verify_n ? "full-accept" : "partial",
+                              verify_n, commit_n, n_draft, tc0, tc0, tc_draft,
+                              tc_snap, tc_verify, p36_now_sec(), tr0, tf0);
+    }
+    return commit_n;
+}
+
+/* Blocks past 4 rows take the multi-row matvec routes only here; see
+ * p36_gpu_set_wide_rows. */
+static int p36_session_eval_clover(p36_session *s, int first_token, int max_tokens,
+                                   int eos_token, int *accepted, int accepted_cap,
+                                   char *err, size_t errlen) {
+    p36_gpu_set_wide_rows(true);
+    int rc = p36_session_eval_clover_step(s, first_token, max_tokens, eos_token,
+                                          accepted, accepted_cap, err, errlen);
+    p36_gpu_set_wide_rows(false);
+    return rc;
+}
+#endif
+
+int p36_session_eval_speculative_argmax(p36_session *s, int first_token,
+                                        int max_tokens, int eos_token,
+                                        int *accepted, int accepted_cap,
+                                        char *err, size_t errlen) {
+    p36_engine *e;
+    if (!s || !accepted || accepted_cap <= 0 || max_tokens <= 0) return 0;
+    e = s->engine;
+#ifndef P36_NO_GPU
+    if (e && e->variant == P36_VARIANT_CLOVER_35B_A3B &&
+        p36_engine_uses_vulkan_runtime(e)) {
+        return p36_session_eval_clover(s, first_token, max_tokens, eos_token,
+                                       accepted, accepted_cap, err, errlen);
+    }
+#endif
+    if (!e || !p36_engine_has_mtp(e) || e->mtp_draft_tokens <= 1 ||
+        !p36_engine_uses_vulkan_runtime(e)) {
+        /* No MTP head available: prompt lookup is the only draft source. */
+#ifndef P36_NO_GPU
+        if (e && e->lookup_k > 1 && p36_engine_uses_vulkan_runtime(e))
+            return p36_session_eval_lookup(s, first_token, max_tokens, eos_token,
+                                           accepted, accepted_cap, err, errlen);
+#endif
+        if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+        accepted[0] = first_token;
+        return 1;
+    }
+#ifndef P36_NO_GPU
+    {
+        p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+        int verify[P36_MTP_MAX_DRAFT];
+        int row_tops[P36_MTP_MAX_DRAFT];
+        int lookup[P36_MTP_MAX_DRAFT];
+        int mtp_cap = e->mtp_draft_tokens - 1;
+        int draft_cap = mtp_cap;
+        int lookup_n = 0;
+        int n_lookup = 0;
+        int head_covered = 0;
+        int verify_n;
+        int commit_n;
+        uint32_t start_pos;
+        int prev_token;
+        if (!rt || !rt->last_h || !rt->logits) return 0;
+
+        /* P36_MTP_TIMING: per-phase wall clock for one speculative cycle plus
+         * the host readback volume and the GPU drains it caused.  Diagnostic
+         * only: nothing below changes the tokens produced. */
+        const bool mtp_timing = getenv("P36_MTP_TIMING") != NULL;
+        double tc0 = 0.0, tc_fwd = 0.0, tc_draft = 0.0, tc_snap = 0.0;
+        double tc_verify = 0.0;
+        uint64_t tr0 = 0, tf0 = 0;
+        int n_draft = 0;
+        if (mtp_timing) {
+            tc0 = p36_now_sec();
+            tr0 = p36_gpu_read_bytes();
+            tf0 = p36_gpu_read_flushes();
+        }
+
+        if (draft_cap > P36_MTP_MAX_DRAFT) draft_cap = P36_MTP_MAX_DRAFT;
+        if (draft_cap > accepted_cap) draft_cap = accepted_cap;
+        if (draft_cap > max_tokens) draft_cap = max_tokens;
+        if (draft_cap > s->ctx_size - s->checkpoint.len) draft_cap = s->ctx_size - s->checkpoint.len;
+        if (rt->prefill_cap > 0 && draft_cap > (int)rt->prefill_cap) draft_cap = (int)rt->prefill_cap;
+        if (mtp_cap > draft_cap) mtp_cap = draft_cap;
+        /* Lookup drafts ride the same verifier: a repeat-heavy turn gets rows
+         * for free, so the row budget is whichever source asks for more. */
+        if (e->lookup_k > draft_cap) draft_cap = e->lookup_k;
+        if (mtp_cap > draft_cap) mtp_cap = draft_cap;
+        if (first_token == eos_token || draft_cap <= 1) {
+            if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+            accepted[0] = first_token;
+            return 1;
+        }
+        start_pos = (uint32_t)s->checkpoint.len;
+        if (!p36_session_reserve_kv(s, start_pos + (uint32_t)draft_cap, start_pos)) {
+            if (err && errlen) snprintf(err, errlen, "failed to grow MTP KV cache");
+            return -1;
+        }
+        /* Draft from the hidden the previous cycle left in last_h, before the
+         * target runs: the verify pass below covers the pending token and every
+         * draft in one target forward, so a cycle costs one forward no matter
+         * how deep the draft goes. */
+        /* History here still ends at the token before the pending one, so
+         * lookup[0] is the proposal for the pending token's own position and
+         * lookup[1] is the first continuation the MTP draft must agree with. */
+        if (e->lookup_k > 1 && draft_cap > 2)
+            lookup_n = p36_lookup_propose(s, e->lookup_order, draft_cap - 1, lookup);
+        verify[0] = first_token;
+        verify_n = 1;
+        prev_token = first_token;
+        while (verify_n < mtp_cap && prev_token != eos_token) {
+            float margin = 0.0f;
+            const p36_gpu_tensor *h = verify_n == 1
+                ? (rt->last_h_raw ? rt->last_h_raw : rt->last_h)
+                : rt->mtp_cur;
+            if (!p36_mtp_eval_vulkan(s, prev_token, start_pos + (uint32_t)verify_n - 1u, h)) {
+                if (err && errlen)
+                    snprintf(err, errlen, "MTP draft failed at pos %u",
+                             start_pos + (uint32_t)verify_n - 1u);
+                p36_session_invalidate(s);
+                return -1;
+            }
+            int tok = p36_mtp_pick(s, &margin);
+            if (tok < 0) break;
+            if (e->mtp_margin > 0.0f && margin < e->mtp_margin) break;
+            verify[verify_n++] = tok;
+            prev_token = tok;
+            n_draft++;
+            if (lookup_n > 2 && verify_n == 2 && lookup[0] == first_token &&
+                tok == lookup[1] && tok != eos_token) {
+                /* The draft agreed with the chain's first step: take the rest
+                 * of the chain, it costs verify rows and no head forward. */
+                for (int li = 2; li < lookup_n && verify_n < draft_cap; li++) {
+                    verify[verify_n++] = lookup[li];
+                    n_lookup++;
+                    if (lookup[li] == eos_token) break;
+                }
+                break;
+            }
+        }
+        head_covered = verify_n;
+        if (mtp_timing) {
+            tc_fwd = p36_now_sec();
+            tc_draft = tc_fwd;
+        }
+        if (verify_n <= 1 && lookup_n > 1 && lookup[0] == first_token &&
+            first_token != eos_token) {
+            /* No usable MTP draft, but the history repeats verbatim: verify the
+             * lookup continuation in the same single target forward. */
+            for (int li = 1; li < lookup_n && verify_n < draft_cap; li++) {
+                verify[verify_n++] = lookup[li];
+                n_lookup++;
+                if (lookup[li] == eos_token) break;
+            }
+        }
+        if (verify_n <= 1) {
+            /* The gate took every draft: decode the pending token plainly. */
+            if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+            accepted[0] = first_token;
+            if (mtp_timing) {
+                p36_mtp_timing_report(start_pos, "no-draft", 0, 1, 0, tc0, tc_draft,
+                                      tc_draft, tc_draft, tc_draft, p36_now_sec(), tr0, tf0);
+            }
+            return 1;
+        }
+        if (!p36_vulkan_spec_frontier_snapshot(rt)) {
+            if (err && errlen) snprintf(err, errlen, "MTP state snapshot failed");
+            return -1;
+        }
+        if (mtp_timing) tc_snap = p36_now_sec();
+        if (!p36_vulkan_verify_suffix_tops(s, verify, (uint32_t)verify_n, start_pos, row_tops)) {
+            if (!p36_vulkan_spec_frontier_restore(rt)) p36_session_invalidate(s);
+            if (err && errlen) snprintf(err, errlen, "MTP target verifier failed at pos %u", start_pos);
+            return -1;
+        }
+        if (mtp_timing) tc_verify = p36_now_sec();
+        commit_n = p36_spec_commit_pending(s, verify, verify_n, start_pos, row_tops,
+                                           eos_token, accepted, head_covered, n_lookup,
+                                           err, errlen);
+        if (commit_n < 0) return -1;
+        if (mtp_timing) {
+            p36_mtp_timing_report(start_pos,
+                                  commit_n == verify_n ? "full-accept" : "partial",
+                                  verify_n, commit_n, n_draft, tc0, tc_fwd, tc_draft,
+                                  tc_snap, tc_verify, p36_now_sec(), tr0, tf0);
+        }
+        s->mtp_draft_valid = false;
+        s->mtp_draft_token = -1;
+        return commit_n;
+    }
+#else
+    (void)eos_token;
+    if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+    accepted[0] = first_token;
+    return 1;
+#endif
+}
+
+const float *p36_session_logits(p36_session *s, int *n_vocab) {
+    if (n_vocab) *n_vocab = P36_N_VOCAB;
+    return p36_session_ensure_logits_host(s) ? s->logits : NULL;
+}
+
+static void p36_session_reset_runtime(p36_session *s) {
+    if (!s) return;
+    s->spec_tail_valid = false;
+    s->logits_stale = false;
+    s->logits_host_valid = false;
+    s->gpu_top2_valid = false;
+    if (p36_engine_uses_vulkan_runtime(s->engine)) {
+#ifndef P36_NO_GPU
+        (void)p36_vulkan_runtime_reset((p36_vulkan_runtime *)s->runtime);
+#endif
+    } else {
+        p36_cpu_runtime_reset((p36_cpu_runtime *)s->runtime);
+    }
+}
+
+void p36_session_invalidate(p36_session *s) {
+    if (!s) return;
+    p36_session_reset_runtime(s);
+    s->mtp_draft_valid = false;
+    s->mtp_draft_token = -1;
+    s->checkpoint_valid = false;
+    s->checkpoint.len = 0;
+    s->vision_state = false;
+    free(s->vision_spans);
+    s->vision_spans = NULL;
+    s->vision_count = 0;
+    s->rope_delta = 0;
+    P36_SESSION_ASSERT(s, "invalidate");
+}
+
+void p36_session_rewind(p36_session *s, int pos) {
+    p36_tokens prefix = {0};
+    if (!s) return;
+    if (s->vision_state) {
+        p36_session_invalidate(s);
+        return;
+    }
+    if (pos < 0) pos = 0;
+    if (pos > s->checkpoint.len) pos = s->checkpoint.len;
+    if (pos == s->checkpoint.len) return;
+#ifndef P36_NO_GPU
+    /* Cheap path: the cut is inside the verified tail of the last speculative step. */
+    if (s->spec_tail_valid && !getenv("P36_REWIND_FULL") && p36_engine_uses_vulkan_runtime(s->engine) &&
+        s->checkpoint.len == (int)s->spec_tail_start + s->spec_tail_commit &&
+        pos >= (int)s->spec_tail_start && pos < s->checkpoint.len) {
+        uint32_t keep_n = (uint32_t)(pos - (int)s->spec_tail_start);
+        s->spec_tail_valid = false;
+        if (p36_vulkan_spec_rewind(s, keep_n)) {
+            if (getenv("P36_LOOKUP_TIME")) fprintf(stderr, "rewind: cheap keep_n=%u\n", keep_n);
+            s->checkpoint.len = pos;
+            return;
+        }
+        /* partial replay failed: fall through to the full resync below */
+    }
+#endif
+    s->spec_tail_valid = false;
+    if (getenv("P36_LOOKUP_TIME")) fprintf(stderr, "rewind: FULL resync to pos=%d (len=%d tail_start=%u tail_commit=%d)\n", pos, s->checkpoint.len, s->spec_tail_start, s->spec_tail_commit);
+    for (int i = 0; i < pos; i++) p36_tokens_push(&prefix, s->checkpoint.v[i]);
+    p36_session_reset_runtime(s);
+    s->mtp_draft_valid = false;
+    s->mtp_draft_token = -1;
+    s->checkpoint.len = 0;
+    s->checkpoint_valid = false;
+    if (pos > 0) {
+        if (p36_session_sync(s, &prefix, NULL, 0) != 0) {
+            p36_session_invalidate(s);
+        }
+    }
+    p36_tokens_free(&prefix);
+}
+
+int p36_session_pos(p36_session *s) {
+    return s ? s->checkpoint.len : 0;
+}
+
+int p36_session_ctx(p36_session *s) {
+    return s ? s->ctx_size : 0;
+}
+
+int p36_engine_routed_quant_bits(p36_engine *e) {
+    return e ? e->routed_quant_bits : 0;
+}
+
+bool p36_engine_has_mtp(p36_engine *e) {
+    return e && p36_backend_uses_graph(e->backend) && e->mtp_ready;
+}
+
+int p36_engine_mtp_draft_tokens(p36_engine *e) {
+    return p36_engine_has_mtp(e) ? e->mtp_draft_tokens : 1;
+}
+
+/* Drafts per prompt-lookup step; 0 disables the lookup route. */
+int p36_engine_lookup_k(p36_engine *e) {
+    return e && p36_engine_uses_vulkan_runtime(e) ? e->lookup_k : 0;
+}
+
+/* Greedy decode can speculate when any draft source is armed. */
+bool p36_engine_spec_enabled(p36_engine *e) {
+    return p36_engine_mtp_draft_tokens(e) > 1 || p36_engine_lookup_k(e) > 1 ||
+           /* Clover block speculation is opt-in: draft + verify measured
+            * slower than plain decode (72 vs ~82 t/s at block 4). */
+           (e && e->variant == P36_VARIANT_CLOVER_35B_A3B && getenv("P36_CLOVER_BLOCK") &&
+            p36_engine_uses_vulkan_runtime(e));
+}
+
+const p36_tokens *p36_session_tokens(p36_session *s) {
+    return s ? &s->checkpoint : NULL;
+}
+
+static void p36_payload_set_err(char *err, size_t errlen, const char *msg) {
+    if (err && errlen) snprintf(err, errlen, "%s", msg ? msg : "session payload error");
+}
+
+static int p36_payload_copy_file_bytes(FILE *src, FILE *dst, uint64_t bytes,
+                                       char *err, size_t errlen) {
+    unsigned char buf[64 * 1024];
+    while (bytes) {
+        size_t n = bytes < sizeof(buf) ? (size_t)bytes : sizeof(buf);
+        if (fread(buf, 1, n, src) != n) {
+            p36_payload_set_err(err, errlen, "failed to read staged session payload");
+            return 1;
+        }
+        if (fwrite(buf, 1, n, dst) != n) {
+            p36_payload_set_err(err, errlen, "failed to write staged session payload");
+            return 1;
+        }
+        bytes -= n;
+    }
+    return 0;
+}
+
+static uint64_t p36_full_k_bytes(uint32_t rows, p36_kv_cache_type type) {
+    return (uint64_t)rows * p36_kv_cache_row_bytes(type, P36_N_HEAD_KV * P36_N_HEAD_DIM);
+}
+
+static uint64_t p36_full_v_bytes(uint32_t rows, p36_kv_cache_type type) {
+    return (uint64_t)rows * p36_kv_cache_row_bytes(type, P36_N_HEAD_KV * P36_N_VALUE_DIM);
+}
+
+static uint64_t p36_recurrent_conv_bytes(void) {
+    return (uint64_t)(P36_N_SSM_CONV - 1u) * P36_N_SSM_CONV_DIM * sizeof(float);
+}
+
+static uint64_t p36_recurrent_state_bytes(void) {
+    return (uint64_t)P36_N_SSM_STATE * P36_N_SSM_STATE * P36_N_SSM_DT_RANK * sizeof(float);
+}
+
+static int p36_payload_write_bytes(FILE *fp, const void *ptr, uint64_t bytes,
+                                   char *err, size_t errlen) {
+    if (bytes == 0) return 0;
+    if (!ptr || fwrite(ptr, 1, (size_t)bytes, fp) != bytes) {
+        p36_payload_set_err(err, errlen, "failed to write session payload");
+        return 1;
+    }
+    return 0;
+}
+
+static int p36_payload_read_bytes(FILE *fp, void *ptr, uint64_t bytes,
+                                  uint64_t *remaining, char *err, size_t errlen) {
+    if (bytes == 0) return 0;
+    if (!remaining || *remaining < bytes || !ptr ||
+        fread(ptr, 1, (size_t)bytes, fp) != bytes)
+    {
+        p36_payload_set_err(err, errlen, "failed to read session payload");
+        return 1;
+    }
+    *remaining -= bytes;
+    return 0;
+}
+
+static int p36_payload_write_u32(FILE *fp, uint32_t v, char *err, size_t errlen) {
+    return p36_payload_write_bytes(fp, &v, sizeof(v), err, errlen);
+}
+
+static int p36_payload_read_u32(FILE *fp, uint32_t *v, uint64_t *remaining,
+                                char *err, size_t errlen) {
+    return p36_payload_read_bytes(fp, v, sizeof(*v), remaining, err, errlen);
+}
+
+#ifndef P36_NO_GPU
+static int p36_payload_write_tensor(FILE *fp, const p36_gpu_tensor *tensor,
+                                    uint64_t bytes, char *err, size_t errlen) {
+    unsigned char buf[64 * 1024];
+    uint64_t off = 0;
+    while (off < bytes) {
+        uint64_t n = bytes - off;
+        if (n > sizeof(buf)) n = sizeof(buf);
+        if (!p36_gpu_tensor_read(tensor, off, buf, n) ||
+            fwrite(buf, 1, (size_t)n, fp) != n)
+        {
+            p36_payload_set_err(err, errlen, "failed to write GPU session payload");
+            return 1;
+        }
+        off += n;
+    }
+    return 0;
+}
+
+static int p36_payload_read_tensor(p36_gpu_tensor *tensor, FILE *fp,
+                                   uint64_t bytes, uint64_t *remaining,
+                                   char *err, size_t errlen) {
+    unsigned char buf[64 * 1024];
+    uint64_t off = 0;
+    if (!remaining || *remaining < bytes) {
+        p36_payload_set_err(err, errlen, "truncated GPU session payload");
+        return 1;
+    }
+    while (off < bytes) {
+        uint64_t n = bytes - off;
+        if (n > sizeof(buf)) n = sizeof(buf);
+        if (fread(buf, 1, (size_t)n, fp) != n ||
+            !p36_gpu_tensor_write(tensor, off, buf, n))
+        {
+            p36_payload_set_err(err, errlen, "failed to read GPU session payload");
+            return 1;
+        }
+        off += n;
+    }
+    *remaining -= bytes;
+    return 0;
+}
+
+static int p36_payload_write_recurrent_state(FILE *fp,
+                                              const p36_gpu_tensor *tensor,
+                                              bool f16,
+                                              char *err, size_t errlen) {
+    if (!f16)
+        return p36_payload_write_tensor(fp, tensor,
+                                        p36_recurrent_state_bytes(), err, errlen);
+    uint16_t half[8192];
+    float full[8192];
+    uint64_t elems = p36_recurrent_state_bytes() / sizeof(float);
+    for (uint64_t off = 0; off < elems; off += 8192u) {
+        uint64_t n = elems - off;
+        if (n > 8192u) n = 8192u;
+        if (!p36_gpu_tensor_read(tensor, off * sizeof(uint16_t), half,
+                                  n * sizeof(uint16_t))) {
+            p36_payload_set_err(err, errlen, "failed to read FP16 recurrent state");
+            return 1;
+        }
+        for (uint64_t i = 0; i < n; i++) full[i] = p36_f16_to_f32(half[i]);
+        if (fwrite(full, sizeof(float), (size_t)n, fp) != n) {
+            p36_payload_set_err(err, errlen, "failed to write recurrent state");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int p36_payload_read_recurrent_state(p36_gpu_tensor *tensor, FILE *fp,
+                                             bool f16, uint64_t *remaining,
+                                             char *err, size_t errlen) {
+    uint64_t bytes = p36_recurrent_state_bytes();
+    if (!f16)
+        return p36_payload_read_tensor(tensor, fp, bytes, remaining, err, errlen);
+    if (!remaining || *remaining < bytes) {
+        p36_payload_set_err(err, errlen, "truncated recurrent state");
+        return 1;
+    }
+    uint16_t half[8192];
+    float full[8192];
+    uint64_t elems = bytes / sizeof(float);
+    for (uint64_t off = 0; off < elems; off += 8192u) {
+        uint64_t n = elems - off;
+        if (n > 8192u) n = 8192u;
+        if (fread(full, sizeof(float), (size_t)n, fp) != n) {
+            p36_payload_set_err(err, errlen, "failed to read recurrent state");
+            return 1;
+        }
+        for (uint64_t i = 0; i < n; i++) half[i] = p36_f32_to_f16(full[i]);
+        if (!p36_gpu_tensor_write(tensor, off * sizeof(uint16_t), half,
+                                   n * sizeof(uint16_t))) {
+            p36_payload_set_err(err, errlen, "failed to upload FP16 recurrent state");
+            return 1;
+        }
+    }
+    *remaining -= bytes;
+    return 0;
+}
+#endif
+
+uint64_t p36_session_payload_bytes(p36_session *s) {
+    if (!s || s->vision_state) return 0;
+    uint32_t rows = (uint32_t)s->checkpoint.len;
+    bool typed = s->engine &&
+        (s->engine->cache_type_k != P36_KV_CACHE_F16 ||
+         s->engine->cache_type_v != P36_KV_CACHE_F16);
+    uint64_t bytes = (uint64_t)(typed ? P36_PAYLOAD_U32_FIELDS_TYPED_KV : P36_PAYLOAD_U32_FIELDS) * sizeof(uint32_t);
+    bytes += (uint64_t)rows * sizeof(int32_t);
+    bytes += (uint64_t)P36_N_VOCAB * sizeof(float);
+    if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) {
+        uint32_t swa_cap = 2048u;
+        uint32_t swa_rows = rows < swa_cap ? rows : swa_cap;
+        uint64_t conv_layer_bytes = (2ull * 3ull * 1024ull + 2ull * 3ull * 2304ull) * sizeof(float);
+        for (uint32_t il = 0; il < 48u; il++) {
+            bool is_swa = ((il % 6u) != 5u);
+            uint32_t kv_rows = is_swa ? swa_rows : rows;
+            bytes += sizeof(uint32_t) + 2ull * (uint64_t)kv_rows * p36_ink_kv_row_bytes() + conv_layer_bytes;
+        }
+        return bytes;
+    }
+    for (uint32_t il = 0; il < P36_N_LAYER; il++) {
+        if (p36_layer_is_full_attention(il)) {
+            bytes += sizeof(uint32_t) +
+                     p36_full_k_bytes(rows, s->engine->cache_type_k) +
+                     p36_full_v_bytes(rows, s->engine->cache_type_v);
+        } else {
+            bytes += p36_recurrent_conv_bytes() + p36_recurrent_state_bytes();
+        }
+    }
+    return bytes;
+}
+
+int p36_session_write_staged_payload(const p36_session_payload_file *payload,
+                                     FILE *fp, char *err, size_t errlen) {
+    if (!payload || !payload->path || !fp) {
+        p36_payload_set_err(err, errlen, "invalid staged session payload");
+        return 1;
+    }
+    FILE *src = fopen(payload->path, "rb");
+    if (!src) {
+        p36_payload_set_err(err, errlen, "failed to open staged session payload");
+        return 1;
+    }
+    int rc = p36_payload_copy_file_bytes(src, fp, payload->bytes, err, errlen);
+    if (fclose(src) != 0 && rc == 0) {
+        p36_payload_set_err(err, errlen, "failed to close staged session payload");
+        return 1;
+    }
+    return rc;
+}
+
+void p36_session_payload_file_free(p36_session_payload_file *payload) {
+    if (!payload) return;
+    if (payload->path) {
+        unlink(payload->path);
+        free(payload->path);
+    }
+    memset(payload, 0, sizeof(*payload));
+}
+
+int p36_session_stage_payload(p36_session *s, p36_session_payload_file *out,
+                              char *err, size_t errlen) {
+    if (!out) {
+        p36_payload_set_err(err, errlen, "invalid session payload staging request");
+        return 1;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!s || !s->checkpoint_valid || s->vision_state) {
+        p36_payload_set_err(err, errlen, "session has no valid checkpoint to stage");
+        return 1;
+    }
+
+    const char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir || !tmpdir[0]) tmpdir = "/tmp";
+    size_t tmpl_len = strlen(tmpdir) + sizeof("/p36-session-payload.XXXXXX");
+    char *tmpl = xmalloc(tmpl_len);
+    snprintf(tmpl, tmpl_len, "%s/p36-session-payload.XXXXXX", tmpdir);
+    int fd = mkstemp(tmpl);
+    if (fd < 0) {
+        free(tmpl);
+        p36_payload_set_err(err, errlen, "failed to create staged session payload");
+        return 1;
+    }
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) {
+        int saved = errno;
+        close(fd);
+        unlink(tmpl);
+        free(tmpl);
+        if (err && errlen)
+            snprintf(err, errlen, "failed to open staged session payload: %s",
+                     strerror(saved));
+        return 1;
+    }
+
+    int rc = p36_session_save_payload(s, fp, err, errlen);
+    if (rc == 0 && fflush(fp) != 0) {
+        p36_payload_set_err(err, errlen, "failed to flush staged session payload");
+        rc = 1;
+    }
+    off_t pos = -1;
+    if (rc == 0) {
+        pos = ftello(fp);
+        if (pos < 0) {
+            p36_payload_set_err(err, errlen, "failed to measure staged session payload");
+            rc = 1;
+        }
+    }
+    if (fclose(fp) != 0 && rc == 0) {
+        p36_payload_set_err(err, errlen, "failed to close staged session payload");
+        rc = 1;
+    }
+    if (rc != 0) {
+        unlink(tmpl);
+        free(tmpl);
+        return 1;
+    }
+    out->path = p36_strdup(tmpl);
+    out->bytes = (uint64_t)pos;
+    free(tmpl);
+    return 0;
+}
+
+int p36_session_save_payload(p36_session *s, FILE *fp, char *err, size_t errlen) {
+    if (!s || !fp) {
+        if (err && errlen) snprintf(err, errlen, "invalid payload save arguments");
+        return 1;
+    }
+    if (!s->checkpoint_valid) {
+        p36_payload_set_err(err, errlen, "session has no valid checkpoint to save");
+        return 1;
+    }
+    if (s->vision_state) {
+        p36_payload_set_err(err, errlen, "image-conditioned checkpoints are not persistent");
+        return 1;
+    }
+    /* A cheap rewind to the start of the verified tail restores the state but not
+     * the logits; rt->logits then holds the verifier's rows, and a payload that
+     * stored them would answer an identical prompt with the wrong next token. */
+    if (s->logits_stale) {
+        p36_payload_set_err(err, errlen, "checkpoint logits are stale after a speculative rollback");
+        return 1;
+    }
+    uint32_t rows = (uint32_t)s->checkpoint.len;
+    bool typed = s->engine &&
+        (s->engine->cache_type_k != P36_KV_CACHE_F16 ||
+         s->engine->cache_type_v != P36_KV_CACHE_F16);
+    uint32_t h[P36_PAYLOAD_U32_FIELDS_TYPED_KV] = {
+        P36_PAYLOAD_MAGIC,
+        typed ? P36_PAYLOAD_VERSION_TYPED_KV : P36_PAYLOAD_VERSION,
+        (uint32_t)s->ctx_size,
+        s->engine && s->engine->backend == P36_BACKEND_CPU ?
+            ((p36_cpu_runtime *)s->runtime)->prefill_cap :
+#ifndef P36_NO_GPU
+            ((p36_vulkan_runtime *)s->runtime)->prefill_cap,
+#else
+            0,
+#endif
+        rows,
+        P36_N_VOCAB,
+        P36_N_LAYER,
+        P36_N_HEAD_KV,
+        P36_N_HEAD_DIM,
+        P36_N_VALUE_DIM,
+        P36_N_SSM_CONV,
+        P36_N_SSM_CONV_DIM,
+        P36_N_SSM_STATE,
+        P36_N_SSM_DT_RANK,
+        s->engine ? (uint32_t)s->engine->cache_type_k : 0,
+        s->engine ? (uint32_t)s->engine->cache_type_v : 0,
+    };
+    uint32_t nfields = typed ? P36_PAYLOAD_U32_FIELDS_TYPED_KV : P36_PAYLOAD_U32_FIELDS;
+    for (uint32_t i = 0; i < nfields; i++) {
+        if (p36_payload_write_u32(fp, h[i], err, errlen) != 0) return 1;
+    }
+    if (p36_payload_write_bytes(fp, s->checkpoint.v,
+                                (uint64_t)rows * sizeof(int32_t),
+                                err, errlen) != 0) return 1;
+    if (s->engine->backend == P36_BACKEND_CPU) {
+        p36_cpu_runtime *rt = (p36_cpu_runtime *)s->runtime;
+        if (!rt) return p36_unsupported_runtime(err, errlen);
+        if (p36_payload_write_bytes(fp, s->logits,
+                                    (uint64_t)P36_N_VOCAB * sizeof(float),
+                                    err, errlen) != 0) return 1;
+        for (uint32_t il = 0; il < P36_N_LAYER; il++) {
+            if (p36_layer_is_full_attention(il)) {
+                p36_full_attn_cache *c = &rt->full[il];
+                if (!c->k || !c->v || c->len < rows) {
+                    p36_payload_set_err(err, errlen, "CPU KV cache is shorter than checkpoint");
+                    return 1;
+                }
+                if (p36_payload_write_u32(fp, rows, err, errlen) != 0 ||
+                    p36_payload_write_bytes(fp, c->k, p36_full_k_bytes(rows, c->type_k), err, errlen) != 0 ||
+                    p36_payload_write_bytes(fp, c->v, p36_full_v_bytes(rows, c->type_v), err, errlen) != 0)
+                    return 1;
+            } else {
+                p36_recurrent_cache *c = &rt->recurrent[il];
+                if (p36_payload_write_bytes(fp, c->conv, p36_recurrent_conv_bytes(), err, errlen) != 0 ||
+                    p36_payload_write_bytes(fp, c->state, p36_recurrent_state_bytes(), err, errlen) != 0)
+                    return 1;
+            }
+        }
+        return 0;
+    }
+#ifdef P36_NO_GPU
+    return p36_unsupported_runtime(err, errlen);
+#else
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    if (!rt) return p36_unsupported_runtime(err, errlen);
+    if (s->logits_host_valid) {
+        if (p36_payload_write_bytes(fp, s->logits,
+                                    (uint64_t)P36_N_VOCAB * sizeof(float),
+                                    err, errlen) != 0) return 1;
+    } else if (p36_payload_write_tensor(fp, rt->logits,
+                                        (uint64_t)P36_N_VOCAB * sizeof(float),
+                                        err, errlen) != 0) {
+        return 1;
+    }
+    if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) {
+        p36_inkling2_runtime *ink = (p36_inkling2_runtime *)rt->ink;
+        if (!ink) return p36_unsupported_runtime(err, errlen);
+        const uint64_t conv_kv_bytes = 3ull * 1024ull * sizeof(float);
+        const uint64_t conv_post_bytes = 3ull * 2304ull * sizeof(float);
+        for (uint32_t il = 0; il < ink->n_logical; il++) {
+            uint32_t kv_rows = ink->is_swa_logical[il]
+                ? (rows < ink->swa_kv_cap ? rows : ink->swa_kv_cap)
+                : rows;
+            uint32_t cap = ink->is_swa_logical[il] ? ink->swa_kv_cap : ink->full_kv_cap;
+            if (!ink->kv_k[il] || !ink->kv_v[il] || cap < kv_rows) {
+                p36_payload_set_err(err, errlen, "Vulkan Inkling2 KV cache is shorter than checkpoint");
+                return 1;
+            }
+            uint64_t kv_bytes = (uint64_t)kv_rows * p36_ink_kv_row_bytes();
+            if (p36_payload_write_u32(fp, kv_rows, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->kv_k[il], kv_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->kv_v[il], kv_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->conv_k[il], conv_kv_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->conv_v[il], conv_kv_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->conv_attn_post[il], conv_post_bytes, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, ink->conv_ffn_post[il], conv_post_bytes, err, errlen) != 0)
+                return 1;
+        }
+        return 0;
+    }
+    for (uint32_t il = 0; il < P36_N_LAYER; il++) {
+        if (p36_layer_is_full_attention(il)) {
+            p36_vulkan_full_attn_cache *c = &rt->full[il];
+            if (!c->k || !c->v || c->cap < rows) {
+                p36_payload_set_err(err, errlen, "Vulkan KV cache is shorter than checkpoint");
+                return 1;
+            }
+            if (p36_payload_write_u32(fp, rows, err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, c->k, p36_full_k_bytes(rows, c->type_k), err, errlen) != 0 ||
+                p36_payload_write_tensor(fp, c->v, p36_full_v_bytes(rows, c->type_v), err, errlen) != 0)
+                return 1;
+        } else {
+            p36_vulkan_recurrent_cache *c = &rt->recurrent[il];
+            if (p36_payload_write_tensor(fp, c->conv, p36_recurrent_conv_bytes(), err, errlen) != 0 ||
+                p36_payload_write_recurrent_state(fp, c->state,
+                                                  rt->recur_state_f16,
+                                                  err, errlen) != 0)
+                return 1;
+        }
+    }
+    return 0;
+#endif
+}
+
+static int p36_session_load_payload_impl(p36_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
+    if (!s || !fp) {
+        if (err && errlen) snprintf(err, errlen, "invalid payload load arguments");
+        return 1;
+    }
+    uint64_t remaining = payload_bytes;
+    uint32_t magic = 0, version = 0, third = 0;
+    if (p36_payload_read_u32(fp, &magic, &remaining, err, errlen) != 0 ||
+        p36_payload_read_u32(fp, &version, &remaining, err, errlen) != 0 ||
+        p36_payload_read_u32(fp, &third, &remaining, err, errlen) != 0)
+    {
+        if (err && errlen) snprintf(err, errlen, "failed to read session payload header");
+        return 1;
+    }
+    if (magic != P36_PAYLOAD_MAGIC) {
+        if (err && errlen) snprintf(err, errlen, "unsupported session payload format");
+        return 1;
+    }
+    if (version == P36_PAYLOAD_VERSION_TOKEN_ONLY) {
+        uint32_t n_tokens = third;
+        if (n_tokens >= (uint32_t)s->ctx_size) {
+            p36_payload_set_err(err, errlen, "token-only checkpoint does not fit current context");
+            return 1;
+        }
+        if (remaining != (uint64_t)n_tokens * sizeof(int32_t)) {
+            if (err && errlen) snprintf(err, errlen, "mismatched token-only payload size");
+            return 1;
+        }
+        p36_tokens prompt = {0};
+        for (uint32_t i = 0; i < n_tokens; i++) {
+            int32_t tok = 0;
+            if (p36_payload_read_bytes(fp, &tok, sizeof(tok), &remaining, err, errlen) != 0) {
+                p36_tokens_free(&prompt);
+                return 1;
+            }
+            p36_tokens_push(&prompt, tok);
+        }
+        s->checkpoint.len = 0;
+        s->checkpoint_valid = false;
+        int rc = prompt.len ? p36_session_sync(s, &prompt, err, errlen) : 0;
+        if (!prompt.len) p36_session_reset_runtime(s);
+        p36_tokens_free(&prompt);
+        if (rc != 0) return 1;
+        s->checkpoint_valid = true;
+        return 0;
+    }
+    if (version != P36_PAYLOAD_VERSION && version != P36_PAYLOAD_VERSION_TYPED_KV) {
+        if (err && errlen) snprintf(err, errlen, "unsupported session payload version");
+        return 1;
+    }
+
+    uint32_t nfields = version == P36_PAYLOAD_VERSION_TYPED_KV ?
+        P36_PAYLOAD_U32_FIELDS_TYPED_KV : P36_PAYLOAD_U32_FIELDS;
+    uint32_t h[P36_PAYLOAD_U32_FIELDS_TYPED_KV] = {0};
+    h[0] = magic;
+    h[1] = version;
+    h[2] = third;
+    for (uint32_t i = 3; i < nfields; i++) {
+        if (p36_payload_read_u32(fp, &h[i], &remaining, err, errlen) != 0) return 1;
+    }
+    uint32_t saved_ctx = h[2];
+    uint32_t n_tokens = h[4];
+    if (saved_ctx > (uint32_t)s->ctx_size || n_tokens >= (uint32_t)s->ctx_size) {
+        p36_payload_set_err(err, errlen, "KV checkpoint does not fit current context");
+        return 1;
+    }
+    if (h[5] != P36_N_VOCAB || h[6] != P36_N_LAYER ||
+        h[7] != P36_N_HEAD_KV || h[8] != P36_N_HEAD_DIM ||
+        h[9] != P36_N_VALUE_DIM || h[10] != P36_N_SSM_CONV ||
+        h[11] != P36_N_SSM_CONV_DIM || h[12] != P36_N_SSM_STATE ||
+        h[13] != P36_N_SSM_DT_RANK)
+    {
+        p36_payload_set_err(err, errlen, "KV checkpoint was written for a different p36 layout");
+        return 1;
+    }
+    p36_kv_cache_type payload_type_k = version == P36_PAYLOAD_VERSION_TYPED_KV ?
+        (p36_kv_cache_type)h[14] : P36_KV_CACHE_F16;
+    p36_kv_cache_type payload_type_v = version == P36_PAYLOAD_VERSION_TYPED_KV ?
+        (p36_kv_cache_type)h[15] : P36_KV_CACHE_F16;
+    if (payload_type_k > P36_KV_CACHE_Q4_0 || payload_type_v > P36_KV_CACHE_Q4_0 ||
+        !s->engine ||
+        s->engine->cache_type_k != payload_type_k ||
+        s->engine->cache_type_v != payload_type_v)
+    {
+        p36_payload_set_err(err, errlen, "KV checkpoint was written with a different cache type");
+        return 1;
+    }
+
+    /* From here the live state is overwritten: drop vision spans, rope_delta and
+     * any pending MTP draft along with the checkpoint, not just the tokens. */
+    p36_session_invalidate(s);
+    if (!p36_session_reserve_kv(s, n_tokens, 0)) {
+        p36_payload_set_err(err, errlen, "failed to grow KV cache for checkpoint");
+        return 1;
+    }
+    for (uint32_t i = 0; i < n_tokens; i++) {
+        int32_t tok = 0;
+        if (p36_payload_read_bytes(fp, &tok, sizeof(tok), &remaining, err, errlen) != 0) return 1;
+        p36_tokens_push(&s->checkpoint, tok);
+    }
+    if (s->engine->backend == P36_BACKEND_CPU) {
+        p36_cpu_runtime *rt = (p36_cpu_runtime *)s->runtime;
+        if (!rt) return p36_unsupported_runtime(err, errlen);
+        if (p36_payload_read_bytes(fp, s->logits,
+                                   (uint64_t)P36_N_VOCAB * sizeof(float),
+                                   &remaining, err, errlen) != 0) return 1;
+        s->logits_host_valid = true;
+        s->gpu_top2_valid = false;
+        for (uint32_t il = 0; il < P36_N_LAYER; il++) {
+            if (p36_layer_is_full_attention(il)) {
+                uint32_t rows = 0;
+                p36_full_attn_cache *c = &rt->full[il];
+                if (p36_payload_read_u32(fp, &rows, &remaining, err, errlen) != 0) return 1;
+                if (rows != n_tokens || rows > c->cap) {
+                    p36_payload_set_err(err, errlen, "KV checkpoint full-attention length mismatch");
+                    return 1;
+                }
+                c->len = rows;
+                if (p36_payload_read_bytes(fp, c->k, p36_full_k_bytes(rows, c->type_k), &remaining, err, errlen) != 0 ||
+                    p36_payload_read_bytes(fp, c->v, p36_full_v_bytes(rows, c->type_v), &remaining, err, errlen) != 0)
+                    return 1;
+            } else {
+                p36_recurrent_cache *c = &rt->recurrent[il];
+                if (p36_payload_read_bytes(fp, c->conv, p36_recurrent_conv_bytes(), &remaining, err, errlen) != 0 ||
+                    p36_payload_read_bytes(fp, c->state, p36_recurrent_state_bytes(), &remaining, err, errlen) != 0)
+                    return 1;
+            }
+        }
+    } else {
+#ifdef P36_NO_GPU
+        return p36_unsupported_runtime(err, errlen);
+#else
+        p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+        if (!rt) return p36_unsupported_runtime(err, errlen);
+        if (p36_payload_read_tensor(rt->logits, fp,
+                                    (uint64_t)P36_N_VOCAB * sizeof(float),
+                                    &remaining, err, errlen) != 0) return 1;
+        s->logits_host_valid = false;
+        s->gpu_top2_valid = false;
+        if (s->engine && s->engine->variant == P36_VARIANT_INKLING2_LOOP) {
+            p36_inkling2_runtime *ink = (p36_inkling2_runtime *)rt->ink;
+            if (!ink) return p36_unsupported_runtime(err, errlen);
+            const uint64_t conv_kv_bytes = 3ull * 1024ull * sizeof(float);
+            const uint64_t conv_post_bytes = 3ull * 2304ull * sizeof(float);
+            for (uint32_t il = 0; il < ink->n_logical; il++) {
+                uint32_t expected_rows = ink->is_swa_logical[il]
+                    ? (n_tokens < ink->swa_kv_cap ? n_tokens : ink->swa_kv_cap)
+                    : n_tokens;
+                uint32_t cap = ink->is_swa_logical[il] ? ink->swa_kv_cap : ink->full_kv_cap;
+                uint32_t kv_rows = 0;
+                if (p36_payload_read_u32(fp, &kv_rows, &remaining, err, errlen) != 0) return 1;
+                if (kv_rows != expected_rows || kv_rows > cap) {
+                    p36_payload_set_err(err, errlen, "KV checkpoint Inkling2 KV length mismatch");
+                    return 1;
+                }
+                uint64_t kv_bytes = (uint64_t)kv_rows * p36_ink_kv_row_bytes();
+                if (p36_payload_read_tensor(ink->kv_k[il], fp, kv_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->kv_v[il], fp, kv_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->conv_k[il], fp, conv_kv_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->conv_v[il], fp, conv_kv_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->conv_attn_post[il], fp, conv_post_bytes, &remaining, err, errlen) != 0 ||
+                    p36_payload_read_tensor(ink->conv_ffn_post[il], fp, conv_post_bytes, &remaining, err, errlen) != 0)
+                    return 1;
+            }
+        } else {
+            for (uint32_t il = 0; il < P36_N_LAYER; il++) {
+                if (p36_layer_is_full_attention(il)) {
+                    uint32_t rows = 0;
+                    p36_vulkan_full_attn_cache *c = &rt->full[il];
+                    if (p36_payload_read_u32(fp, &rows, &remaining, err, errlen) != 0) return 1;
+                    if (rows != n_tokens || rows > c->cap) {
+                        p36_payload_set_err(err, errlen, "KV checkpoint full-attention length mismatch");
+                        return 1;
+                    }
+                    if (p36_payload_read_tensor(c->k, fp, p36_full_k_bytes(rows, c->type_k), &remaining, err, errlen) != 0 ||
+                        p36_payload_read_tensor(c->v, fp, p36_full_v_bytes(rows, c->type_v), &remaining, err, errlen) != 0)
+                        return 1;
+                } else {
+                    p36_vulkan_recurrent_cache *c = &rt->recurrent[il];
+                    if (p36_payload_read_tensor(c->conv, fp, p36_recurrent_conv_bytes(), &remaining, err, errlen) != 0 ||
+                        p36_payload_read_recurrent_state(c->state, fp,
+                                                         rt->recur_state_f16,
+                                                         &remaining, err, errlen) != 0)
+                        return 1;
+                }
+            }
+        }
+#endif
+    }
+    if (remaining != 0) {
+        p36_payload_set_err(err, errlen, "trailing bytes in session payload");
+        p36_session_invalidate(s);
+        return 1;
+    }
+    s->checkpoint_valid = true;
+    return 0;
+}
+
+int p36_session_load_payload(p36_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
+    int rc = p36_session_load_payload_impl(s, fp, payload_bytes, err, errlen);
+    /* A load that fails after pushing tokens leaves valid=false with len>0
+     * (BROKEN); make that an explicit empty session instead. */
+    if (rc != 0 && s && !s->checkpoint_valid && s->checkpoint.len > 0) p36_session_invalidate(s);
+    if (rc == 0) P36_SESSION_ASSERT(s, "load_payload");
+    return rc;
+}
+
+int p36_session_save_snapshot(p36_session *s, p36_session_snapshot *snap, char *err, size_t errlen) {
+    p36_payload_header hdr;
+    uint64_t bytes;
+    uint8_t *p;
+    if (!s || !snap) {
+        if (err && errlen) snprintf(err, errlen, "invalid snapshot save arguments");
+        return 1;
+    }
+    bytes = sizeof(hdr) + (uint64_t)s->checkpoint.len * sizeof(int32_t);
+    if (snap->cap < bytes) {
+        snap->ptr = xrealloc(snap->ptr, (size_t)bytes);
+        snap->cap = bytes;
+    }
+    hdr.magic = P36_PAYLOAD_MAGIC;
+    hdr.version = P36_PAYLOAD_VERSION_TOKEN_ONLY;
+    hdr.n_tokens = (uint32_t)s->checkpoint.len;
+    memcpy(snap->ptr, &hdr, sizeof(hdr));
+    p = snap->ptr + sizeof(hdr);
+    if (hdr.n_tokens) memcpy(p, s->checkpoint.v, (size_t)hdr.n_tokens * sizeof(int32_t));
+    snap->len = bytes;
+    (void)err;
+    (void)errlen;
+    return 0;
+}
+
+int p36_session_load_snapshot(p36_session *s, const p36_session_snapshot *snap, char *err, size_t errlen) {
+    const p36_payload_header *hdr;
+    const int32_t *tok;
+    if (!s || !snap || !snap->ptr || snap->len < sizeof(p36_payload_header)) {
+        if (err && errlen) snprintf(err, errlen, "invalid snapshot payload");
+        return 1;
+    }
+    hdr = (const p36_payload_header *)snap->ptr;
+    if (hdr->magic != P36_PAYLOAD_MAGIC ||
+        hdr->version != P36_PAYLOAD_VERSION_TOKEN_ONLY)
+    {
+        if (err && errlen) snprintf(err, errlen, "unsupported snapshot format");
+        return 1;
+    }
+    if (snap->len != sizeof(*hdr) + (uint64_t)hdr->n_tokens * sizeof(int32_t)) {
+        if (err && errlen) snprintf(err, errlen, "mismatched snapshot size");
+        return 1;
+    }
+    tok = (const int32_t *)(snap->ptr + sizeof(*hdr));
+    s->mtp_draft_valid = false;
+    s->mtp_draft_token = -1;
+    s->checkpoint.len = 0;
+    s->checkpoint_valid = false;
+    for (uint32_t i = 0; i < hdr->n_tokens; i++) p36_tokens_push(&s->checkpoint, tok[i]);
+    if (s->checkpoint.len > 0) {
+        p36_tokens prompt = {0};
+        p36_tokens_copy(&prompt, &s->checkpoint);
+        s->checkpoint.len = 0;
+        s->checkpoint_valid = false;
+        if (p36_session_sync(s, &prompt, err, errlen) != 0) {
+            p36_tokens_free(&prompt);
+            return 1;
+        }
+        p36_tokens_free(&prompt);
+    } else {
+        p36_session_reset_runtime(s);
+    }
+    s->checkpoint_valid = true;
+    return 0;
+}
+
+void p36_session_snapshot_free(p36_session_snapshot *snap) {
+    if (!snap) return;
+    free(snap->ptr);
+    memset(snap, 0, sizeof(*snap));
+}
+
+int p36_qwen35_n_layer(void) {
+    return P36_N_LAYER;
+}
+
+int p36_qwen35_n_embd(void) {
+    return P36_N_EMBD;
+}
+
+int p36_qwen35_n_vocab(void) {
+    return P36_N_VOCAB;
+}
+
+int p36_engine_prefill_layers(p36_engine *e,
+                              const p36_tokens *prompt,
+                              int ctx_size,
+                              float *layer_out,
+                              float *logits,
+                              char *err,
+                              size_t errlen) {
+    (void)e;
+    (void)prompt;
+    (void)ctx_size;
+    (void)layer_out;
+    (void)logits;
+    return p36_unsupported_runtime(err, errlen);
+}
+
+int p36_compare_prefill_layers(p36_engine *p36_e,
+                               p36_engine *other_e,
+                               const p36_tokens *prompt,
+                               int ctx_size,
+                               float *p36_layer_out,
+                               float *other_layer_out,
+                               float *p36_logits,
+                               float *other_logits,
+                               char *err,
+                               size_t errlen) {
+    (void)p36_e;
+    (void)other_e;
+    (void)prompt;
+    (void)ctx_size;
+    (void)p36_layer_out;
+    (void)other_layer_out;
+    (void)p36_logits;
+    (void)other_logits;
+    return p36_unsupported_runtime(err, errlen);
+}

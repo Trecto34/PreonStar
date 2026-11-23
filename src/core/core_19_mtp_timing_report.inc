@@ -61,9 +61,9 @@ static int p36_spec_commit_tokens(p36_session *s, const int *verify, int verify_
         /* Replay the accepted prefix as one batch; refreshes s->logits
          * and last_h from the last accepted row. */
         bool replay;
-        p36_gpu_set_micro_batch(true);
+        p36_spec_rows_window(s, true);
         replay = p36_forward_tokens_vulkan(s, verify, (uint32_t)commit_n, start_pos, true);
-        p36_gpu_set_micro_batch(false);
+        p36_spec_rows_window(s, false);
         if (!replay) {
             if (err && errlen)
                 snprintf(err, errlen, "spec accepted-prefix replay failed at pos %u", start_pos);
@@ -119,9 +119,9 @@ static int p36_spec_commit_pending(p36_session *s, const int *verify, int verify
             return -1;
         }
         bool replay;
-        p36_gpu_set_micro_batch(true);
+        p36_spec_rows_window(s, true);
         replay = p36_forward_tokens_vulkan(s, verify, (uint32_t)commit_n, start_pos, true);
-        p36_gpu_set_micro_batch(false);
+        p36_spec_rows_window(s, false);
         if (!replay) {
             if (err && errlen)
                 snprintf(err, errlen, "spec accepted-prefix replay failed at pos %u", start_pos);
@@ -175,6 +175,61 @@ static int p36_lookup_propose(const p36_session *s, int order, int k, int *out) 
     return 0;
 }
 
+/* Inkling-2-Mini prompt lookup, one forward per cycle.  A verify row costs
+ * about half a decode step there (every row reads its own 8 of 128 experts),
+ * so the pending token rides in verify row 0 instead of its own decode, and
+ * the draft length adapts: doubled after a full accept, cut back to what
+ * was accepted otherwise, so a run of misses costs 3-row verifies, not 9. */
+static int p36_session_eval_lookup_folded(p36_session *s, int first_token, int max_tokens,
+                                          int eos_token, int *accepted, int accepted_cap,
+                                          char *err, size_t errlen) {
+    p36_engine *e = s->engine;
+    p36_vulkan_runtime *rt = (p36_vulkan_runtime *)s->runtime;
+    int verify[P36_MTP_MAX_DRAFT];
+    int row_tops[P36_MTP_MAX_DRAFT];
+    int k_max, k, n_draft, rc;
+    uint32_t start_pos;
+    k_max = e->lookup_k;
+    if (k_max > P36_MTP_MAX_DRAFT - 1) k_max = P36_MTP_MAX_DRAFT - 1;
+    if (k_max > accepted_cap - 1) k_max = accepted_cap - 1;
+    if (k_max > max_tokens - 1) k_max = max_tokens - 1;
+    if (k_max > s->ctx_size - s->checkpoint.len - 1) k_max = s->ctx_size - s->checkpoint.len - 1;
+    k = s->lookup_k_cur < 2 ? 2 : s->lookup_k_cur;
+    if (k > k_max) k = k_max;
+    n_draft = 0;
+    if (first_token != eos_token && k >= 1) {
+        /* Propose from the history including the pending token. */
+        p36_tokens_push(&s->checkpoint, first_token);
+        n_draft = p36_lookup_propose(s, e->lookup_order, k, verify + 1);
+        s->checkpoint.len--;
+    }
+    if (n_draft <= 0) {
+        if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+        accepted[0] = first_token;
+        return 1;
+    }
+    verify[0] = first_token;
+    start_pos = (uint32_t)s->checkpoint.len;
+    if (!p36_vulkan_spec_frontier_snapshot(rt)) {
+        if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
+        accepted[0] = first_token;
+        return 1;
+    }
+    if (!p36_vulkan_verify_suffix_tops(s, verify, (uint32_t)(n_draft + 1), start_pos, row_tops)) {
+        if (!p36_vulkan_spec_frontier_restore(rt)) p36_session_invalidate(s);
+        if (err && errlen) snprintf(err, errlen, "lookup verifier failed at pos %u", start_pos);
+        return -1;
+    }
+    rc = p36_spec_commit_pending(s, verify, n_draft + 1, start_pos, row_tops,
+                                 eos_token, accepted, 0, 0, err, errlen);
+    if (rc < 0) return -1;
+    s->lookup_k_cur = rc == n_draft + 1 ? 2 * k : rc;
+    s->spec_tail_valid = true;
+    s->spec_tail_start = start_pos;
+    s->spec_tail_commit = rc;
+    return rc;
+}
+
 /* One prompt-lookup speculative step: evaluate the pending token, draft from
  * the token history, then reuse the MTP verifier and commit path so the
  * accept/rollback numerics never fork by draft source. */
@@ -187,6 +242,9 @@ static int p36_session_eval_lookup(p36_session *s, int first_token, int max_toke
     int row_tops[P36_MTP_MAX_DRAFT];
     int k, verify_n, rc;
     uint32_t start_pos;
+    if (rt && rt->ink)
+        return p36_session_eval_lookup_folded(s, first_token, max_tokens, eos_token,
+                                              accepted, accepted_cap, err, errlen);
     if (p36_session_eval_internal(s, first_token, false, err, errlen) != 0) return -1;
     accepted[0] = first_token;
     if (!rt || !rt->last_h || !rt->logits) return 1;

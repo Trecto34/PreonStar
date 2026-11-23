@@ -353,6 +353,16 @@ typedef struct {
     bool is_swa_logical[P36_INK_MAX_LOGICAL];
     uint32_t n_logical;
 
+    /* Speculative-verify rollback (lookup): a verify forward advances every
+     * shortconv state and overwrites SWA ring slots that the 1024-key window
+     * still needs after a rollback, so both are saved before it runs.
+     * NULL unless the engine runs speculative decoding. */
+    p36_gpu_tensor *spec_conv;         /* [n_logical] x {conv_k, conv_v, attn_post, ffn_post} */
+    p36_gpu_tensor *spec_swa_k;        /* [n_logical][P36_MTP_MAX_DRAFT] saved SWA ring rows */
+    p36_gpu_tensor *spec_swa_v;
+    uint32_t spec_swa_pos0;
+    uint32_t spec_swa_rows;            /* 0: nothing saved since the last snapshot */
+
     p36_inkling2_scratch decode;       /* permanent cap=1 (~0.3 MiB, zero false aliasing) */
     p36_inkling2_scratch prefill;      /* lazy aliased slab (freed on decode/reset) */
 } p36_inkling2_runtime;
@@ -363,6 +373,12 @@ static inline uint64_t p36_ink_kv_row_bytes(void) {
     static int q8 = -1;
     if (q8 < 0) q8 = getenv("P36_INK_KV_F16") ? 0 : 1;
     return q8 ? 8ull * 136ull : 1024ull * sizeof(uint16_t);
+}
+
+/* One logical layer's shortconv history: conv_k + conv_v (3 x KV each) and
+ * attn/ffn post-conv (3 x D each), all f32. */
+static inline uint64_t p36_ink_conv_layer_bytes(uint32_t kv, uint32_t d) {
+    return (2ull * 3ull * kv + 2ull * 3ull * d) * sizeof(float);
 }
 
 static inline uint64_t p36_ink_align256(uint64_t n) {
@@ -727,6 +743,9 @@ static void p36_inkling2_vulkan_runtime_free(p36_vulkan_runtime *rt) {
         }
         p36_inkling2_scratch_free(&ink->decode);
         p36_inkling2_scratch_free(&ink->prefill);
+        p36_gpu_tensor_free(ink->spec_conv);
+        p36_gpu_tensor_free(ink->spec_swa_k);
+        p36_gpu_tensor_free(ink->spec_swa_v);
         free(ink);
         rt->ink = NULL;
     }
@@ -740,10 +759,12 @@ static void p36_inkling2_vulkan_runtime_free(p36_vulkan_runtime *rt) {
     p36_gpu_tensor_free(rt->top2[1]);
     p36_gpu_tensor_free(rt->topk8);
     p36_gpu_tensor_free(rt->minp_pack);
+    p36_gpu_tensor_free(rt->spec_logits);
+    p36_gpu_tensor_free(rt->spec_tops);
     free(rt);
 }
 
-static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint32_t prefill_cap) {
+static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint32_t prefill_cap, bool enable_spec) {
     p36_vulkan_runtime *rt = xcalloc(1, sizeof(*rt));
     p36_inkling2_runtime *ink = xcalloc(1, sizeof(*ink));
     rt->ink = ink;
@@ -772,6 +793,16 @@ static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint
     if (!rt->embed_stage[0] || !rt->embed_stage[1] || !rt->last_h ||
         !rt->logits || !rt->top2[0] || !rt->top2[1] || !rt->topk8 || !rt->minp_pack) {
         goto fail;
+    }
+    if (enable_spec) {
+        /* Verify logits keep the padded 201024-float row stride of the LM head. */
+        rt->spec_logits = p36_gpu_tensor_alloc((uint64_t)P36_MTP_MAX_DRAFT * 201024u * sizeof(float));
+        rt->spec_tops = p36_gpu_tensor_alloc((uint64_t)P36_MTP_MAX_DRAFT * 2u * sizeof(int32_t));
+        ink->spec_conv = p36_gpu_tensor_alloc((uint64_t)ink->n_logical * p36_ink_conv_layer_bytes(KV, D));
+        ink->spec_swa_k = p36_gpu_tensor_alloc((uint64_t)ink->n_logical * P36_MTP_MAX_DRAFT * p36_ink_kv_row_bytes());
+        ink->spec_swa_v = p36_gpu_tensor_alloc((uint64_t)ink->n_logical * P36_MTP_MAX_DRAFT * p36_ink_kv_row_bytes());
+        if (!rt->spec_logits || !rt->spec_tops || !ink->spec_conv ||
+            !ink->spec_swa_k || !ink->spec_swa_v) goto fail;
     }
 
     /* Permanent decode scratch (cap=1, ~0.3 MiB); prefill scratch is allocated lazily on n_tok > 1. */
@@ -825,6 +856,92 @@ static bool p36_inkling2_embed_tokens_host(const p36_model *m, const p36_tensor 
         if (t->hadamard_inverse) p36_hadamard_inverse_host(row, n_embd);
     }
     return true;
+}
+
+/* --- speculative verify rollback ------------------------------------------ */
+
+static uint32_t p36_inkling2_logit_stride(const p36_engine *e) {
+    const p36_inkling2_hparams *hp = e ? (const p36_inkling2_hparams *)e->ink_hparams : NULL;
+    return hp ? hp->n_vocab_padded : P36_N_VOCAB;
+}
+
+/* Copy every logical layer's shortconv history into (to_spec) or out of the
+ * snapshot buffer, one layer after another in the same queue. */
+static bool p36_inkling2_spec_conv_copy(p36_inkling2_runtime *ink, bool to_spec) {
+    const uint64_t kv_b = 3ull * 1024u * sizeof(float);
+    const uint64_t d_b = 3ull * 2304u * sizeof(float);
+    uint64_t off = 0;
+    if (!ink || !ink->spec_conv) return false;
+    for (uint32_t il = 0; il < ink->n_logical; il++) {
+        p36_gpu_tensor *src[4] = { ink->conv_k[il], ink->conv_v[il],
+                                   ink->conv_attn_post[il], ink->conv_ffn_post[il] };
+        const uint64_t bytes[4] = { kv_b, kv_b, d_b, d_b };
+        for (int j = 0; j < 4; j++) {
+            bool ok = to_spec
+                ? p36_gpu_tensor_copy(ink->spec_conv, off, src[j], 0, bytes[j])
+                : p36_gpu_tensor_copy(src[j], 0, ink->spec_conv, off, bytes[j]);
+            if (!ok) return false;
+            off += bytes[j];
+        }
+    }
+    return true;
+}
+
+static bool p36_inkling2_spec_snapshot(p36_vulkan_runtime *rt) {
+    p36_inkling2_runtime *ink = rt ? (p36_inkling2_runtime *)rt->ink : NULL;
+    if (!p36_inkling2_spec_conv_copy(ink, true)) return false;
+    ink->spec_swa_rows = 0;
+    return true;
+}
+
+/* The SWA ring has exactly window-many slots, so verify rows for positions
+ * pos0..pos0+n-1 overwrite keys that the window still needs if the step is
+ * cut short.  Save those slots (ring wrap: up to two runs) before the forward. */
+static bool p36_inkling2_spec_swa_copy(p36_inkling2_runtime *ink, bool to_spec,
+                                       uint32_t pos0, uint32_t n) {
+    const uint64_t rb = p36_ink_kv_row_bytes();
+    const uint32_t cap = ink->swa_kv_cap;
+    const uint32_t start = pos0 & (cap - 1u);
+    const uint32_t first = n < cap - start ? n : cap - start;
+    for (uint32_t il = 0; il < ink->n_logical; il++) {
+        if (!ink->is_swa_logical[il]) continue;
+        const uint64_t spec_off = (uint64_t)il * P36_MTP_MAX_DRAFT * rb;
+        const uint32_t run_slot[2] = { start, 0u };
+        const uint32_t run_rows[2] = { first, n - first };
+        uint32_t done = 0;
+        for (int r = 0; r < 2; r++) {
+            if (run_rows[r] == 0u) continue;
+            const uint64_t ring_off = (uint64_t)run_slot[r] * rb;
+            const uint64_t buf_off = spec_off + (uint64_t)done * rb;
+            const uint64_t bytes = (uint64_t)run_rows[r] * rb;
+            bool ok = to_spec
+                ? (p36_gpu_tensor_copy(ink->spec_swa_k, buf_off, ink->kv_k[il], ring_off, bytes) &&
+                   p36_gpu_tensor_copy(ink->spec_swa_v, buf_off, ink->kv_v[il], ring_off, bytes))
+                : (p36_gpu_tensor_copy(ink->kv_k[il], ring_off, ink->spec_swa_k, buf_off, bytes) &&
+                   p36_gpu_tensor_copy(ink->kv_v[il], ring_off, ink->spec_swa_v, buf_off, bytes));
+            if (!ok) return false;
+            done += run_rows[r];
+        }
+    }
+    return true;
+}
+
+static bool p36_inkling2_spec_save_swa(p36_vulkan_runtime *rt, uint32_t pos0, uint32_t n) {
+    p36_inkling2_runtime *ink = rt ? (p36_inkling2_runtime *)rt->ink : NULL;
+    if (!ink || !ink->spec_swa_k || n == 0u || n > P36_MTP_MAX_DRAFT) return false;
+    if (!p36_inkling2_spec_swa_copy(ink, true, pos0, n)) return false;
+    ink->spec_swa_pos0 = pos0;
+    ink->spec_swa_rows = n;
+    return true;
+}
+
+/* Back to the snapshot: shortconv histories plus the saved SWA slots.  The
+ * saved rows stay valid, so a later rewind can restore the same step again. */
+static bool p36_inkling2_spec_restore(p36_vulkan_runtime *rt) {
+    p36_inkling2_runtime *ink = rt ? (p36_inkling2_runtime *)rt->ink : NULL;
+    if (!p36_inkling2_spec_conv_copy(ink, false)) return false;
+    return ink->spec_swa_rows == 0u ||
+           p36_inkling2_spec_swa_copy(ink, false, ink->spec_swa_pos0, ink->spec_swa_rows);
 }
 
 static bool p36_inkling2_control_vk(const p36_model *m,
@@ -884,7 +1001,10 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
     }
     p36_inkling2_scratch *sc;
     if (n_tok == 1u) {
-        if (ink->prefill.cap != 0) {
+        /* Speculative decoding alternates a 1-row decode with a 2..16-row
+         * verify: keep the 64-row slab then, or every cycle would sync,
+         * free and reallocate it. */
+        if (ink->prefill.cap != 0 && !(ink->spec_conv && ink->prefill.cap <= 64u)) {
             p36_gpu_synchronize();
             p36_inkling2_scratch_free(&ink->prefill);
             p36_gpu_trim_scratch();
@@ -1339,7 +1459,11 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
             p36_gpu_tensor_free(last);
             INK_CHK(ok, "lm_head");
             if (hp->final_logit_softcapping > 0.0f) {
-                INK_CHK(p36_gpu_inkling2_softcap_tensor(logits_out, rows * hp->n_vocab_unpadded, hp->final_logit_softcapping), "softcap");
+                /* Several rows sit n_vocab_padded apart: cap all of them (the pad
+                 * logits are never sampled); one row keeps the unpadded range. */
+                INK_CHK(p36_gpu_inkling2_softcap_tensor(logits_out,
+                                                        rows == 1u ? hp->n_vocab_unpadded : rows * hp->n_vocab_padded,
+                                                        hp->final_logit_softcapping), "softcap");
             }
         }
     }

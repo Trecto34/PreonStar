@@ -256,7 +256,7 @@ int p36_gpu_init(void) {
     p36_vk.rms_norm_rope_kv = P36_VK_KERNEL("vulkan/rms_norm_rope_kv_qwen.spv", 5, 24,
                                             (1u << 2) | (1u << 4));
     p36_vk.top2 = P36_VK_KERNEL("vulkan/top2.spv", 3, 12, (1u << 1) | (1u << 2));
-    p36_vk.argmax_rows = P36_VK_KERNEL("vulkan/argmax_rows.spv", 3, 12,
+    p36_vk.argmax_rows = P36_VK_KERNEL("vulkan/argmax_rows.spv", 3, 16,
                                        (1u << 1) | (1u << 2));
     p36_vk.topk8 = P36_VK_KERNEL("vulkan/topk8.spv", 3, 12, (1u << 1) | (1u << 2));
     p36_vk.logits_minp = P36_VK_KERNEL("vulkan/logits_minp_pack.spv", 2, 24, (1u << 1));

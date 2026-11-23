@@ -296,7 +296,7 @@ static bool p36_gpu_tensor_matmul_dense_q8_scaled(const p36_model *m,
 
 static bool p36_inkling2_vulkan_runtime_reset(p36_vulkan_runtime *rt);
 static void p36_inkling2_vulkan_runtime_free(p36_vulkan_runtime *rt);
-static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint32_t prefill_cap);
+static p36_vulkan_runtime *p36_inkling2_vulkan_runtime_create(int ctx_size, uint32_t prefill_cap, bool enable_spec);
 static bool p36_inkling2_vulkan_runtime_reserve_kv(p36_vulkan_runtime *rt, uint32_t need, uint32_t limit, uint32_t rows);
 
 static bool p36_vulkan_runtime_reset(p36_vulkan_runtime *rt) {
@@ -401,7 +401,7 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
     uint32_t kv_cap;
     if (ctx_size <= 0 || !p36_gpu_init()) return NULL;
     if (g_p36_shape.variant == P36_VARIANT_INKLING2_LOOP) {
-        return p36_inkling2_vulkan_runtime_create(ctx_size, prefill_cap);
+        return p36_inkling2_vulkan_runtime_create(ctx_size, prefill_cap, enable_spec);
     }
     uint32_t k_row_bytes = p36_kv_cache_row_bytes(cache_type_k, P36_N_HEAD_KV * P36_N_HEAD_DIM);
     uint32_t v_row_bytes = p36_kv_cache_row_bytes(cache_type_v, P36_N_HEAD_KV * P36_N_VALUE_DIM);

@@ -2039,6 +2039,7 @@ static bool p36_vulkan_spec_frontier_copy(p36_vulkan_recurrent_cache *dst,
 
 static bool p36_vulkan_spec_frontier_snapshot(p36_vulkan_runtime *rt) {
     if (!rt) return false;
+    if (rt->ink) return p36_inkling2_spec_snapshot(rt);
     for (uint32_t il = 0; il < P36_N_LAYER; il++) {
         if (p36_layer_is_full_attention(il)) continue;
         if (!p36_vulkan_spec_frontier_copy(&rt->spec_recurrent[il], &rt->recurrent[il])) return false;
@@ -2048,11 +2049,21 @@ static bool p36_vulkan_spec_frontier_snapshot(p36_vulkan_runtime *rt) {
 
 static bool p36_vulkan_spec_frontier_restore(p36_vulkan_runtime *rt) {
     if (!rt) return false;
+    if (rt->ink) return p36_inkling2_spec_restore(rt);
     for (uint32_t il = 0; il < P36_N_LAYER; il++) {
         if (p36_layer_is_full_attention(il)) continue;
         if (!p36_vulkan_spec_frontier_copy(&rt->recurrent[il], &rt->spec_recurrent[il])) return false;
     }
     return true;
+}
+
+/* Open/close the micro-batch window for a verify or replay forward.  Inkling
+ * also needs the wide-rows window: its verify blocks run past the 4-row cap
+ * of the K-quant rows kernels, and the MMQ tile costs ~10x per row there. */
+static void p36_spec_rows_window(p36_session *s, bool on) {
+    p36_vulkan_runtime *rt = s ? (p36_vulkan_runtime *)s->runtime : NULL;
+    p36_gpu_set_micro_batch(on);
+    if (rt && rt->ink) p36_gpu_set_wide_rows(on);
 }
 
 static bool p36_vulkan_verify_suffix_tops(p36_session *s,
@@ -2064,17 +2075,19 @@ static bool p36_vulkan_verify_suffix_tops(p36_session *s,
     if (!s || !tokens || n_tok == 0 || n_tok > P36_MTP_MAX_DRAFT) return false;
     rt = (p36_vulkan_runtime *)s->runtime;
     if (!rt || !rt->spec_logits || !rt->spec_tops) return false;
+    const uint32_t stride = rt->ink ? p36_inkling2_logit_stride(s->engine) : P36_N_VOCAB;
     const bool timed = getenv("P36_LOOKUP_TIME") != NULL;
     struct timespec t_start;
     if (timed) clock_gettime(CLOCK_MONOTONIC, &t_start);
-    p36_gpu_set_micro_batch(true);
+    if (rt->ink && !p36_inkling2_spec_save_swa(rt, pos0, n_tok)) return false;
+    p36_spec_rows_window(s, true);
     {
         /* Project every row through the graph's own output path: it applies
          * the Hadamard rotation of the output weight when the loader pre-
          * rotated it, which a plain matmul on rt->norm would miss. */
         bool fwd = p36_forward_tokens_vulkan_into(s, tokens, NULL, NULL,
                                                   n_tok, pos0, rt->spec_logits, true);
-        p36_gpu_set_micro_batch(false);
+        p36_spec_rows_window(s, false);
         if (!fwd) return false;
     }
     /* Top-2 of every row on the device, then one small read: pulling each
@@ -2083,7 +2096,7 @@ static bool p36_vulkan_verify_suffix_tops(p36_session *s,
      * equal to the last row so later lazy host reads stay correct.
      * P36_VK_ARGMAX=0 keeps the plain per-row readback below. */
     if (p36_gpu_spec_verify_tops(rt->logits, rt->spec_tops, rt->spec_logits,
-                                 n_tok, P36_N_VOCAB)) {
+                                 n_tok, P36_N_VOCAB, stride)) {
         int32_t tops[2 * P36_MTP_MAX_DRAFT];
         if (!p36_gpu_tensor_read(rt->spec_tops, 0, tops,
                                  (uint64_t)n_tok * 2u * sizeof(int32_t))) return false;
@@ -2103,14 +2116,14 @@ static bool p36_vulkan_verify_suffix_tops(p36_session *s,
     }
     for (uint32_t i = 0; i + 1u < n_tok; i++) {
         if (!p36_gpu_tensor_read(rt->spec_logits,
-                                 (uint64_t)i * P36_N_VOCAB * sizeof(*s->logits),
+                                 (uint64_t)i * stride * sizeof(*s->logits),
                                  s->logits,
                                  (uint64_t)P36_N_VOCAB * sizeof(*s->logits))) return false;
         row_tops[i] = sample_argmax(s->logits, P36_N_VOCAB);
     }
     bool ok = p36_gpu_tensor_read(
         rt->spec_logits,
-        (uint64_t)(n_tok - 1u) * P36_N_VOCAB * sizeof(*s->logits),
+        (uint64_t)(n_tok - 1u) * stride * sizeof(*s->logits),
         s->logits, (uint64_t)P36_N_VOCAB * sizeof(*s->logits)) != 0;
     if (ok) {
         s->logits_host_valid = true;
@@ -2126,7 +2139,8 @@ static bool p36_vulkan_spec_commit_partial(p36_session *s, uint32_t commit_n) {
     if (!s || commit_n == 0 || commit_n > P36_MTP_MAX_DRAFT) return false;
     e = s->engine;
     rt = (p36_vulkan_runtime *)s->runtime;
-    if (!e || !rt || !rt->recur_conv_fused || !rt->spec_logits || !rt->spec_tops) return false;
+    /* Inkling has no cheap per-layer replay: callers restore and replay the prefix. */
+    if (!e || !rt || rt->ink || !rt->recur_conv_fused || !rt->spec_logits || !rt->spec_tops) return false;
     if (!p36_gpu_tensor_read(rt->spec_tops,
                              (uint64_t)(commit_n - 1u) * 2u * sizeof(int32_t),
                              ids, sizeof(ids))) return false;
@@ -2165,6 +2179,18 @@ static bool p36_vulkan_spec_commit_partial(p36_session *s, uint32_t commit_n) {
 static bool p36_vulkan_spec_rewind(p36_session *s, uint32_t keep_n) {
     p36_vulkan_runtime *rt;
     if (!s) return false;
+    rt = (p36_vulkan_runtime *)s->runtime;
+    if (keep_n > 0 && rt && rt->ink) {
+        /* Restore the pre-verify state, then replay the kept rows; they are
+         * still in the checkpoint at spec_tail_start. */
+        bool ok;
+        if (!p36_vulkan_spec_frontier_restore(rt)) return false;
+        p36_spec_rows_window(s, true);
+        ok = p36_forward_tokens_vulkan(s, s->checkpoint.v + s->spec_tail_start, keep_n,
+                                       s->spec_tail_start, true);
+        p36_spec_rows_window(s, false);
+        return ok;
+    }
     if (keep_n > 0) return p36_vulkan_spec_commit_partial(s, keep_n);
     /* Nothing of the verified tail is kept: the snapshot is exactly the state after the
      * last kept token.  Its logits are gone, so mark them stale (p36_session_sync then
@@ -2200,7 +2226,7 @@ static int p36_clover_preview_draft(p36_session *s, int first_tok, uint32_t pos0
     rt->clover_preview = false;
     if (!fwd) return 0;
     if (!p36_gpu_spec_verify_tops(rt->logits, rt->spec_tops, rt->spec_logits,
-                                  block_len, P36_N_VOCAB)) return 0;
+                                  block_len, P36_N_VOCAB, P36_N_VOCAB)) return 0;
     if (!p36_gpu_tensor_read(rt->spec_tops, 0, tops,
                              (uint64_t)block_len * 2u * sizeof(int32_t))) return 0;
     for (uint32_t i = 1; i < block_len; i++) {
@@ -2359,7 +2385,7 @@ static int p36_mtp_pick(p36_session *s, float *margin) {
     int32_t ids[2] = {-1, -1};
     if (!rt || !rt->mtp_logits) return -1;
     if (p36_gpu_spec_verify_tops(rt->mtp_logits, rt->spec_tops, rt->mtp_logits,
-                                 1u, P36_N_VOCAB) &&
+                                 1u, P36_N_VOCAB, P36_N_VOCAB) &&
         p36_gpu_tensor_read(rt->spec_tops, 0, ids, sizeof(ids)) != 0) {
         if (ids[0] < 0) return -1;
         if (margin) {

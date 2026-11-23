@@ -759,6 +759,7 @@ struct p36_session {
     bool spec_tail_valid;
     uint32_t spec_tail_start;   /* position of the first verified token */
     int spec_tail_commit;       /* verified tokens committed after it */
+    int lookup_k_cur;           /* adaptive lookup draft length (one-forward cycle); 0 = minimum */
     bool logits_stale;          /* state rolled back without recomputing logits */
     bool vision_state;
     p36_vision_span *vision_spans;
