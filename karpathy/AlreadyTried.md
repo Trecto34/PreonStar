@@ -4806,3 +4806,15 @@ f16 (packed-f16 GEMM / f16 LDS staging); decode read F32. Evidence:
   The repo bench_ab gate read +0.53% / +0.81% (below +1.25%).
 * **Rejected on the way.** Unrolling the MoE down IQ4_NL loop (9 iterations): 46.6 -> 71.6 us (+54%, likely VGPR /
   occupancy). Unrolling IQ3_S gate_up: +2%. Evidence: `evidence/raw/ink-wide-unroll-20261123/`.
+
+## 2026-11-23 dense_kquant_decode Q6_K: 16 B funnel-shifted dword loads — REJECTED (inside noise), bit-identical
+
+* **Change.** Generic `dense_kquant_decode.spv` Q6_K path (Inkling O-proj + lm_head, Qwen-family attn_output/output):
+  dword alias on binding 0, each lane's 16 contiguous ql/qh bytes as 5 dword loads + branchless funnel shift
+  (was 2 u16 loads per word). A branchy version (Q3_K `load_16b` style) was 14% SLOWER: the 4 lane groups in a
+  wave work on different blocks, so the odd/even split diverges.
+* **Parity.** Greedy logprob md5 identical on 4 Inkling GGUFs and Sage-A1.5 APEX-I NanoPlus.
+* **Kernel.** MiniPlus-R2 42.2 -> 40.9 us/dispatch (-3%, ~0.06 ms/tok), repeated twice.
+* **Speed** (skill bench.py ctl/cand/ctl, 6 samples): 77.87 / 78.40 / 78.41 t/s — does not beat the second control.
+  Patch: `evidence/raw/ink-dkq-q6k-16b-20261123/dense-q6k-load16b.patch`. Could be re-tested stacked with other
+  sub-noise kernel wins.

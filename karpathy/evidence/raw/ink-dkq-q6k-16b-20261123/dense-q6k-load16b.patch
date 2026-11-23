@@ -1,0 +1,70 @@
+diff --git a/vulkan/dense_kquant_decode.comp b/vulkan/dense_kquant_decode.comp
+index b87c08b..311dc5b 100644
+--- a/vulkan/dense_kquant_decode.comp
++++ b/vulkan/dense_kquant_decode.comp
+@@ -1,4 +1,5 @@
+ #version 460
++#extension GL_EXT_control_flow_attributes : require
+ #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+ #extension GL_EXT_shader_16bit_storage : require
+ #extension GL_KHR_shader_subgroup_basic : require
+@@ -8,8 +9,12 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+ 
+ #if defined(P36_Q4K_ONLY) || defined(P36_Q5K_ONLY) || defined(P36_Q3K_ONLY) || defined(P36_Q2K_ONLY)
+ layout(set = 0, binding = 0) readonly buffer Weights { uint ww[]; };
++#define wa ww
+ #else
+ layout(set = 0, binding = 0) readonly buffer Weights { uint16_t wh[]; };
++/* Same descriptor seen as dwords: lets the Q6_K path fetch 16 B slices as
++ * 4-5 word loads instead of eight 16-bit ones (blocks are only 2 B-aligned). */
++layout(set = 0, binding = 0) readonly buffer WeightsW { uint wa[]; };
+ #endif
+ layout(set = 0, binding = 1) readonly buffer Q8K { uint q8[]; };
+ layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+@@ -201,6 +206,17 @@ vec4 dequant_word(uint row, uint block, uint word) {
+            float(load_i8(base + 192u + (idx >> 4u))) * qv;
+ }
+ 
++/* 16 bytes at even byte offset `off`, via the dword view (see load_16b). */
++uvec4 load_16b_w(uint off) {
++    /* Branchless: lanes of one wave work on different blocks, so the
++     * odd/even split would diverge. s = 0 or 16. */
++    uint w = off >> 2u;
++    uint s = (off & 2u) << 3u;
++    uint r0 = wa[w], r1 = wa[w + 1u], r2 = wa[w + 2u], r3 = wa[w + 3u], r4 = wa[w + 4u];
++    return uvec4((r0 >> s) | ((r1 << 16u) << (16u - s)), (r1 >> s) | ((r2 << 16u) << (16u - s)),
++                 (r2 >> s) | ((r3 << 16u) << (16u - s)), (r3 >> s) | ((r4 << 16u) << (16u - s)));
++}
++
+ #ifdef P36_Q3K_ONLY
+ /* A Q3_K block is 110 bytes, so odd blocks start 2 bytes off a word boundary.
+  * Fetch the 16 bytes at even offset `off` as four aligned words, funnel-shifted
+@@ -484,16 +500,18 @@ void main(void) {
+                 uint base = row * pc.row_bytes + 210u * b;
+                 float qdot[TOK];
+                 for (uint t = 0u; t < TOK; t++) qdot[t] = 0.0;
+-                for (uint i = 0u; i < 4u; i++) {
+-                    uint idx = 16u * itid + 4u * i;
+-                    uint half_block = idx >> 7u;
+-                    uint in_idx = idx & 127u;
+-                    uint l = in_idx & 31u;
+-                    uint sel = in_idx >> 5u;
+-                    uint ql_off = half_block * 64u +
+-                        ((sel & 1u) != 0u ? 32u : 0u) + l;
+-                    uint ql = load_u32(base + ql_off);
+-                    uint qh = load_u32(base + 128u + half_block * 32u + l);
++                /* A lane's 16 weights share half_block/sel and are 16 contiguous
++                 * ql and qh bytes: fetch each slice once. */
++                uint idx0 = 16u * itid;
++                uint half_block = idx0 >> 7u;
++                uint sel = (idx0 & 127u) >> 5u;
++                uint l0 = idx0 & 31u;
++                uvec4 qlv = load_16b_w(base + half_block * 64u +
++                                       ((sel & 1u) != 0u ? 32u : 0u) + l0);
++                uvec4 qhv = load_16b_w(base + 128u + half_block * 32u + l0);
++                [[unroll]] for (uint i = 0u; i < 4u; i++) {
++                    uint ql = qlv[i];
++                    uint qh = qhv[i];
+                     uint low = sel < 2u ? ql & 0x0f0f0f0fu :
+                                            (ql >> 4u) & 0x0f0f0f0fu;
+                     uint packed = low |
