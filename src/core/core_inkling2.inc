@@ -812,6 +812,25 @@ fail:
     return NULL;
 }
 
+/* Build the decode kernels' F16 loop-controller weights up front (byte sizes
+ * match the decode wrappers' cache keys). Failure only means decode converts
+ * lazily on first use. */
+static void p36_inkling2_warm_f16_weights(const p36_engine *e) {
+    const p36_inkling2_hparams *hp = (const p36_inkling2_hparams *)e->ink_hparams;
+    const p36_inkling2_weights *w = (const p36_inkling2_weights *)e->ink_weights;
+    if (!hp || !w || hp->loop_count <= 1) return;
+    const uint64_t dr = (uint64_t)hp->n_embd * hp->loop_gate_rank * sizeof(float);
+    for (uint32_t ip = hp->loop_start; ip < hp->loop_end; ip++) {
+        const p36_inkling2_layer_weights *l = &w->layer[ip];
+        for (int k = 0; k < 4; k++) {
+            if (!l->loop_down[k] || !l->loop_forget[k] || !l->loop_gain[k]) continue;
+            p36_gpu_inkling2_f16_weight_warm(e->model.map, e->model.size, l->loop_down[k]->abs_offset, 2u * dr);
+            p36_gpu_inkling2_f16_weight_warm(e->model.map, e->model.size, l->loop_forget[k]->abs_offset, dr);
+            p36_gpu_inkling2_f16_weight_warm(e->model.map, e->model.size, l->loop_gain[k]->abs_offset, dr);
+        }
+    }
+}
+
 static bool p36_inkling2_embed_tokens_host(const p36_model *m, const p36_tensor *t,
                                            const int *tokens, uint32_t n_tok,
                                            uint32_t n_embd, uint32_t n_vocab,

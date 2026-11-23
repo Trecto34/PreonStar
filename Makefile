@@ -257,6 +257,7 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_control_prep_down.spv \
 	vulkan/inkling2_control_gate.spv \
 	vulkan/inkling2_control_gate_decode.spv \
+	vulkan/inkling2_f32_to_f16.spv \
 	vulkan/inkling2_conv.spv \
 	vulkan/inkling2_conv_kv_store.spv \
 	vulkan/inkling2_conv_kv_store_q8.spv \
@@ -331,6 +332,9 @@ vulkan/inkling2_control_gate.spv: vulkan/inkling2_control_gate.comp
 
 vulkan/inkling2_control_gate_decode.spv: vulkan/inkling2_control_gate.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_DECODE -o $@ $<
+
+vulkan/inkling2_f32_to_f16.spv: vulkan/inkling2_f32_to_f16.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<
 
 vulkan/inkling2_conv.spv: vulkan/inkling2_conv.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -o $@ $<

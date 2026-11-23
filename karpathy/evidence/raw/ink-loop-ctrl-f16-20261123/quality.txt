@@ -1,0 +1,5 @@
+p36-perplexity --decode (scorer from 3871a29), tests/long_context_story_prompt.txt, -c 512 --chunks 4, 1020 scored tokens
+MiniPlus-R2:  PPL 8.0331 -> 8.0317; paired mean dNLL -0.00017 +/- 0.00186 (se); argmax agree 0.9716
+NanoPlus:     PPL 8.6778 -> 8.6691; paired mean dNLL -0.00101 +/- 0.00170 (se); argmax agree 0.9853
+--dump-logprobs 64 steps vs base: R2 diverges at step 26 (drift mean 0.081 before), NanoPlus/MiniPlus-V2.1/UD-IQ3_XXS top-1 identical 64/64.
+CPU-side conversion and GPU f16vec4 conversion give the same md5 (df1dac62f74a, R2).

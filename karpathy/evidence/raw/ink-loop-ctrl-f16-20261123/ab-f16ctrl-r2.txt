@@ -1,0 +1,6 @@
+A    3     460.48         0.190     74.02          0.200     /home/server/q36-ab/base/p36-bench
+B    3     466.34         0.920     75.61          0.120     ./p36-bench
+
+B vs A prefill: +1.27%   decode: +2.15%   (gate: +1.25%)
+separation: min B 465.42 vs max A 471.56 -> overlap
+verdict: FAIL (prefill)

@@ -1,0 +1,7 @@
+p36: timestamps period_ns=10.000000 computeAndGraphics=1 valid_bits=64 queue_family=0 (graphics fallback) ace=0
+p36: Vulkan device AMD BC-250 (RADV GFX1013), 15.34 GiB UMA
+p36: Vulkan generic backend, BC-250 fast path, subgroup 64
+p36: Vulkan queue family 0: graphics fallback (1 queue exposed)
+p36-perplexity: 37925 tokens, 4 chunks of 512, 255 scored/chunk, bos=-1, mode=decode
+[1]6.9328,[2]8.1677,[3]8.6903,[4]8.6691,
+Final estimate: PPL = 8.6691 +/- 0.66516  (tokens=1020, 15.2s)

@@ -1062,6 +1062,7 @@ int p36_session_create(p36_session **out, p36_engine *e, int ctx_size) {
         if (s->runtime) {
             ((p36_vulkan_runtime *)s->runtime)->clover_block_size =
                 e->clover_block_size ? e->clover_block_size : 32u;
+            if (e->variant == P36_VARIANT_INKLING2_LOOP) p36_inkling2_warm_f16_weights(e);
         }
 #endif
     } else {

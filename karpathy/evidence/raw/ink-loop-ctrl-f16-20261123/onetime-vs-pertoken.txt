@@ -1,0 +1,4 @@
+n=32 /home/server/q36-ab/base 72.05
+n=32 /home/server/q36 49.47
+n=256 /home/server/q36-ab/base 73.51
+n=256 /home/server/q36 70.97

@@ -1,21 +1,25 @@
 #version 460
 
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
 
 /* Fused decode (n_tok == 1) control_prep + loop_down matmul (1-way or 3-way Q/K/V):
  *   h[j, row] = dot(W_down_j[row, 0..D-1], rms(cur_j)) + dot(W_down_j[row, D..2D-1], rms(msg_j))
+ * Weights are F16 copies of the F32 GGUF tensors (prefill already rounds them to f16 in
+ * its packed-f16 GEMM); F32 accumulation. Halves the 114 MB/tok these rows cost.
  * Dispatch: (rank = 64, n_way = 1 or 3, 1), local_size_x = 64 (1 wave64 per row, zero barriers). */
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer DownW0 { vec4 wd0[]; };
+layout(set = 0, binding = 0) readonly buffer DownW0 { f16vec4 wd0[]; };
 layout(set = 0, binding = 1) readonly buffer Cur { vec4 cur[]; };
 layout(set = 0, binding = 2) readonly buffer Msg { vec4 msg[]; };
 layout(set = 0, binding = 3) writeonly buffer OutH { float h[]; };
-layout(set = 0, binding = 4) readonly buffer DownW1 { vec4 wd1[]; };
-layout(set = 0, binding = 5) readonly buffer DownW2 { vec4 wd2[]; };
+layout(set = 0, binding = 4) readonly buffer DownW1 { f16vec4 wd1[]; };
+layout(set = 0, binding = 5) readonly buffer DownW2 { f16vec4 wd2[]; };
 
 layout(push_constant) uniform Push {
     uint n_embd;       /* 2304 */
@@ -46,8 +50,8 @@ void main(void) {
             vec4 vm = msg[m_base + idx];
             sum_cc += dot(vc, vc);
             sum_mm += dot(vm, vm);
-            dot_c += dot(vc, wd0[w_base_c + idx]);
-            dot_m += dot(vm, wd0[w_base_m + idx]);
+            dot_c += dot(vc, vec4(wd0[w_base_c + idx]));
+            dot_m += dot(vm, vec4(wd0[w_base_m + idx]));
         }
     } else if (j == 1u) {
         [[unroll]] for (uint c = 0u; c < 9u; c++) {
@@ -56,8 +60,8 @@ void main(void) {
             vec4 vm = msg[m_base + idx];
             sum_cc += dot(vc, vc);
             sum_mm += dot(vm, vm);
-            dot_c += dot(vc, wd1[w_base_c + idx]);
-            dot_m += dot(vm, wd1[w_base_m + idx]);
+            dot_c += dot(vc, vec4(wd1[w_base_c + idx]));
+            dot_m += dot(vm, vec4(wd1[w_base_m + idx]));
         }
     } else {
         [[unroll]] for (uint c = 0u; c < 9u; c++) {
@@ -66,8 +70,8 @@ void main(void) {
             vec4 vm = msg[m_base + idx];
             sum_cc += dot(vc, vc);
             sum_mm += dot(vm, vm);
-            dot_c += dot(vc, wd2[w_base_c + idx]);
-            dot_m += dot(vm, wd2[w_base_m + idx]);
+            dot_c += dot(vc, vec4(wd2[w_base_c + idx]));
+            dot_m += dot(vm, vec4(wd2[w_base_m + idx]));
         }
     }
 

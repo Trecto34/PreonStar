@@ -1,0 +1,20 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+/* One-time F32 -> F16 weight copy on the GPU (Inkling loop-controller weights).
+ * f16vec4(vec4) is the same conversion the prefill control kernels apply when
+ * they stage these weights into LDS. Dispatch: (ceil(n4 / 256), 1, 1). */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Src { vec4 src[]; };
+layout(set = 0, binding = 1) writeonly buffer Dst { f16vec4 dst[]; };
+
+layout(push_constant) uniform Push { uint n4; } pc;
+
+void main(void) {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < pc.n4) dst[i] = f16vec4(src[i]);
+}

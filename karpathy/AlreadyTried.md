@@ -4763,3 +4763,31 @@ Evidence + patch + shader: `evidence/raw/ink-wo-q6k-direct-20261123/`.
   fewer and more workgroups lose. Not LDS-, ALU- or activation-bound.
   reconsider_if: a different weight layout (repacked IQ4_NL with 16-B aligned
   blocks for vector loads) at load time.
+
+## 2026-11-23 Inkling-2-Mini: F16 loop-controller weights in decode — ACCEPTED, +2.15% MiniPlus-R2 / +1.80% NanoPlus decode
+
+The loop controllers (`loop_*_{down,forget,gain}`, F32 in every Inkling GGUF)
+cost 227 MB per decode token (7% of bytes). Prefill already rounds them to
+f16 (packed-f16 GEMM / f16 LDS staging); decode read F32. Evidence:
+`evidence/raw/ink-loop-ctrl-f16-20261123/`.
+
+* **Change.** `inkling2_control_prep_down` and `inkling2_control_gate` (decode
+  build) read `f16vec4` weights with F32 accumulation. The F16 copies (57 MB,
+  device arena, cached in `packed_weights` so a model switch frees them) are
+  made once on the GPU by `inkling2_f32_to_f16.comp` from the resident F32
+  tensor, at session creation (`p36_inkling2_warm_f16_weights`). Prefill
+  still reads F32.
+* **Two dead ends on the way.** (1) CPU conversion into the arena: 0.58-0.74 s
+  — the CPU re-reads the F32 rows from the mmap (pages not resident, the GPU
+  holds its own staged copy), F16C made no difference. (2) Lazy conversion at
+  first decode: correct but put ~0.2 s into the first decode tokens (a 128-tok
+  bench read -3.4%). Converting on the GPU at session creation removes both.
+* **Kernel.** ctrl_pd + ctrl_gate 44.7 -> 30.8 ms / 64 tok (-0.22 ms/tok).
+* **Quality (lossy, weight rounding to f16).** Decode-mode NLL on 1020 tokens:
+  paired mean dNLL **-0.0002 +/- 0.0019** (R2), **-0.0010 +/- 0.0017** (NanoPlus);
+  PPL 8.0331 -> 8.0317 / 8.6778 -> 8.6691. Greedy top-1 identical over 64
+  steps on NanoPlus, MiniPlus-V2.1 and UD-IQ3_XXS; R2 diverges at step 26.
+* **A/B** (`bench_ab.sh`, ctx 1024, gen 128, 3 reps): MiniPlus-R2 decode
+  **74.02 -> 75.61 (+2.15%)**, MAD 0.20/0.12; NanoPlus **80.96 -> 82.42
+  (+1.80%)**, MAD 0.02/0.03. Prefill unchanged (inside noise).
+* **Memory.** +57 MB GPU (F32 copies stay for prefill).

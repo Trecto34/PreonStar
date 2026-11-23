@@ -1279,6 +1279,11 @@ int p36_gpu_inkling2_router_topk_tensor(
         uint32_t              n_used,
         float                 weight_scale);
 
+/* Make the cached F16 copy of an F32 loop-controller weight now (session
+ * creation) so the one-time conversion stays out of decode. */
+int p36_gpu_inkling2_f16_weight_warm(const void *model_map, uint64_t model_size,
+                                     uint64_t offset, uint64_t f32_bytes);
+
 int p36_gpu_inkling2_moe_ffn_tensor(
         p36_gpu_tensor       *out,
         p36_gpu_tensor       *mid_scratch,

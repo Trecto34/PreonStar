@@ -16,16 +16,23 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer ForgetW0 { vec4 wf0[]; };
-layout(set = 0, binding = 1) readonly buffer GainW0 { vec4 wg0[]; };
+/* Decode reads F16 copies of the forget/gain weights (prefill rounds them to f16
+ * in LDS anyway); prefill keeps reading the F32 GGUF tensors. */
+#ifdef P36_DECODE
+#define WVEC f16vec4
+#else
+#define WVEC vec4
+#endif
+layout(set = 0, binding = 0) readonly buffer ForgetW0 { WVEC wf0[]; };
+layout(set = 0, binding = 1) readonly buffer GainW0 { WVEC wg0[]; };
 layout(set = 0, binding = 2) readonly buffer H { vec4 hv[]; };
 layout(set = 0, binding = 3) readonly buffer Cur { float cur[]; };
 layout(set = 0, binding = 4) readonly buffer Msg { float msg[]; };
 layout(set = 0, binding = 5) writeonly buffer Out { float out_buf[]; };
-layout(set = 0, binding = 6) readonly buffer ForgetW1 { vec4 wf1[]; };
-layout(set = 0, binding = 7) readonly buffer GainW1 { vec4 wg1[]; };
-layout(set = 0, binding = 8) readonly buffer ForgetW2 { vec4 wf2[]; };
-layout(set = 0, binding = 9) readonly buffer GainW2 { vec4 wg2[]; };
+layout(set = 0, binding = 6) readonly buffer ForgetW1 { WVEC wf1[]; };
+layout(set = 0, binding = 7) readonly buffer GainW1 { WVEC wg1[]; };
+layout(set = 0, binding = 8) readonly buffer ForgetW2 { WVEC wf2[]; };
+layout(set = 0, binding = 9) readonly buffer GainW2 { WVEC wg2[]; };
 
 layout(push_constant) uniform Push {
     uint n_embd;
@@ -57,14 +64,14 @@ void main(void) {
     float f;
     float g;
     if (j == 0u) {
-        f = dot(wf0[widx], vh);
-        g = dot(wg0[widx], vh);
+        f = dot(vec4(wf0[widx]), vh);
+        g = dot(vec4(wg0[widx]), vh);
     } else if (j == 1u) {
-        f = dot(wf1[widx], vh);
-        g = dot(wg1[widx], vh);
+        f = dot(vec4(wf1[widx]), vh);
+        g = dot(vec4(wg1[widx]), vh);
     } else {
-        f = dot(wf2[widx], vh);
-        g = dot(wg2[widx], vh);
+        f = dot(vec4(wf2[widx]), vh);
+        g = dot(vec4(wg2[widx]), vh);
     }
     f += subgroupShuffleXor(f, 8u); g += subgroupShuffleXor(g, 8u);
     f += subgroupShuffleXor(f, 4u); g += subgroupShuffleXor(g, 4u);
