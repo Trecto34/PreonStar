@@ -4825,3 +4825,18 @@ f16 (packed-f16 GEMM / f16 LDS staging); decode read F32. Evidence:
   MiniPlus-R2 22.14 -> 22.27 us/dispatch over two profiles. Patch in `evidence/raw/ink-dkq-q6k-16b-20261123/`.
 * Lesson: once a lane's loads are 8 B or less, u16 vs dword load shape is not the limit; the 16 B/lane kernels
   (qkv Q6_K, gate_up Q4_K) were the only ones where it paid.
+
+## 2026-11-23 Inkling-2-Mini: Q/R clip folded into conv_kv_store decode dispatch — REJECTED (decode unchanged), bit-identical
+
+* **Change.** Decode only: `inkling2_conv_kv_store` dispatched with n_head_kv + n_head workgroups; the extra 24
+  run the `inkling2_clip_norm` code (same wave64 lane mapping -> bit-identical on all 4 Inkling GGUFs); the
+  standalone clip_qr dispatch is skipped. -1 dispatch + barrier per layer.
+* **Variants.** Clip on the 8 KV workgroups (3 heads each, serial): conv_kv 3.1 -> 5.7 us (net ~0). Same with the
+  3 heads' loads batched: 5.7. Clip first: 5.5. Separate workgroups in one dispatch: 3.5 us (vs 3.1 + 1.7 + ~1.3 us
+  profiled gap) -> profile says -0.12 ms/tok.
+* **Speed** (skill bench.py, ctl/cand/ctl, 6 samples, MiniPlus-R2): 78.35 / 78.34 / 78.59 t/s. No gain.
+* **Lesson.** The ~1.3 us inter-dispatch gaps in the timeline profile do not show up in wall-clock decode;
+  removing a 1.7 us dispatch is invisible. Consistent with the earlier fusion rejections. Do not chase dispatch
+  count with profile-gap arithmetic.
+* Also here, unbenched: Q4_K qkv uvec4 loads + 9-block unroll (`qkv-q4k-wide-unroll.patch`): bit-identical,
+  kernel -1.5% (23.5 -> 23.1 us, NanoPlus), far below decode noise.

@@ -1,0 +1,68 @@
+diff --git a/vulkan/inkling2_qkv_rel_q4k_decode.comp b/vulkan/inkling2_qkv_rel_q4k_decode.comp
+index ee2af76..33e2255 100644
+--- a/vulkan/inkling2_qkv_rel_q4k_decode.comp
++++ b/vulkan/inkling2_qkv_rel_q4k_decode.comp
+@@ -8,15 +8,17 @@
+ /* Fused Q4_K decode for Inkling-2-Mini attention projections: Q + K + V + rel in ONE dispatch!
+  * 64 threads = 4 sub-groups x 16 lanes/sub-group, 2 rows/sub-group -> 8 output rows/WG!
+  * Reuses unpacked Q8_K activations (yd, qsum, av[0..3]) across 2 rows -> halves Q8_K loads & ALU.
++ * Q4_K blocks are 144 B = 9 x 16 B: header and each lane's quant slice are one uvec4 load each;
++ * the 9-block loop is unrolled (host only dispatches in_dim 2304). Math order unchanged.
+  * Eliminates 144 dispatches/tok (48 logical layers x 3 saved dispatches) and tail-wave waste.
+  * Dispatch: ((out_q + out_k + out_v + out_r) / 8, 1, 1) = (688, 1, 1). */
+ 
+ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+ 
+-layout(set = 0, binding = 0) readonly buffer Wq { uint wq[]; };
+-layout(set = 0, binding = 1) readonly buffer Wk { uint wk[]; };
+-layout(set = 0, binding = 2) readonly buffer Wv { uint wv[]; };
+-layout(set = 0, binding = 3) readonly buffer Wr { uint wr[]; };
++layout(set = 0, binding = 0) readonly buffer Wq { uvec4 wq[]; };
++layout(set = 0, binding = 1) readonly buffer Wk { uvec4 wk[]; };
++layout(set = 0, binding = 2) readonly buffer Wv { uvec4 wv[]; };
++layout(set = 0, binding = 3) readonly buffer Wr { uvec4 wr[]; };
+ layout(set = 0, binding = 4) readonly buffer Q8_0 { uint q8_0[]; };
+ layout(set = 0, binding = 5) readonly buffer Q8_1 { uint q8_1[]; };
+ layout(set = 0, binding = 6) readonly buffer Q8_2 { uint q8_2[]; };
+@@ -44,9 +46,10 @@ float sum16(float v) {
+ }
+ 
+ #define Q4K_ROW_PART(WBUF, WBASE, AV0, AV1, AV2, AV3, QSUM, PART_OUT) do { \
+-    vec2 d2 = unpackHalf2x16(WBUF[WBASE]); \
+-    uint s0 = WBUF[WBASE + 1u]; \
+-    uint s1 = WBUF[WBASE + 2u]; \
++    uvec4 hd = WBUF[(WBASE) >> 2u]; \
++    vec2 d2 = unpackHalf2x16(hd.x); \
++    uint s0 = hd.y; \
++    uint s1 = hd.z; \
+     uint sc; \
+     uint mn; \
+     if (group < 4u) { \
+@@ -55,15 +58,12 @@ float sum16(float v) {
+         mn = (s1 >> sh) & 63u; \
+     } else { \
+         uint sh = (group - 4u) * 8u; \
+-        uint s2 = WBUF[WBASE + 3u]; \
++        uint s2 = hd.w; \
+         sc = ((s2 >> sh) & 15u) | (((s0 >> (sh + 6u)) & 3u) << 4u); \
+         mn = ((s2 >> (sh + 4u)) & 15u) | (((s1 >> (sh + 6u)) & 3u) << 4u); \
+     } \
+-    uint qw = WBASE + qw_off; \
+-    uint ql0 = (WBUF[qw + 0u] >> nshift) & 0x0f0f0f0fu; \
+-    uint ql1 = (WBUF[qw + 1u] >> nshift) & 0x0f0f0f0fu; \
+-    uint ql2 = (WBUF[qw + 2u] >> nshift) & 0x0f0f0f0fu; \
+-    uint ql3 = (WBUF[qw + 3u] >> nshift) & 0x0f0f0f0fu; \
++    uvec4 qv = (WBUF[((WBASE) + qw_off) >> 2u] >> nshift) & 0x0f0f0f0fu; \
++    uint ql0 = qv.x, ql1 = qv.y, ql2 = qv.z, ql3 = qv.w; \
+     float qdot = dot(vec4(float(ql0 & 15u), float((ql0 >> 8u) & 15u), float((ql0 >> 16u) & 15u), float((ql0 >> 24u) & 15u)), AV0) \
+                + dot(vec4(float(ql1 & 15u), float((ql1 >> 8u) & 15u), float((ql1 >> 16u) & 15u), float((ql1 >> 24u) & 15u)), AV1) \
+                + dot(vec4(float(ql2 & 15u), float((ql2 >> 8u) & 15u), float((ql2 >> 16u) & 15u), float((ql2 >> 24u) & 15u)), AV2) \
+@@ -77,7 +77,7 @@ float sum16(float v) {
+     uint row1_w0 = row0_w0 + pc.row_words; \
+     float acc0 = 0.0; \
+     float acc1 = 0.0; \
+-    for (uint b = 0u; b < pc.blocks; b++) { \
++    [[unroll]] for (uint b = 0u; b < 9u; b++) { \
+         uint qbase = b * Q8K_WORDS; \
+         float yd = uintBitsToFloat(Q8BUF[qbase]); \
+         float qsum = float(bitfieldExtract(int(Q8BUF[qbase + bsum_off]), bsum_bit, 16)); \

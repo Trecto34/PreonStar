@@ -1,0 +1,210 @@
+diff --git a/p36_gpu.h b/p36_gpu.h
+index a7e9983..4cf4d23 100644
+--- a/p36_gpu.h
++++ b/p36_gpu.h
+@@ -1028,6 +1028,14 @@ int p36_gpu_inkling2_control_prep_down_tensor(
+         uint32_t              n_embd,
+         uint32_t              rank);
+ 
++/* Optional decode-time Q/R clip folded into conv_kv_store (see the shader). */
++typedef struct {
++    p36_gpu_tensor *q_buf, *r_buf;
++    uint64_t        q_scale_offset, q_scale_bytes, r_scale_offset, r_scale_bytes;
++    uint32_t        n_head, use_tau;
++    float           rel_clip, log_floor, log_alpha;
++} p36_ink_qr_clip;
++
+ int p36_gpu_inkling2_conv_kv_store_tensor(
+         const p36_gpu_tensor *k_in,
+         const p36_gpu_tensor *v_in,
+@@ -1047,7 +1055,8 @@ int p36_gpu_inkling2_conv_kv_store_tensor(
+         uint32_t              kv_cap,
+         uint32_t              is_swa,
+         float                 inv_scale,
+-        float                 qk_clip);
++        float                 qk_clip,
++        const p36_ink_qr_clip *clip);
+ 
+ int p36_gpu_inkling2_control_gate_tensor(
+         p36_gpu_tensor       *out,
+diff --git a/src/core/core_inkling2.inc b/src/core/core_inkling2.inc
+index 39666ba..5f5d3a6 100644
+--- a/src/core/core_inkling2.inc
++++ b/src/core/core_inkling2.inc
+@@ -1189,6 +1189,14 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
+          * ring slots aren't overwritten before attn_prefill reads past keys. */
+         const float kv_conv_scale = is_swa ? inv_sqrt_5 : inv_sqrt_9;
+         const bool swa_stage = is_swa && (n_tok > 1u);
++        const bool fuse_clip = (n_tok == 1u);
++        const p36_ink_qr_clip qr_clip = {
++            sc->q_buf, sc->r_buf,
++            l->attn_q_clip->abs_offset, l->attn_q_clip->bytes,
++            l->attn_rel_clip->abs_offset, l->attn_rel_clip->bytes,
++            hp->n_head, is_swa ? 0u : 1u,
++            hp->rel_clip, hp->log_scale_floor, hp->log_scale_alpha
++        };
+         INK_CHK(p36_gpu_inkling2_conv_kv_store_tensor(sc->k_buf, sc->v_buf, m->map, m->size,
+                                                       l->attn_k_conv->abs_offset, l->attn_v_conv->abs_offset,
+                                                       ink->conv_k[il], ink->conv_v[il],
+@@ -1199,15 +1207,17 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
+                                                       swa_stage ? 0u : pos0,
+                                                       kv_cap,
+                                                       swa_stage ? 0u : (is_swa ? 1u : 0u),
+-                                                      kv_conv_scale, hp->qk_clip), "conv_kv");
+-
+-        /* Fused Q clip + R clip (1 dispatch instead of 2!) */
+-        INK_CHK(p36_gpu_inkling2_clip_qr_tensor(sc->q_buf, sc->r_buf, m->map, m->size,
+-                                                l->attn_q_clip->abs_offset, l->attn_q_clip->bytes,
+-                                                l->attn_rel_clip->abs_offset, l->attn_rel_clip->bytes,
+-                                                hp->n_head, n_tok, pos0, is_swa ? 0u : 1u,
+-                                                hp->qk_clip, hp->rel_clip,
+-                                                hp->log_scale_floor, hp->log_scale_alpha), "clip_qr");
++                                                      kv_conv_scale, hp->qk_clip,
++                                                      fuse_clip ? &qr_clip : NULL), "conv_kv");
++
++        /* Fused Q clip + R clip (1 dispatch instead of 2!); in decode it rides in conv_kv above. */
++        if (!fuse_clip)
++            INK_CHK(p36_gpu_inkling2_clip_qr_tensor(sc->q_buf, sc->r_buf, m->map, m->size,
++                                                    l->attn_q_clip->abs_offset, l->attn_q_clip->bytes,
++                                                    l->attn_rel_clip->abs_offset, l->attn_rel_clip->bytes,
++                                                    hp->n_head, n_tok, pos0, is_swa ? 0u : 1u,
++                                                    hp->qk_clip, hp->rel_clip,
++                                                    hp->log_scale_floor, hp->log_scale_alpha), "clip_qr");
+ 
+         /* FlashAttention + fused sigmoid gate */
+         INK_CHK(p36_gpu_inkling2_attn_tensor(sc->attn_out, sc->q_buf, sc->r_buf,
+diff --git a/src/vulkan/vk_14_inkling2.inc b/src/vulkan/vk_14_inkling2.inc
+index b2acaf2..f27432b 100644
+--- a/src/vulkan/vk_14_inkling2.inc
++++ b/src/vulkan/vk_14_inkling2.inc
+@@ -63,7 +63,7 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
+     p36_vk_ink_conv           = P36_VK_KERNEL("vulkan/inkling2_conv.spv", 6, 28, (1u << 2) | (1u << 5));
+     /* Int8 KV by default; must match p36_ink_kv_row_bytes() in core_inkling2.inc. */
+     const bool kv_f16 = getenv("P36_INK_KV_F16") != NULL;
+-    p36_vk_ink_conv_kv_store  = P36_VK_KERNEL(kv_f16 ? "vulkan/inkling2_conv_kv_store.spv" : "vulkan/inkling2_conv_kv_store_q8.spv", 10, 32, (1u << 4) | (1u << 5) | (1u << 8) | (1u << 9));
++    p36_vk_ink_conv_kv_store  = P36_VK_KERNEL(kv_f16 ? "vulkan/inkling2_conv_kv_store.spv" : "vulkan/inkling2_conv_kv_store_q8.spv", 14, 56, (1u << 4) | (1u << 5) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11));
+     p36_vk_ink_clip_norm      = P36_VK_KERNEL("vulkan/inkling2_clip_norm.spv", 4, 28, (1u << 0) | (1u << 1));
+     p36_vk_ink_rms_norm_q8k   = P36_VK_KERNEL("vulkan/inkling2_rms_norm_q8k.spv", 6, 24, (1u << 2) | (1u << 3));
+     p36_vk_ink_router_topk    = P36_VK_KERNEL("vulkan/inkling2_router_topk.spv", 4, 16, (1u << 2) | (1u << 3));
+@@ -484,7 +484,8 @@ int p36_gpu_inkling2_conv_kv_store_tensor(
+         uint32_t              kv_cap,
+         uint32_t              is_swa,
+         float                 inv_scale,
+-        float                 qk_clip) {
++        float                 qk_clip,
++        const p36_ink_qr_clip *clip) {
+     int ok = 0;
+     uint64_t w_bytes = (uint64_t)n_head_kv * 128u * 4u * sizeof(float);
+     pthread_mutex_lock(&p36_vk_mu);
+@@ -496,17 +497,34 @@ int p36_gpu_inkling2_conv_kv_store_tensor(
+     p36_gpu_tensor *kw_t = p36_vk_weight_get_unlocked(kw_src, w_bytes);
+     p36_gpu_tensor *vw_t = kw_t ? p36_vk_weight_get_unlocked(vw_src, w_bytes) : NULL;
+     if (!vw_t) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
+-    const p36_gpu_tensor *bindings[10] = {
++    /* Caller passes clip only for n_tok == 1: n_head extra workgroups clip Q/R. */
++    bool do_clip = clip != NULL;
++    p36_gpu_tensor *qs_t = NULL, *rs_t = NULL;
++    if (do_clip) {
++        const unsigned char *qs_src = p36_gpu_weight_bytes(model_map, model_size, clip->q_scale_offset, clip->q_scale_bytes);
++        const unsigned char *rs_src = p36_gpu_weight_bytes(model_map, model_size, clip->r_scale_offset, clip->r_scale_bytes);
++        qs_t = qs_src ? p36_vk_weight_get_unlocked(qs_src, clip->q_scale_bytes) : NULL;
++        rs_t = (qs_t && rs_src) ? p36_vk_weight_get_unlocked(rs_src, clip->r_scale_bytes) : NULL;
++        if (!rs_t) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
++    }
++    /* Unused clip slots alias buffers this kernel already writes/reads: no extra hazards. */
++    const p36_gpu_tensor *bindings[14] = {
+         k_in, v_in, kw_t, vw_t, k_state, v_state,
+-        k_dyn ? k_dyn : k_in, v_dyn ? v_dyn : v_in, cache_k, cache_v
++        k_dyn ? k_dyn : k_in, v_dyn ? v_dyn : v_in, cache_k, cache_v,
++        do_clip ? clip->q_buf : cache_k, do_clip ? clip->r_buf : cache_v,
++        do_clip ? qs_t : kw_t, do_clip ? rs_t : vw_t
+     };
+     struct {
+         uint32_t n_head_kv, n_tok, pos0, kv_cap, is_swa, has_dyn;
+         float inv_scale, qk_clip;
+-    } pc = { n_head_kv, n_tok, pos0, kv_cap, is_swa, k_dyn != NULL ? 1u : 0u, inv_scale, qk_clip };
++        uint32_t n_head, do_clip, use_tau;
++        float rel_clip, log_floor, log_alpha;
++    } pc = { n_head_kv, n_tok, pos0, kv_cap, is_swa, k_dyn != NULL ? 1u : 0u, inv_scale, qk_clip,
++             do_clip ? clip->n_head : 0u, do_clip ? 1u : 0u, do_clip ? clip->use_tau : 0u,
++             do_clip ? clip->rel_clip : 0.0f, do_clip ? clip->log_floor : 1.0f, do_clip ? clip->log_alpha : 0.0f };
+     uint32_t gy = (n_tok >= 3u) ? ((n_tok + 7u) / 8u) : 1u;
+     ok = p36_vk_run_unlocked("inkling2_conv_kv", &p36_vk_ink_conv_kv_store, bindings, &pc, sizeof(pc),
+-                             n_head_kv, gy, 1);
++                             n_head_kv + (do_clip ? clip->n_head : 0u), gy, 1);
+     pthread_mutex_unlock(&p36_vk_mu);
+     if (ok && n_tok >= 3u) {
+         uint64_t row_bytes = (uint64_t)n_head_kv * 128u * sizeof(float);
+diff --git a/vulkan/inkling2_conv_kv_store.comp b/vulkan/inkling2_conv_kv_store.comp
+index e6ee175..76434c8 100644
+--- a/vulkan/inkling2_conv_kv_store.comp
++++ b/vulkan/inkling2_conv_kv_store.comp
+@@ -13,7 +13,10 @@
+  * Each workgroup (1 wave64) owns 1 KV head (128 dims = 2 dims/lane) x 8 tokens.
+  * When n_tok >= 3, dispatches (n_head_kv = 8, ceil(n_tok / 8), 1) with state READ-ONLY;
+  * host copies last 3 rows of k_in/v_in into k_state/v_state via vkCmdCopyBuffer.
+- * When n_tok < 3, dispatches (n_head_kv = 8, 1, 1) and updates state in-place. */
++ * When n_tok < 3, dispatches (n_head_kv = 8, 1, 1) and updates state in-place.
++ * Decode (do_clip): n_head extra workgroups run the Q/R clip, one query head each (the
++ * standalone inkling2_clip_norm code, same wave64 lane mapping -> bit-identical), in
++ * parallel with the K/V workgroups: one dispatch + barrier less per layer. */
+ 
+ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+ 
+@@ -54,6 +57,11 @@ layout(set = 0, binding = 8) writeonly buffer CacheK { float16_t cache_k[]; };
+ layout(set = 0, binding = 9) writeonly buffer CacheV { float16_t cache_v[]; };
+ #endif
+ 
++layout(set = 0, binding = 10) buffer QBuf { float q_buf[]; };
++layout(set = 0, binding = 11) buffer RBuf { float r_buf[]; };
++layout(set = 0, binding = 12) readonly buffer QScale { float q_scale[]; };
++layout(set = 0, binding = 13) readonly buffer RScale { float r_scale[]; };
++
+ layout(push_constant) uniform Push {
+     uint n_head_kv;
+     uint n_tok;
+@@ -63,10 +71,44 @@ layout(push_constant) uniform Push {
+     uint has_dyn;
+     float inv_scale;
+     float qk_clip;
++    uint n_head;      /* query heads (do_clip) */
++    uint do_clip;     /* n_tok == 1 only */
++    uint use_tau;
++    float rel_clip;
++    float log_floor;
++    float log_alpha;
+ } pc;
+ 
++/* Mirror of inkling2_clip_norm.comp main() for head h, token 0. */
++void clip_qr_head(uint h, uint tid) {
++    float tau = 1.0;
++    if (pc.use_tau != 0u) {
++        float r = max(1.0, float(pc.pos0 + 0u + 1u) / pc.log_floor);
++        tau = 1.0 + pc.log_alpha * log(r);
++    }
++    uint qb = h * 128u;
++    float q0 = q_buf[qb + tid] * q_scale[h * 128u + tid];
++    float q1 = q_buf[qb + tid + 64u] * q_scale[h * 128u + tid + 64u];
++    float qnorm = sqrt(subgroupAdd(q0 * q0 + q1 * q1)) + 1.0e-6;
++    float qf = clamp(pc.qk_clip / qnorm, 0.0, 1.0) * tau;
++    q_buf[qb + tid] = q0 * qf;
++    q_buf[qb + tid + 64u] = q1 * qf;
++
++    uint rb = h * 16u;
++    float rv = (tid < 16u) ? (r_buf[rb + tid] * r_scale[h * 16u + tid]) : 0.0;
++    float rnorm = sqrt(subgroupAdd(rv * rv)) + 1.0e-6;
++    float rf = clamp(pc.rel_clip / rnorm, 0.0, 1.0) * tau;
++    if (tid < 16u) {
++        r_buf[rb + tid] = rv * rf;
++    }
++}
++
+ void main(void) {
+     uint h = gl_WorkGroupID.x;
++    if (h >= pc.n_head_kv) {  /* do_clip: workgroups n_head_kv.. clip one query head each */
++        clip_qr_head(h - pc.n_head_kv, gl_LocalInvocationID.x);
++        return;
++    }
+     uint t0 = gl_WorkGroupID.y * 8u;
+     uint t_end = min(t0 + 8u, pc.n_tok);
+     if (t0 >= pc.n_tok) return;
