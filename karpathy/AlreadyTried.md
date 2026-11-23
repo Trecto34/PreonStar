@@ -4850,3 +4850,28 @@ f16 (packed-f16 GEMM / f16 LDS staging); decode read F32. Evidence:
   tracking is exact.
 * The kernel timeline (`P36_VK_PROF_KERNEL`) serializes dispatches, so it shows ~1.3 us gaps and makes
   overlapping kernels look sequential. Do not estimate fusion wins from its gaps; check `barriers=` per op first.
+
+## 2026-11-23 Inkling-2-Mini MoE down IQ4_NL decode: software prefetch REJECTED + ablation (what the kernel is bound by)
+
+Roofline note: the user's Vulkan memory bench measures **437.5 GB/s** sequential (98% of 448), 53.6 GB/s scattered,
+171 ns latency; BC-250 here has **40 CUs** @ 2 GHz (`RADV_DEBUG=info`). Earlier "near ceiling (~320-370)" claims were wrong.
+Evidence: `evidence/raw/ink-moe-down-ablation-20261123/` (ablation shaders + profile lines). MiniPlus-R2, ctx 2048, 64 tok,
+`P36_VK_PROF_KERNEL=1 P36_VK_PROF_DECODE=1`, kernel gpu_ms over 3072 dispatches (11.94 MB each):
+
+| variant | gpu_ms | us/disp |
+|---|---|---|
+| control (HEAD) | 143.2 / 143.5 / 144.1 | ~46.8 |
+| prefetch next block, branchy load | 179.5 | 58.4 |
+| prefetch next block, unconditional load | 151.9 | 49.4 |
+| loads only (weights + activations, no dequant) | 145.7 | 47.4 |
+| loads only, wave reads contiguous 1152 B per iteration | 140.3 | 45.7 |
+| weight loads only (no activation loads) | 157.9 / 159.1 | ~51.6 |
+| math only (no weight loads) | 112.6 | 36.7 |
+| empty (no loads, trivial math) | 16.6 | 5.4 |
+
+* **Prefetch rejected.** Branchy version: ACO resolves the loop-carried phi with copies after `s_waitcnt vmcnt(0)`, fully
+  exposing the load. Branchless still +6%. 16 waves/SIMD (64 VGPR) already hide latency; waves are not in lockstep.
+* **Math is fully hidden** (loads-only == full kernel). Access order is not the limit either (contiguous only -4%).
+  Net of the 5.4 us fixed cost, the kernel streams at ~288 GB/s. Open question: what a 12 MB / ~40 us dispatch can reach at
+  all (the 437 figure is a 256 MiB multi-ms stream). Measure that before more shader work on this kernel.
+* reconsider_if: a standalone microbench shows 12 MB dispatches reaching >>290 GB/s with some load shape.

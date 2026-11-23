@@ -1,0 +1,213 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Expert-major Pass 1 of Inkling-2-Mini MoE down decode:
+ * 1 expert per workgroup (gl_WorkGroupID.y = slot = 0..n_used-1) for 100% DRAM row-buffer
+ * locality and high CU occupancy (2304/16 * 8 = 1152 WGs = 28.8 waves/CU on BC-250).
+ * 64 threads = 16 output rows x 4 lanes/row: 36 blocks / 4 lanes = 9 exact iterations,
+ * ZERO idle-lane tail, and all 16 row-groups broadcast L1-resident activations (4.6 KiB).
+ * Writes pre-weighted expert outputs [n_used, out_dim] (73.7 KiB, L2-resident) for Pass 2.
+ * Dispatch: (out_dim / 16, n_used, 1). */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
+layout(set = 0, binding = 1) readonly buffer Act { vec4 xv[]; };
+layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
+layout(set = 0, binding = 3) readonly buffer RouterW { float rw[]; };
+layout(set = 0, binding = 4) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 5) readonly buffer ExpScale { float exp_scale[]; };
+
+layout(push_constant) uniform Push {
+    uint out_dim;
+    uint in_dim;
+    uint blocks;        /* in_dim / 32 = 36 */
+    uint n_used;        /* 8 */
+    uint has_exp_scale; /* 1 if exp_scale[] is valid */
+} pc;
+
+#ifdef P36_MOE_IQ4NL
+const uint BLOCK_U16 = 9u;
+const float IQ4NL_INIT[16] = float[16](
+    -127.0, -104.0, -83.0, -65.0, -49.0, -35.0, -22.0, -10.0,
+       1.0,   13.0,  25.0,  38.0,  53.0,  69.0,  89.0, 113.0
+);
+shared float sh_lut[16];
+#elif defined(P36_MOE_Q5_0)
+const uint BLOCK_U16 = 11u;
+#elif defined(P36_MOE_NVFP4)
+const uint BLOCK_U32 = 9u; /* 36 bytes per 64 weights */
+const float NVFP4_INIT[16] = float[16](
+    0.0,  1.0,  2.0,  3.0,  4.0,  6.0,  8.0,  12.0,
+    0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0
+);
+shared float sh_lut[16];
+shared float sh_ue4m3[256];
+#else
+#error "Define P36_MOE_IQ4NL, P36_MOE_Q5_0, or P36_MOE_NVFP4"
+#endif
+
+void main(void) {
+    uint tid = gl_LocalInvocationID.x;
+    uint r_local = tid >> 2u;   /* 0..15 */
+    uint blane = tid & 3u;      /* 0..3 */
+    bool odd = (blane & 1u) != 0u; /* row_u16 is even -> parity is loop-invariant */
+    uint row = gl_WorkGroupID.x * 16u + r_local;
+    uint slot = gl_WorkGroupID.y;
+
+#ifdef P36_MOE_IQ4NL
+    if (tid < 16u) sh_lut[tid] = IQ4NL_INIT[tid];
+    barrier();
+#elif defined(P36_MOE_NVFP4)
+    if (tid < 16u) sh_lut[tid] = NVFP4_INIT[tid];
+    for (uint i = tid; i < 256u; i += 64u) {
+        if (i == 0u || i == 0x7Fu) {
+            sh_ue4m3[i] = 0.0;
+        } else {
+            uint e = (i >> 3u) & 15u;
+            uint m = i & 7u;
+            float raw = (e == 0u) ? ldexp(float(m), -9)
+                                  : ldexp(1.0 + float(m) * 0.125, int(e) - 7);
+            sh_ue4m3[i] = raw * 0.5;
+        }
+    }
+    barrier();
+#endif
+
+    uint expert = selected[slot];
+    float weight = rw[slot];
+    if (pc.has_exp_scale != 0u) weight *= exp_scale[expert];
+    uint x_base = slot * (pc.in_dim >> 2u);
+#ifdef P36_MOE_NVFP4
+    uint row_u32 = (pc.blocks >> 1u) * BLOCK_U32;
+    uint row_off = (expert * pc.out_dim + row) * row_u32;
+#else
+    uint row_u16 = pc.blocks * BLOCK_U16;
+    uint row_off = (expert * pc.out_dim + row) * row_u16;
+#endif
+
+    float acc = 0.0;
+
+    for (uint b = blane; b < pc.blocks; b += 4u) {
+        uint x4 = x_base + b * 8u;
+
+#ifdef P36_MOE_NVFP4
+        uint blk = b >> 1u;
+        uint half_b = b & 1u;
+        uint wi = row_off + blk * BLOCK_U32;
+        uint ds = w[wi];
+        uint qbase = wi + 1u + half_b * 4u;
+        uint q0 = w[qbase + 0u];
+        uint q1 = w[qbase + 1u];
+        uint q2 = w[qbase + 2u];
+        uint q3 = w[qbase + 3u];
+        float d0 = sh_ue4m3[(ds >> (half_b * 16u)) & 255u];
+        float d1 = sh_ue4m3[(ds >> (half_b * 16u + 8u)) & 255u];
+        float s0 = dot(vec4(sh_lut[(q0      ) & 15u], sh_lut[(q0 >>  8u) & 15u],
+                            sh_lut[(q0 >> 16u) & 15u], sh_lut[(q0 >> 24u) & 15u]), a0)
+                 + dot(vec4(sh_lut[(q1      ) & 15u], sh_lut[(q1 >>  8u) & 15u],
+                            sh_lut[(q1 >> 16u) & 15u], sh_lut[(q1 >> 24u) & 15u]), a1)
+                 + dot(vec4(sh_lut[(q0 >>  4u) & 15u], sh_lut[(q0 >> 12u) & 15u],
+                            sh_lut[(q0 >> 20u) & 15u], sh_lut[(q0 >> 28u) & 15u]), a2)
+                 + dot(vec4(sh_lut[(q1 >>  4u) & 15u], sh_lut[(q1 >> 12u) & 15u],
+                            sh_lut[(q1 >> 20u) & 15u], sh_lut[(q1 >> 28u) & 15u]), a3);
+        float s1 = dot(vec4(sh_lut[(q2      ) & 15u], sh_lut[(q2 >>  8u) & 15u],
+                            sh_lut[(q2 >> 16u) & 15u], sh_lut[(q2 >> 24u) & 15u]), a4)
+                 + dot(vec4(sh_lut[(q3      ) & 15u], sh_lut[(q3 >>  8u) & 15u],
+                            sh_lut[(q3 >> 16u) & 15u], sh_lut[(q3 >> 24u) & 15u]), a5)
+                 + dot(vec4(sh_lut[(q2 >>  4u) & 15u], sh_lut[(q2 >> 12u) & 15u],
+                            sh_lut[(q2 >> 20u) & 15u], sh_lut[(q2 >> 28u) & 15u]), a6)
+                 + dot(vec4(sh_lut[(q3 >>  4u) & 15u], sh_lut[(q3 >> 12u) & 15u],
+                            sh_lut[(q3 >> 20u) & 15u], sh_lut[(q3 >> 28u) & 15u]), a7);
+        acc = fma(d0, s0, fma(d1, s1, acc));
+#else
+        uint wi = (row_off + b * BLOCK_U16) >> 1u;
+        float d;
+        float s = 0.0;
+
+#ifdef P36_MOE_IQ4NL
+        uint u0 = w[wi + 0u];
+        uint u1 = w[wi + 1u];
+        uint u2 = w[wi + 2u];
+        uint u3 = w[wi + 3u];
+        uint u4 = w[wi + 4u];
+        uint q0, q1, q2, q3;
+        if (odd) {
+            d = unpackHalf2x16(u0 >> 16u).x;
+            q0 = u1; q1 = u2; q2 = u3; q3 = u4;
+        } else {
+            d = unpackHalf2x16(u0).x;
+            q0 = (u0 >> 16u) | (u1 << 16u);
+            q1 = (u1 >> 16u) | (u2 << 16u);
+            q2 = (u2 >> 16u) | (u3 << 16u);
+            q3 = (u3 >> 16u) | (u4 << 16u);
+        }
+
+        s = uintBitsToFloat((q0 ^ q1 ^ q2 ^ q3) & 0x3f7fffffu) + float(x4);
+#elif defined(P36_MOE_Q5_0)
+        uint u0 = w[wi + 0u];
+        uint u1 = w[wi + 1u];
+        uint u2 = w[wi + 2u];
+        uint u3 = w[wi + 3u];
+        uint u4 = w[wi + 4u];
+        uint u5 = w[wi + 5u];
+        uint qh, q0, q1, q2, q3;
+        if (odd) {
+            d = unpackHalf2x16(u0 >> 16u).x;
+            qh = u1; q0 = u2; q1 = u3; q2 = u4; q3 = u5;
+        } else {
+            d = unpackHalf2x16(u0).x;
+            qh = (u0 >> 16u) | (u1 << 16u);
+            q0 = (u1 >> 16u) | (u2 << 16u);
+            q1 = (u2 >> 16u) | (u3 << 16u);
+            q2 = (u3 >> 16u) | (u4 << 16u);
+            q3 = (u4 >> 16u) | (u5 << 16u);
+        }
+
+        s += dot(vec4(float(int(((q0      ) & 15u) | (((qh      ) & 1u) << 4u)) - 16),
+                      float(int(((q0 >>  8u) & 15u) | (((qh >>  1u) & 1u) << 4u)) - 16),
+                      float(int(((q0 >> 16u) & 15u) | (((qh >>  2u) & 1u) << 4u)) - 16),
+                      float(int(((q0 >> 24u) & 15u) | (((qh >>  3u) & 1u) << 4u)) - 16)), a0);
+        s += dot(vec4(float(int(((q1      ) & 15u) | (((qh >>  4u) & 1u) << 4u)) - 16),
+                      float(int(((q1 >>  8u) & 15u) | (((qh >>  5u) & 1u) << 4u)) - 16),
+                      float(int(((q1 >> 16u) & 15u) | (((qh >>  6u) & 1u) << 4u)) - 16),
+                      float(int(((q1 >> 24u) & 15u) | (((qh >>  7u) & 1u) << 4u)) - 16)), a1);
+        s += dot(vec4(float(int(((q2      ) & 15u) | (((qh >>  8u) & 1u) << 4u)) - 16),
+                      float(int(((q2 >>  8u) & 15u) | (((qh >>  9u) & 1u) << 4u)) - 16),
+                      float(int(((q2 >> 16u) & 15u) | (((qh >> 10u) & 1u) << 4u)) - 16),
+                      float(int(((q2 >> 24u) & 15u) | (((qh >> 11u) & 1u) << 4u)) - 16)), a2);
+        s += dot(vec4(float(int(((q3      ) & 15u) | (((qh >> 12u) & 1u) << 4u)) - 16),
+                      float(int(((q3 >>  8u) & 15u) | (((qh >> 13u) & 1u) << 4u)) - 16),
+                      float(int(((q3 >> 16u) & 15u) | (((qh >> 14u) & 1u) << 4u)) - 16),
+                      float(int(((q3 >> 24u) & 15u) | (((qh >> 15u) & 1u) << 4u)) - 16)), a3);
+
+        s += dot(vec4(float(int(((q0 >>  4u) & 15u) | (((qh >> 16u) & 1u) << 4u)) - 16),
+                      float(int(((q0 >> 12u) & 15u) | (((qh >> 17u) & 1u) << 4u)) - 16),
+                      float(int(((q0 >> 20u) & 15u) | (((qh >> 18u) & 1u) << 4u)) - 16),
+                      float(int(((q0 >> 28u) & 15u) | (((qh >> 19u) & 1u) << 4u)) - 16)), a4);
+        s += dot(vec4(float(int(((q1 >>  4u) & 15u) | (((qh >> 20u) & 1u) << 4u)) - 16),
+                      float(int(((q1 >> 12u) & 15u) | (((qh >> 21u) & 1u) << 4u)) - 16),
+                      float(int(((q1 >> 20u) & 15u) | (((qh >> 22u) & 1u) << 4u)) - 16),
+                      float(int(((q1 >> 28u) & 15u) | (((qh >> 23u) & 1u) << 4u)) - 16)), a5);
+        s += dot(vec4(float(int(((q2 >>  4u) & 15u) | (((qh >> 24u) & 1u) << 4u)) - 16),
+                      float(int(((q2 >> 12u) & 15u) | (((qh >> 25u) & 1u) << 4u)) - 16),
+                      float(int(((q2 >> 20u) & 15u) | (((qh >> 26u) & 1u) << 4u)) - 16),
+                      float(int(((q2 >> 28u) & 15u) | (((qh >> 27u) & 1u) << 4u)) - 16)), a6);
+        s += dot(vec4(float(int(((q3 >>  4u) & 15u) | (((qh >> 28u) & 1u) << 4u)) - 16),
+                      float(int(((q3 >> 12u) & 15u) | (((qh >> 29u) & 1u) << 4u)) - 16),
+                      float(int(((q3 >> 20u) & 15u) | (((qh >> 30u) & 1u) << 4u)) - 16),
+                      float(int(((q3 >> 28u) & 15u) | (((qh >> 31u) & 1u) << 4u)) - 16)), a7);
+#endif
+        acc = fma(d, s, acc);
+#endif
+    }
+
+    acc += subgroupShuffleXor(acc, 2u);
+    acc += subgroupShuffleXor(acc, 1u);
+    if (blane == 0u) {
+        y[slot * pc.out_dim + row] = acc * weight;
+    }
+}

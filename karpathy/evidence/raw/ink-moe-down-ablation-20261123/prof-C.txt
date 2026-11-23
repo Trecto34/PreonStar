@@ -1,0 +1,2 @@
+p36: Vulkan kernel GPU time total_ms=769.819 barriers=53372 fence_ready=973 fence_blocked=60 spin_ms=669.675 block_ms=1671.326
+p36:   vulkan/inkling2_moe_down_decode_iq4nl.spv dispatches=3072 groups=3538944 gpu_ms=112.647 pct=14.6
