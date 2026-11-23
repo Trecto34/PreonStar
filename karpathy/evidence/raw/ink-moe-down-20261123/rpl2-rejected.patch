@@ -1,0 +1,171 @@
+diff --git a/src/vulkan/vk_14_inkling2.inc b/src/vulkan/vk_14_inkling2.inc
+index 4aec0cc..7318e7d 100644
+--- a/src/vulkan/vk_14_inkling2.inc
++++ b/src/vulkan/vk_14_inkling2.inc
+@@ -931,7 +931,7 @@ int p36_gpu_inkling2_moe_ffn_tensor(
+                 dn_t, mid_scratch, selected, weights, down_scratch, dn_sc_t
+             };
+             ok = p36_vk_run_unlocked("inkling2_moe_dn_dec", dn_k, dn_b, &dn_pc, sizeof(dn_pc),
+-                                     out_dim / 16u, n_used, 1);
++                                     out_dim / 32u, n_used, 1);   /* 16 rows x RPL=2 per WG */
+             if (ok) {
+                 uint64_t cw_bytes = (uint64_t)out_dim * 4u * sizeof(float);
+                 const unsigned char *cw_src = p36_gpu_weight_bytes(model_map, model_size, conv_w_offset, cw_bytes);
+diff --git a/vulkan/inkling2_moe_down_decode.comp b/vulkan/inkling2_moe_down_decode.comp
+index d8c4533..67595da 100644
+--- a/vulkan/inkling2_moe_down_decode.comp
++++ b/vulkan/inkling2_moe_down_decode.comp
+@@ -14,6 +14,13 @@
+ 
+ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+ 
++/* Rows per lane: each lane runs RPL rows (r_local, r_local + 16, ...) so one set of
++ * activation loads (128 B per 18 B IQ4_NL block) feeds RPL weight blocks.
++ * Dispatch: (out_dim / (16 * RPL), n_used, 1). */
++#ifndef RPL
++#define RPL 2u
++#endif
++
+ layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
+ layout(set = 0, binding = 1) readonly buffer Act { vec4 xv[]; };
+ layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
+@@ -50,58 +57,11 @@ shared float sh_ue4m3[256];
+ #error "Define P36_MOE_IQ4NL, P36_MOE_Q5_0, or P36_MOE_NVFP4"
+ #endif
+ 
+-void main(void) {
+-    uint tid = gl_LocalInvocationID.x;
+-    uint r_local = tid >> 2u;   /* 0..15 */
+-    uint blane = tid & 3u;      /* 0..3 */
+-    bool odd = (blane & 1u) != 0u; /* row_u16 is even -> parity is loop-invariant */
+-    uint row = gl_WorkGroupID.x * 16u + r_local;
+-    uint slot = gl_WorkGroupID.y;
+-
+-#ifdef P36_MOE_IQ4NL
+-    if (tid < 16u) sh_lut[tid] = IQ4NL_INIT[tid];
+-    barrier();
+-#elif defined(P36_MOE_NVFP4)
+-    if (tid < 16u) sh_lut[tid] = NVFP4_INIT[tid];
+-    for (uint i = tid; i < 256u; i += 64u) {
+-        if (i == 0u || i == 0x7Fu) {
+-            sh_ue4m3[i] = 0.0;
+-        } else {
+-            uint e = (i >> 3u) & 15u;
+-            uint m = i & 7u;
+-            float raw = (e == 0u) ? ldexp(float(m), -9)
+-                                  : ldexp(1.0 + float(m) * 0.125, int(e) - 7);
+-            sh_ue4m3[i] = raw * 0.5;
+-        }
+-    }
+-    barrier();
+-#endif
+-
+-    uint expert = selected[slot];
+-    float weight = rw[slot];
+-    if (pc.has_exp_scale != 0u) weight *= exp_scale[expert];
+-    uint x_base = slot * (pc.in_dim >> 2u);
+-#ifdef P36_MOE_NVFP4
+-    uint row_u32 = (pc.blocks >> 1u) * BLOCK_U32;
+-    uint row_off = (expert * pc.out_dim + row) * row_u32;
+-#else
+-    uint row_u16 = pc.blocks * BLOCK_U16;
+-    uint row_off = (expert * pc.out_dim + row) * row_u16;
+-#endif
+-
+-    float acc = 0.0;
+-
+-    for (uint b = blane; b < pc.blocks; b += 4u) {
+-        uint x4 = x_base + b * 8u;
+-        vec4 a0 = xv[x4 + 0u];
+-        vec4 a1 = xv[x4 + 1u];
+-        vec4 a2 = xv[x4 + 2u];
+-        vec4 a3 = xv[x4 + 3u];
+-        vec4 a4 = xv[x4 + 4u];
+-        vec4 a5 = xv[x4 + 5u];
+-        vec4 a6 = xv[x4 + 6u];
+-        vec4 a7 = xv[x4 + 7u];
+-
++/* One weight block of one row: identical ops to the former inline loop body,
++ * so each row's accumulation order (and result) is unchanged. */
++void blk_acc(uint row_off, uint b, bool odd,
++             vec4 a0, vec4 a1, vec4 a2, vec4 a3, vec4 a4, vec4 a5, vec4 a6, vec4 a7,
++             inout float acc) {
+ #ifdef P36_MOE_NVFP4
+         uint blk = b >> 1u;
+         uint half_b = b & 1u;
+@@ -227,11 +187,71 @@ void main(void) {
+ #endif
+         acc = fma(d, s, acc);
+ #endif
++}
++
++void main(void) {
++    uint tid = gl_LocalInvocationID.x;
++    uint r_local = tid >> 2u;   /* 0..15 */
++    uint blane = tid & 3u;      /* 0..3 */
++    bool odd = (blane & 1u) != 0u; /* row_u16 is even -> parity is loop-invariant */
++    uint row = gl_WorkGroupID.x * (16u * RPL) + r_local;   /* + 16 * rr */
++    uint slot = gl_WorkGroupID.y;
++
++#ifdef P36_MOE_IQ4NL
++    if (tid < 16u) sh_lut[tid] = IQ4NL_INIT[tid];
++    barrier();
++#elif defined(P36_MOE_NVFP4)
++    if (tid < 16u) sh_lut[tid] = NVFP4_INIT[tid];
++    for (uint i = tid; i < 256u; i += 64u) {
++        if (i == 0u || i == 0x7Fu) {
++            sh_ue4m3[i] = 0.0;
++        } else {
++            uint e = (i >> 3u) & 15u;
++            uint m = i & 7u;
++            float raw = (e == 0u) ? ldexp(float(m), -9)
++                                  : ldexp(1.0 + float(m) * 0.125, int(e) - 7);
++            sh_ue4m3[i] = raw * 0.5;
++        }
++    }
++    barrier();
++#endif
++
++    uint expert = selected[slot];
++    float weight = rw[slot];
++    if (pc.has_exp_scale != 0u) weight *= exp_scale[expert];
++    uint x_base = slot * (pc.in_dim >> 2u);
++#ifdef P36_MOE_NVFP4
++    uint row_u32 = (pc.blocks >> 1u) * BLOCK_U32;
++    uint row_off[RPL];
++    [[unroll]] for (uint rr = 0u; rr < RPL; rr++) row_off[rr] = (expert * pc.out_dim + row + 16u * rr) * row_u32;
++#else
++    uint row_u16 = pc.blocks * BLOCK_U16;
++    uint row_off[RPL];
++    [[unroll]] for (uint rr = 0u; rr < RPL; rr++) row_off[rr] = (expert * pc.out_dim + row + 16u * rr) * row_u16;
++#endif
++
++    float acc[RPL];
++    [[unroll]] for (uint rr = 0u; rr < RPL; rr++) acc[rr] = 0.0;
++
++    for (uint b = blane; b < pc.blocks; b += 4u) {
++        uint x4 = x_base + b * 8u;
++        vec4 a0 = xv[x4 + 0u];
++        vec4 a1 = xv[x4 + 1u];
++        vec4 a2 = xv[x4 + 2u];
++        vec4 a3 = xv[x4 + 3u];
++        vec4 a4 = xv[x4 + 4u];
++        vec4 a5 = xv[x4 + 5u];
++        vec4 a6 = xv[x4 + 6u];
++        vec4 a7 = xv[x4 + 7u];
++
++        [[unroll]] for (uint rr = 0u; rr < RPL; rr++)
++            blk_acc(row_off[rr], b, odd, a0, a1, a2, a3, a4, a5, a6, a7, acc[rr]);
+     }
+ 
+-    acc += subgroupShuffleXor(acc, 2u);
+-    acc += subgroupShuffleXor(acc, 1u);
+-    if (blane == 0u) {
+-        y[slot * pc.out_dim + row] = acc * weight;
++    [[unroll]] for (uint rr = 0u; rr < RPL; rr++) {
++        float t = acc[rr];
++        t += subgroupShuffleXor(t, 2u);
++        t += subgroupShuffleXor(t, 1u);
++        if (blane == 0u) y[slot * pc.out_dim + row + 16u * rr] = t * weight;
+     }
+ }

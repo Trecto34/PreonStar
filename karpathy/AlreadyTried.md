@@ -4741,3 +4741,23 @@ Evidence + patch + shader: `evidence/raw/ink-wo-q6k-direct-20261123/`.
 * reconsider_if: stacked with another R2 decode win, or if F32 activations are
   wanted for quality on their own; the kernel reaches only ~294 GB/s, so a
   u32-load variant (handle odd-block 2-byte offset) may lift it.
+
+## 2026-11-23 Inkling-2-Mini MoE down IQ4_NL decode: paired fp16 LUT and 2 rows/lane — both REJECTED (slower kernel)
+
+`inkling2_moe_down_decode_iq4nl` is the largest decode kernel on MiniPlus-R2
+(143.3 ms / 64 tok = 2.24 ms/tok, ~256 GB/s). Evidence (kernel profiles, ctx
+2048, 64 tok, `P36_VK_PROF_KERNEL=1`): `evidence/raw/ink-moe-down-20261123/`.
+
+* **Paired LUT** (256-entry byte -> fp16x2 (lo, hi) table, one LDS read per
+  weight byte instead of two): kernel **143.3 -> 148.8 ms (+3.8%)**. Not even
+  bit-identical (top-1 same over 64 steps, logprob drift mean ~0.1), likely a
+  different FMA contraction. LDS lookups are not the limiter.
+* **2 rows per lane** (32 rows/WG, 576 WGs, activations loaded once for two
+  weight blocks; per-row order unchanged): bit-identical md5 on MiniPlus-R2
+  and NanoPlus, kernel **143.3 -> 159.6 ms (+11%)**. Halving the grid costs
+  more memory-level parallelism than the activation reuse saves. Patch:
+  `rpl2-rejected.patch`.
+* Conclusion: the down kernel is limited by in-flight memory requests, not
+  ALU/LDS or activation traffic. reconsider_if: a layout with *more*
+  independent row streams per CU (e.g. 8 lanes x 8 rows, 2304 WGs, contiguous
+  144-B row bursts) — not bit-identical (lane partial order changes).
