@@ -4702,3 +4702,46 @@ from global memory (53.6 ms = 1.5% of Axion 4k prefill). Evidence:
 * **Rejected along the way:** `matmul_f32_fast_t8` 2x unroll (84 VGPRs,
   occupancy -> 12): regressed 102.2 -> 112.3 ms.
 * reconsider_if: `recur_norm_gate` is fused into `delta_net_decode_reg_f16`.
+
+## 2026-11-23 Inkling-2-Mini 2..16-row micro-batch forward (MoE on the decode kernels) — ACCEPTED, 8-row verify 174 -> 59 ms, decode and normal prefill bit-identical
+
+Motivation: DSpark / speculative verify on Inkling-2-Mini needs a cheap
+N-row forward. Every `n_tok > 1` forward took the prefill tiles: 128-row
+`dense_kquant_mmq`, `matmul_q8_0_mm`, and the 64-slot MoE GEMM. Profile at
+8 rows (MiniPlus-R2): `dense_kquant_mmq` 53 ms, `matmul_q8_0_mm` 31 ms,
+MoE gate_up 55 ms + down 27 ms per forward, against 11.9 ms for a whole
+decode step. Evidence: `karpathy/evidence/raw/ink-smallbatch-20261123/`.
+
+* **Change.** Inside the micro-batch window (`p36_gpu_set_micro_batch`),
+  `p36_gpu_inkling2_moe_rows(n_tok)` (2..16 rows) sends MoE to the decode
+  kernels over `n_tok * n_used` (token, expert) pairs, with a pair-major grid
+  (`pair_major` push field) so tokens that share an expert read it from L2
+  together. `inkling2_moe_down_reduce_conv` gets an `n_tok` field and steps the
+  ffn_post_conv state through the tokens per channel; the forward then skips
+  its own `conv_ffn`. The dense trunk already had multi-row routes
+  (`dense_q*k_rows`, `matmul_q8_0_f32b_nx`) behind the same window.
+  `P36_VK_MICRO_ALL=1` is a bench-only diagnostic that keeps the window on.
+* **Rows curve** (ms per forward, A -> B, 2 reps each, `rows-curve.csv`):
+  1 row 11.8 -> 11.7, 2 rows 77.9 -> 22.6, 4 rows 98.2 -> 33.8,
+  8 rows 173.8 -> 59.1. Pair-major alone: 8-row MoE ~40.6 -> 37.6 ms.
+* **Parity.** Without the variable, chunk 1 and chunk 8 frontier logits are
+  byte-identical to `main` (max_abs_diff 0). Micro-batch rows are not
+  bit-identical to decode (dense trunk uses the rows kernels, attention uses
+  `attn_prefill`): top-1 same, max_abs_diff 1.03 / 1.23, top-64 62/61 of 64;
+  the existing GEMM route is 1.49 / 0.94, 61/62.
+* **Decode** (`decode-ab.csv`, 4 interleaved reps): A 74.86-75.00, B
+  74.80-74.91 t/s — unchanged. `make check` ok.
+* **Limit, measured:** the 8 tokens share almost no experts — 8-row MoE is
+  6.7x one row (random routing gives ~6.5x) — so MoE adds ~4.6 ms per extra
+  row. The extra-row cost is ~0.51 of a decode token on MiniPlus-R2,
+  NanoPlus-V2.1 and UD-IQ3_XXS alike (`smaller-quants.csv`). With DSpark
+  (acceptance ~0.66 per draft token on the vLLM numbers) that is about
+  break-even on average and ~+25% on code; long blocks (7 drafts) lose.
+* **Remaining 2-row overheads:** `inkling2_attn_prefill` 2.34 ms vs
+  0.37 ms/row on `attn_decode`; `dense_q6k_rows2` 4.78 ms vs 2.57 ms for the
+  fused decode Q6_K kernels; loop controls ~1.3 vs 0.7 ms.
+* **Not yet live:** no Inkling caller opens the micro-batch window. The spec
+  frontier snapshot copies only the Qwen recurrent state, so lookup / MTP /
+  DSpark verify on Inkling first needs conv + SWA ring rollback.
+* reconsider_if: a router or model where (token, expert) pairs overlap a lot
+  (then an expert-grouped small tile beats per-pair decode kernels).

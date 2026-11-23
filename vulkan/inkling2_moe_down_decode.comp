@@ -27,6 +27,7 @@ layout(push_constant) uniform Push {
     uint blocks;        /* in_dim / 32 = 36 */
     uint n_used;        /* 8 */
     uint has_exp_scale; /* 1 if exp_scale[] is valid */
+    uint pair_major;    /* 1: grid (pairs, row blocks) so tokens sharing an expert hit L2 together */
 } pc;
 
 #ifdef P36_MOE_IQ4NL
@@ -55,8 +56,8 @@ void main(void) {
     uint r_local = tid >> 2u;   /* 0..15 */
     uint blane = tid & 3u;      /* 0..3 */
     bool odd = (blane & 1u) != 0u; /* row_u16 is even -> parity is loop-invariant */
-    uint row = gl_WorkGroupID.x * 16u + r_local;
-    uint slot = gl_WorkGroupID.y;
+    uint row = (pc.pair_major != 0u ? gl_WorkGroupID.y : gl_WorkGroupID.x) * 16u + r_local;
+    uint slot = pc.pair_major != 0u ? gl_WorkGroupID.x : gl_WorkGroupID.y;
 
 #ifdef P36_MOE_IQ4NL
     if (tid < 16u) sh_lut[tid] = IQ4NL_INIT[tid];

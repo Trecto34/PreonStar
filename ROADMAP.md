@@ -62,6 +62,14 @@ files only with memory headroom.
 - [x] `router_topk` single-wave64 zero-barrier + parallel lanes `0..7` `exp`/`ddiv` — −40.5% kernel (`13.0 → 7.7 ms`), Axion decode **110.21 → 110.55 t/s (+0.31%**, 4/5 pairs positive, bit-identical on Axion + Qwen3.6)
 - [x] Q4_K decode shape-aware row count (`out_dim >= 4096 || (out_dim >= 2048 && in_dim <= 512) → 4 rows`, else 1 row) — `2048×8192` −8.6%, `512×2048` −7.4%, Axion decode **109.44 → 111.78 t/s (+2.14%**, 5/5 pairs positive, bit-identical on Axion + Qwen3.6)
 
+## Speculative verify on Inkling-2-Mini — `karpathy/AlreadyTried.md` (2026-11-23)
+
+- [x] 2..16-row micro-batch forward: MoE on the decode kernels (pair-major) + per-token reduce-conv — 8-row forward **174 → 59 ms**, 4-row 98 → 34, 2-row 78 → 23; decode and normal prefill bit-identical
+- [ ] Spec frontier snapshot/rollback for Inkling conv state + SWA KV ring (blocks lookup, MTP and DSpark on Inkling)
+- [ ] Prompt-lookup verify on Inkling once rollback lands (no draft RAM)
+- [ ] Row-count overheads: decode-style attention for 2..4 rows (2.34 → ~0.8 ms), `dense_q6k_rows2` vs fused decode (4.78 vs 2.57 ms)
+- [ ] DSpark draft (`mtp.safetensors`, 3 dense layers + rnn Markov head) — estimate ±0% average / ~+25% code on BC-250; MoE adds ~4.6 ms per verify row
+
 ## Prefill kernels
 
 - [x] `moe_down_gemm` `BM=128` (8-row × 2-slot tile, 64 VGPRs, 10.7 KB LDS, 16 waves/SIMD) + aligned 16-bit IQ3_XXS/Q3_K loads — `moe_iq3xxs_down_gemm` −7.8%, `moe_q3k_down_gemm` −21.1% (combined −9.6%), Axion 4k chunk-1024 prefill **1039.93 → 1060.95 t/s (+2.02%**, 4/5 pairs positive, bit-identical on Axion c1024/c64 + Qwen3.6)

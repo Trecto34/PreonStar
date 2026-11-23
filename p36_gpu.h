@@ -1279,6 +1279,10 @@ int p36_gpu_inkling2_router_topk_tensor(
         uint32_t              n_used,
         float                 weight_scale);
 
+/* true when n_tok rows take the decode MoE kernels (decode, or a 2..16 row
+ * micro-batch); the fused reduce then also applies ffn_post_conv + residual. */
+bool p36_gpu_inkling2_moe_rows(uint32_t n_tok);
+
 int p36_gpu_inkling2_moe_ffn_tensor(
         p36_gpu_tensor       *out,
         p36_gpu_tensor       *mid_scratch,

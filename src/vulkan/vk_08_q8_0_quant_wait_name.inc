@@ -79,8 +79,18 @@ static bool p36_vk_use_q8_mm_f16_out32(void) {
  * warm resume would stop matching the chunked cold rebuild. */
 static bool p36_vk_micro_batch;
 
+/* Bench-only diagnostic: P36_VK_MICRO_ALL=1 keeps every forward inside the
+ * micro-batch + wide-rows window, so `p36-bench --prefill-chunk N` times the
+ * N-row speculative-verify routes. It validates those routes; it is not a
+ * second release semantic. */
+static bool p36_vk_micro_all;
+__attribute__((constructor)) static void p36_vk_micro_all_init(void) {
+    p36_vk_micro_all = getenv("P36_VK_MICRO_ALL") != NULL;
+    p36_vk_micro_batch = p36_vk_micro_all;
+}
+
 void p36_gpu_set_micro_batch(bool enabled) {
-    p36_vk_micro_batch = enabled;
+    p36_vk_micro_batch = enabled || p36_vk_micro_all;
 }
 
 /* Clover block decode runs 5..16-row micro batches (block preview and its
@@ -93,7 +103,7 @@ void p36_gpu_set_wide_rows(bool enabled) {
 }
 
 static uint64_t p36_vk_rows_max(void) {
-    return p36_vk_wide_rows && p36_vk_micro_batch ? 16u : 4u;
+    return (p36_vk_wide_rows && p36_vk_micro_batch) || p36_vk_micro_all ? 16u : 4u;
 }
 
 /* Prefill GEMM against raw f32 activations: 64x64 shared-memory tiles,

@@ -1,0 +1,156 @@
+<p align="center">
+  <img src="logo.svg" alt="PreonStar logo" width="220">
+</p>
+
+# PreonStar
+
+**A small, self-contained inference engine that runs a 35B-parameter model on
+hardware you already own** -- a laptop, a workstation, or a $150 mini-PC.
+
+PreonStar is a native C99 engine for the Qwen3.6-35B-A3B, Qwen3.8-27B, and
+Inkling-2-Mini (`inkling2_loop`) families.
+It ships the whole stack: a CLI, an OpenAI/Anthropic-compatible HTTP server, a
+coding agent, a benchmark harness, and an evaluation runner. No Python in the hot
+path, no framework underneath, no build system beyond `make`.
+
+It runs a mixture-of-experts model at interactive speed on a machine with 16 GB of
+memory, and if the model does not fit, it streams experts from disk and still
+answers.
+
+[Quickstart](#quickstart) | [Documentation](docs/README.md) | [Benchmarks](docs/benchmarks.md) | [Status](#status)
+
+## What you get
+
+- **Run a capable model locally.** Qwen3.6-35B-A3B (35B total, `3B active),
+  dense Qwen3.8-27B, or Thinking Machines' Inkling-2-Mini (`inkling2_loop`,
+  24 physical / 48 looped logical layers), in 2-5 bit quantizations, resident
+  or streamed.
+- **Talk to it four ways.** Interactive CLI, HTTP server with OpenAI and Anthropic
+  wire formats, a native coding agent, and a batch evaluation harness.
+- **Bring your own hardware.** Anything with a working Vulkan 1.1 driver runs.
+  Apple Silicon runs natively through Metal. The AMD BC-250 is the board the fast
+  path was tuned on -- a reference configuration, not a requirement.
+
+## Supported runtimes
+
+| Backend | Platform | Status |
+|---|---|---|
+| **Vulkan** | Linux, Vulkan 1.1+ | Primary GPU path. Generic; the BC-250 fast path is selected by device ID |
+| **Metal** | macOS 11+, Apple Silicon M1 or newer | Native graph runtime, same CLI and server |
+| **CPU** | Any C99 platform | Portable reference and debugging runtime, not the production path |
+
+Windows is not a build target.
+
+Both GPU backends are chosen **at build time** (`make` for Vulkan, `make metal` for
+Metal) and produce the same six command names: `p36`, `p36-server`, `p36-agent`,
+`p36-bench`, `p36-eval`, `p36_test`.
+
+## Requirements
+
+**Universal:**
+
+- Linux or macOS, a C99 compiler, GNU `make`.
+- 16 GB of memory for the default model resident; 8 GB is workable with SSD
+  streaming.
+- `glslang-tools` (or `glslc`) to compile the Vulkan shaders.
+
+**Backend-specific:**
+
+- **Vulkan**: a driver supporting shader `float64` and `int64`. Subgroup
+  arithmetic, 16-bit storage and native `float16` are probed at runtime and the
+  optimized kernels fall back when absent. See [backends.md](docs/backends.md).
+- **Metal**: Xcode command line tools. No Vulkan loader needed.
+- **BC-250**: needs a recent Mesa/RADV, a 512 MB UMA split, and a GPU governor to
+  hold clocks. Step-by-step in [docs/hardware/bc250.md](docs/hardware/bc250.md).
+
+## Quickstart
+
+Debian/Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y build-essential glslang-tools libvulkan-dev
+```
+
+Arch and Fedora equivalents are in [docs/hardware/bc250.md](docs/hardware/bc250.md#1-install-linux-and-radv);
+on macOS install the Xcode command line tools instead.
+
+Build and fetch a model:
+
+```sh
+git clone https://github.com/Trecto34/PreonStar.git
+cd PreonStar
+
+make -j"$(nproc)"        # Vulkan, with runtime capability detection
+make metal               # Apple Silicon instead
+
+./download_model.sh q2-imatrix    # Qwen3.6-35B-A3B, `10 GB
+```
+
+Run it:
+
+```sh
+./p36 -p "Explain Redis streams in one paragraph."
+
+./p36-server --ctx 32768 --kv-disk-dir `/.p36/server-kv --kv-disk-space-mb 8192
+
+./p36-agent
+```
+
+Verify the build without a model or a GPU:
+
+```sh
+make check
+```
+
+### Rebuild before you benchmark
+
+`make` builds six binaries from shared objects. Almost every runtime change is
+compiled into the common objects, so **rebuild all of them, not one** — then
+confirm the clock on each is fresh:
+
+```sh
+make -j"$(nproc)"          # p36, p36-server, p36-agent, p36-bench, p36-eval, p36_test
+ls -l p36 p36-server p36-agent
+```
+
+A stale binary does not error, it just keeps running the old route. That cost a
+whole session once: `p36-server` from before the fused expert pair stayed on the
+q8 route and read **49 t/s where the current build does 68 t/s** — a phantom "30%
+server overhead" that was entirely a missing relink. If a number looks worse than
+the table in [Performance](#performance), check the binary timestamp before you
+profile anything.
+
+## Configuration
+
+A few flags cover most use; the rest are in [configuration.md](docs/configuration.md).
+
+| Flag | Use |
+|---|---|
+| `-m, --model FILE` | Model to load. Defaults to the q2 imatrix download |
+| `--ctx N` | Context window in tokens |
+| `--ssd-streaming` | Stream experts from disk instead of full residency |
+| `-ctk` / `-ctv` | KV cache types: `f16`, `q8_0`, `q4_0` (GPU default q8_0 / q4_0) |
+| `--backend` | `vulkan`, `metal` or `cpu` |
+| `--kv-disk-dir DIR` | Persist the KV cache so restarts skip prefill |
+
+Platform-agnostic options behave the same everywhere. Hardware-specific flags
+(prefill chunk width, cache sizing, CU occupancy hints) are documented next to the
+backend they affect, not in the general flag list.
+
+## Performance
+
+On the BC-250 reference board (16 GB UMA, RADV), greedy decoding, Q8_0 K / Q4_0 V
+cache. MoE decode uses the **fused expert pair** (gate+up in one dispatch, down
+sum in another, no q8_K staging) by default; `P36_VK_MOE_PAIR_DECODE=0` restores
+the bit-exact q8 route, which is what to use when you need token-for-token
+reproducibility against older builds:
+
+Decode holds up with context — the fused pair keeps **68+ t/s at 10.8k tokens**
+and loses only 11% going from 1k to 10.8k (n=192, temp 0, `--prefill-chunk 512`):
+
+| Context | Occamy 35B-A3B prefill | Occamy decode | MiniCPM-V 35B-A3B prefill | MiniCPM-V decode |
+|---:|---:|---:|---:|---:|
+| 1k | 565 t/s | **76.9 t/s** | 518 t/s | **80.0 t/s** |
+| 2k | 746 t/s | 76.2 t/s | 788 t/s | 79.0 t/s |
+| 4k | 782 t/s | 73.5 t/s | 830 t/s | 77.1 t/s

@@ -1,0 +1,11 @@
+model,rows,prefill_tps,ms_per_forward
+Inkling-2-Mini-APEX-I-NanoPlus-V2.1,1,93.40,10.71
+Inkling-2-Mini-APEX-I-NanoPlus-V2.1,2,98.78,20.25
+Inkling-2-Mini-APEX-I-NanoPlus-V2.1,4,124.82,32.05
+Inkling-2-Mini-APEX-I-NanoPlus-V2.1,8,144.85,55.23
+Inkling-2-Mini-APEX-I-NanoPlus-V2.1,decode_gen_tps,81.78,
+Inkling-2-Mini-UD-IQ3_XXS,1,84.22,11.87
+Inkling-2-Mini-UD-IQ3_XXS,2,92.37,21.65
+Inkling-2-Mini-UD-IQ3_XXS,4,119.06,33.6
+Inkling-2-Mini-UD-IQ3_XXS,8,139.07,57.52
+Inkling-2-Mini-UD-IQ3_XXS,decode_gen_tps,74.81,

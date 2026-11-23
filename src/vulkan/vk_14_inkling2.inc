@@ -70,22 +70,22 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     p36_vk_ink_attn_decode    = P36_VK_KERNEL(kv_f16 ? "vulkan/inkling2_attn_decode.spv" : "vulkan/inkling2_attn_decode_q8.spv", 9, 32, (1u << 7) | (1u << 8));
     p36_vk_ink_attn_combine   = P36_VK_KERNEL("vulkan/inkling2_attn_combine.spv", 3, 4, 1u << 2);
     p36_vk_ink_attn_prefill   = P36_VK_KERNEL(kv_f16 ? "vulkan/inkling2_attn_prefill.spv" : "vulkan/inkling2_attn_prefill_q8.spv", 10, 32, 1u << 7);
-    p36_vk_ink_gu_dec_iq2xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xxs.spv", 6, 32, 1u << 3);
-    p36_vk_ink_gu_dec_iq2xs   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xs.spv", 6, 32, 1u << 3);
-    p36_vk_ink_gu_dec_iq2s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2s.spv", 6, 32, 1u << 3);
-    p36_vk_ink_gu_dec_iq3xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv", 6, 32, 1u << 3);
-    p36_vk_ink_gu_dec_iq3s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3s.spv", 6, 32, 1u << 3);
-    p36_vk_ink_gu_dec_q4k     = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_q4k.spv", 6, 32, 1u << 3);
+    p36_vk_ink_gu_dec_iq2xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xxs.spv", 6, 36, 1u << 3);
+    p36_vk_ink_gu_dec_iq2xs   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xs.spv", 6, 36, 1u << 3);
+    p36_vk_ink_gu_dec_iq2s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2s.spv", 6, 36, 1u << 3);
+    p36_vk_ink_gu_dec_iq3xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv", 6, 36, 1u << 3);
+    p36_vk_ink_gu_dec_iq3s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3s.spv", 6, 36, 1u << 3);
+    p36_vk_ink_gu_dec_q4k     = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_q4k.spv", 6, 36, 1u << 3);
     p36_vk_ink_gu_gemm_iq2xxs = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq2xxs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq2xs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq2xs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq2s   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq2s.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq3xxs = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq3s   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq3s.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_q4k    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_q4k.spv", 6, 32, 1u << 3);
-    p36_vk_ink_down_dec_iq4nl = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_iq4nl.spv", 6, 20, 1u << 4);
-    p36_vk_ink_down_dec_q5_0  = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_q5_0.spv", 6, 20, 1u << 4);
-    p36_vk_ink_down_dec_nvfp4 = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_nvfp4.spv", 6, 20, 1u << 4);
-    p36_vk_ink_down_red_conv  = P36_VK_KERNEL("vulkan/inkling2_moe_down_reduce_conv.spv", 5, 12, (1u << 1) | (1u << 3));
+    p36_vk_ink_down_dec_iq4nl = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_iq4nl.spv", 6, 24, 1u << 4);
+    p36_vk_ink_down_dec_q5_0  = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_q5_0.spv", 6, 24, 1u << 4);
+    p36_vk_ink_down_dec_nvfp4 = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_nvfp4.spv", 6, 24, 1u << 4);
+    p36_vk_ink_down_red_conv  = P36_VK_KERNEL("vulkan/inkling2_moe_down_reduce_conv.spv", 5, 16, (1u << 1) | (1u << 3));
     p36_vk_ink_down_gemm_iq4nl= P36_VK_KERNEL("vulkan/inkling2_moe_down_gemm_iq4nl.spv", 5, 20, 1u << 3);
     p36_vk_ink_down_gemm_q5_0 = P36_VK_KERNEL("vulkan/inkling2_moe_down_gemm_q5_0.spv", 5, 20, 1u << 3);
     p36_vk_ink_down_gemm_nvfp4= P36_VK_KERNEL("vulkan/inkling2_moe_down_gemm_nvfp4.spv", 5, 20, 1u << 3);
@@ -821,6 +821,15 @@ int p36_gpu_inkling2_router_topk_tensor(
     return ok;
 }
 
+/* A 2..16 row micro-batch (speculative verify) runs the decode kernels over
+ * n_tok * n_used (token, expert) pairs instead of the 64-slot GEMM tiles:
+ * the tiles cost ~55 ms for 8 tokens against ~3 ms for one decode step, and
+ * each row's MoE output then uses the decode arithmetic. The fused reduce + conv
+ * writes the final residual, so the caller skips its own ffn_post_conv. */
+bool p36_gpu_inkling2_moe_rows(uint32_t n_tok) {
+    return n_tok == 1u || (p36_vk_micro_batch && n_tok <= 16u);
+}
+
 int p36_gpu_inkling2_moe_ffn_tensor(
         p36_gpu_tensor       *out,
         p36_gpu_tensor       *mid_scratch,
@@ -854,7 +863,8 @@ int p36_gpu_inkling2_moe_ffn_tensor(
         float                 situ_lb) {
     p36_gpu_tensor *tiles = NULL;
     uint32_t tile_count = 0;
-    if (n_tok > 1u) {
+    const bool rows = p36_gpu_inkling2_moe_rows(n_tok);
+    if (!rows) {
         uint32_t n_slot = n_tok * n_used;
         tile_count = p36_vk_moe_tile_bound(n_slot, n_expert, 64u);
         tiles = p36_vk_moe_tiles_gpu(selected, n_slot, n_expert, NULL, 64u);
@@ -898,7 +908,7 @@ int p36_gpu_inkling2_moe_ffn_tensor(
 
     p36_vk_kernel *gu_k = NULL;
     p36_vk_kernel *dn_k = NULL;
-    if (n_tok == 1u) {
+    if (rows) {
         switch (gate_up_type) {
             case P36_VK_TENSOR_IQ2_XXS: gu_k = &p36_vk_ink_gu_dec_iq2xxs; break;
             case P36_VK_TENSOR_IQ2_XS:  gu_k = &p36_vk_ink_gu_dec_iq2xs; break;
@@ -914,31 +924,35 @@ int p36_gpu_inkling2_moe_ffn_tensor(
             case P36_VK_TENSOR_NVFP4:   dn_k = &p36_vk_ink_down_dec_nvfp4; break;
             default: pthread_mutex_unlock(&p36_vk_mu); return 0;
         }
+        const uint32_t pair_major = n_tok > 1u ? 1u : 0u;
+        const uint32_t n_pair = n_tok * n_used;
         struct {
             uint32_t mid_dim, blocks, n_used;
             float situ_beta, inv_beta, situ_lb, inv_lb;
-            uint32_t has_exp_scale;
-        } gu_pc = { mid_dim, in_dim / 256u, n_used, situ_beta, 1.0f / situ_beta, situ_lb, 1.0f / situ_lb, has_gate_up_scale ? 1u : 0u };
+            uint32_t has_exp_scale, pair_major;
+        } gu_pc = { mid_dim, in_dim / 256u, n_used, situ_beta, 1.0f / situ_beta, situ_lb, 1.0f / situ_lb, has_gate_up_scale ? 1u : 0u, pair_major };
         const p36_gpu_tensor *gu_b[6] = { gu_t, x, selected, mid_scratch, tables, gu_sc_t };
         uint32_t gu_rows = (gate_up_type == P36_VK_TENSOR_IQ2_S) ? 16u : 4u;
         ok = p36_vk_run_unlocked("inkling2_moe_gu_dec", gu_k, gu_b, &gu_pc, sizeof(gu_pc),
-                                 mid_dim / gu_rows, n_used, 1);
+                                 pair_major ? n_pair : mid_dim / gu_rows,
+                                 pair_major ? mid_dim / gu_rows : n_pair, 1);
         if (ok) {
-            struct { uint32_t out_dim, in_dim, blocks, n_used, has_exp_scale; } dn_pc = {
-                out_dim, mid_dim, mid_dim / 32u, n_used, has_down_scale ? 1u : 0u
+            struct { uint32_t out_dim, in_dim, blocks, n_used, has_exp_scale, pair_major; } dn_pc = {
+                out_dim, mid_dim, mid_dim / 32u, n_used, has_down_scale ? 1u : 0u, pair_major
             };
             const p36_gpu_tensor *dn_b[6] = {
                 dn_t, mid_scratch, selected, weights, down_scratch, dn_sc_t
             };
             ok = p36_vk_run_unlocked("inkling2_moe_dn_dec", dn_k, dn_b, &dn_pc, sizeof(dn_pc),
-                                     out_dim / 16u, n_used, 1);
+                                     pair_major ? n_pair : out_dim / 16u,
+                                     pair_major ? out_dim / 16u : n_pair, 1);
             if (ok) {
                 uint64_t cw_bytes = (uint64_t)out_dim * 4u * sizeof(float);
                 const unsigned char *cw_src = p36_gpu_weight_bytes(model_map, model_size, conv_w_offset, cw_bytes);
                 p36_gpu_tensor *cw_t = cw_src ? p36_vk_weight_get_unlocked(cw_src, cw_bytes) : NULL;
                 if (!cw_t) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
-                struct { uint32_t out_dim, n_used; float inv_scale; } rc_pc = {
-                    out_dim, n_used, conv_inv_scale
+                struct { uint32_t out_dim, n_used; float inv_scale; uint32_t n_tok; } rc_pc = {
+                    out_dim, n_used, conv_inv_scale, n_tok
                 };
                 const p36_gpu_tensor *rc_b[5] = {
                     down_scratch, out, cw_t, conv_state, res

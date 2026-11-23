@@ -1290,7 +1290,8 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                                                     l->exp_probs_b ? l->exp_probs_b->abs_offset : 0,
                                                     l->exp_probs_b != NULL,
                                                     n_tok, hp->n_expert, hp->n_expert_used, hp->expert_weights_scale), "router_topk");
-        INK_CHK(p36_gpu_inkling2_moe_ffn_tensor(n_tok == 1u ? sc->cur : sc->moe_out,
+        const bool moe_rows = p36_gpu_inkling2_moe_rows(n_tok);
+        INK_CHK(p36_gpu_inkling2_moe_ffn_tensor(moe_rows ? sc->cur : sc->moe_out,
                                                 sc->moe_mid, sc->moe_down,
                                                 m->map, m->size,
                                                 l->ffn_gate_up_exps->abs_offset, l->ffn_gate_up_exps->type, l->ffn_gate_up_exps->bytes,
@@ -1303,7 +1304,7 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
                                                 sc->norm[0], sc->selected, sc->router_w,
                                                 n_tok, D, hp->n_ff_exp, D, hp->n_expert, hp->n_expert_used,
                                                 hp->situ_beta, hp->situ_linear_beta), "moe_ffn");
-        if (n_tok > 1u) {
+        if (!moe_rows) {
             INK_CHK(p36_gpu_inkling2_conv_tensor(sc->cur, sc->moe_out, m->map, m->size,
                                                  l->ffn_post_conv->abs_offset, ink->conv_ffn_post[il],
                                                  NULL, sc->ffn_inp, D, n_tok, 0, 0, inv_sqrt_5), "conv_ffn");

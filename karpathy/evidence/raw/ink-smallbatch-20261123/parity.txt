@@ -1,0 +1,12 @@
+## chunk 1 main(A) vs branch(B), no env
+frontier_000256.logits.json: max_abs_diff=0 at 0  top1 ref=13 (29.202334) new=13 (29.202334) same=True  top64 overlap=64/64
+frontier_000512.logits.json: max_abs_diff=0 at 0  top1 ref=220 (28.555632) new=220 (28.555632) same=True  top64 overlap=64/64
+## chunk 8 main(A) vs branch(B), no env
+frontier_000256.logits.json: max_abs_diff=0 at 0  top1 ref=13 (29.238117) new=13 (29.238117) same=True  top64 overlap=64/64
+frontier_000512.logits.json: max_abs_diff=0 at 0  top1 ref=220 (28.535791) new=220 (28.535791) same=True  top64 overlap=64/64
+## decode(A chunk 1) vs branch micro-batch 8 rows
+frontier_000256.logits.json: max_abs_diff=1.03258 at 51533  top1 ref=13 (29.202334) new=13 (29.244122) same=True  top64 overlap=62/64
+frontier_000512.logits.json: max_abs_diff=1.22618 at 145952  top1 ref=220 (28.555632) new=220 (28.468084) same=True  top64 overlap=61/64
+## decode(A chunk 1) vs main GEMM 8 rows
+frontier_000256.logits.json: max_abs_diff=1.49007 at 182049  top1 ref=13 (29.202334) new=13 (29.238117) same=True  top64 overlap=61/64
+frontier_000512.logits.json: max_abs_diff=0.936198 at 2955  top1 ref=220 (28.555632) new=220 (28.535791) same=True  top64 overlap=62/64

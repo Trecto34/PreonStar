@@ -12,7 +12,7 @@
  * Pre-packs uint8 IQ grids into exact fp16 pairs (uvec2/uvec4) in LDS and applies
  * sign flips via 32-bit XOR on fp16 sign bits + unpackHalf2x16 -> cuts VALU ~3x with
  * 100% exact F32 accumulation!
- * Dispatch: (mid_dim / WG_ROWS, n_used, 1). */
+ * Dispatch: (mid_dim / WG_ROWS, n_tok * n_used, 1), or swapped when pair_major. */
 
 #if defined(P36_MOE_IQ2S)
 const uint WG_THREADS = 256u;
@@ -44,6 +44,7 @@ layout(push_constant) uniform Push {
     float situ_lb;     /* 25.0 */
     float inv_lb;      /* 0.04 */
     uint has_exp_scale;
+    uint pair_major;   /* 1: grid (pairs, row blocks) so tokens sharing an expert hit L2 together */
 } pc;
 
 const uint IQ2_U16 = 33u;
@@ -101,8 +102,9 @@ void main(void) {
     uint tid = gl_LocalInvocationID.x;
     uint r_local = tid >> 4u;
     uint itid = tid & 15u;       /* 0..15 */
-    uint row = gl_WorkGroupID.x * WG_ROWS + r_local;
-    uint pair = gl_WorkGroupID.y;
+    uint row_blk = pc.pair_major != 0u ? gl_WorkGroupID.y : gl_WorkGroupID.x;
+    uint row = row_blk * WG_ROWS + r_local;
+    uint pair = pc.pair_major != 0u ? gl_WorkGroupID.x : gl_WorkGroupID.y;
     uint expert = selected[pair];
     uint x4 = (pair / pc.n_used) * pc.blocks * 64u;
 
