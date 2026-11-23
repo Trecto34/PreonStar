@@ -1411,12 +1411,15 @@ int p36_session_score_tokens(p36_session *s, const p36_tokens *tokens, int first
     if (e->variant == P36_VARIANT_INKLING2_LOOP && e->ink_hparams) {
         stride = ((const p36_inkling2_hparams *)e->ink_hparams)->n_vocab_padded;
     }
-    const uint32_t cap = rt ? rt->prefill_cap : 0u;
+    uint32_t cap = rt ? rt->prefill_cap : 0u;
     if (!cap) {
         if (err && errlen) snprintf(err, errlen, "no Vulkan runtime");
         return 1;
     }
-    p36_gpu_tensor *all = p36_gpu_tensor_alloc_scratch((uint64_t)cap * stride * sizeof(float));
+    if ((uint32_t)tokens->len < cap) cap = (uint32_t)tokens->len;
+    /* Host-readable, not scratch: scratch can come from the device-private
+     * pool, which has no host mapping, and these rows are read back. */
+    p36_gpu_tensor *all = p36_gpu_tensor_alloc((uint64_t)cap * stride * sizeof(float));
     float *row = malloc((size_t)stride * sizeof(float) * cap);
     if (!all || !row) {
         p36_gpu_tensor_free(all);
