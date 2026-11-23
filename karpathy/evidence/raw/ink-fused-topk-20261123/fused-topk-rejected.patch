@@ -1,0 +1,195 @@
+diff --git a/p36_gpu.h b/p36_gpu.h
+index 22c8a86..ed30e05 100644
+--- a/p36_gpu.h
++++ b/p36_gpu.h
+@@ -1309,7 +1309,11 @@ int p36_gpu_inkling2_moe_ffn_tensor(
+         uint32_t              n_expert,
+         uint32_t              n_used,
+         float                 situ_beta,
+-        float                 situ_lb);
++        float                 situ_lb,
++        const p36_gpu_tensor *router_logits,
++        uint64_t              router_bias_offset,
++        bool                  router_has_bias,
++        float                 router_weight_scale);
+ 
+ int p36_gpu_inkling2_softcap_tensor(
+         p36_gpu_tensor *logits,
+diff --git a/src/core/core_inkling2.inc b/src/core/core_inkling2.inc
+index 4390f9c..d1f63f1 100644
+--- a/src/core/core_inkling2.inc
++++ b/src/core/core_inkling2.inc
+@@ -1285,7 +1285,8 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
+         } else {
+             INK_CHK(p36_gpu_tensor_matmul_scaled(m, l->ffn_gate_inp, sc->norm[0], sc->router_logits, D, hp->n_expert, n_tok, 1.0f), "router_mm");
+         }
+-        INK_CHK(p36_gpu_inkling2_router_topk_tensor(sc->selected, sc->router_w, sc->router_logits,
++        /* Decode: the gate_up kernel runs the top-k itself (one fewer link). */
++        if (n_tok > 1u) INK_CHK(p36_gpu_inkling2_router_topk_tensor(sc->selected, sc->router_w, sc->router_logits,
+                                                     m->map, m->size,
+                                                     l->exp_probs_b ? l->exp_probs_b->abs_offset : 0,
+                                                     l->exp_probs_b != NULL,
+@@ -1302,7 +1303,10 @@ static bool p36_forward_tokens_inkling2_vulkan(p36_session *s,
+                                                 l->ffn_post_conv->abs_offset, ink->conv_ffn_post[il], sc->ffn_inp, inv_sqrt_5,
+                                                 sc->norm[0], sc->selected, sc->router_w,
+                                                 n_tok, D, hp->n_ff_exp, D, hp->n_expert, hp->n_expert_used,
+-                                                hp->situ_beta, hp->situ_linear_beta), "moe_ffn");
++                                                hp->situ_beta, hp->situ_linear_beta,
++                                                sc->router_logits,
++                                                l->exp_probs_b ? l->exp_probs_b->abs_offset : 0,
++                                                l->exp_probs_b != NULL, hp->expert_weights_scale), "moe_ffn");
+         if (n_tok > 1u) {
+             INK_CHK(p36_gpu_inkling2_conv_tensor(sc->cur, sc->moe_out, m->map, m->size,
+                                                  l->ffn_post_conv->abs_offset, ink->conv_ffn_post[il],
+diff --git a/src/vulkan/vk_14_inkling2.inc b/src/vulkan/vk_14_inkling2.inc
+index 4aec0cc..87d34c4 100644
+--- a/src/vulkan/vk_14_inkling2.inc
++++ b/src/vulkan/vk_14_inkling2.inc
+@@ -70,12 +70,12 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
+     p36_vk_ink_attn_decode    = P36_VK_KERNEL(kv_f16 ? "vulkan/inkling2_attn_decode.spv" : "vulkan/inkling2_attn_decode_q8.spv", 9, 32, (1u << 7) | (1u << 8));
+     p36_vk_ink_attn_combine   = P36_VK_KERNEL("vulkan/inkling2_attn_combine.spv", 3, 4, 1u << 2);
+     p36_vk_ink_attn_prefill   = P36_VK_KERNEL(kv_f16 ? "vulkan/inkling2_attn_prefill.spv" : "vulkan/inkling2_attn_prefill_q8.spv", 10, 32, 1u << 7);
+-    p36_vk_ink_gu_dec_iq2xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xxs.spv", 6, 32, 1u << 3);
+-    p36_vk_ink_gu_dec_iq2xs   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xs.spv", 6, 32, 1u << 3);
+-    p36_vk_ink_gu_dec_iq2s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2s.spv", 6, 32, 1u << 3);
+-    p36_vk_ink_gu_dec_iq3xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv", 6, 32, 1u << 3);
+-    p36_vk_ink_gu_dec_iq3s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3s.spv", 6, 32, 1u << 3);
+-    p36_vk_ink_gu_dec_q4k     = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_q4k.spv", 6, 32, 1u << 3);
++    p36_vk_ink_gu_dec_iq2xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xxs.spv", 9, 44, (1u << 2) | (1u << 3) | (1u << 8));
++    p36_vk_ink_gu_dec_iq2xs   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2xs.spv", 9, 44, (1u << 2) | (1u << 3) | (1u << 8));
++    p36_vk_ink_gu_dec_iq2s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq2s.spv", 9, 44, (1u << 2) | (1u << 3) | (1u << 8));
++    p36_vk_ink_gu_dec_iq3xxs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv", 9, 44, (1u << 2) | (1u << 3) | (1u << 8));
++    p36_vk_ink_gu_dec_iq3s    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3s.spv", 9, 44, (1u << 2) | (1u << 3) | (1u << 8));
++    p36_vk_ink_gu_dec_q4k     = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_q4k.spv", 9, 44, (1u << 2) | (1u << 3) | (1u << 8));
+     p36_vk_ink_gu_gemm_iq2xxs = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq2xxs.spv", 6, 32, 1u << 3);
+     p36_vk_ink_gu_gemm_iq2xs  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq2xs.spv", 6, 32, 1u << 3);
+     p36_vk_ink_gu_gemm_iq2s   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq2s.spv", 6, 32, 1u << 3);
+@@ -851,7 +851,11 @@ int p36_gpu_inkling2_moe_ffn_tensor(
+         uint32_t              n_expert,
+         uint32_t              n_used,
+         float                 situ_beta,
+-        float                 situ_lb) {
++        float                 situ_lb,
++        const p36_gpu_tensor *router_logits,
++        uint64_t              router_bias_offset,
++        bool                  router_has_bias,
++        float                 router_weight_scale) {
+     p36_gpu_tensor *tiles = NULL;
+     uint32_t tile_count = 0;
+     if (n_tok > 1u) {
+@@ -914,12 +918,25 @@ int p36_gpu_inkling2_moe_ffn_tensor(
+             case P36_VK_TENSOR_NVFP4:   dn_k = &p36_vk_ink_down_dec_nvfp4; break;
+             default: pthread_mutex_unlock(&p36_vk_mu); return 0;
+         }
++        /* Decode gate_up also runs the router top-k (see ink_topk_slot in the
++         * shader) and writes selected/weights for the down kernel. */
++        if (!router_logits || n_expert != 128u || n_used > 8u) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
++        const p36_gpu_tensor *bias_t = router_logits;
++        if (router_has_bias) {
++            uint64_t b_bytes = (uint64_t)n_expert * sizeof(float);
++            const unsigned char *b_src = p36_gpu_weight_bytes(model_map, model_size, router_bias_offset, b_bytes);
++            bias_t = b_src ? p36_vk_weight_get_unlocked(b_src, b_bytes) : NULL;
++            if (!bias_t) { pthread_mutex_unlock(&p36_vk_mu); return 0; }
++        }
+         struct {
+             uint32_t mid_dim, blocks, n_used;
+             float situ_beta, inv_beta, situ_lb, inv_lb;
+-            uint32_t has_exp_scale;
+-        } gu_pc = { mid_dim, in_dim / 256u, n_used, situ_beta, 1.0f / situ_beta, situ_lb, 1.0f / situ_lb, has_gate_up_scale ? 1u : 0u };
+-        const p36_gpu_tensor *gu_b[6] = { gu_t, x, selected, mid_scratch, tables, gu_sc_t };
++            uint32_t has_exp_scale, n_expert, has_bias;
++            float weight_scale;
++        } gu_pc = { mid_dim, in_dim / 256u, n_used, situ_beta, 1.0f / situ_beta, situ_lb, 1.0f / situ_lb,
++                    has_gate_up_scale ? 1u : 0u, n_expert, router_has_bias ? 1u : 0u, router_weight_scale };
++        const p36_gpu_tensor *gu_b[9] = { gu_t, x, selected, mid_scratch, tables, gu_sc_t,
++                                          router_logits, bias_t, weights };
+         uint32_t gu_rows = (gate_up_type == P36_VK_TENSOR_IQ2_S) ? 16u : 4u;
+         ok = p36_vk_run_unlocked("inkling2_moe_gu_dec", gu_k, gu_b, &gu_pc, sizeof(gu_pc),
+                                  mid_dim / gu_rows, n_used, 1);
+diff --git a/vulkan/inkling2_moe_gate_up_decode.comp b/vulkan/inkling2_moe_gate_up_decode.comp
+index 924545a..efcdd69 100644
+--- a/vulkan/inkling2_moe_gate_up_decode.comp
++++ b/vulkan/inkling2_moe_gate_up_decode.comp
+@@ -30,10 +30,14 @@ layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
+ layout(set = 0, binding = 0) readonly buffer Weights { uint16_t w[]; };
+ #endif
+ layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
+-layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
++layout(set = 0, binding = 2) writeonly buffer Selected { uint selected[]; };
+ layout(set = 0, binding = 3) writeonly buffer Output { float y[]; };
+ layout(set = 0, binding = 4) readonly buffer Tables { uint tables[]; };
+ layout(set = 0, binding = 5) readonly buffer ExpScale { float exp_scale[]; };
++/* Router top-k is fused in (decode, one token): see ink_topk_slot(). */
++layout(set = 0, binding = 6) readonly buffer Logits { float logits[]; };
++layout(set = 0, binding = 7) readonly buffer Bias { float bias[]; };
++layout(set = 0, binding = 8) writeonly buffer RouterW { float router_w[]; };
+ 
+ layout(push_constant) uniform Push {
+     uint mid_dim;      /* 1152 */
+@@ -44,6 +48,9 @@ layout(push_constant) uniform Push {
+     float situ_lb;     /* 25.0 */
+     float inv_lb;      /* 0.04 */
+     uint has_exp_scale;
++    uint n_expert;     /* 128 */
++    uint has_bias;
++    float weight_scale;
+ } pc;
+ 
+ const uint IQ2_U16 = 33u;
+@@ -83,6 +90,45 @@ float sum16(float v) {
+     return v;
+ }
+ 
++/* Same arithmetic as inkling2_router_topk.comp (one token, n_expert = 128,
++ * top_k <= 8, one wave64 per pass), so the picks and weights are bit-identical.
++ * Every workgroup (each wave of the IQ2_S build) recomputes the 128-logit
++ * top-k instead of waiting on a separate 1-workgroup router_topk dispatch and
++ * its barrier; workgroup x == 0 of each slot publishes the pick and weight for
++ * the down kernel. Returns the expert for slot k. */
++uint ink_topk_slot(uint k_want, uint gx) {
++    uint lane = gl_SubgroupInvocationID;
++    uint e0 = lane;
++    uint e1 = lane + 64u;
++    float p0 = 1.0 / (1.0 + exp(-logits[e0]));
++    float p1 = 1.0 / (1.0 + exp(-logits[e1]));
++    float s0 = p0 + (pc.has_bias != 0u ? bias[e0] : 0.0);
++    float s1 = p1 + (pc.has_bias != 0u ? bias[e1] : 0.0);
++    uint my_id = 0u;
++    float my_p = 0.0;
++    float sum_p = 0.0;
++    for (uint k = 0u; k < pc.n_used; k++) {
++        float lmax = max(s0, s1);
++        float gmax = subgroupMax(lmax);
++        uint cand = 0xffffffffu;
++        if (s0 == gmax) cand = e0;
++        else if (s1 == gmax) cand = e1;
++        uint win = subgroupMin(cand);
++        float win_p = (win == e0) ? p0 : ((win == e1) ? p1 : 0.0);
++        win_p = subgroupAdd(win_p);
++        if (k == k_want) { my_id = win; my_p = win_p; }
++        sum_p += win_p;
++        if (win == e0) s0 = -1.0e30;
++        if (win == e1) s1 = -1.0e30;
++    }
++    if (gx == 0u && gl_LocalInvocationID.x == 0u) {
++        float norm = pc.weight_scale / (sum_p + 1.0e-20);
++        selected[k_want] = my_id;
++        router_w[k_want] = my_p * norm;
++    }
++    return my_id;
++}
++
+ #ifdef P36_MOE_IQ2XXS
+ shared uvec4 sh_grid[256];
+ #elif defined(P36_MOE_IQ2XS)
+@@ -103,8 +149,8 @@ void main(void) {
+     uint itid = tid & 15u;       /* 0..15 */
+     uint row = gl_WorkGroupID.x * WG_ROWS + r_local;
+     uint pair = gl_WorkGroupID.y;
+-    uint expert = selected[pair];
+-    uint x4 = (pair / pc.n_used) * pc.blocks * 64u;
++    uint expert = ink_topk_slot(pair, gl_WorkGroupID.x);
++    uint x4 = 0u;   /* one token */
+ 
+ #ifdef P36_MOE_IQ2XXS
+     for (uint i = tid; i < 256u; i += WG_THREADS) {

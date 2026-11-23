@@ -1,0 +1,6 @@
+MiniPlus-R2, tests/bench_ab.sh A=45ac3c8 B=fused top-k, P36_AB_GEN=128 ctx 1024, 3 reps
+bin  n     prefill_med    mad       decode_med     mad
+A    3     460.05         4.830     73.97          0.050
+B    3     454.39         0.180     72.99          0.200
+B vs A decode: -1.32%  (B reps 72.99/72.74/.., A reps 73.92/73.97)
+Parity (--dump-logprobs, 64 steps, greedy): MiniPlus-R2 57a90884dca1 both; NanoPlus 017b65482901 both.

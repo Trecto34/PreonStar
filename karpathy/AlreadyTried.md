@@ -4702,3 +4702,21 @@ from global memory (53.6 ms = 1.5% of Axion 4k prefill). Evidence:
 * **Rejected along the way:** `matmul_f32_fast_t8` 2x unroll (84 VGPRs,
   occupancy -> 12): regressed 102.2 -> 112.3 ms.
 * reconsider_if: `recur_norm_gate` is fused into `delta_net_decode_reg_f16`.
+
+## 2026-11-23 Inkling-2-Mini: router top-k fused into MoE gate_up decode — REJECTED, -1.32% decode, bit-identical
+
+Same-workgroup fusion to remove the 1-WG `inkling2_router_topk` link (48 per
+token). Patch: `evidence/raw/ink-fused-topk-20261123/fused-topk-rejected.patch`.
+
+* **Change.** Every `inkling2_moe_gate_up_decode` workgroup (2304 per layer)
+  re-ran the 128-logit sigmoid + 8-round subgroup top-k from the router logits
+  and used its own slot's pick; workgroup x == 0 of each slot published
+  selected/weight for the down kernel. Decode skipped the `router_topk` dispatch.
+* **Exact.** `--dump-logprobs` md5 identical on MiniPlus-R2 and NanoPlus.
+* **Slower.** MiniPlus-R2 `bench_ab.sh` ctx 1024, gen 128, 3 reps: decode
+  **73.97 -> 72.99 t/s (-1.32%)**, every fused rep below every base rep.
+* **Why.** Two `exp()` plus 24 subgroup reductions on the front of 2304
+  memory-bound workgroups cost more than one ~4 us link + a 3 us 1-WG kernel.
+  Same lesson as the Axion MoE ticket: do not put sync or redundant work on
+  every workgroup of the big kernel to delete a small one.
+* reconsider_if: the gate_up decode grid shrinks to ~hundreds of workgroups.
