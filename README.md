@@ -9,6 +9,9 @@
 ![GPU: AMD BC-250 / Vulkan](https://img.shields.io/badge/GPU-BC--250%20Vulkan-red.svg)
 ![Language: C99](https://img.shields.io/badge/language-C99-555.svg)
 
+> PreonStar is a fork of [**q36 (QuarkStar)**](https://github.com/Ninnix/q36) by
+> Ninnix. See [Lineage and acknowledgements](#lineage-and-acknowledgements).
+
 PreonStar is an inference engine in plain C99 that runs a 35B-parameter
 mixture-of-experts model on a $150 AMD BC-250 mini-PC (16 GB unified memory,
 Vulkan/RADV). When a model does not fit in memory, it streams experts from disk.
@@ -261,9 +264,6 @@ PreonStar started as a fork of [**q36**](https://github.com/Ninnix/q36) (branded
 QuarkStar) by Ninnix. Both projects build on **DwarfStar**, **llama.cpp** and
 **GGML**. Thank you to Ninnix, Salvatore Sanfilippo (Antirez), Georgi Gerganov,
 and every contributor to those projects.
-
-The project follows the best open weights for 16 GB machines and 24/32 GB
-workstations, and drops a model when a better replacement arrives.
 
 ## AI disclosure
 
