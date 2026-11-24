@@ -4875,3 +4875,24 @@ Evidence: `evidence/raw/ink-moe-down-ablation-20261123/` (ablation shaders + pro
   Net of the 5.4 us fixed cost, the kernel streams at ~288 GB/s. Open question: what a 12 MB / ~40 us dispatch can reach at
   all (the 437 figure is a 256 MiB multi-ms stream). Measure that before more shader work on this kernel.
 * reconsider_if: a standalone microbench shows 12 MB dispatches reaching >>290 GB/s with some load shape.
+
+## 2026-11-23 Inkling-2-Mini MoE expert re-layout at upload — ACCEPTED (default on), +3.7% then +1.0% MiniPlus-R2 decode, bit-identical
+
+Evidence + harness: `evidence/raw/ink-moe-down-split-20261123/` (RESULTS.md). Answers the open question of the
+IQ4_NL prefetch entry above: a standalone Vulkan chain (48 dispatches, barriers, ~2 s governor warm-up) shows a plain
+12 MB stream per dispatch reaches 426 GB/s (28 us), while `inkling2_moe_down_decode_iq4nl` ran at 45.9 us. The loss
+was DRAM access order (every WG walking its own 10 KB patch in 72-B steps) plus unaligned 18-B blocks.
+
+* **Down IQ4_NL "split" layout** (`P36_INK_DOWN_SPLIT=0` disables): per expert, 16-B quant halves step-major
+  (`lin = ((b>>2)*out + row)*4 + (b&3)`) then f16 scales. Kernel 45.9 -> 38.7 us (-16%). Trap: select the f16 half
+  AFTER `unpackHalf2x16`, else ACO fuses the convert into `v_fma_mix` for `fma(d, s, acc)` and bits differ.
+  Skill bench R2: 78.17 / **81.04** / 78.16.
+* **gate_up Q4_K + IQ3_XXS step-major** (`P36_INK_GU_STEPMAJOR=0` disables): whole blocks, block i of row R at
+  `i*rows + R`. Kernel Q4_K -7.7%, IQ3_XXS -2.6%; IQ3_S no gain (excluded); gate/up interleaving adds nothing.
+  Skill bench R2 (down split on in all): 80.52 / **81.39** / 80.63.
+* **Mechanism.** Registry keyed by GGUF source pointer (vk_04), filled by the Inkling engine before prewarm; the
+  weight-cache copy re-lays the tensor out, so prewarm/decode/prefill share one copy (no extra memory, startup
+  unchanged). Prefill gemm kernels read the same layouts. Base .spv builds byte-identical.
+* **Parity.** 64-step top-20 logprob md5 identical off/on on MiniPlus-R2, APEX-I MiniPlus/NanoPlus V2.1, UD-IQ3_XXS;
+  Sage-A1.5 NanoPlus unchanged. Independent code review of both parts: no findings.
+* **Rejected on the way.** Activations staged in LDS (+10%), full 9-step unroll of the split kernel (+59%).

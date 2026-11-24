@@ -140,11 +140,20 @@ void main(void) {
 #elif defined(P36_MOE_IQ2S)
     uint wbase = w_row * pc.blocks * IQ2S_BYTES;
 #elif defined(P36_MOE_IQ3XXS)
+#ifdef P36_GU_STEPMAJOR
+    /* step-major gate_up layout (see inkling2_moe_gate_up_decode.comp) */
+    uint wbase = (exp_row0 * pc.blocks + (w_row - exp_row0)) * IQ3XXS_BYTES;
+#else
     uint wbase = w_row * pc.blocks * IQ3XXS_BYTES;
+#endif
 #elif defined(P36_MOE_IQ3S)
     uint wbase = w_row * pc.blocks * IQ3S_BYTES;
 #elif defined(P36_MOE_Q4K)
+#ifdef P36_GU_STEPMAJOR
+    uint wbase = (exp_row0 * pc.blocks + (w_row - exp_row0)) * Q4K_WORDS;
+#else
     uint wbase = w_row * pc.blocks * Q4K_WORDS;
+#endif
 #endif
 
     uint bc0 = tid >> 3u;
@@ -247,7 +256,11 @@ void main(void) {
         }
 #elif defined(P36_MOE_IQ3XXS)
         {
+#ifdef P36_GU_STEPMAJOR
+            uint wbb = wbase + sb * 2u * pc.mid_dim * IQ3XXS_BYTES;
+#else
             uint wbb = wbase + sb * IQ3XXS_BYTES;
+#endif
             uint aux_h = (wbb + 66u + 4u * ib32) >> 1u;
             uint aux = uint(w[aux_h]) | (uint(w[aux_h + 1u]) << 16u);
             uint si = (aux >> sbit) & 127u;
@@ -283,7 +296,11 @@ void main(void) {
         }
 #elif defined(P36_MOE_Q4K)
         {
+#ifdef P36_GU_STEPMAJOR
+            uint wb = wbase + sb * 2u * pc.mid_dim * Q4K_WORDS;
+#else
             uint wb = wbase + sb * Q4K_WORDS;
+#endif
             vec2 d2 = unpackHalf2x16(w[wb]);
             uint s0 = w[wb + 1u];
             uint s1 = w[wb + 2u];

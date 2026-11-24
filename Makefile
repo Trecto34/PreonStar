@@ -272,24 +272,30 @@ VULKAN_SHADERS := \
 	vulkan/inkling2_attn_prefill.spv \
 	vulkan/inkling2_attn_prefill_q8.spv \
 	vulkan/inkling2_moe_down_decode_iq4nl.spv \
+	vulkan/inkling2_moe_down_decode_iq4nl_split.spv \
 	vulkan/inkling2_moe_down_decode_q5_0.spv \
 	vulkan/inkling2_moe_down_decode_nvfp4.spv \
 	vulkan/inkling2_moe_down_reduce_conv.spv \
 	vulkan/inkling2_moe_down_gemm_iq4nl.spv \
+	vulkan/inkling2_moe_down_gemm_iq4nl_split.spv \
 	vulkan/inkling2_moe_down_gemm_q5_0.spv \
 	vulkan/inkling2_moe_down_gemm_nvfp4.spv \
 	vulkan/inkling2_moe_gate_up_decode_iq2xxs.spv \
 	vulkan/inkling2_moe_gate_up_decode_iq2xs.spv \
 	vulkan/inkling2_moe_gate_up_decode_iq2s.spv \
 	vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv \
+	vulkan/inkling2_moe_gate_up_decode_iq3xxs_sm.spv \
 	vulkan/inkling2_moe_gate_up_decode_iq3s.spv \
 	vulkan/inkling2_moe_gate_up_decode_q4k.spv \
+	vulkan/inkling2_moe_gate_up_decode_q4k_sm.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq2xxs.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq2xs.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq2s.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv \
+	vulkan/inkling2_moe_gate_up_gemm_iq3xxs_sm.spv \
 	vulkan/inkling2_moe_gate_up_gemm_iq3s.spv \
 	vulkan/inkling2_moe_gate_up_gemm_q4k.spv \
+	vulkan/inkling2_moe_gate_up_gemm_q4k_sm.spv \
 	vulkan/inkling2_qkv_rel_q4k_decode.spv \
 	vulkan/inkling2_qkv_rel_q6k_decode.spv \
 	vulkan/inkling2_wo_q4k_decode.spv
@@ -381,6 +387,10 @@ vulkan/inkling2_attn_prefill_q8.spv: vulkan/inkling2_attn_prefill.comp
 vulkan/inkling2_moe_down_decode_iq4nl.spv: vulkan/inkling2_moe_down_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ4NL -o $@ $<
 
+# IQ4_NL down experts in the split/step-major layout (re-laid out at upload by default; P36_INK_DOWN_SPLIT=0 disables).
+vulkan/inkling2_moe_down_decode_iq4nl_split.spv: vulkan/inkling2_moe_down_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ4NL -DP36_DOWN_SPLIT -o $@ $<
+
 vulkan/inkling2_moe_down_decode_q5_0.spv: vulkan/inkling2_moe_down_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q5_0 -o $@ $<
 
@@ -392,6 +402,9 @@ vulkan/inkling2_moe_down_reduce_conv.spv: vulkan/inkling2_moe_down_reduce_conv.c
 
 vulkan/inkling2_moe_down_gemm_iq4nl.spv: vulkan/inkling2_moe_down_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ4NL -o $@ $<
+
+vulkan/inkling2_moe_down_gemm_iq4nl_split.spv: vulkan/inkling2_moe_down_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ4NL -DP36_DOWN_SPLIT -o $@ $<
 
 vulkan/inkling2_moe_down_gemm_q5_0.spv: vulkan/inkling2_moe_down_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q5_0 -o $@ $<
@@ -408,11 +421,19 @@ vulkan/inkling2_moe_gate_up_decode_iq2xs.spv: vulkan/inkling2_moe_gate_up_decode
 vulkan/inkling2_moe_gate_up_decode_iq2s.spv: vulkan/inkling2_moe_gate_up_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ2S -o $@ $<
 
+# step-major gate_up layout (re-laid out at upload; P36_INK_GU_STEPMAJOR=0 disables)
+vulkan/inkling2_moe_gate_up_decode_iq3xxs_sm.spv: vulkan/inkling2_moe_gate_up_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3XXS -DP36_GU_STEPMAJOR -o $@ $<
+
 vulkan/inkling2_moe_gate_up_decode_iq3xxs.spv: vulkan/inkling2_moe_gate_up_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3XXS -o $@ $<
 
 vulkan/inkling2_moe_gate_up_decode_iq3s.spv: vulkan/inkling2_moe_gate_up_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3S -o $@ $<
+
+# step-major gate_up layout (re-laid out at upload; P36_INK_GU_STEPMAJOR=0 disables)
+vulkan/inkling2_moe_gate_up_decode_q4k_sm.spv: vulkan/inkling2_moe_gate_up_decode.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q4K -DP36_GU_STEPMAJOR -o $@ $<
 
 vulkan/inkling2_moe_gate_up_decode_q4k.spv: vulkan/inkling2_moe_gate_up_decode.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q4K -o $@ $<
@@ -426,11 +447,19 @@ vulkan/inkling2_moe_gate_up_gemm_iq2xs.spv: vulkan/inkling2_moe_gate_up_gemm.com
 vulkan/inkling2_moe_gate_up_gemm_iq2s.spv: vulkan/inkling2_moe_gate_up_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ2S -o $@ $<
 
+# step-major gate_up layout (re-laid out at upload; P36_INK_GU_STEPMAJOR=0 disables)
+vulkan/inkling2_moe_gate_up_gemm_iq3xxs_sm.spv: vulkan/inkling2_moe_gate_up_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3XXS -DP36_GU_STEPMAJOR -o $@ $<
+
 vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv: vulkan/inkling2_moe_gate_up_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3XXS -o $@ $<
 
 vulkan/inkling2_moe_gate_up_gemm_iq3s.spv: vulkan/inkling2_moe_gate_up_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_IQ3S -o $@ $<
+
+# step-major gate_up layout (re-laid out at upload; P36_INK_GU_STEPMAJOR=0 disables)
+vulkan/inkling2_moe_gate_up_gemm_q4k_sm.spv: vulkan/inkling2_moe_gate_up_gemm.comp
+	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q4K -DP36_GU_STEPMAJOR -o $@ $<
 
 vulkan/inkling2_moe_gate_up_gemm_q4k.spv: vulkan/inkling2_moe_gate_up_gemm.comp
 	$(GLSLC) --target-env=vulkan1.3 -O -DP36_MOE_Q4K -o $@ $<

@@ -288,6 +288,38 @@ static bool p36_inkling2_init_engine(p36_engine *e) {
         }
     }
     e->routed_quant_bits = p36_quant_bits_from_type(w->layer[0].ffn_gate_up_exps->type);
+#ifndef P36_NO_GPU
+    /* IQ4_NL down experts re-laid out at upload so the decode kernel reads them in
+     * DRAM-friendly order: bit-identical, +3.7% decode on MiniPlus-R2
+     * (karpathy/evidence/raw/ink-moe-down-split-20261123).  Default on;
+     * P36_INK_DOWN_SPLIT=0 keeps the GGUF layout.  Runs before prewarm. */
+    const char *split_env = getenv("P36_INK_DOWN_SPLIT");
+    if (!split_env || split_env[0] != '0') {
+        uint32_t n_split = 0, n_iq4 = 0;
+        for (uint32_t ip = 0; ip < hp->n_phys_layer; ip++) {
+            const p36_tensor *t = w->layer[ip].ffn_down_exps;
+            if (!t || t->type != P36_TENSOR_IQ4_NL || t->ndim < 3) continue;
+            n_iq4++;
+            n_split += (uint32_t)p36_gpu_inkling2_down_split_register(m->map, m->size, t->abs_offset, t->bytes,
+                                                                     (uint32_t)t->dim[1], (uint32_t)t->dim[0]);
+        }
+        fprintf(stderr, "p36: Inkling IQ4_NL down experts in split layout: %u of %u tensors\n", n_split, n_iq4);
+    }
+    /* Same idea for gate_up Q4_K / IQ3_XXS (whole blocks, step-major): -7.7% / -2.6%
+     * kernel time, bit-identical.  P36_INK_GU_STEPMAJOR=0 keeps the GGUF layout. */
+    const char *gu_env = getenv("P36_INK_GU_STEPMAJOR");
+    if (!gu_env || gu_env[0] != '0') {
+        uint32_t n_sm = 0, n_cand = 0;
+        for (uint32_t ip = 0; ip < hp->n_phys_layer; ip++) {
+            const p36_tensor *t = w->layer[ip].ffn_gate_up_exps;
+            if (!t || t->ndim < 3 || (t->type != P36_TENSOR_Q4_K && t->type != P36_TENSOR_IQ3_XXS)) continue;
+            n_cand++;
+            n_sm += (uint32_t)p36_gpu_inkling2_gate_up_sm_register(m->map, m->size, t->abs_offset, t->bytes,
+                                                                  (uint32_t)t->dim[1], (uint32_t)t->dim[0], t->type);
+        }
+        fprintf(stderr, "p36: Inkling gate_up experts step-major: %u of %u Q4_K/IQ3_XXS tensors\n", n_sm, n_cand);
+    }
+#endif
     return true;
 }
 

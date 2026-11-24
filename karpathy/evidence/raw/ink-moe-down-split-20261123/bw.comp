@@ -1,0 +1,13 @@
+#version 450
+// Streams n uvec4 starting at base; each thread reads k uvec4 with stride (grid width).
+layout(local_size_x = 256) in;
+layout(set=0, binding=0) readonly buffer A { uvec4 a[]; };
+layout(set=0, binding=1) writeonly buffer O { uint o[]; };
+layout(push_constant) uniform P { uint base; uint n; } pc;
+void main() {
+    uint stride = gl_NumWorkGroups.x * 256u;
+    uvec4 acc = uvec4(0);
+    for (uint i = gl_GlobalInvocationID.x; i < pc.n; i += stride) acc ^= a[pc.base + i];
+    uint r = acc.x ^ acc.y ^ acc.z ^ acc.w;
+    if (r == 0x12345678u) o[0] = r;
+}

@@ -101,6 +101,78 @@ static void p36_vk_weight_copy_rows(void *ctx, uint64_t row0, uint64_t row1) {
     if (off0 < off1) memcpy(c->dst + off0, c->src + off0, (size_t)(off1 - off0));
 }
 
+/* Inkling IQ4_NL routed-down tensors kept on the GPU in the "split" layout
+ * (default on, P36_INK_DOWN_SPLIT=0 disables; registered by the Inkling engine before prewarm).
+ * Keyed by GGUF source pointer, so every path that caches the tensor --
+ * prewarm, decode, prefill -- gets the same single re-laid-out copy.  Per
+ * expert, at the GGUF expert stride (out_dim * blocks * 18 bytes):
+ *   [16 B quant half of every block, lin = ((b >> 2) * out_dim + row) * 4 + (b & 3)]
+ *   [f16 scale of every block, same order]
+ * Read by inkling2_moe_down_{decode,gemm}_iq4nl_split.spv.
+ * Kind GU (gate_up Q4_K / IQ3_XXS, P36_INK_GU_STEPMAJOR=0 disables): whole
+ * blocks, step-major -- block i of expert-row R at (i * rows + R) within the
+ * expert; read by inkling2_moe_gate_up_{decode,gemm}_*_sm.spv. */
+enum { P36_VK_INK_SPLIT_DOWN = 0, P36_VK_INK_SPLIT_GU = 1 };
+typedef struct {
+    const unsigned char *src;
+    uint64_t bytes;
+    uint32_t kind;
+    uint32_t out_dim, blocks;   /* rows per expert, blocks per row */
+    uint32_t block_bytes;       /* 18 for DOWN (IQ4_NL) */
+} p36_vk_ink_split_entry;
+enum { P36_VK_INK_SPLIT_CAP = 64 };
+static p36_vk_ink_split_entry p36_vk_ink_split[P36_VK_INK_SPLIT_CAP];
+static uint32_t p36_vk_ink_split_n;
+static const void *p36_vk_ink_split_map;
+static uint64_t p36_vk_ink_split_map_size;
+
+static const p36_vk_ink_split_entry *p36_vk_ink_split_find(const void *src, uint64_t bytes) {
+    /* Entries belong to one model mapping; a later model never matches them. */
+    if (p36_vk_ink_split_map != p36_gpu_model_map || p36_vk_ink_split_map_size != p36_gpu_model_size)
+        return NULL;
+    for (uint32_t i = 0; i < p36_vk_ink_split_n; i++)
+        if (p36_vk_ink_split[i].src == src && p36_vk_ink_split[i].bytes == bytes) return &p36_vk_ink_split[i];
+    return NULL;
+}
+
+typedef struct {
+    unsigned char *dst;
+    const unsigned char *src;
+    uint32_t kind;
+    uint64_t out_dim, blocks, block_bytes;
+} p36_vk_ink_split_ctx;
+
+/* Writes each expert's destination strictly in order (write-combined arena);
+ * the scattered side is the read from the GGUF mapping. */
+static void p36_vk_ink_split_rows(void *ctx, uint64_t e0, uint64_t e1) {
+    const p36_vk_ink_split_ctx *c = ctx;
+    const uint64_t eb = c->out_dim * c->blocks * c->block_bytes;
+    if (c->kind == P36_VK_INK_SPLIT_GU) {
+        for (uint64_t e = e0; e < e1; e++) {
+            const unsigned char *s = c->src + e * eb;
+            unsigned char *d = c->dst + e * eb;
+            for (uint64_t i = 0; i < c->blocks; i++)
+                for (uint64_t r = 0; r < c->out_dim; r++, d += c->block_bytes)
+                    memcpy(d, s + (r * c->blocks + i) * c->block_bytes, (size_t)c->block_bytes);
+        }
+        return;
+    }
+    for (uint64_t e = e0; e < e1; e++) {
+        const unsigned char *s = c->src + e * eb;
+        unsigned char *dq = c->dst + e * eb;
+        unsigned char *ds = dq + c->out_dim * c->blocks * 16u;
+        for (uint64_t step = 0; step < c->blocks / 4u; step++)
+            for (uint64_t row = 0; row < c->out_dim; row++)
+                for (uint64_t lane = 0; lane < 4u; lane++) {
+                    const unsigned char *blk = s + (row * c->blocks + step * 4u + lane) * 18u;
+                    memcpy(dq, blk + 2, 16);
+                    memcpy(ds, blk, 2);
+                    dq += 16;
+                    ds += 2;
+                }
+    }
+}
+
 static p36_gpu_tensor *p36_vk_weight_get_unlocked(const void *source, uint64_t bytes) {
     /* Move hits to the head: the cache is a linear list scanned per matvec
      * and a token touches the same few hundred weights in layer order. */
@@ -146,7 +218,15 @@ static p36_gpu_tensor *p36_vk_weight_get_unlocked(const void *source, uint64_t b
         bool copy_parallel = p36_vk_weight_copy_parallel ||
                              (limit && bytes >= (1u << 20) &&
                               p36_vk_env_default_on("P36_VK_DENSE_WEIGHT_COPY_PARALLEL"));
-        if (copy_parallel) {
+        const p36_vk_ink_split_entry *split = p36_vk_ink_split_find(source, bytes);
+        if (split) {
+            p36_vk_ink_split_ctx c = { root->data + offset, source, split->kind,
+                                       split->out_dim, split->blocks, split->block_bytes };
+            const uint64_t n_expert = bytes / ((uint64_t)split->out_dim * split->blocks * split->block_bytes);
+            /* Pool only on the prewarm path, like the plain copy below. */
+            if (p36_vk_weight_copy_parallel) p36_gpu_parallel_for_rows(n_expert, 1, p36_vk_ink_split_rows, &c);
+            else p36_vk_ink_split_rows(&c, 0, n_expert);
+        } else if (copy_parallel) {
             p36_vk_weight_copy_ctx c = { root->data + offset, source, bytes };
             p36_gpu_parallel_for_rows((bytes + ((1u << 20) - 1)) >> 20, 8, p36_vk_weight_copy_rows, &c);
         } else {

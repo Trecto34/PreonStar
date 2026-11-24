@@ -1,0 +1,18 @@
+single dispatch, read-only, median of 41 (offset rotates through 512 MiB)
+      MB   k=1 GB/s        k=4       k=16    us(k=4)
+     0.5      106.6       88.0       35.0        6.0
+     2.0      205.6      208.1      133.7       10.1
+     6.0      259.5      257.4      260.8       24.4
+    12.0      278.1      278.1      276.2       45.2
+    24.0      288.2      287.9      302.9       87.4
+    48.0      306.5      306.6      302.3      164.2
+    96.0      308.8      309.8      309.8      324.9
+   256.0      320.1      323.0      324.7      831.1
+
+chain: 48 dispatches x 12 MB, barrier between each (decode shape), median of 21
+  k=1  no-barrier   1488.8 us total    31.0 us/disp   405.7 GB/s
+  k=1  barriers     1550.9 us total    32.3 us/disp   389.4 GB/s
+  k=4  no-barrier   1390.4 us total    29.0 us/disp   434.4 GB/s
+  k=4  barriers     1451.0 us total    30.2 us/disp   416.3 GB/s
+  k=16 no-barrier   1380.9 us total    28.8 us/disp   437.4 GB/s
+  k=16 barriers     1444.4 us total    30.1 us/disp   418.1 GB/s

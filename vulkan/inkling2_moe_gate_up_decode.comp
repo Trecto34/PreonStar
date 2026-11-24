@@ -191,17 +191,33 @@ void main(void) {
     gbase = (exp_row0 + row) * row_bytes;
     ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
 #elif defined(P36_MOE_IQ3XXS)
+#ifdef P36_GU_STEPMAJOR
+    /* P36_GU_STEPMAJOR: gate_up experts re-laid out at upload (p36_vk_ink_split_rows,
+     * kind GU): block i of expert-row R at (expert * 2 * mid * blocks + i * 2 * mid + R),
+     * so at loop step i every workgroup of an expert reads adjacent memory. */
+    gbase = (exp_row0 * pc.blocks + row) * IQ3XXS_BYTES;
+    ubase = gbase + pc.mid_dim * IQ3XXS_BYTES;
+#else
     uint row_bytes = pc.blocks * IQ3XXS_BYTES;
     gbase = (exp_row0 + row) * row_bytes;
     ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
+#endif
 #elif defined(P36_MOE_IQ3S)
     uint row_bytes = pc.blocks * IQ3S_BYTES;
     gbase = (exp_row0 + row) * row_bytes;
     ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
 #elif defined(P36_MOE_Q4K)
+#ifdef P36_GU_STEPMAJOR
+    /* P36_GU_STEPMAJOR: gate_up experts re-laid out at upload (p36_vk_ink_split_rows,
+     * kind GU): block i of expert-row R at (expert * 2 * mid * blocks + i * 2 * mid + R),
+     * so at loop step i every workgroup of an expert reads adjacent memory. */
+    gbase = (exp_row0 * pc.blocks + row) * Q4K_WORDS;
+    ubase = gbase + pc.mid_dim * Q4K_WORDS;
+#else
     uint row_words = pc.blocks * Q4K_WORDS;
     gbase = (exp_row0 + row) * row_words;
     ubase = (exp_row0 + pc.mid_dim + row) * row_words;
+#endif
     q4_nshift = (ib32 & 1u) * 4u;
     q4_qw_off = 4u + (ib32 >> 1u) * 8u + qpair * 4u;
 #endif
@@ -330,8 +346,13 @@ void gu_block(uint i) {
     gate_acc = fma(gdb, gs, gate_acc);
     up_acc = fma(udb, us, up_acc);
 #elif defined(P36_MOE_IQ3XXS)
+#ifdef P36_GU_STEPMAJOR
+    uint gbb = gbase + i * 2u * pc.mid_dim * IQ3XXS_BYTES;
+    uint ubb = ubase + i * 2u * pc.mid_dim * IQ3XXS_BYTES;
+#else
     uint gbb = gbase + i * IQ3XXS_BYTES;
     uint ubb = ubase + i * IQ3XXS_BYTES;
+#endif
     uint gaux_h = (gbb + 66u + 4u * ib32) >> 1u;
     uint uaux_h = (ubb + 66u + 4u * ib32) >> 1u;
     uint gaux = W16_LOAD(gaux_h) | (W16_LOAD(gaux_h + 1u) << 16u);
@@ -425,8 +446,13 @@ void gu_block(uint i) {
     up_acc += float(uh.x ^ uh.y ^ uh.z ^ uh.w ^ uq_l.x ^ uq_l.y ^ uq_l.z ^ uq_l.w);
 #else
     float xsum = dot(a0 + a1 + a2 + a3, vec4(1.0));
+#ifdef P36_GU_STEPMAJOR
+    uint gb = (gbase + i * 2u * pc.mid_dim * Q4K_WORDS) >> 2u;
+    uint ub = (ubase + i * 2u * pc.mid_dim * Q4K_WORDS) >> 2u;
+#else
     uint gb = (gbase + i * Q4K_WORDS) >> 2u;
     uint ub = (ubase + i * Q4K_WORDS) >> 2u;
+#endif
     uvec4 gh = W4_LOAD(gb);
     uvec4 uh = W4_LOAD(ub);
     vec2 gd2 = unpackHalf2x16(gh.x);

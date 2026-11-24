@@ -1,0 +1,505 @@
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+
+/* Inkling-2-Mini single-tensor MoE gate_up + SITU decode kernel (100% lane-balanced).
+ * 64 threads (256 for IQ2_S) = WG_ROWS output rows x 16 lanes/row (9 exact iterations).
+ * Pre-packs uint8 IQ grids into exact fp16 pairs (uvec2/uvec4) in LDS and applies
+ * sign flips via 32-bit XOR on fp16 sign bits + unpackHalf2x16 -> cuts VALU ~3x with
+ * 100% exact F32 accumulation!
+ * Dispatch: (mid_dim / WG_ROWS, n_used, 1). */
+
+#if defined(P36_MOE_IQ2S)
+const uint WG_THREADS = 256u;
+const uint WG_ROWS = 16u;
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+#else
+const uint WG_THREADS = 64u;
+const uint WG_ROWS = 4u;
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+#endif
+
+#ifdef P36_MOE_Q4K
+/* Q4_K blocks are 144 B (9 x 16 B) and rows start 16 B-aligned, so the header
+ * (d/dmin + scales, words 0..3) and each lane's 16 B quant slice are single
+ * 128-bit loads instead of 4 dword loads. */
+layout(set = 0, binding = 0) readonly buffer Weights { uvec4 w4[]; };
+#ifdef P36_ABLATE_MATH
+#define W4_LOAD(i) uvec4((i) ^ gl_LocalInvocationID.x, (i) + 1u, (i) + 2u, (i) + 3u)
+#else
+#define W4_LOAD(i) w4[i]
+#endif
+#else
+layout(set = 0, binding = 0) readonly buffer Weights { uint16_t w[]; };
+#ifdef P36_ABLATE_MATH
+#define W16_LOAD(i) (((i) ^ gl_LocalInvocationID.x) & 0xffffu)
+#else
+#define W16_LOAD(i) uint(w[i])
+#endif
+#endif
+layout(set = 0, binding = 1) readonly buffer X { vec4 xv[]; };
+layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
+layout(set = 0, binding = 3) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 4) readonly buffer Tables { uint tables[]; };
+layout(set = 0, binding = 5) readonly buffer ExpScale { float exp_scale[]; };
+
+layout(push_constant) uniform Push {
+    uint mid_dim;      /* 1152 */
+    uint blocks;       /* 2304 / 256 = 9 */
+    uint n_used;       /* 8 */
+    float situ_beta;   /* 4.0 */
+    float inv_beta;    /* 0.25 */
+    float situ_lb;     /* 25.0 */
+    float inv_lb;      /* 0.04 */
+    uint has_exp_scale;
+} pc;
+
+const uint IQ2_U16 = 33u;
+const uint IQ2XS_U16 = 37u;
+const uint IQ2S_BYTES = 82u;
+const uint IQ3XXS_BYTES = 98u;
+const uint IQ3S_BYTES = 110u;
+const uint Q4K_WORDS = 36u;
+const uint TAB_KSIGNS = 512u;
+const uint TAB_IQ2S = 544u;
+const uint TAB_IQ3S_GRID = 2592u;
+const uint TAB_IQ3XXS_GRID = 3104u;
+const uint TAB_IQ2XS = 7456u;
+
+#ifndef P36_MOE_Q4K
+uint w_u8(uint off) {
+    return (W16_LOAD(off >> 1u) >> (8u * (off & 1u))) & 255u;
+}
+#endif
+
+uvec2 pack4h(uint u) {
+    vec4 v = vec4(unpack8(u));
+    return uvec2(packHalf2x16(v.xy), packHalf2x16(v.zw));
+}
+
+float dot4h(uvec2 p, uint m, vec4 a) {
+    vec2 w0 = unpackHalf2x16(p.x ^ (((m & 1u) << 15u) | ((m & 2u) << 30u)));
+    vec2 w1 = unpackHalf2x16(p.y ^ (((m & 4u) << 13u) | ((m & 8u) << 28u)));
+    return dot(w0, a.xy) + dot(w1, a.zw);
+}
+
+float sum16(float v) {
+    v += subgroupShuffleXor(v, 8u);
+    v += subgroupShuffleXor(v, 4u);
+    v += subgroupShuffleXor(v, 2u);
+    v += subgroupShuffleXor(v, 1u);
+    return v;
+}
+
+#ifdef P36_MOE_IQ2XXS
+shared uvec4 sh_grid[256];
+#elif defined(P36_MOE_IQ2XS)
+shared uvec4 sh_grid[512];
+shared uint sh_ksigns[128];
+#elif defined(P36_MOE_IQ2S)
+shared uvec4 sh_grid[1024];
+#elif defined(P36_MOE_IQ3XXS)
+shared uvec2 sh_grid[256];
+shared uint sh_ksigns[128];
+#elif defined(P36_MOE_IQ3S)
+shared uvec2 sh_grid[512];
+#endif
+
+/* Per-lane state shared by main() and gu_block() (inlined; private, not LDS). */
+uint itid, x4, ib32, qpair, gbase, ubase;
+float gate_acc, up_acc;
+#ifdef P36_MOE_Q4K
+uint q4_nshift, q4_qw_off;
+#endif
+
+void gu_block(uint i);
+
+void main(void) {
+#ifdef P36_ABLATE_EMPTY
+    return;
+#endif
+    uint tid = gl_LocalInvocationID.x;
+    uint r_local = tid >> 4u;
+    itid = tid & 15u;            /* 0..15 */
+    uint row = gl_WorkGroupID.x * WG_ROWS + r_local;
+    uint pair = gl_WorkGroupID.y;
+    uint expert = selected[pair];
+    x4 = (pair / pc.n_used) * pc.blocks * 64u;
+
+#ifdef P36_MOE_IQ2XXS
+    for (uint i = tid; i < 256u; i += WG_THREADS) {
+        sh_grid[i] = uvec4(pack4h(tables[2u * i]), pack4h(tables[2u * i + 1u]));
+    }
+    barrier();
+#elif defined(P36_MOE_IQ2XS)
+    for (uint i = tid; i < 512u; i += WG_THREADS) {
+        sh_grid[i] = uvec4(pack4h(tables[TAB_IQ2XS + 2u * i]), pack4h(tables[TAB_IQ2XS + 2u * i + 1u]));
+    }
+    if (tid < 32u) {
+        uint kw = tables[TAB_KSIGNS + tid];
+        sh_ksigns[4u * tid + 0u] = kw & 255u;
+        sh_ksigns[4u * tid + 1u] = (kw >> 8u) & 255u;
+        sh_ksigns[4u * tid + 2u] = (kw >> 16u) & 255u;
+        sh_ksigns[4u * tid + 3u] = kw >> 24u;
+    }
+    barrier();
+#elif defined(P36_MOE_IQ2S)
+    for (uint i = tid; i < 1024u; i += WG_THREADS) {
+        sh_grid[i] = uvec4(pack4h(tables[TAB_IQ2S + 2u * i]), pack4h(tables[TAB_IQ2S + 2u * i + 1u]));
+    }
+    barrier();
+#elif defined(P36_MOE_IQ3XXS)
+    for (uint i = tid; i < 256u; i += WG_THREADS) {
+        sh_grid[i] = pack4h(tables[TAB_IQ3XXS_GRID + i]);
+    }
+    if (tid < 32u) {
+        uint kw = tables[TAB_KSIGNS + tid];
+        sh_ksigns[4u * tid + 0u] = kw & 255u;
+        sh_ksigns[4u * tid + 1u] = (kw >> 8u) & 255u;
+        sh_ksigns[4u * tid + 2u] = (kw >> 16u) & 255u;
+        sh_ksigns[4u * tid + 3u] = kw >> 24u;
+    }
+    barrier();
+#elif defined(P36_MOE_IQ3S)
+    for (uint i = tid; i < 512u; i += WG_THREADS) {
+        sh_grid[i] = pack4h(tables[TAB_IQ3S_GRID + i]);
+    }
+    barrier();
+#endif
+
+    ib32 = itid >> 1u;
+    qpair = itid & 1u;
+    gate_acc = 0.0;
+    up_acc = 0.0;
+
+    uint exp_row0 = expert * (2u * pc.mid_dim);
+#ifdef P36_MOE_IQ2XXS
+    uint row_u16 = pc.blocks * IQ2_U16;
+    gbase = (exp_row0 + row) * row_u16;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_u16;
+#elif defined(P36_MOE_IQ2XS)
+    uint row_u16 = pc.blocks * IQ2XS_U16;
+    gbase = (exp_row0 + row) * row_u16;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_u16;
+#elif defined(P36_MOE_IQ2S)
+    uint row_bytes = pc.blocks * IQ2S_BYTES;
+    gbase = (exp_row0 + row) * row_bytes;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
+#elif defined(P36_MOE_IQ3XXS)
+#ifdef P36_GU_STEPMAJOR
+    gbase = (exp_row0 * pc.blocks + row) * IQ3XXS_BYTES;
+    ubase = gbase + pc.mid_dim * IQ3XXS_BYTES;
+#else
+    uint row_bytes = pc.blocks * IQ3XXS_BYTES;
+    gbase = (exp_row0 + row) * row_bytes;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
+#endif
+#elif defined(P36_MOE_IQ3S)
+#ifdef P36_GU_STEPMAJOR
+    gbase = (exp_row0 * pc.blocks + row) * IQ3S_BYTES;
+    ubase = gbase + pc.mid_dim * IQ3S_BYTES;
+#else
+    uint row_bytes = pc.blocks * IQ3S_BYTES;
+    gbase = (exp_row0 + row) * row_bytes;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_bytes;
+#endif
+#elif defined(P36_MOE_Q4K)
+#ifdef P36_GU_STEPMAJOR
+    /* step-major: block i of expert-row R at ((expert * 2 * mid * blocks) + i * 2 * mid + R) * 36 words */
+#ifdef P36_GU_INTERLEAVE
+    /* step-major, gate/up interleaved: block i of (row, half) at exp_base + (i * 2 * mid + 2 * row + half) * 36 words */
+    gbase = (exp_row0 * pc.blocks + 2u * row) * Q4K_WORDS;
+    ubase = gbase + Q4K_WORDS;
+#else
+    gbase = (exp_row0 * pc.blocks + row) * Q4K_WORDS;
+    ubase = gbase + pc.mid_dim * Q4K_WORDS;
+#endif
+#else
+    uint row_words = pc.blocks * Q4K_WORDS;
+    gbase = (exp_row0 + row) * row_words;
+    ubase = (exp_row0 + pc.mid_dim + row) * row_words;
+#endif
+    q4_nshift = (ib32 & 1u) * 4u;
+    q4_qw_off = 4u + (ib32 >> 1u) * 8u + qpair * 4u;
+#endif
+
+    /* Every Inkling-2-Mini has hidden 2304 = 9 blocks.  Fully unrolled, the
+     * compiler hoists later blocks' weight loads (bit-identical: same order).
+     * IQ3_S measured slower unrolled (+2%), so it keeps the rolled loop. */
+#ifndef P36_MOE_IQ3S
+    if (pc.blocks == 9u) {
+        [[unroll]] for (uint i = 0u; i < 9u; i++) gu_block(i);
+    } else
+#endif
+    {
+        for (uint i = 0u; i < pc.blocks; i++) gu_block(i);
+    }
+
+    float g = sum16(gate_acc);
+    float u = sum16(up_acc);
+    if (itid == 0u) {
+        if (pc.has_exp_scale != 0u) {
+            float es = exp_scale[expert];
+            g *= es;
+            u *= es;
+        }
+        float sg = pc.situ_beta * tanh(g * pc.inv_beta) / (1.0 + exp(-g));
+        float su = pc.situ_lb * tanh(u * pc.inv_lb);
+        y[pair * pc.mid_dim + row] = sg * su;
+    }
+}
+
+void gu_block(uint i) {
+    uint y4 = (i * 256u + 16u * itid) >> 2u;
+    vec4 a0 = xv[x4 + y4 + 0u];
+    vec4 a1 = xv[x4 + y4 + 1u];
+    vec4 a2 = xv[x4 + y4 + 2u];
+    vec4 a3 = xv[x4 + y4 + 3u];
+
+#ifdef P36_MOE_IQ2XXS
+    uint gb = gbase + i * IQ2_U16;
+    uint ub = ubase + i * IQ2_U16;
+    float gd = unpackHalf2x16(uint(w[gb])).x;
+    float ud = unpackHalf2x16(uint(w[ub])).x;
+    uint gq = gb + 1u + 4u * ib32;
+    uint uq = ub + 1u + 4u * ib32;
+    uint gss = uint(w[gq + 2u]) | (uint(w[gq + 3u]) << 16u);
+    uint uss = uint(w[uq + 2u]) | (uint(w[uq + 3u]) << 16u);
+    float gdb = gd * 0.25 * (0.5 + float(gss >> 28u));
+    float udb = ud * 0.25 * (0.5 + float(uss >> 28u));
+    uint gidx_w = uint(w[gq + qpair]);
+    uint uidx_w = uint(w[uq + qpair]);
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sbit = 7u * (2u * qpair + l);
+        uint gqs = (gidx_w >> (8u * l)) & 255u;
+        uint gsign = bitfieldExtract(gss, int(sbit), 7);
+        uint gsign_hi = (gsign >> 4u) | ((uint(bitCount(gsign)) & 1u) << 3u);
+        uvec4 gg = sh_grid[gqs];
+        uint uqs = (uidx_w >> (8u * l)) & 255u;
+        uint usign = bitfieldExtract(uss, int(sbit), 7);
+        uint usign_hi = (usign >> 4u) | ((uint(bitCount(usign)) & 1u) << 3u);
+        uvec4 ug = sh_grid[uqs];
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(gg.xy, gsign, b0) + dot4h(gg.zw, gsign_hi, b4);
+        us += dot4h(ug.xy, usign, b0) + dot4h(ug.zw, usign_hi, b4);
+    }
+    gate_acc = fma(gdb, gs, gate_acc);
+    up_acc = fma(udb, us, up_acc);
+#elif defined(P36_MOE_IQ2XS)
+    uint gb = gbase + i * IQ2XS_U16;
+    uint ub = ubase + i * IQ2XS_U16;
+    float gd = unpackHalf2x16(uint(w[gb])).x;
+    float ud = unpackHalf2x16(uint(w[ub])).x;
+    uint gsc = w_u8((gb + 33u) * 2u + ib32);
+    uint usc = w_u8((ub + 33u) * 2u + ib32);
+    float gdb = gd * 0.25 * (0.5 + float(qpair == 0u ? (gsc & 15u) : (gsc >> 4u)));
+    float udb = ud * 0.25 * (0.5 + float(qpair == 0u ? (usc & 15u) : (usc >> 4u)));
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sub = 2u * qpair + l;
+        uint gq = uint(w[gb + 1u + 4u * ib32 + sub]);
+        uint uq = uint(w[ub + 1u + 4u * ib32 + sub]);
+        uint gsign = sh_ksigns[gq >> 9u];
+        uint usign = sh_ksigns[uq >> 9u];
+        uvec4 gg = sh_grid[gq & 511u];
+        uvec4 ug = sh_grid[uq & 511u];
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(gg.xy, gsign, b0) + dot4h(gg.zw, gsign >> 4u, b4);
+        us += dot4h(ug.xy, usign, b0) + dot4h(ug.zw, usign >> 4u, b4);
+    }
+    gate_acc = fma(gdb, gs, gate_acc);
+    up_acc = fma(udb, us, up_acc);
+#elif defined(P36_MOE_IQ2S)
+    uint gbb = gbase + i * IQ2S_BYTES;
+    uint ubb = ubase + i * IQ2S_BYTES;
+    float gd = unpackHalf2x16(uint(w[gbb >> 1u])).x;
+    float ud = unpackHalf2x16(uint(w[ubb >> 1u])).x;
+    uint gqh = w_u8(gbb + 66u + ib32);
+    uint uqh = w_u8(ubb + 66u + ib32);
+    uint gsc = w_u8(gbb + 74u + ib32);
+    uint usc = w_u8(ubb + 74u + ib32);
+    float gdb = gd * 0.25 * (0.5 + float(qpair == 0u ? (gsc & 15u) : (gsc >> 4u)));
+    float udb = ud * 0.25 * (0.5 + float(qpair == 0u ? (usc & 15u) : (usc >> 4u)));
+    uint gsig01 = uint(w[(gbb + 34u + 4u * ib32 + 2u * qpair) >> 1u]);
+    uint usig01 = uint(w[(ubb + 34u + 4u * ib32 + 2u * qpair) >> 1u]);
+    uint gidx01 = uint(w[(gbb + 2u + 4u * ib32 + 2u * qpair) >> 1u]);
+    uint uidx01 = uint(w[(ubb + 2u + 4u * ib32 + 2u * qpair) >> 1u]);
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint p = 2u * qpair + l;
+        uint gsig = (gsig01 >> (8u * l)) & 255u;
+        uint usig = (usig01 >> (8u * l)) & 255u;
+        uint gidx = ((gidx01 >> (8u * l)) & 255u) | ((gqh << (8u - 2u * p)) & 0x300u);
+        uint uidx = ((uidx01 >> (8u * l)) & 255u) | ((uqh << (8u - 2u * p)) & 0x300u);
+        uvec4 gg = sh_grid[gidx];
+        uvec4 ug = sh_grid[uidx];
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(gg.xy, gsig, b0) + dot4h(gg.zw, gsig >> 4u, b4);
+        us += dot4h(ug.xy, usig, b0) + dot4h(ug.zw, usig >> 4u, b4);
+    }
+    gate_acc = fma(gdb, gs, gate_acc);
+    up_acc = fma(udb, us, up_acc);
+#elif defined(P36_MOE_IQ3XXS)
+#ifdef P36_GU_STEPMAJOR
+    uint gbb = gbase + i * 2u * pc.mid_dim * IQ3XXS_BYTES;
+    uint ubb = ubase + i * 2u * pc.mid_dim * IQ3XXS_BYTES;
+#else
+    uint gbb = gbase + i * IQ3XXS_BYTES;
+    uint ubb = ubase + i * IQ3XXS_BYTES;
+#endif
+    uint gaux_h = (gbb + 66u + 4u * ib32) >> 1u;
+    uint uaux_h = (ubb + 66u + 4u * ib32) >> 1u;
+    uint gaux = W16_LOAD(gaux_h) | (W16_LOAD(gaux_h + 1u) << 16u);
+    uint uaux = W16_LOAD(uaux_h) | (W16_LOAD(uaux_h + 1u) << 16u);
+#ifdef P36_ABLATE_LOADS
+    uint gs_l = gaux ^ W16_LOAD(gbb >> 1u);
+    uint us_l = uaux ^ W16_LOAD(ubb >> 1u);
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sub = 2u * qpair + l;
+        gs_l ^= W16_LOAD((gbb + 2u + 8u * ib32 + 2u * sub) >> 1u);
+        us_l ^= W16_LOAD((ubb + 2u + 8u * ib32 + 2u * sub) >> 1u);
+    }
+    gate_acc += float(gs_l);
+    up_acc += float(us_l);
+#else
+    float gd = unpackHalf2x16(W16_LOAD(gbb >> 1u)).x * 0.25 * float(2u * (gaux >> 28u) + 1u);
+    float ud = unpackHalf2x16(W16_LOAD(ubb >> 1u)).x * 0.25 * float(2u * (uaux >> 28u) + 1u);
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sub = 2u * qpair + l;
+        uint gsi = (gaux >> (7u * sub)) & 127u;
+        uint usi = (uaux >> (7u * sub)) & 127u;
+        uint gsign = sh_ksigns[gsi];
+        uint usign = sh_ksigns[usi];
+        uint ge01 = W16_LOAD((gbb + 2u + 8u * ib32 + 2u * sub) >> 1u);
+        uint ue01 = W16_LOAD((ubb + 2u + 8u * ib32 + 2u * sub) >> 1u);
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(sh_grid[ge01 & 255u], gsign, b0) + dot4h(sh_grid[ge01 >> 8u], gsign >> 4u, b4);
+        us += dot4h(sh_grid[ue01 & 255u], usign, b0) + dot4h(sh_grid[ue01 >> 8u], usign >> 4u, b4);
+    }
+    gate_acc = fma(gd, gs, gate_acc);
+    up_acc = fma(ud, us, up_acc);
+#endif
+#elif defined(P36_MOE_IQ3S)
+#ifdef P36_GU_STEPMAJOR
+    uint gbb = gbase + i * 2u * pc.mid_dim * IQ3S_BYTES;
+    uint ubb = ubase + i * 2u * pc.mid_dim * IQ3S_BYTES;
+#else
+    uint gbb = gbase + i * IQ3S_BYTES;
+    uint ubb = ubase + i * IQ3S_BYTES;
+#endif
+    uint gqh = w_u8(gbb + 66u + ib32);
+    uint uqh = w_u8(ubb + 66u + ib32);
+    uint gscb = w_u8(gbb + 106u + (ib32 >> 1u));
+    uint uscb = w_u8(ubb + 106u + (ib32 >> 1u));
+#ifdef P36_ABLATE_LOADS
+    uint gsgn01 = W16_LOAD((gbb + 74u + 4u * ib32 + 2u * qpair) >> 1u);
+    uint usgn01 = W16_LOAD((ubb + 74u + 4u * ib32 + 2u * qpair) >> 1u);
+    uint gs_l = gqh ^ gscb ^ gsgn01 ^ W16_LOAD(gbb >> 1u);
+    uint us_l = uqh ^ uscb ^ usgn01 ^ W16_LOAD(ubb >> 1u);
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sub = 2u * qpair + l;
+        gs_l ^= W16_LOAD((gbb + 2u + 8u * ib32 + 2u * sub) >> 1u);
+        us_l ^= W16_LOAD((ubb + 2u + 8u * ib32 + 2u * sub) >> 1u);
+    }
+    gate_acc += float(gs_l);
+    up_acc += float(us_l);
+#else
+    uint gnib = (ib32 & 1u) != 0u ? (gscb >> 4u) : (gscb & 15u);
+    uint unib = (ib32 & 1u) != 0u ? (uscb >> 4u) : (uscb & 15u);
+    float gd = unpackHalf2x16(W16_LOAD(gbb >> 1u)).x * float(2u * gnib + 1u);
+    float ud = unpackHalf2x16(W16_LOAD(ubb >> 1u)).x * float(2u * unib + 1u);
+    uint gsgn01 = W16_LOAD((gbb + 74u + 4u * ib32 + 2u * qpair) >> 1u);
+    uint usgn01 = W16_LOAD((ubb + 74u + 4u * ib32 + 2u * qpair) >> 1u);
+    float gs = 0.0;
+    float us = 0.0;
+    [[unroll]] for (uint l = 0u; l < 2u; l++) {
+        uint sub = 2u * qpair + l;
+        uint gsgn = (gsgn01 >> (8u * l)) & 255u;
+        uint usgn = (usgn01 >> (8u * l)) & 255u;
+        uint ge01 = W16_LOAD((gbb + 2u + 8u * ib32 + 2u * sub) >> 1u);
+        uint ue01 = W16_LOAD((ubb + 2u + 8u * ib32 + 2u * sub) >> 1u);
+        uint ge0 = (ge01 & 255u) | (((gqh >> (2u * sub)) & 1u) << 8u);
+        uint ge1 = (ge01 >> 8u)  | (((gqh >> (2u * sub + 1u)) & 1u) << 8u);
+        uint ue0 = (ue01 & 255u) | (((uqh >> (2u * sub)) & 1u) << 8u);
+        uint ue1 = (ue01 >> 8u)  | (((uqh >> (2u * sub + 1u)) & 1u) << 8u);
+        vec4 b0 = (l == 0u) ? a0 : a2;
+        vec4 b4 = (l == 0u) ? a1 : a3;
+        gs += dot4h(sh_grid[ge0], gsgn, b0) + dot4h(sh_grid[ge1], gsgn >> 4u, b4);
+        us += dot4h(sh_grid[ue0], usgn, b0) + dot4h(sh_grid[ue1], usgn >> 4u, b4);
+    }
+    gate_acc = fma(gd, gs, gate_acc);
+    up_acc = fma(ud, us, up_acc);
+#endif
+#elif defined(P36_MOE_Q4K)
+#ifdef P36_ABLATE_LOADS
+    uint gb = (gbase + i * Q4K_WORDS) >> 2u;
+    uint ub = (ubase + i * Q4K_WORDS) >> 2u;
+    uvec4 gh = W4_LOAD(gb);
+    uvec4 uh = W4_LOAD(ub);
+    uvec4 gq_l = W4_LOAD(gb + (q4_qw_off >> 2u));
+    uvec4 uq_l = W4_LOAD(ub + (q4_qw_off >> 2u));
+    gate_acc += float(gh.x ^ gh.y ^ gh.z ^ gh.w ^ gq_l.x ^ gq_l.y ^ gq_l.z ^ gq_l.w);
+    up_acc += float(uh.x ^ uh.y ^ uh.z ^ uh.w ^ uq_l.x ^ uq_l.y ^ uq_l.z ^ uq_l.w);
+#else
+    float xsum = dot(a0 + a1 + a2 + a3, vec4(1.0));
+#ifdef P36_GU_STEPMAJOR
+    uint gb = (gbase + i * 2u * pc.mid_dim * Q4K_WORDS) >> 2u;
+    uint ub = (ubase + i * 2u * pc.mid_dim * Q4K_WORDS) >> 2u;
+#else
+    uint gb = (gbase + i * Q4K_WORDS) >> 2u;
+    uint ub = (ubase + i * Q4K_WORDS) >> 2u;
+#endif
+    uvec4 gh = W4_LOAD(gb);
+    uvec4 uh = W4_LOAD(ub);
+    vec2 gd2 = unpackHalf2x16(gh.x);
+    vec2 ud2 = unpackHalf2x16(uh.x);
+    uint gs0 = gh.y, gs1 = gh.z;
+    uint us0 = uh.y, us1 = uh.z;
+    uint gsc, gmn, usc, umn;
+    if (ib32 < 4u) {
+        uint sh = ib32 * 8u;
+        gsc = (gs0 >> sh) & 63u; gmn = (gs1 >> sh) & 63u;
+        usc = (us0 >> sh) & 63u; umn = (us1 >> sh) & 63u;
+    } else {
+        uint sh = (ib32 - 4u) * 8u;
+        uint gs2 = gh.w;
+        uint us2 = uh.w;
+        gsc = ((gs2 >> sh) & 15u) | (((gs0 >> (sh + 6u)) & 3u) << 4u);
+        gmn = ((gs2 >> (sh + 4u)) & 15u) | (((gs1 >> (sh + 6u)) & 3u) << 4u);
+        usc = ((us2 >> sh) & 15u) | (((us0 >> (sh + 6u)) & 3u) << 4u);
+        umn = ((us2 >> (sh + 4u)) & 15u) | (((us1 >> (sh + 6u)) & 3u) << 4u);
+    }
+    uvec4 gq = (W4_LOAD(gb + (q4_qw_off >> 2u)) >> q4_nshift) & 0x0f0f0f0fu;
+    uvec4 uq = (W4_LOAD(ub + (q4_qw_off >> 2u)) >> q4_nshift) & 0x0f0f0f0fu;
+    uint gql0 = gq.x, gql1 = gq.y, gql2 = gq.z, gql3 = gq.w;
+    uint uql0 = uq.x, uql1 = uq.y, uql2 = uq.z, uql3 = uq.w;
+    float gdot = dot(vec4(float(gql0 & 15u), float((gql0 >> 8u) & 15u), float((gql0 >> 16u) & 15u), float((gql0 >> 24u) & 15u)), a0)
+               + dot(vec4(float(gql1 & 15u), float((gql1 >> 8u) & 15u), float((gql1 >> 16u) & 15u), float((gql1 >> 24u) & 15u)), a1)
+               + dot(vec4(float(gql2 & 15u), float((gql2 >> 8u) & 15u), float((gql2 >> 16u) & 15u), float((gql2 >> 24u) & 15u)), a2)
+               + dot(vec4(float(gql3 & 15u), float((gql3 >> 8u) & 15u), float((gql3 >> 16u) & 15u), float((gql3 >> 24u) & 15u)), a3);
+    float udot = dot(vec4(float(uql0 & 15u), float((uql0 >> 8u) & 15u), float((uql0 >> 16u) & 15u), float((uql0 >> 24u) & 15u)), a0)
+               + dot(vec4(float(uql1 & 15u), float((uql1 >> 8u) & 15u), float((uql1 >> 16u) & 15u), float((uql1 >> 24u) & 15u)), a1)
+               + dot(vec4(float(uql2 & 15u), float((uql2 >> 8u) & 15u), float((uql2 >> 16u) & 15u), float((uql2 >> 24u) & 15u)), a2)
+               + dot(vec4(float(uql3 & 15u), float((uql3 >> 8u) & 15u), float((uql3 >> 16u) & 15u), float((uql3 >> 24u) & 15u)), a3);
+    gate_acc = fma(gd2.x * float(gsc), gdot, fma(-gd2.y * float(gmn), xsum, gate_acc));
+    up_acc = fma(ud2.x * float(usc), udot, fma(-ud2.y * float(umn), xsum, up_acc));
+#endif
+#else
+#error "Define P36_MOE_IQ2XXS, P36_MOE_IQ2XS, P36_MOE_IQ2S, P36_MOE_IQ3XXS, P36_MOE_IQ3S, or P36_MOE_Q4K"
+#endif
+}

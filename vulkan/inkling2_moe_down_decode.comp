@@ -20,6 +20,14 @@ layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
 #else
 #define W_LOAD(i) w[i]
 #endif
+#ifdef P36_DOWN_SPLIT
+/* IQ4_NL "split" layout, rearranged at upload (p36_vk_ink_down_split_copy): per
+ * expert (same 18 B/block stride as the GGUF), the 16 B quant halves of every
+ * block in step-major order lin = ((b >> 2) * out_dim + row) * 4 + (b & 3), then
+ * the f16 scales in the same order.  At loop step b >> 2 every workgroup of an
+ * expert reads adjacent memory, and each lane's quants are one aligned uvec4. */
+layout(set = 0, binding = 0) readonly buffer Weights4 { uvec4 w4[]; };
+#endif
 layout(set = 0, binding = 1) readonly buffer Act { vec4 xv[]; };
 layout(set = 0, binding = 2) readonly buffer Selected { uint selected[]; };
 layout(set = 0, binding = 3) readonly buffer RouterW { float rw[]; };
@@ -98,6 +106,10 @@ void main(void) {
 #endif
 
     float acc = 0.0;
+#ifdef P36_DOWN_SPLIT
+    uint ebase = expert * pc.out_dim * pc.blocks * 18u;          /* bytes, multiple of 16 (host checks) */
+    uint sbase = (ebase >> 1u) + pc.out_dim * pc.blocks * 8u;    /* f16 index of this expert's scales */
+#endif
 
     for (uint b = blane; b < pc.blocks; b += 4u) {
         uint x4 = x_base + b * 8u;
@@ -145,6 +157,17 @@ void main(void) {
         float s = 0.0;
 
 #ifdef P36_MOE_IQ4NL
+#ifdef P36_DOWN_SPLIT
+        uint lin = ((b >> 2u) * pc.out_dim + row) * 4u + blane;
+        uvec4 qq = w4[(ebase >> 4u) + lin];
+        /* Convert both halves, THEN select: selecting the u16 first lets ACO fold the
+         * convert into a fused v_fma_mix for acc = fma(d, s, acc), while the GGUF build
+         * rounds d*s through v_mac -- the results would differ in the last bit.
+         * (sbase + lin) parity == blane parity == odd. */
+        vec2 dd = unpackHalf2x16(w[(sbase + lin) >> 1u]);
+        d = odd ? dd.y : dd.x;
+        uint q0 = qq.x, q1 = qq.y, q2 = qq.z, q3 = qq.w;
+#else
         uint u0 = W_LOAD(wi + 0u);
         uint u1 = W_LOAD(wi + 1u);
         uint u2 = W_LOAD(wi + 2u);
@@ -165,6 +188,9 @@ void main(void) {
             q2 = (u2 >> 16u) | (u3 << 16u);
             q3 = (u3 >> 16u) | (u4 << 16u);
         }
+#endif
+#endif /* P36_DOWN_SPLIT */
+#ifndef P36_ABLATE_LOADS
 
         s += dot(vec4(sh_lut[(q0      ) & 15u], sh_lut[(q0 >>  8u) & 15u],
                       sh_lut[(q0 >> 16u) & 15u], sh_lut[(q0 >> 24u) & 15u]), a0);

@@ -1284,6 +1284,19 @@ int p36_gpu_inkling2_router_topk_tensor(
 int p36_gpu_inkling2_f16_weight_warm(const void *model_map, uint64_t model_size,
                                      uint64_t offset, uint64_t f32_bytes);
 
+/* Default on (P36_INK_DOWN_SPLIT=0 disables): store this IQ4_NL routed-down tensor [in_dim, out_dim, n_expert]
+ * on the GPU in the split/step-major layout (bit-identical results, faster decode).
+ * Call before prewarm.  Returns 1 if registered. */
+int p36_gpu_inkling2_down_split_register(const void *model_map, uint64_t model_size,
+                                         uint64_t offset, uint64_t bytes,
+                                         uint32_t out_dim, uint32_t in_dim);
+/* Default on (P36_INK_GU_STEPMAJOR=0 disables): store a Q4_K (type 12) or IQ3_XXS
+ * (type 18) ffn_gate_up_exps tensor [in_dim, rows, n_expert] step-major.
+ * Call before prewarm.  Returns 1 if registered. */
+int p36_gpu_inkling2_gate_up_sm_register(const void *model_map, uint64_t model_size,
+                                         uint64_t offset, uint64_t bytes,
+                                         uint32_t rows, uint32_t in_dim, uint32_t type);
+
 int p36_gpu_inkling2_moe_ffn_tensor(
         p36_gpu_tensor       *out,
         p36_gpu_tensor       *mid_scratch,

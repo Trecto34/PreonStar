@@ -44,6 +44,9 @@ static p36_vk_kernel p36_vk_ink_down_red_conv;
 static p36_vk_kernel p36_vk_ink_down_gemm_iq4nl;
 static p36_vk_kernel p36_vk_ink_down_gemm_q5_0;
 static p36_vk_kernel p36_vk_ink_down_gemm_nvfp4;
+static p36_vk_kernel p36_vk_ink_down_dec_iq4nl_split;
+static p36_vk_kernel p36_vk_ink_down_gemm_iq4nl_split;
+static p36_vk_kernel p36_vk_ink_gu_dec_q4k_sm, p36_vk_ink_gu_dec_iq3xxs_sm, p36_vk_ink_gu_gemm_q4k_sm, p36_vk_ink_gu_gemm_iq3xxs_sm;
 static bool p36_vk_ink_kernels_inited = false;
 
 static void p36_vk_inkling2_init_kernels_unlocked(void) {
@@ -84,6 +87,10 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     p36_vk_ink_gu_gemm_iq3xxs = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq3xxs.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_iq3s   = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq3s.spv", 6, 32, 1u << 3);
     p36_vk_ink_gu_gemm_q4k    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_q4k.spv", 6, 32, 1u << 3);
+    p36_vk_ink_gu_dec_q4k_sm     = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_q4k_sm.spv", 6, 32, 1u << 3);
+    p36_vk_ink_gu_dec_iq3xxs_sm  = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_decode_iq3xxs_sm.spv", 6, 32, 1u << 3);
+    p36_vk_ink_gu_gemm_q4k_sm    = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_q4k_sm.spv", 6, 32, 1u << 3);
+    p36_vk_ink_gu_gemm_iq3xxs_sm = P36_VK_KERNEL("vulkan/inkling2_moe_gate_up_gemm_iq3xxs_sm.spv", 6, 32, 1u << 3);
     p36_vk_ink_down_dec_iq4nl = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_iq4nl.spv", 6, 20, 1u << 4);
     p36_vk_ink_down_dec_q5_0  = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_q5_0.spv", 6, 20, 1u << 4);
     p36_vk_ink_down_dec_nvfp4 = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_nvfp4.spv", 6, 20, 1u << 4);
@@ -91,6 +98,8 @@ static void p36_vk_inkling2_init_kernels_unlocked(void) {
     p36_vk_ink_down_gemm_iq4nl= P36_VK_KERNEL("vulkan/inkling2_moe_down_gemm_iq4nl.spv", 5, 20, 1u << 3);
     p36_vk_ink_down_gemm_q5_0 = P36_VK_KERNEL("vulkan/inkling2_moe_down_gemm_q5_0.spv", 5, 20, 1u << 3);
     p36_vk_ink_down_gemm_nvfp4= P36_VK_KERNEL("vulkan/inkling2_moe_down_gemm_nvfp4.spv", 5, 20, 1u << 3);
+    p36_vk_ink_down_dec_iq4nl_split = P36_VK_KERNEL("vulkan/inkling2_moe_down_decode_iq4nl_split.spv", 6, 20, 1u << 4);
+    p36_vk_ink_down_gemm_iq4nl_split = P36_VK_KERNEL("vulkan/inkling2_moe_down_gemm_iq4nl_split.spv", 5, 20, 1u << 3);
     p36_vk_ink_kernels_inited = true;
 }
 
@@ -134,6 +143,10 @@ static void p36_vk_inkling2_cleanup_unlocked(void) {
     p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_iq3xxs);
     p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_iq3s);
     p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_q4k);
+    p36_vk_kernel_destroy(&p36_vk_ink_gu_dec_q4k_sm);
+    p36_vk_kernel_destroy(&p36_vk_ink_gu_dec_iq3xxs_sm);
+    p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_q4k_sm);
+    p36_vk_kernel_destroy(&p36_vk_ink_gu_gemm_iq3xxs_sm);
     p36_vk_kernel_destroy(&p36_vk_ink_down_dec_iq4nl);
     p36_vk_kernel_destroy(&p36_vk_ink_down_dec_q5_0);
     p36_vk_kernel_destroy(&p36_vk_ink_down_dec_nvfp4);
@@ -141,7 +154,60 @@ static void p36_vk_inkling2_cleanup_unlocked(void) {
     p36_vk_kernel_destroy(&p36_vk_ink_down_gemm_iq4nl);
     p36_vk_kernel_destroy(&p36_vk_ink_down_gemm_q5_0);
     p36_vk_kernel_destroy(&p36_vk_ink_down_gemm_nvfp4);
+    p36_vk_kernel_destroy(&p36_vk_ink_down_dec_iq4nl_split);
+    p36_vk_kernel_destroy(&p36_vk_ink_down_gemm_iq4nl_split);
     p36_vk_ink_kernels_inited = false;
+}
+
+/* Default on (P36_INK_DOWN_SPLIT=0 disables): mark an IQ4_NL ffn_down_exps tensor [in_dim, out_dim, n_expert]
+ * to be stored in the split layout (see p36_vk_ink_split_rows).  Must run before
+ * anything caches the tensor (the engine calls it before prewarm); a tensor that is
+ * already resident in the GGUF layout is refused, so the two layouts never mix.
+ * Returns 1 if registered. */
+static int p36_vk_ink_split_add(const void *model_map, uint64_t model_size, uint64_t offset,
+                                p36_vk_ink_split_entry e) {
+    const uint64_t expert_bytes = (uint64_t)e.out_dim * e.blocks * e.block_bytes;
+    if (!model_map || !expert_bytes || e.bytes % expert_bytes || e.bytes > UINT32_MAX) return 0;
+    e.src = p36_gpu_weight_bytes(model_map, model_size, offset, e.bytes);
+    if (!e.src) return 0;
+    pthread_mutex_lock(&p36_vk_mu);
+    int ok = 0;
+    if (p36_vk_ink_split_map != model_map || p36_vk_ink_split_map_size != model_size) {
+        p36_vk_ink_split_n = 0;
+        p36_vk_ink_split_map = model_map;
+        p36_vk_ink_split_map_size = model_size;
+    }
+    bool resident = false;
+    for (p36_vk_weight *w = p36_vk.weights; w; w = w->next) resident |= w->source == e.src;
+    bool dup = false;
+    for (uint32_t i = 0; i < p36_vk_ink_split_n; i++) dup |= p36_vk_ink_split[i].src == e.src;
+    if (!resident && !dup && p36_vk_ink_split_n < P36_VK_INK_SPLIT_CAP) {
+        p36_vk_ink_split[p36_vk_ink_split_n++] = e;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&p36_vk_mu);
+    return ok;
+}
+
+int p36_gpu_inkling2_down_split_register(const void *model_map, uint64_t model_size,
+                                         uint64_t offset, uint64_t bytes,
+                                         uint32_t out_dim, uint32_t in_dim) {
+    const uint32_t blocks = in_dim / 32u;
+    if (in_dim % 32u || blocks % 4u || ((uint64_t)out_dim * blocks) % 8u) return 0;
+    return p36_vk_ink_split_add(model_map, model_size, offset, (p36_vk_ink_split_entry){
+        .bytes = bytes, .kind = P36_VK_INK_SPLIT_DOWN, .out_dim = out_dim, .blocks = blocks, .block_bytes = 18u });
+}
+
+/* Default on (P36_INK_GU_STEPMAJOR=0 disables): store a Q4_K or IQ3_XXS
+ * ffn_gate_up_exps tensor [in_dim, rows, n_expert] step-major (kind GU).
+ * type is the GGML type (12 = Q4_K, 18 = IQ3_XXS).  Same rules as above. */
+int p36_gpu_inkling2_gate_up_sm_register(const void *model_map, uint64_t model_size,
+                                         uint64_t offset, uint64_t bytes,
+                                         uint32_t rows, uint32_t in_dim, uint32_t type) {
+    const uint32_t bb = type == 12u ? 144u : type == 18u ? 98u : 0u;
+    if (!bb || in_dim % 256u || rows % 2u) return 0;
+    return p36_vk_ink_split_add(model_map, model_size, offset, (p36_vk_ink_split_entry){
+        .bytes = bytes, .kind = P36_VK_INK_SPLIT_GU, .out_dim = rows, .blocks = in_dim / 256u, .block_bytes = bb });
 }
 
 /* Loop-controller weights (F32 in every Inkling GGUF, 227 MB read per decode
@@ -956,18 +1022,32 @@ int p36_gpu_inkling2_moe_ffn_tensor(
 
     p36_vk_kernel *gu_k = NULL;
     p36_vk_kernel *dn_k = NULL;
+    /* The cached copy's layout picks the down kernel (P36_INK_DOWN_SPLIT); a split
+     * tensor must be IQ4_NL with exactly the dims it was re-laid out for. */
+    const p36_vk_ink_split_entry *dn_split = p36_vk_ink_split_find(dn_src, down_bytes);
+    if (dn_split && (dn_split->kind != P36_VK_INK_SPLIT_DOWN || down_type != P36_VK_TENSOR_IQ4_NL ||
+                     dn_split->out_dim != out_dim || dn_split->blocks != mid_dim / 32u)) {
+        pthread_mutex_unlock(&p36_vk_mu); p36_gpu_tensor_free(tiles); return 0;
+    }
+    /* Same for gate_up (P36_INK_GU_STEPMAJOR): only Q4_K / IQ3_XXS have _sm kernels. */
+    const p36_vk_ink_split_entry *gu_split = p36_vk_ink_split_find(gu_src, gate_up_bytes);
+    if (gu_split && (gu_split->kind != P36_VK_INK_SPLIT_GU ||
+                     (gate_up_type != P36_VK_TENSOR_Q4_K && gate_up_type != P36_VK_TENSOR_IQ3_XXS) ||
+                     gu_split->out_dim != 2u * mid_dim || gu_split->blocks != in_dim / 256u)) {
+        pthread_mutex_unlock(&p36_vk_mu); p36_gpu_tensor_free(tiles); return 0;
+    }
     if (n_tok == 1u) {
         switch (gate_up_type) {
             case P36_VK_TENSOR_IQ2_XXS: gu_k = &p36_vk_ink_gu_dec_iq2xxs; break;
             case P36_VK_TENSOR_IQ2_XS:  gu_k = &p36_vk_ink_gu_dec_iq2xs; break;
             case P36_VK_TENSOR_IQ2_S:   gu_k = &p36_vk_ink_gu_dec_iq2s; break;
-            case P36_VK_TENSOR_IQ3_XXS: gu_k = &p36_vk_ink_gu_dec_iq3xxs; break;
+            case P36_VK_TENSOR_IQ3_XXS: gu_k = gu_split ? &p36_vk_ink_gu_dec_iq3xxs_sm : &p36_vk_ink_gu_dec_iq3xxs; break;
             case P36_VK_TENSOR_IQ3_S:   gu_k = &p36_vk_ink_gu_dec_iq3s; break;
-            case P36_VK_TENSOR_Q4_K:    gu_k = &p36_vk_ink_gu_dec_q4k; break;
+            case P36_VK_TENSOR_Q4_K:    gu_k = gu_split ? &p36_vk_ink_gu_dec_q4k_sm : &p36_vk_ink_gu_dec_q4k; break;
             default: pthread_mutex_unlock(&p36_vk_mu); return 0;
         }
         switch (down_type) {
-            case P36_VK_TENSOR_IQ4_NL:  dn_k = &p36_vk_ink_down_dec_iq4nl; break;
+            case P36_VK_TENSOR_IQ4_NL:  dn_k = dn_split ? &p36_vk_ink_down_dec_iq4nl_split : &p36_vk_ink_down_dec_iq4nl; break;
             case P36_VK_TENSOR_Q5_0:    dn_k = &p36_vk_ink_down_dec_q5_0; break;
             case P36_VK_TENSOR_NVFP4:   dn_k = &p36_vk_ink_down_dec_nvfp4; break;
             default: pthread_mutex_unlock(&p36_vk_mu); return 0;
@@ -1014,13 +1094,13 @@ int p36_gpu_inkling2_moe_ffn_tensor(
             case P36_VK_TENSOR_IQ2_XXS: gu_k = &p36_vk_ink_gu_gemm_iq2xxs; break;
             case P36_VK_TENSOR_IQ2_XS:  gu_k = &p36_vk_ink_gu_gemm_iq2xs; break;
             case P36_VK_TENSOR_IQ2_S:   gu_k = &p36_vk_ink_gu_gemm_iq2s; break;
-            case P36_VK_TENSOR_IQ3_XXS: gu_k = &p36_vk_ink_gu_gemm_iq3xxs; break;
+            case P36_VK_TENSOR_IQ3_XXS: gu_k = gu_split ? &p36_vk_ink_gu_gemm_iq3xxs_sm : &p36_vk_ink_gu_gemm_iq3xxs; break;
             case P36_VK_TENSOR_IQ3_S:   gu_k = &p36_vk_ink_gu_gemm_iq3s; break;
-            case P36_VK_TENSOR_Q4_K:    gu_k = &p36_vk_ink_gu_gemm_q4k; break;
+            case P36_VK_TENSOR_Q4_K:    gu_k = gu_split ? &p36_vk_ink_gu_gemm_q4k_sm : &p36_vk_ink_gu_gemm_q4k; break;
             default: pthread_mutex_unlock(&p36_vk_mu); p36_gpu_tensor_free(tiles); return 0;
         }
         switch (down_type) {
-            case P36_VK_TENSOR_IQ4_NL:  dn_k = &p36_vk_ink_down_gemm_iq4nl; break;
+            case P36_VK_TENSOR_IQ4_NL:  dn_k = dn_split ? &p36_vk_ink_down_gemm_iq4nl_split : &p36_vk_ink_down_gemm_iq4nl; break;
             case P36_VK_TENSOR_Q5_0:    dn_k = &p36_vk_ink_down_gemm_q5_0; break;
             case P36_VK_TENSOR_NVFP4:   dn_k = &p36_vk_ink_down_gemm_nvfp4; break;
             default: pthread_mutex_unlock(&p36_vk_mu); p36_gpu_tensor_free(tiles); return 0;
