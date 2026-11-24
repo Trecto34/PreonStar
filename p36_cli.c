@@ -108,15 +108,15 @@ static void usage(FILE *fp) {
         "  -c, --ctx N\n"
         "      Context size allocated for the session. Default: 32768\n"
         "  -ctk, --cache-type-k TYPE\n"
-        "      KV cache K type: f16, q8_0, or q4_0. Default: Vulkan/Metal q8_0, CPU f16\n"
+        "      KV cache K type: f16, q8_0, or q4_0. Default: Vulkan q8_0, CPU f16\n"
         "  -ctv, --cache-type-v TYPE\n"
-        "      KV cache V type: f16, q8_0, or q4_0. Default: Vulkan/Metal q4_0, CPU f16\n"
-        "  --metal | --vulkan\n"
-        "      Use Metal on Apple Silicon or Vulkan on Linux/BC-250.\n"
+        "      KV cache V type: f16, q8_0, or q4_0. Default: Vulkan q4_0, CPU f16\n"
+        "  --vulkan\n"
+        "      Use Vulkan on Linux/BC-250.\n"
         "  --cpu\n"
         "      Use the CPU reference/debug backend. Not recommended for normal inference.\n"
         "  --backend NAME\n"
-        "      Select backend explicitly: metal, vulkan, or cpu.\n"
+        "      Select backend explicitly: vulkan, or cpu.\n"
         "  -t, --threads N\n"
         "      CPU helper threads for host-side or reference work.\n"
         "  --quality\n"
@@ -142,7 +142,7 @@ static void usage(FILE *fp) {
         "  --simulate-used-memory SIZEGB\n"
         "      Reduce automatic SSD cache planning by pretending SIZEGB is already used.\n"
         "  --prefill-chunk N\n"
-        "      Override prompt prefill chunk size. Default: auto (resident Metal resolves to 1024).\n"
+        "      Override prompt prefill chunk size. Default: auto.\n"
         "  --f32-fast-wide\n"
         "      Opt-in 256-thread f32 matvec. Faster, but reassociates the MoE router gate.\n"
         "      Benchmarking only: observed to break long-context chat. See README.md.\n"
@@ -205,23 +205,11 @@ static void usage(FILE *fp) {
         "      Run the output HC/logits head after the CPU slice.\n"
         "  --first-token-test\n"
         "      Run an exact CPU whole-model pass for the first prompt token.\n"
-#ifdef P36_METAL
-        "  --metal-graph-test\n"
-#else
         "  --vulkan-graph-test\n"
-#endif
         "      Compare first GPU-resident graph stages with CPU.\n"
-#ifdef P36_METAL
-        "  --metal-graph-full-test\n"
-#else
         "  --vulkan-graph-full-test\n"
-#endif
         "      Run the GPU-resident self-token graph across all layers.\n"
-#ifdef P36_METAL
-        "  --metal-graph-prompt-test\n"
-#else
         "  --vulkan-graph-prompt-test\n"
-#endif
         "      Compare CPU and GPU graph logits for the full prompt.\n"
         "\n"
         "Normal CLI commands:\n"
@@ -280,19 +268,16 @@ static float parse_float_range(const char *s, const char *opt, float min, float 
 }
 
 static p36_backend parse_backend(const char *s) {
-    if (!strcmp(s, "metal")) return P36_BACKEND_METAL;
     if (!strcmp(s, "vulkan")) return P36_BACKEND_VULKAN;
     if (!strcmp(s, "cpu")) return P36_BACKEND_CPU;
     fprintf(stderr, "p36: invalid backend: %s\n", s);
-    fprintf(stderr, "p36: valid backends are: metal, vulkan, cpu\n");
+    fprintf(stderr, "p36: valid backends are: vulkan, cpu\n");
     exit(2);
 }
 
 static p36_backend default_backend(void) {
 #ifdef P36_NO_GPU
     return P36_BACKEND_CPU;
-#elif defined(__APPLE__)
-    return P36_BACKEND_METAL;
 #else
     return P36_BACKEND_VULKAN;
 #endif
@@ -1753,8 +1738,6 @@ static cli_config parse_options(int argc, char **argv) {
             c.engine.backend = P36_BACKEND_CPU;
         } else if (!strcmp(arg, "--vulkan")) {
             c.engine.backend = P36_BACKEND_VULKAN;
-        } else if (!strcmp(arg, "--metal")) {
-            c.engine.backend = P36_BACKEND_METAL;
         } else if (!strcmp(arg, "--dump-tokens")) {
             c.gen.dump_tokens = true;
         } else if (!strcmp(arg, "--dump-logprobs")) {
@@ -1778,54 +1761,19 @@ static cli_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--first-token-test")) {
             c.gen.first_token_test = true;
         } else if (!strcmp(arg, "--vulkan-graph-test")
-#ifdef P36_METAL
-                   || !strcmp(arg, "--metal-graph-test")
-#endif
         ) {
             c.gen.vulkan_graph_test = true;
-#ifdef P36_METAL
-            c.engine.backend = P36_BACKEND_METAL;
-#else
             c.engine.backend = P36_BACKEND_VULKAN;
-#endif
         } else if (!strcmp(arg, "--vulkan-graph-full-test")
-#ifdef P36_METAL
-                   || !strcmp(arg, "--metal-graph-full-test")
-#endif
         ) {
             c.gen.vulkan_graph_full_test = true;
-#ifdef P36_METAL
-            c.engine.backend = P36_BACKEND_METAL;
-#else
             c.engine.backend = P36_BACKEND_VULKAN;
-#endif
         } else if (!strcmp(arg, "--vulkan-graph-prompt-test")
-#ifdef P36_METAL
-                   || !strcmp(arg, "--metal-graph-prompt-test")
-#endif
         ) {
             c.gen.vulkan_graph_prompt_test = true;
-#ifdef P36_METAL
-            c.engine.backend = P36_BACKEND_METAL;
-#else
             c.engine.backend = P36_BACKEND_VULKAN;
-#endif
-        } else if (
-                   !strcmp(arg, "--cuda")) {
-#ifdef P36_METAL
-            fprintf(stderr, "p36: %s is not supported; use --metal or --cpu\n", arg);
-#else
+        } else if (!strcmp(arg, "--cuda")) {
             fprintf(stderr, "p36: %s is not supported; use --vulkan or --cpu\n", arg);
-#endif
-            exit(2);
-        } else if (
-#ifndef P36_METAL
-                   !strcmp(arg, "--metal-graph-test") ||
-                   !strcmp(arg, "--metal-graph-full-test") ||
-                   !strcmp(arg, "--metal-graph-prompt-test") ||
-#endif
-                   !strcmp(arg, "--metal-graph-generate")) {
-            fprintf(stderr, "p36: Metal graph flags were renamed to Vulkan graph flags\n");
             exit(2);
         } else if (!strcmp(arg, "--inspect")) {
             c.inspect = true;

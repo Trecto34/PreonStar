@@ -265,7 +265,6 @@ static void test_agent_streaming_defaults(void) {
     char *streamcachev[] = {"p36-agent", "--ssd-streaming", "-ctk", "q8_0", "-ctv", "q4_0"};
     char *cachev[] = {"p36-agent", "-ctk", "q4_0", "-ctv", "f16"};
     char *cpuv[] = {"p36-agent", "--cpu"};
-    char *metalv[] = {"p36-agent", "--metal"};
     char *vulkanv[] = {"p36-agent", "--vulkan"};
     char *chunkv[] = {"p36-agent", "--prefill-chunk", "1024"};
     char *samplingv[] = {"p36-agent", "--temp", "0.7", "--top-k", "20",
@@ -283,7 +282,6 @@ static void test_agent_streaming_defaults(void) {
     agent_config streamcache = parse_options(6, streamcachev);
     agent_config cache = parse_options(5, cachev);
     agent_config cpu = parse_options(2, cpuv);
-    agent_config metal = parse_options(2, metalv);
     agent_config vulkan = parse_options(2, vulkanv);
     agent_config chunk = parse_options(3, chunkv);
     agent_config sampling = parse_options(9, samplingv);
@@ -307,15 +305,8 @@ static void test_agent_streaming_defaults(void) {
     AGENT_TEST_ASSERT(!def.edit_upto);
     AGENT_TEST_ASSERT(upto.edit_upto);
     AGENT_TEST_ASSERT(def.gen.ctx_size == AGENT_RESIDENT_CTX);
-    AGENT_TEST_ASSERT(metal.gen.ctx_size == AGENT_RESIDENT_CTX);
     AGENT_TEST_ASSERT(vulkan.gen.ctx_size == AGENT_RESIDENT_CTX);
     AGENT_TEST_ASSERT(def.engine.prefill_chunk == 0);
-#ifndef P36_NO_GPU
-    p36_context_memory auto_metal = p36_context_memory_estimate_configured(
-        P36_BACKEND_METAL, 4096, def.engine.prefill_chunk,
-        P36_KV_CACHE_Q8_0, P36_KV_CACHE_Q4_0);
-    AGENT_TEST_ASSERT(auto_metal.prefill_cap == 1024);
-#endif
 #ifdef P36_NO_GPU
     AGENT_TEST_ASSERT(def.engine.cache_type_k == P36_KV_CACHE_F16);
     AGENT_TEST_ASSERT(def.engine.cache_type_v == P36_KV_CACHE_F16);

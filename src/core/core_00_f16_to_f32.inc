@@ -1085,7 +1085,7 @@ static uint32_t p36_default_cpu_prefill_cap(void) {
 #ifndef P36_NO_GPU
 static uint32_t p36_default_gpu_prefill_cap(void) {
     /* Keep the established environment name for compatibility; this graph
-     * default is shared by Vulkan and Metal. */
+     * default is used by Vulkan. */
     uint32_t cap = p36_parse_env_u32(
         "P36_VK_PREFILL_CHUNK", P36_GPU_PREFILL_CHUNK_DEFAULT);
     if (cap < 1) cap = 1;
@@ -1132,17 +1132,6 @@ static uint32_t p36_engine_clamp_prefill_cap(uint32_t cap) {
 }
 
 static uint32_t p36_engine_gpu_prefill_cap(const p36_engine *e) {
-#ifdef P36_METAL
-    if (e->ssd_streaming) {
-        uint32_t cap = e->prefill_cap_override ?
-            e->prefill_cap_override : p36_default_gpu_prefill_cap();
-        uint32_t cache_tokens =
-            e->ssd_streaming_cache_experts / P36_N_EXPERT_USED;
-        if (cache_tokens < 1) cache_tokens = 1;
-        if (cap > cache_tokens) cap = cache_tokens;
-        return cap;
-    }
-#endif
     uint32_t cap;
     if (e->prefill_cap_override) cap = e->prefill_cap_override;
     else if (e->variant == P36_VARIANT_INKLING2_LOOP && !getenv("P36_VK_PREFILL_CHUNK")) cap = 1024;

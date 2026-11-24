@@ -32,9 +32,7 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
-#ifdef __APPLE__
-#include <copyfile.h>
-#elif defined(__linux__)
+#if defined(__linux__)
 #include <sys/xattr.h>
 #endif
 
@@ -747,19 +745,16 @@ static float parse_float_range(const char *s, const char *opt, float min, float 
 }
 
 static p36_backend parse_backend(const char *s) {
-    if (!strcmp(s, "metal")) return P36_BACKEND_METAL;
     if (!strcmp(s, "vulkan")) return P36_BACKEND_VULKAN;
     if (!strcmp(s, "cpu")) return P36_BACKEND_CPU;
     fprintf(stderr, "p36-agent: invalid backend: %s\n", s);
-    fprintf(stderr, "p36-agent: valid backends are: metal, vulkan, cpu\n");
+    fprintf(stderr, "p36-agent: valid backends are: vulkan, cpu\n");
     exit(2);
 }
 
 static p36_backend default_backend(void) {
 #ifdef P36_NO_GPU
     return P36_BACKEND_CPU;
-#elif defined(__APPLE__)
-    return P36_BACKEND_METAL;
 #else
     return P36_BACKEND_VULKAN;
 #endif

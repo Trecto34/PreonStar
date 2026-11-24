@@ -17,7 +17,6 @@
 
 typedef enum {
     P36_BACKEND_VULKAN,
-    P36_BACKEND_METAL,
     P36_BACKEND_CPU,
 } p36_backend;
 

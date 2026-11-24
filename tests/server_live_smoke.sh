@@ -3,9 +3,9 @@ set -eu
 
 backend=${1:---vulkan}
 case "$backend" in
-    --metal|--vulkan) ;;
+    --vulkan) ;;
     *)
-        echo "usage: $0 [--metal|--vulkan] [--ssd-streaming]" >&2
+        echo "usage: $0 [--vulkan] [--ssd-streaming]" >&2
         exit 2
         ;;
 esac
@@ -13,7 +13,7 @@ streaming=${2:-}
 case "$streaming" in
     ""|--ssd-streaming) ;;
     *)
-        echo "usage: $0 [--metal|--vulkan] [--ssd-streaming]" >&2
+        echo "usage: $0 [--vulkan] [--ssd-streaming]" >&2
         exit 2
         ;;
 esac

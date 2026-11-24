@@ -3,9 +3,9 @@ set -eu
 
 backend=${1:---vulkan}
 case "$backend" in
-    --metal|--vulkan) ;;
+    --vulkan) ;;
     *)
-        echo "usage: $0 [--metal|--vulkan] [--ssd-streaming]" >&2
+        echo "usage: $0 [--vulkan] [--ssd-streaming]" >&2
         exit 2
         ;;
 esac
@@ -13,7 +13,7 @@ streaming=${2:-}
 case "$streaming" in
     ""|--ssd-streaming) ;;
     *)
-        echo "usage: $0 [--metal|--vulkan] [--ssd-streaming]" >&2
+        echo "usage: $0 [--vulkan] [--ssd-streaming]" >&2
         exit 2
         ;;
 esac
@@ -120,7 +120,7 @@ if [ "$streaming" = "--ssd-streaming" ]; then
     grep -Eq 'session batch rows=[2-8] native=0 ordered=1' "$tmp/server.log"
     grep -q 'SSD expert cache allocated' "$tmp/server.log"
 else
-    grep -Eq '(metal|vulkan) session batch rows=[2-8] native=1' "$tmp/server.log"
+    grep -Eq 'vulkan session batch rows=[2-8] native=1' "$tmp/server.log"
 fi
 grep -q 'kv cache hit text' "$tmp/server.log"
 grep -q 'shutdown requested' "$tmp/server.log"

@@ -315,17 +315,11 @@ static bool p36_streaming_routed_expert_layout(
         uint64_t gate = 0, up = 0, down = 0;
         if (p36_streaming_layer_routed_expert_bytes(
                 &weights->layer[il], &gate, &up, &down, NULL)) {
-#ifdef P36_METAL
-            if (gate > max_gate) max_gate = gate;
-            if (up > max_up) max_up = up;
-            if (down > max_down) max_down = down;
-#else
             /* Preserve the Vulkan single-size-class cache ABI. */
             max_gate = gate;
             max_up = up;
             max_down = down;
             break;
-#endif
         }
     }
     if (max_gate > UINT64_MAX - max_up) return false;
@@ -347,13 +341,6 @@ static bool p36_streaming_routed_expert_bytes(const p36_weights *weights,
 
 static bool p36_weights_streaming_layer_experts_uniform(
         const p36_weights *weights, uint32_t il) {
-#ifdef P36_METAL
-    (void)weights;
-    (void)il;
-    /* Metal uses component-wise padded expert slots, so every routed
-     * precision class is cache-compatible. */
-    return true;
-#else
     uint64_t base = 0;
     uint64_t bytes = 0;
     if (!weights || il >= P36_N_LAYER) return true;
@@ -367,7 +354,6 @@ static bool p36_weights_streaming_layer_experts_uniform(
             &weights->layer[il], NULL, NULL, NULL, &bytes))
         return true;
     return bytes == base;
-#endif
 }
 
 static bool p36_streaming_full_layer_budget(const p36_weights *weights,
@@ -885,64 +871,16 @@ static bool p36_tensor_is_disabled_embedded_mtp(const p36_engine *e,
            memcmp(t->name.ptr, prefix, (size_t)len) == 0;
 }
 
-#ifdef P36_METAL
-static bool p36_metal_q5_output_cache_candidate(const p36_engine *e,
-                                                const p36_tensor *t) {
-    const char *enabled = getenv("P36_METAL_Q5_OUTPUT_CACHE");
-    return e && !e->ssd_streaming &&
-           (!enabled || enabled[0] != '0') &&
-           P36_MODEL_DENSE && t && t == e->weights.output &&
-           t->type == P36_TENSOR_Q5_K;
-}
-
-#endif
 
 static bool p36_vulkan_prewarm_skip_tensor(const p36_engine *e, const p36_tensor *t) {
     /* The main graph executes only the trunk; an unbound appended NextN block
      * must not consume the resident model arena. */
     if (t == e->weights.token_embd || t->bytes == 0 ||
         p36_tensor_is_disabled_embedded_mtp(e, t)) return true;
-#ifdef P36_METAL
-    if (p36_metal_q5_output_cache_candidate(e, t)) return true;
-#endif
     int il = p36_weights_tensor_routed_layer(&e->weights, t);
     return e->ssd_streaming && il >= 0 && (uint32_t)il >= e->ssd_streaming_full_layers;
 }
 
-#ifdef P36_METAL
-static void p36_streaming_lock_static_weights(p36_engine *e) {
-    if (!e->ssd_streaming || getenv("P36_METAL_DISABLE_STREAMING_STATIC_LOCK")) return;
-    uint64_t fixed = 0, per_expert = 0, resident = 0;
-    uint32_t slots = 0;
-    if (!p36_weights_streaming_non_routed_bytes(&e->weights, &fixed) ||
-        !p36_streaming_routed_expert_bytes(&e->weights, &per_expert) ||
-        (e->ssd_streaming_full_layers && !p36_streaming_full_layer_budget(
-            &e->weights, e->ssd_streaming_full_layers, &slots, &resident))) return;
-    uint64_t budget = e->streaming_model_limit;
-    uint64_t experts = (uint64_t)e->ssd_streaming_cache_experts * per_expert;
-    if (fixed > budget || resident > budget - fixed || experts > budget - fixed - resident) return;
-    uint64_t pin_budget = budget - resident - experts;
-    uint64_t locked = 0;
-    size_t page = (size_t)getpagesize();
-    bool can_lock = true;
-    for (uint64_t i = 0; i < e->model.n_tensors; i++) {
-        const p36_tensor *t = &e->model.tensors[i];
-        if (!t->bytes || p36_tensor_is_disabled_embedded_mtp(e, t) ||
-            p36_weights_tensor_routed_layer(&e->weights, t) >= 0) continue;
-        uint64_t off = t->abs_offset / page * page, end = t->abs_offset + t->bytes;
-        if (end > e->model.size) continue;
-        while (can_lock && off < end) {
-            size_t len = end - off > 256ull * 1024 * 1024 ? 256u * 1024 * 1024 : (size_t)(end - off);
-            uint64_t charged = ((uint64_t)len + page - 1) / page * page;
-            if (charged > pin_budget - locked) break;
-            if (mlock(e->model.map + off, len)) can_lock = false;
-            else locked += charged;
-            off += len;
-        }
-    }
-    fprintf(stderr, "p36: Metal SSD static weights locked %.2f GiB within runtime budget\n", locked / 1073741824.0);
-}
-#endif
 
 static bool p36_vulkan_set_model_spans(const p36_engine *e) {
     uint64_t *offsets = malloc(e->model.n_tensors * sizeof(*offsets));
@@ -1035,15 +973,6 @@ static void p36_vulkan_prewarm_weights(const p36_engine *e) {
         __atomic_store_n(&reader.staged, UINT64_MAX, __ATOMIC_RELAXED);
         pthread_join(reader_thread, NULL);
     }
-#ifdef P36_METAL
-    if (p36_metal_q5_output_cache_candidate(e, e->weights.output) &&
-        !p36_gpu_prepare_q5_k_output_cache(
-            e->model.map, e->model.size, e->weights.output->abs_offset,
-            P36_N_EMBD, P36_N_VOCAB)) {
-        fprintf(stderr,
-                "p36: Metal Q5_K output cache unavailable; using GGUF weights\n");
-    }
-#endif
     /* The MTP support model is fetched through the same whole-tensor cache
      * keys at draft time; without a prewarm the first drafts pay its whole
      * upload (~1.2s spread over the first replies). The head only reads the

@@ -42,7 +42,7 @@ const char *p36_kv_cache_type_name(p36_kv_cache_type type) {
 p36_kv_cache_type p36_default_kv_cache_type_k(p36_backend backend, bool ssd_streaming) {
     if (getenv("P36_VK_STRICT_PARITY") && !getenv("P36_VK_STRICT_Q8_KV"))
         return P36_KV_CACHE_F16;
-    return (backend == P36_BACKEND_VULKAN || backend == P36_BACKEND_METAL) &&
+    return backend == P36_BACKEND_VULKAN &&
            !ssd_streaming ?
            P36_KV_CACHE_Q8_0 : P36_KV_CACHE_F16;
 }
@@ -50,7 +50,7 @@ p36_kv_cache_type p36_default_kv_cache_type_k(p36_backend backend, bool ssd_stre
 p36_kv_cache_type p36_default_kv_cache_type_v(p36_backend backend, bool ssd_streaming) {
     if (getenv("P36_VK_STRICT_PARITY") && !getenv("P36_VK_STRICT_Q8_KV"))
         return P36_KV_CACHE_F16;
-    return (backend == P36_BACKEND_VULKAN || backend == P36_BACKEND_METAL) &&
+    return backend == P36_BACKEND_VULKAN &&
            !ssd_streaming ?
            P36_KV_CACHE_Q4_0 : P36_KV_CACHE_F16;
 }
@@ -269,7 +269,7 @@ static void p36_parallel_for_rows(uint64_t n_rows,
 }
 
 static bool p36_backend_uses_graph(p36_backend backend) {
-    return backend == P36_BACKEND_VULKAN || backend == P36_BACKEND_METAL;
+    return backend == P36_BACKEND_VULKAN;
 }
 
 static bool p36_backend_supports_ssd_streaming(p36_backend backend) {
@@ -393,7 +393,6 @@ void p36_log(FILE *fp, p36_log_type type, const char *fmt, ...) {
 const char *p36_backend_name(p36_backend backend) {
     switch (backend) {
     case P36_BACKEND_VULKAN: return "vulkan";
-    case P36_BACKEND_METAL: return "metal";
     case P36_BACKEND_CPU: return "cpu";
     default: return "unknown";
     }

@@ -26,9 +26,7 @@ static void test_atomic_file_tools(void) {
     memset(original, 'x', sizeof(original));
     AGENT_TEST_ASSERT(test_write_file(path, original, sizeof(original), err, sizeof(err)) == 0);
     AGENT_TEST_ASSERT(chmod(path, 0751) == 0);
-#ifdef __APPLE__
-    AGENT_TEST_ASSERT(setxattr(path, "com.p36.agent-test", "keep", 4, 0, 0) == 0);
-#elif defined(__linux__)
+#if defined(__linux__)
     AGENT_TEST_ASSERT(setxattr(path, "user.p36-agent-test", "keep", 4, 0) == 0);
 #endif
 
@@ -59,11 +57,7 @@ static void test_atomic_file_tools(void) {
     AGENT_TEST_ASSERT(lstat(linkpath, &st) == 0 && S_ISLNK(st.st_mode));
     AGENT_TEST_ASSERT(stat(path, &st) == 0 && (st.st_mode & 0777) == 0751);
     AGENT_TEST_ASSERT(st.st_uid == getuid());
-#ifdef __APPLE__
-    char attribute[16];
-    AGENT_TEST_ASSERT(getxattr(path, "com.p36.agent-test", attribute, sizeof(attribute), 0, 0) == 4);
-    AGENT_TEST_ASSERT(!memcmp(attribute, "keep", 4));
-#elif defined(__linux__)
+#if defined(__linux__)
     char attribute[16];
     AGENT_TEST_ASSERT(getxattr(path, "user.p36-agent-test", attribute, sizeof(attribute)) == 4);
     AGENT_TEST_ASSERT(!memcmp(attribute, "keep", 4));

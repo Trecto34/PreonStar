@@ -262,15 +262,6 @@ static bool p36_gpu_tensor_matmul_q8_or_float_scaled(const p36_model *m,
                                                      uint32_t n_tok,
                                                      float scale) {
     if (!t) return false;
-#if defined(P36_METAL)
-    /* Dense Metal has native float-RHS IQ3/K-quant kernels.  Keep the original
-     * activation instead of forcing a host-synchronized q8_K staging pass.
-     * Vulkan retains its tuned q8_K dense path unchanged. */
-    if (P36_MODEL_DENSE) {
-        return p36_gpu_tensor_matmul_scaled(m, t, x, out,
-                                             in_dim, out_dim, n_tok, scale);
-    }
-#endif
     if (t->type == P36_TENSOR_F32 || t->type == P36_TENSOR_F16 ||
         t->type == P36_TENSOR_BF16 || t->type == P36_TENSOR_Q8_0) {
         return p36_gpu_tensor_matmul_scaled(m, t, x, out, in_dim, out_dim, n_tok, scale);
@@ -418,14 +409,12 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
         rt->recur_conv_fused = !quality && !ssd_streaming &&
                                (!env || !env[0] || env[0] != '0');
     }
-#ifndef P36_METAL
     {
         const char *env = getenv("P36_VK_RECURRENT_STATE_F16");
         rt->recur_state_f16 = !quality && !ssd_streaming &&
                               !getenv("P36_VK_STRICT_PARITY") &&
                               (!env || !env[0] || env[0] != '0');
     }
-#endif
     state_dim = (uint64_t)P36_N_SSM_STATE * P36_N_SSM_STATE * P36_N_SSM_DT_RANK;
     hist_rows = P36_N_SSM_CONV - 1u;
     /* Activation scratch carries prefill_cap token rows for batched prefill;
@@ -457,41 +446,6 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
     if (!rt->last_h) goto fail;
     rt->last_h_raw = p36_gpu_tensor_alloc((uint64_t)P36_N_EMBD * sizeof(float));
     if (!rt->last_h_raw) goto fail;
-#ifdef P36_METAL
-    P36_GPU_ALLOC_F32(recur_v, P36_N_SSM_INNER);
-    {
-        const uint64_t attn_kv_bytes =
-            (uint64_t)P36_N_HEAD_KV *
-            (P36_N_HEAD_DIM + P36_N_VALUE_DIM) *
-            prefill_cap * sizeof(float);
-        const uint64_t inp_q8_bytes =
-            (uint64_t)((P36_N_EMBD + P36_QK_K - 1u) / P36_QK_K) *
-            P36_VK_Q8_K_BYTES * prefill_cap;
-        rt->inp_q8 = p36_gpu_tensor_view(
-            rt->recur_v, attn_kv_bytes, inp_q8_bytes);
-        if (!rt->inp_q8) goto fail;
-    }
-    /* Allocate attention partials before recurrent scratch: on Metal, large
-     * contexts can reuse this owner on layers where attention is inactive. */
-    if (!p36_gpu_attn_fused_enabled()) {
-        uint64_t score_bytes = p36_metal_attention_scratch_bytes(
-            (uint32_t)ctx_size, prefill_cap, cache_type_k, cache_type_v);
-        rt->scores = p36_gpu_tensor_alloc(score_bytes);
-        if (!rt->scores) goto fail;
-    }
-    P36_GPU_ALLOC_F32(attn_qg, P36_N_HEAD * P36_N_HEAD_DIM * 2u);
-    P36_GPU_ALLOC_F32(attn_q, P36_N_HEAD * P36_N_HEAD_DIM);
-    rt->attn_k = p36_gpu_tensor_view(rt->recur_v, 0,
-        (uint64_t)P36_N_HEAD_KV * P36_N_HEAD_DIM *
-            prefill_cap * sizeof(float));
-    rt->attn_v = p36_gpu_tensor_view(rt->recur_v,
-        (uint64_t)P36_N_HEAD_KV * P36_N_HEAD_DIM *
-            prefill_cap * sizeof(float),
-        (uint64_t)P36_N_HEAD_KV * P36_N_VALUE_DIM *
-            prefill_cap * sizeof(float));
-    if (!rt->attn_k || !rt->attn_v) goto fail;
-    P36_GPU_ALLOC_F32(attn_out, P36_N_SSM_INNER);
-#else
     uint32_t q8_width = P36_MODEL_DENSE && P36_N_FF_SHARED > P36_N_EMBD ?
         P36_N_FF_SHARED : P36_N_EMBD;
     rt->inp_q8 = quality ?
@@ -503,7 +457,6 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
     P36_GPU_ALLOC_SCRATCH_F32(attn_k, P36_N_HEAD_KV * P36_N_HEAD_DIM);
     P36_GPU_ALLOC_SCRATCH_F32(attn_v, P36_N_HEAD_KV * P36_N_VALUE_DIM);
     P36_GPU_ALLOC_SCRATCH_F32(attn_out, P36_N_SSM_INNER);
-#endif
     if (g_p36_hadamard.enabled) {
         uint32_t had_width = P36_N_EMBD;
         uint64_t signs_total = 0;
@@ -540,61 +493,16 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
     if (!rt->recur_qkv) goto fail;
     if (!rt->recur_conv_fused)
         P36_GPU_ALLOC_F32(recur_window, (uint64_t)P36_N_SSM_CONV * P36_N_SSM_CONV_DIM);
-#ifdef P36_METAL
-    {
-        const uint64_t conv_bytes =
-            (uint64_t)P36_N_SSM_CONV_DIM * prefill_cap * sizeof(float);
-        const uint64_t alpha_bytes =
-            (uint64_t)P36_N_SSM_DT_RANK * prefill_cap * sizeof(float);
-        const uint64_t gb_bytes = alpha_bytes * 2u;
-        const uint64_t aux_bytes = conv_bytes + alpha_bytes * 2u + gb_bytes;
-        if (rt->scores && p36_gpu_tensor_bytes(rt->scores) >= aux_bytes) {
-            uint64_t offset = 0;
-            rt->recur_conv = p36_gpu_tensor_view(
-                rt->scores, offset, conv_bytes);
-            offset += conv_bytes;
-            rt->recur_alpha = p36_gpu_tensor_view(
-                rt->scores, offset, alpha_bytes);
-            offset += alpha_bytes;
-            rt->recur_beta = p36_gpu_tensor_view(
-                rt->scores, offset, alpha_bytes);
-            offset += alpha_bytes;
-            rt->recur_gb = p36_gpu_tensor_view(
-                rt->scores, offset, gb_bytes);
-            if (!rt->recur_conv || !rt->recur_alpha ||
-                !rt->recur_beta || !rt->recur_gb) goto fail;
-        } else {
-            P36_GPU_ALLOC_F32(recur_conv, P36_N_SSM_CONV_DIM);
-            P36_GPU_ALLOC_F32(recur_alpha, P36_N_SSM_DT_RANK);
-            P36_GPU_ALLOC_F32(recur_beta, P36_N_SSM_DT_RANK);
-            P36_GPU_ALLOC_F32(recur_gb, P36_N_SSM_DT_RANK * 2u);
-        }
-    }
-#else
     if (!P36_MODEL_DENSE)
         P36_GPU_ALLOC_F32(recur_conv, P36_N_SSM_CONV_DIM);
-#endif
     rt->recur_z = p36_gpu_tensor_view(rt->attn_q, 0,
         (uint64_t)P36_N_SSM_INNER * prefill_cap * sizeof(float));
     if (!rt->recur_z) goto fail;
-#ifndef P36_METAL
     if (!P36_MODEL_DENSE) {
         P36_GPU_ALLOC_F32(recur_alpha, P36_N_SSM_DT_RANK);
         P36_GPU_ALLOC_F32(recur_beta, P36_N_SSM_DT_RANK);
         P36_GPU_ALLOC_F32(recur_gb, P36_N_SSM_DT_RANK * 2u);
     }
-#endif
-#ifdef P36_METAL
-    /* Recurrent QKV is dead once convolution has produced recur_conv.  The
-     * following delta-net stage needs Q and K simultaneously, so split that
-     * dead row into two views. Command ordering preserves the dependency. */
-    rt->recur_q = p36_gpu_tensor_view(rt->attn_qg, 0,
-        (uint64_t)P36_N_SSM_INNER * prefill_cap * sizeof(float));
-    rt->recur_k = p36_gpu_tensor_view(rt->attn_qg,
-        (uint64_t)P36_N_SSM_INNER * prefill_cap * sizeof(float),
-        (uint64_t)P36_N_SSM_INNER * prefill_cap * sizeof(float));
-    if (!rt->recur_q || !rt->recur_k) goto fail;
-#else
     if (P36_MODEL_DENSE) {
         rt->recur_q = p36_gpu_tensor_view(rt->attn_qg, 0,
             (uint64_t)P36_N_SSM_INNER * prefill_cap * sizeof(float));
@@ -606,67 +514,11 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
         P36_GPU_ALLOC_F32(recur_q, P36_N_SSM_INNER);
         P36_GPU_ALLOC_F32(recur_k, P36_N_SSM_INNER);
     }
-#endif
-#ifndef P36_METAL
     if (!P36_MODEL_DENSE)
         P36_GPU_ALLOC_F32(recur_v, P36_N_SSM_INNER);
-#endif
     rt->recur_proj = p36_gpu_tensor_view(rt->attn_out, 0,
         (uint64_t)P36_N_SSM_INNER * prefill_cap * sizeof(float));
     if (!rt->recur_proj) goto fail;
-#ifdef P36_METAL
-    /* FFN starts after attention/recurrent output and the residual norm, so
-     * their QGV storage is dead for the rest of the layer. Pack all FFN
-     * control/shared tensors into non-overlapping views of that 32 MiB owner. */
-    if (P36_MODEL_DENSE) {
-        /* Dense gate/up need two full-width owners. Mid overwrites gate;
-         * the routed controls, shared tail and scalar are never used.  Large
-         * attention scratch is dead by this point in every layer, so reuse it
-         * for one or both panels when large enough. */
-        const uint64_t ffn_panel_bytes =
-            (uint64_t)P36_N_FF_SHARED * prefill_cap * sizeof(float);
-        if (rt->scores &&
-            p36_gpu_tensor_bytes(rt->scores) >= 2u * ffn_panel_bytes) {
-            rt->ffn_shared_gate = p36_gpu_tensor_view(
-                rt->scores, 0, ffn_panel_bytes);
-            rt->ffn_shared_up = p36_gpu_tensor_view(
-                rt->scores, ffn_panel_bytes, ffn_panel_bytes);
-            if (!rt->ffn_shared_gate || !rt->ffn_shared_up) goto fail;
-        } else if (rt->scores &&
-                   p36_gpu_tensor_bytes(rt->scores) >= ffn_panel_bytes) {
-            rt->ffn_shared_gate = p36_gpu_tensor_view(
-                rt->scores, 0, ffn_panel_bytes);
-            P36_GPU_ALLOC_F32(ffn_shared_up, P36_N_FF_SHARED);
-        } else {
-            P36_GPU_ALLOC_F32(ffn_shared_gate, P36_N_FF_SHARED);
-            P36_GPU_ALLOC_F32(ffn_shared_up, P36_N_FF_SHARED);
-        }
-        rt->ffn_shared_mid = p36_gpu_tensor_view(
-            rt->ffn_shared_gate, 0,
-            (uint64_t)P36_N_FF_SHARED * prefill_cap * sizeof(float));
-        if (!rt->ffn_shared_mid) goto fail;
-    } else {
-        uint64_t ffn_alias_offset = 0;
-#define P36_GPU_ALIAS_FFN(field, n, type) do { \
-        uint64_t alias_bytes = (uint64_t)(n) * prefill_cap * sizeof(type); \
-        rt->field = p36_gpu_tensor_view( \
-            rt->attn_qg, ffn_alias_offset, alias_bytes); \
-        if (!rt->field) goto fail; \
-        ffn_alias_offset += alias_bytes; \
-    } while (0)
-    P36_GPU_ALIAS_FFN(ffn_gate_logits, P36_N_EXPERT, float);
-    P36_GPU_ALIAS_FFN(ffn_selected, P36_N_EXPERT_USED, uint32_t);
-    P36_GPU_ALIAS_FFN(ffn_weights, P36_N_EXPERT_USED, float);
-    P36_GPU_ALIAS_FFN(ffn_shared_gate, P36_N_FF_SHARED, float);
-    P36_GPU_ALIAS_FFN(ffn_shared_up, P36_N_FF_SHARED, float);
-    rt->ffn_shared_mid = p36_gpu_tensor_view(rt->ffn_shared_gate, 0,
-        (uint64_t)P36_N_FF_SHARED * prefill_cap * sizeof(float));
-    if (!rt->ffn_shared_mid) goto fail;
-    P36_GPU_ALIAS_FFN(ffn_shared_out, P36_N_EMBD, float);
-    P36_GPU_ALIAS_FFN(ffn_scalar, 1, float);
-#undef P36_GPU_ALIAS_FFN
-    }
-#else
     if (P36_MODEL_DENSE) {
         P36_GPU_ALLOC_SCRATCH_F32(ffn_shared_gate, P36_N_FF_SHARED);
         P36_GPU_ALLOC_SCRATCH_F32(ffn_shared_up, P36_N_FF_SHARED);
@@ -706,7 +558,6 @@ static p36_vulkan_runtime *p36_vulkan_runtime_create(int ctx_size,
      * saves ctx_size * n_head * prefill_cap floats (128 MiB at ctx 32k). */
     if (!p36_gpu_attn_fused_enabled())
         P36_GPU_ALLOC_SCRATCH_F32(scores, (uint64_t)ctx_size * P36_N_HEAD);
-#endif
     rt->logits = p36_gpu_tensor_alloc((uint64_t)P36_N_VOCAB * sizeof(float));
     rt->top2[0] = p36_gpu_tensor_alloc(2u * sizeof(int32_t));
     rt->top2[1] = p36_gpu_tensor_alloc(2u * sizeof(int32_t));

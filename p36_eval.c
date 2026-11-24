@@ -1516,13 +1516,7 @@ static double now_sec(void) {
 
 static double run_clock_sec(void) {
     struct timespec ts;
-#ifdef CLOCK_UPTIME_RAW
-    /* On Darwin this clock excludes system sleep, which is exactly what the TUI
-     * elapsed counter wants: benchmark runtime, not lid-closed wall time. */
-    clock_gettime(CLOCK_UPTIME_RAW, &ts);
-#else
     clock_gettime(CLOCK_MONOTONIC, &ts);
-#endif
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
@@ -1575,19 +1569,16 @@ static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
 }
 
 static p36_backend parse_backend(const char *s, const char *opt) {
-    if (!strcmp(s, "metal")) return P36_BACKEND_METAL;
     if (!strcmp(s, "vulkan")) return P36_BACKEND_VULKAN;
     if (!strcmp(s, "cpu")) return P36_BACKEND_CPU;
     fprintf(stderr, "p36-eval: invalid value for %s: %s\n", opt, s);
-    fprintf(stderr, "p36-eval: valid backends are: metal, vulkan, cpu\n");
+    fprintf(stderr, "p36-eval: valid backends are: vulkan, cpu\n");
     exit(2);
 }
 
 static p36_backend default_backend(void) {
 #ifdef P36_NO_GPU
     return P36_BACKEND_CPU;
-#elif defined(__APPLE__)
-    return P36_BACKEND_METAL;
 #else
     return P36_BACKEND_VULKAN;
 #endif
@@ -1701,8 +1692,6 @@ static eval_config parse_options(int argc, char **argv) {
             c.backend = parse_backend(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--vulkan")) {
             c.backend = P36_BACKEND_VULKAN;
-        } else if (!strcmp(arg, "--metal")) {
-            c.backend = P36_BACKEND_METAL;
         } else if (!strcmp(arg, "--cpu")) {
             c.backend = P36_BACKEND_CPU;
         } else if (!strcmp(arg, "--cuda") ||

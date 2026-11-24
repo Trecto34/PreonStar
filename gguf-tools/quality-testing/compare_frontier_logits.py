@@ -77,7 +77,7 @@ def validate_expectations(frontiers, ctx, model, backend, quality, quant_bits, v
         raise InvalidDump('expected ctx must exceed the final frontier and fit a signed C int')
     if type(model) is not str or not model or '\0' in model:
         raise InvalidDump('expected model must be a nonempty path string without NUL')
-    if backend not in ('vulkan', 'metal', 'cpu') or type(backend) is not str:
+    if backend not in ('vulkan', 'cpu') or type(backend) is not str:
         raise InvalidDump('unsupported expected backend')
     if type(quality) is not bool or type(quant_bits) is not int or quant_bits not in (0, 2, 4):
         raise InvalidDump('expected quality must be boolean and quant_bits must be 0, 2, or 4')
@@ -205,7 +205,7 @@ def main(argv=None):
     parser.add_argument('--frontiers', type=int, nargs='+', required=True)
     parser.add_argument('--ctx', type=int, required=True)
     parser.add_argument('--model', required=True)
-    parser.add_argument('--backend', choices=('vulkan', 'metal', 'cpu'), required=True)
+    parser.add_argument('--backend', choices=('vulkan', 'cpu'), required=True)
     parser.add_argument('--quality', choices=('true', 'false'), required=True)
     parser.add_argument('--quant-bits', type=int, choices=(0, 2, 4), required=True)
     parser.add_argument('--vocab', type=int, required=True)

@@ -203,31 +203,13 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
 #ifdef P36_NO_GPU
     if (p36_backend_uses_graph(opt->backend)) return 1;
 #else
-#if defined(P36_METAL) && !defined(P36_METAL_TEST_COMPAT)
-    if (opt->backend == P36_BACKEND_VULKAN) {
-        fprintf(stderr, "p36: Vulkan was requested from a Metal binary; use --metal or rebuild with 'make gpu'\n");
-        return 1;
-    }
-#elif !defined(P36_METAL)
-    if (opt->backend == P36_BACKEND_METAL) {
-        fprintf(stderr, "p36: Metal was requested from a Vulkan binary; use --vulkan or build with 'make metal'\n");
-        return 1;
-    }
-#endif
     if (p36_backend_uses_graph(opt->backend) && !p36_gpu_init()) return 1;
 #endif
     e = xcalloc(1, sizeof(*e));
     e->model.fd = -1;
     e->mtp_model.fd = -1;
     e->vision_model.fd = -1;
-#if defined(P36_METAL) && defined(P36_METAL_TEST_COMPAT)
-    /* The GPU ABI is shared by both native runtimes.  Normalize legacy
-     * Vulkan-named test callers to the backend linked into this binary. */
-    e->backend = p36_backend_uses_graph(opt->backend)
-        ? P36_BACKEND_METAL : opt->backend;
-#else
     e->backend = opt->backend;
-#endif
     e->n_threads = p36_resolve_thread_count(opt->n_threads);
     e->cpu_prefill_cap = opt->prefill_chunk ? opt->prefill_chunk : p36_default_cpu_prefill_cap();
     e->prefill_cap_override = opt->prefill_chunk;
@@ -402,7 +384,7 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
             madvise((void *)e->vision_model.map, (size_t)e->vision_model.size, MADV_DONTNEED);
         }
 #endif
-#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+#if !defined(P36_NO_GPU)
         /* Non-F16 matrices are expanded to F16 in the stream buffer. */
         uint64_t vision_stream_bytes = e->vision_model.max_tensor_bytes;
         for (uint64_t i = 0; i < e->vision_model.n_tensors; i++) {
@@ -474,7 +456,7 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
     }
     if (e->ssd_streaming && !p36_backend_supports_ssd_streaming(e->backend)) {
         fprintf(stderr,
-                "p36: --ssd-streaming requires a Metal or Vulkan GPU graph backend\n");
+                "p36: --ssd-streaming requires a Vulkan GPU graph backend\n");
         p36_engine_close(e);
         return 1;
     }
@@ -590,9 +572,6 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
         p36_gpu_set_streaming_full_layers(e->ssd_streaming ?
                                           e->ssd_streaming_full_layers : 0);
         p36_gpu_set_streaming_expert_cache_budget(e->ssd_streaming_cache_experts);
-#ifdef P36_METAL
-        p36_streaming_lock_static_weights(e);
-#endif
         if (e->ssd_streaming) {
             uint64_t slab_gate_bytes = 0, slab_up_bytes = 0;
             uint64_t slab_down_bytes = 0, slab_expert_bytes = 0;
@@ -620,23 +599,6 @@ int p36_engine_open(p36_engine **out, const p36_engine_options *opt) {
             p36_engine_close(e);
             return 1;
         }
-#ifdef P36_METAL
-        if (e->ssd_streaming && e->ssd_streaming_full_layers != 0) {
-            for (uint32_t il = 0;
-                 il < e->ssd_streaming_full_layers; il++) {
-                p36_gpu_stream_expert_table table =
-                    p36_stream_expert_table_make(
-                        &e->model, &e->weights.layer[il], il);
-                if (!p36_gpu_stream_expert_cache_load_layer(&table)) {
-                    fprintf(stderr,
-                            "p36: Metal failed to load full resident routed layer %u\n",
-                            il);
-                    p36_engine_close(e);
-                    return 1;
-                }
-            }
-        }
-#endif
         p36_vulkan_prewarm_weights(e);
         if (!p36_gpu_finish_model_cache()) {
             p36_engine_close(e);

@@ -193,14 +193,12 @@ static server_config parse_options(int argc, char **argv) {
             c.engine.warm_weights = true;
         } else if (!strcmp(arg, "--vulkan")) {
             c.engine.backend = P36_BACKEND_VULKAN;
-        } else if (!strcmp(arg, "--metal")) {
-            c.engine.backend = P36_BACKEND_METAL;
         } else if (!strcmp(arg, "--backend")) {
             c.engine.backend = parse_backend_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--cpu")) {
             c.engine.backend = P36_BACKEND_CPU;
         } else if (!strcmp(arg, "--cuda")) {
-            server_log(P36_LOG_DEFAULT, "p36-server: %s is not supported; use --metal, --vulkan, or --cpu", arg);
+            server_log(P36_LOG_DEFAULT, "p36-server: %s is not supported; use --vulkan or --cpu", arg);
             exit(2);
         } else {
             server_log(P36_LOG_DEFAULT, "p36-server: unknown option: %s", arg);

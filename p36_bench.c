@@ -87,8 +87,8 @@ static void usage(FILE *fp) {
         "\n"
         "Model and backend:\n"
         "  -m, --model FILE       GGUF model path. Default: " P36_DEFAULT_MODEL_PATH "\n"
-        "  --metal | --vulkan | --cpu | --backend NAME\n"
-        "      Select Metal on Apple Silicon, Vulkan on Linux, or CPU.\n"
+        "  --vulkan | --cpu | --backend NAME\n"
+        "      Select Vulkan or CPU.\n"
         "  -t, --threads N        CPU helper threads.\n"
         "  --prefill-chunk N      Override GPU graph prefill width. Default: auto; resident GPU resolves to 1024.\n"
         "  --f32-fast-wide        Opt-in 256-thread f32 matvec: faster, but reassociates the MoE router gate.\n"
@@ -98,10 +98,10 @@ static void usage(FILE *fp) {
         "  --quality              Prefer exact kernels where applicable.\n"
         "  -ctk, --cache-type-k TYPE\n"
         "                         KV cache K type: f16, q8_0, or q4_0.\n"
-        "                         Default: Vulkan/Metal resident q8_0, otherwise f16\n"
+        "                         Default: Vulkan resident q8_0, otherwise f16\n"
         "  -ctv, --cache-type-v TYPE\n"
         "                         KV cache V type: f16, q8_0, or q4_0.\n"
-        "                         Default: Vulkan/Metal resident q4_0, otherwise f16\n"
+        "                         Default: Vulkan resident q4_0, otherwise f16\n"
         "  --warm-weights         Touch mapped tensor pages before benchmarking.\n"
         "  --mtp FILE             Optional MTP support GGUF: the greedy decode runs\n"
         "                         the speculative path when --mtp-draft > 1.\n"
@@ -172,19 +172,16 @@ static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
 }
 
 static p36_backend parse_backend(const char *s, const char *opt) {
-    if (!strcmp(s, "metal")) return P36_BACKEND_METAL;
     if (!strcmp(s, "vulkan")) return P36_BACKEND_VULKAN;
     if (!strcmp(s, "cpu")) return P36_BACKEND_CPU;
     fprintf(stderr, "p36-bench: invalid value for %s: %s\n", opt, s);
-    fprintf(stderr, "p36-bench: valid backends are: metal, vulkan, cpu\n");
+    fprintf(stderr, "p36-bench: valid backends are: vulkan, cpu\n");
     exit(2);
 }
 
 static p36_backend default_backend(void) {
 #ifdef P36_NO_GPU
     return P36_BACKEND_CPU;
-#elif defined(__APPLE__)
-    return P36_BACKEND_METAL;
 #else
     return P36_BACKEND_VULKAN;
 #endif
@@ -292,12 +289,10 @@ static bench_config parse_options(int argc, char **argv) {
             c.backend = parse_backend(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--vulkan")) {
             c.backend = P36_BACKEND_VULKAN;
-        } else if (!strcmp(arg, "--metal")) {
-            c.backend = P36_BACKEND_METAL;
         } else if (!strcmp(arg, "--cpu")) {
             c.backend = P36_BACKEND_CPU;
         } else if (!strcmp(arg, "--cuda")) {
-            fprintf(stderr, "p36-bench: %s is not supported; use --metal, --vulkan, or --cpu\n", arg);
+            fprintf(stderr, "p36-bench: %s is not supported; use --vulkan or --cpu\n", arg);
             exit(2);
         } else if (!strcmp(arg, "--quality")) {
             c.quality = true;

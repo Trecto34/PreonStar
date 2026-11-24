@@ -356,29 +356,6 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
         }
         rt->inp_q8_valid = false;
         bool pair_projected = false;
-#ifdef P36_METAL
-        const char *iq3_pair = getenv("P36_METAL_IQ3_PAIR");
-        if (n_tok == 1u && (!iq3_pair || iq3_pair[0] != '0') &&
-            l->ffn_gate_shexp->type == P36_TENSOR_IQ3_S &&
-            l->ffn_up_shexp->type == P36_TENSOR_IQ3_S) {
-            pair_projected = p36_gpu_matmul_iq3_s_pair_tensor(
-                rt->ffn_shared_gate, rt->ffn_shared_up,
-                m->map, m->size,
-                l->ffn_gate_shexp->abs_offset,
-                l->ffn_up_shexp->abs_offset,
-                P36_N_EMBD, P36_N_FF_SHARED, inp) != 0;
-        } else if (n_tok == 1u && (!iq3_pair || iq3_pair[0] != '0') &&
-                   l->ffn_gate_shexp->type == P36_TENSOR_IQ3_XXS &&
-                   l->ffn_up_shexp->type == P36_TENSOR_IQ3_XXS) {
-            pair_projected = p36_gpu_matmul_iq3_xxs_pair_tensor(
-                rt->ffn_shared_gate, rt->ffn_shared_up,
-                m->map, m->size,
-                l->ffn_gate_shexp->abs_offset,
-                l->ffn_up_shexp->abs_offset,
-                P36_N_EMBD, P36_N_FF_SHARED, inp) != 0;
-        }
-#endif
-#ifndef P36_METAL
         /* Vulkan prefill pair: one dispatch decodes the gate and up tiles
          * against a single staged activation tile.  Small 2..4-row batches
          * (MTP verify) skip the 128-row tile and fall through to the
@@ -398,7 +375,6 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
                     P36_N_EMBD, P36_N_FF_SHARED, ffn_q8, n_tok, 1.0f) != 0;
             }
         }
-#endif
         if (!pair_projected &&
             (!p36_gpu_tensor_matmul_q8_or_float_scaled(
                  m, l->ffn_gate_shexp, ffn_in, ffn_q8,
@@ -411,11 +387,9 @@ static bool p36_forward_ffn_vulkan_model(p36_vulkan_runtime *rt,
             return false;
         }
         bool fused_swiglu_q8 = false;
-#ifndef P36_METAL
         fused_swiglu_q8 = p36_gpu_swiglu_q8_k_tensor(
             rt->ffn_shared_mid, rt->inp_q8, rt->ffn_shared_gate,
             rt->ffn_shared_up, P36_N_FF_SHARED, n_tok, 0.0f, 1.0f);
-#endif
         if (!fused_swiglu_q8 &&
             !p36_gpu_swiglu_tensor(
                  rt->ffn_shared_mid, rt->ffn_shared_gate,
@@ -986,7 +960,6 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
             (uint64_t)n_tok * P36_N_SSM_CONV_DIM * sizeof(float));
     }
     bool front=false;
-#ifndef P36_METAL
     if (!rt->clover_preview && !e->quality && !e->ssd_streaming && n_tok==1u && rt->recur_conv_fused &&
         P36_N_SSM_STATE==128u && P36_N_SSM_CONV==4u &&
         l->ssm_alpha->type==P36_TENSOR_Q8_0 && l->ssm_beta->type==P36_TENSOR_Q8_0) {
@@ -998,7 +971,6 @@ static bool p36_forward_recurrent_vulkan(p36_session *s,
             p36_tensor_scalar_or(&e->model,l->ssm_alpha_scale,1.0f),
             p36_tensor_scalar_or(&e->model,l->ssm_beta_scale,1.0f),P36_RMS_EPS)!=0;
     }
-#endif
     if (front) goto recurrent_update;
     /* alpha/beta read only inp (clean since the qkv barrier): issue them
      * before the conv step so they share qkv/gate's barrier epoch instead
@@ -1160,13 +1132,11 @@ recurrent_update:
         return false;
     }
     bool norm_gate_q8 = false;
-#ifndef P36_METAL
     norm_gate_q8 = !e->quality &&
         p36_gpu_recurrent_norm_gate_q8_k_tensor(
             rt->recur_proj, rt->inp_q8, rt->recur_z,
             e->model.map, e->model.size, l->ssm_norm->abs_offset,
             n_tok * P36_N_SSM_DT_RANK, P36_RMS_EPS);
-#endif
     bool norm_gate_fused = norm_gate_q8 || (!e->quality &&
         p36_gpu_recurrent_norm_gate_tensor(
             rt->recur_proj, rt->recur_z, e->model.map, e->model.size,

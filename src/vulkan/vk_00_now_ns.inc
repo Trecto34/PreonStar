@@ -554,7 +554,7 @@ static p36_vk_host_pool p36_vk_host;
 static pthread_mutex_t p36_vk_host_init_mu = PTHREAD_MUTEX_INITIALIZER;
 static __thread int p36_vk_parallel_depth;
 
-/* Lazy submission, the scheme ds4's Metal runtime uses: dispatches are
+/* Lazy submission, the scheme ds4's runtime uses: dispatches are
  * recorded into one open command buffer with full compute barriers between
  * them, and the batch is submitted and fence-waited only when the host
  * actually reads a tensor.  Every host-side op fetches its pointers through

@@ -474,13 +474,8 @@ static char *agent_tool_list(const agent_tool_call *call) {
  */
 
 static bool agent_same_file_version(const struct stat *a, const struct stat *b) {
-#ifdef __APPLE__
-    struct timespec am = a->st_mtimespec, bm = b->st_mtimespec;
-    struct timespec ac = a->st_ctimespec, bc = b->st_ctimespec;
-#else
     struct timespec am = a->st_mtim, bm = b->st_mtim;
     struct timespec ac = a->st_ctim, bc = b->st_ctim;
-#endif
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
            a->st_size == b->st_size && a->st_nlink == b->st_nlink &&
            am.tv_sec == bm.tv_sec && am.tv_nsec == bm.tv_nsec &&
@@ -592,9 +587,7 @@ static int agent_replace_file(const char *path, const char *data, size_t len,
     if (exists) {
         if (fchown(fd, before.st_uid, before.st_gid) != 0) goto failed;
         if (fchmod(fd, before.st_mode & 07777) != 0) goto failed;
-#ifdef __APPLE__
-        if (fcopyfile(src, fd, NULL, COPYFILE_ACL | COPYFILE_XATTR) != 0) goto failed;
-#elif defined(__linux__)
+#if defined(__linux__)
         if (agent_copy_file_xattrs(src, fd) != 0) goto failed;
 #endif
     }

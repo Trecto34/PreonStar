@@ -166,7 +166,7 @@ static void p36_vision_mm_worker(void *opaque, uint64_t row0, uint64_t row1) {
     }
 }
 
-#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+#if !defined(P36_NO_GPU)
 typedef struct {
     const p36_model *model;
     const p36_tensor *weight;
@@ -208,7 +208,7 @@ static int p36_vision_fill_cb(void *opaque, uint16_t *dst) {
 }
 #endif
 
-#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+#if !defined(P36_NO_GPU)
 static bool p36_vision_ensure_resident_gpu(p36_engine *e) {
     if (e->vision_gpu_buf && e->vision_gpu_offsets) return true;
     p36_model *m = &e->vision_model;
@@ -292,7 +292,7 @@ static bool p36_vision_mm(p36_engine *e, const p36_tensor *weight,
          (weight->dim[0] != in_dim || weight->dim[1] != out_dim)))
         return false;
     if (e->backend == P36_BACKEND_VULKAN) {
-#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+#if !defined(P36_NO_GPU)
         uint64_t in_bytes = (uint64_t)rows * in_dim * sizeof(float);
         uint64_t out_bytes = (uint64_t)rows * out_dim * sizeof(float);
         p36_gpu_tensor *gx = p36_gpu_tensor_alloc_uninitialized(in_bytes);
@@ -423,7 +423,7 @@ static bool p36_vision_attention_ex(p36_engine *e, const float *qkv,
                                     float *out, uint32_t rows,
                                     uint32_t n_heads, uint32_t head_dim) {
     const uint32_t embd = n_heads * head_dim;
-#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+#if !defined(P36_NO_GPU)
     if (e->backend == P36_BACKEND_VULKAN) {
         uint64_t qkv_bytes = (uint64_t)rows * (embd * 3u) * sizeof(float);
         uint64_t out_bytes = (uint64_t)rows * embd * sizeof(float);
@@ -545,7 +545,7 @@ static int p36_vision_encode_image_inkling2v(p36_engine *e,
     if ((uint64_t)merged * merged_dim > wide_count)
         wide_count = (uint64_t)merged * merged_dim;
     bool vk_path = false;
-#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+#if !defined(P36_NO_GPU)
     vk_path = (e->backend == P36_BACKEND_VULKAN);
 #endif
     if (!vk_path) {
@@ -628,7 +628,7 @@ static int p36_vision_encode_image_inkling2v(p36_engine *e,
         }
 
         /* Pre-LayerNorm (on GPU when Vulkan, on CPU otherwise) */
-#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+#if !defined(P36_NO_GPU)
         if (e->backend != P36_BACKEND_VULKAN)
 #endif
         {
@@ -638,7 +638,7 @@ static int p36_vision_encode_image_inkling2v(p36_engine *e,
     }
 
     /* 2. ViT blocks + GPU spatial merge + projector (single batched Vulkan pass) */
-#if !defined(P36_NO_GPU) && !defined(P36_METAL)
+#if !defined(P36_NO_GPU)
     if (e->backend == P36_BACKEND_VULKAN) {
         bool resident = p36_vision_ensure_resident_gpu(e);
         const bool use_hd64 = (head_dim == 64u && p36_gpu_vision_has_hd64());

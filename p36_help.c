@@ -149,17 +149,17 @@ static void print_model_runtime(FILE *fp, const help_colors *c,
     title(fp, c, "Model And Runtime");
     opt(fp, c, "-m, --model FILE", "GGUF model path. Default: " P36_DEFAULT_MODEL_PATH);
     opt(fp, c, "--chat-template FILE", "Load an external .jinja chat template file (disabled by default).");
-    opt(fp, c, "--metal | --vulkan | --cpu", "Select the backend explicitly.");
-    opt(fp, c, "--backend NAME", "Backend name: metal, vulkan, or cpu.");
+    opt(fp, c, "--vulkan | --cpu", "Select the backend explicitly.");
+    opt(fp, c, "--backend NAME", "Backend name: vulkan, or cpu.");
     if (tool != P36_HELP_BENCH) {
         opt(fp, c, "-c, --ctx N", tool == P36_HELP_AGENT ?
             "Allocated context tokens. Default: 100000 for resident GPU and SSD streaming." :
             "Allocated context tokens.");
     }
     opt(fp, c, "-ctk, --cache-type-k TYPE",
-        "KV cache K type: f16, q8_0, or q4_0. Default: Vulkan/Metal resident q8_0, otherwise f16");
+        "KV cache K type: f16, q8_0, or q4_0. Default: Vulkan resident q8_0, otherwise f16");
     opt(fp, c, "-ctv, --cache-type-v TYPE",
-        "KV cache V type: f16, q8_0, or q4_0. Default: Vulkan/Metal resident q4_0, otherwise f16");
+        "KV cache V type: f16, q8_0, or q4_0. Default: Vulkan resident q4_0, otherwise f16");
     if (tool == P36_HELP_SERVER) {
         opt(fp, c, "-n, --tokens N", "Default max output tokens when clients omit a limit.");
         opt(fp, c, "--batched-session N", "Keep N resident sessions and batch decode-ready requests.");

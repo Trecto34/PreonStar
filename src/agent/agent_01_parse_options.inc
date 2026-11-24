@@ -178,8 +178,6 @@ static agent_config parse_options(int argc, char **argv) {
             c.engine.backend = parse_backend(need_arg(&i, argc, argv, arg));
         } else if (!strcmp(arg, "--vulkan")) {
             c.engine.backend = P36_BACKEND_VULKAN;
-        } else if (!strcmp(arg, "--metal")) {
-            c.engine.backend = P36_BACKEND_METAL;
         } else if (!strcmp(arg, "--cpu")) {
             c.engine.backend = P36_BACKEND_CPU;
         } else if (!strcmp(arg, "--cuda") ||

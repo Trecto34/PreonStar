@@ -5,112 +5,33 @@ p36_think_mode p36_think_mode_for_context(p36_think_mode mode, int ctx_size) {
     return mode;
 }
 
-static uint64_t p36_metal_attention_scratch_bytes(
-        uint32_t ctx, uint32_t cap,
-        p36_kv_cache_type cache_type_k,
-        p36_kv_cache_type cache_type_v) {
-#ifdef P36_METAL
-    uint64_t bytes;
-    const char *gqa_env = getenv("P36_METAL_ATTN_GQA");
-    const char *split_env = getenv("P36_METAL_ATTN_SPLIT");
-    const bool gqa = !gqa_env || !gqa_env[0] || gqa_env[0] != '0';
-    const bool split = !split_env || !split_env[0] || split_env[0] != '0';
-    const bool compact = cache_type_k == P36_KV_CACHE_Q8_0 &&
-                         cache_type_v == P36_KV_CACHE_Q4_0;
-
-    if (!compact) return (uint64_t)cap * P36_N_HEAD * ctx * sizeof(float);
-
-    /* Up to 1024 keys Metal uses the dense parallel kernel.  Above that,
-     * normal multi-token prefill uses one partial per 4096-key GQA group;
-     * a one-token tail/decode uses split-K partials.  Size for each path so
-     * compacting this buffer cannot change kernel selection or numerics. */
-    const uint32_t prefix = ctx < 1024u ? ctx : 1024u;
-    const uint32_t prefix_rows = cap < prefix ? cap : prefix;
-    bytes = (uint64_t)prefix_rows * P36_N_HEAD * prefix * sizeof(float);
-    if (gqa) {
-        uint64_t grouped = (uint64_t)cap * P36_N_HEAD *
-            ((ctx + 4095u) / 4096u) * (P36_N_HEAD_DIM + 2u) * sizeof(float);
-        if (grouped > bytes) bytes = grouped;
-    } else if (split) {
-        uint64_t grouped = (uint64_t)cap * P36_N_HEAD *
-            ((ctx + 511u) / 512u) * (P36_N_HEAD_DIM + 2u) * sizeof(float);
-        if (grouped > bytes) bytes = grouped;
-    } else {
-        uint64_t dense = (uint64_t)cap * P36_N_HEAD * ctx * sizeof(float);
-        if (dense > bytes) bytes = dense;
-    }
-    if (split) {
-        uint64_t tail = (uint64_t)P36_N_HEAD *
-            ((ctx + 511u) / 512u) * (P36_N_HEAD_DIM + 2u) * sizeof(float);
-        if (tail > bytes) bytes = tail;
-    } else {
-        uint64_t dense_rows = (uint64_t)P36_N_HEAD * ctx * sizeof(float);
-        if (dense_rows > bytes) bytes = dense_rows;
-    }
-    return bytes;
-#else
-    (void)cache_type_k;
-    (void)cache_type_v;
-    return (uint64_t)cap * P36_N_HEAD * ctx * sizeof(float);
-#endif
-}
-
-static uint64_t p36_vulkan_scratch_bytes(
-        p36_backend backend, uint32_t ctx, uint32_t cap,
-        p36_kv_cache_type cache_type_k,
-        p36_kv_cache_type cache_type_v) {
+static uint64_t p36_vulkan_scratch_bytes(uint32_t ctx, uint32_t cap) {
     uint64_t bytes = 0;
-    uint64_t metal_attention_bytes = backend == P36_BACKEND_METAL ?
-        p36_metal_attention_scratch_bytes(
-            ctx, cap, cache_type_k, cache_type_v) : 0;
     bytes += (uint64_t)cap * P36_N_EMBD * 5u * sizeof(float);
     bytes += (uint64_t)P36_N_EMBD * sizeof(float);
-    if (backend != P36_BACKEND_METAL) {
-        bytes += (uint64_t)cap *
-                 ((P36_N_EMBD + P36_QK_K - 1u) / P36_QK_K) *
-                 P36_VK_Q8_K_BYTES;
-    }
+    bytes += (uint64_t)cap *
+             ((P36_N_EMBD + P36_QK_K - 1u) / P36_QK_K) *
+             P36_VK_Q8_K_BYTES;
     bytes += (uint64_t)cap *
              (P36_N_HEAD * P36_N_HEAD_DIM * 4u +
-              (backend == P36_BACKEND_METAL ? 0u : P36_N_HEAD_KV) *
+              P36_N_HEAD_KV *
                   (P36_N_HEAD_DIM + P36_N_VALUE_DIM)) *
              sizeof(float);
     bytes += (uint64_t)cap * P36_N_SSM_INNER *
-             (backend == P36_BACKEND_METAL ? 1u :
-              P36_MODEL_DENSE ? 0u : 3u) * sizeof(float);
-    {
-        uint64_t recurrent_aux_bytes = (uint64_t)cap *
-            (P36_N_SSM_CONV_DIM + P36_N_SSM_DT_RANK * 4u) * sizeof(float);
-        if ((!P36_MODEL_DENSE && backend != P36_BACKEND_METAL) ||
-            (backend == P36_BACKEND_METAL &&
-             metal_attention_bytes < recurrent_aux_bytes)) {
-            bytes += recurrent_aux_bytes;
-        }
-    }
-    if (backend == P36_BACKEND_METAL && P36_MODEL_DENSE) {
-        const uint64_t dense_ffn_panel_bytes =
-            (uint64_t)cap * P36_N_FF_SHARED * sizeof(float);
-        const uint64_t reusable_panels = metal_attention_bytes /
-            dense_ffn_panel_bytes > 2u ? 2u :
-            metal_attention_bytes / dense_ffn_panel_bytes;
-        /* Attention/recurrent scratch is dead before dense FFN starts.  Reuse
-         * it for as many complete FFN panels as it can hold. */
-        bytes += (2u - reusable_panels) * dense_ffn_panel_bytes;
-    } else if (backend != P36_BACKEND_METAL) {
+             (P36_MODEL_DENSE ? 0u : 3u) * sizeof(float);
+    if (!P36_MODEL_DENSE) {
         bytes += (uint64_t)cap *
-                 (P36_N_FF_SHARED * 2u +
-                  (P36_MODEL_DENSE ? 0u :
-                   P36_N_EXPERT + P36_N_EXPERT_USED * 2u + P36_N_EMBD + 1u)) *
-                 sizeof(float);
+                 (P36_N_SSM_CONV_DIM + P36_N_SSM_DT_RANK * 4u) * sizeof(float);
     }
+    bytes += (uint64_t)cap *
+             (P36_N_FF_SHARED * 2u +
+              (P36_MODEL_DENSE ? 0u :
+               P36_N_EXPERT + P36_N_EXPERT_USED * 2u + P36_N_EMBD + 1u)) *
+             sizeof(float);
     bytes += (uint64_t)P36_N_VOCAB * sizeof(float);
-    if (backend == P36_BACKEND_METAL) {
-        bytes += metal_attention_bytes;
-    } else {
-        bytes += (uint64_t)cap * P36_N_HEAD *
-                 ((ctx + 8191u) / 8192u) *
-                 (P36_N_HEAD_DIM + 2u) * sizeof(float);
-    }
+    bytes += (uint64_t)cap * P36_N_HEAD *
+             ((ctx + 8191u) / 8192u) *
+             (P36_N_HEAD_DIM + 2u) * sizeof(float);
     return bytes;
 }
 
@@ -169,8 +90,7 @@ p36_context_memory p36_context_memory_estimate_configured(
                                   (uint64_t)P36_N_SSM_STATE * P36_N_SSM_STATE *
                                       P36_N_SSM_DT_RANK * sizeof(float));
             m.scratch_bytes = p36_vulkan_scratch_bytes(
-                backend, (uint32_t)ctx_size, m.prefill_cap,
-                cache_type_k, cache_type_v);
+                (uint32_t)ctx_size, m.prefill_cap);
         }
     } else {
         m.raw_bytes = (uint64_t)P36_N_LAYER * P36_N_HEAD_KV *

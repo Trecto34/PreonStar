@@ -989,9 +989,9 @@ static void usage(FILE *fp) {
         "  -c, --ctx N\n"
         "      Context size allocated at startup. Default: 32768\n"
         "  -ctk, --cache-type-k TYPE\n"
-        "      KV cache K type: f16, q8_0, or q4_0. Default: Vulkan/Metal resident q8_0, otherwise f16\n"
+        "      KV cache K type: f16, q8_0, or q4_0. Default: Vulkan resident q8_0, otherwise f16\n"
         "  -ctv, --cache-type-v TYPE\n"
-        "      KV cache V type: f16, q8_0, or q4_0. Default: Vulkan/Metal resident q4_0, otherwise f16\n"
+        "      KV cache V type: f16, q8_0, or q4_0. Default: Vulkan resident q4_0, otherwise f16\n"
         "  -n, --tokens N          (alias: --default-tokens)\n"
         "      Default max output tokens when the client omits a limit. Default: 262144 (256K)\n"
         "  --presence-penalty F    (alias: --default-presence-penalty)\n"
@@ -1045,8 +1045,8 @@ static void usage(FILE *fp) {
         "      Override the number of dynamic expert slots preloaded at startup.\n"
         "  --simulate-used-memory NGB\n"
         "      Reserve memory before auto-sizing the streaming cache.\n"
-        "  --metal | --vulkan | --cpu | --backend NAME\n"
-        "      Select Metal on Apple Silicon, Vulkan on Linux, or CPU.\n"
+        "  --vulkan | --cpu | --backend NAME\n"
+        "      Select Vulkan or CPU.\n"
         "\n"
         "HTTP API:\n"
         "  --vision FILE\n"
@@ -1141,19 +1141,16 @@ static void usage(FILE *fp) {
 }
 
 static p36_backend parse_backend_arg(const char *s, const char *arg) {
-    if (!strcmp(s, "metal")) return P36_BACKEND_METAL;
     if (!strcmp(s, "vulkan")) return P36_BACKEND_VULKAN;
     if (!strcmp(s, "cpu")) return P36_BACKEND_CPU;
     server_log(P36_LOG_DEFAULT, "p36-server: invalid %s value: %s", arg, s);
-    server_log(P36_LOG_DEFAULT, "p36-server: valid server backends are: metal, vulkan, cpu");
+    server_log(P36_LOG_DEFAULT, "p36-server: valid server backends are: vulkan, cpu");
     exit(2);
 }
 
 static p36_backend default_server_backend(void) {
 #ifdef P36_NO_GPU
     return P36_BACKEND_CPU;
-#elif defined(__APPLE__)
-    return P36_BACKEND_METAL;
 #else
     return P36_BACKEND_VULKAN;
 #endif

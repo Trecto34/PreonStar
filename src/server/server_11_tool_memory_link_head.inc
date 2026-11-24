@@ -350,7 +350,7 @@ static void apply_openai_stream_tool_ids(tool_calls *calls,
 /* Tokenizers may merge text across the prompt boundary.  Trimming a small tail
  * still improves the cheap token-prefix path, while text-prefix lookup handles
  * the cases where canonical prompt tokenization spells the same bytes
- * differently.  The 2048 alignment also matches the Metal prefill chunk
+ * differently.  The 2048 alignment also matches the prefill chunk
  * schedule, which keeps compressor row finalization identical to a cold full
  * prompt. */
 #define KV_CACHE_DEFAULT_BOUNDARY_TRIM_TOKENS 32

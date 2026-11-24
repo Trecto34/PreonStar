@@ -3,18 +3,8 @@ CC ?= cc
 CXX ?= c++
 GLSLC ?= ./glslc
 .DEFAULT_GOAL := all
-UNAME_S := $(shell uname -s)
 
-ifeq ($(UNAME_S),Darwin)
-# Release-safe Apple Silicon baseline. Local-only builds may override this with
-# NATIVE_CPU_FLAG=-mcpu=native, but published binaries must remain M1-capable.
-NATIVE_CPU_FLAG ?= -mcpu=apple-m1
-MACOSX_DEPLOYMENT_TARGET ?= 11.0
-DARWIN_MIN_FLAG := -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)
-else
 NATIVE_CPU_FLAG ?= -march=native
-DARWIN_MIN_FLAG :=
-endif
 
 CFLAGS ?= -O3 -ffast-math $(NATIVE_CPU_FLAG) -Wall -Wextra -std=c99
 LLAMA_CPP_DIR ?= llama.cpp
@@ -42,14 +32,11 @@ LLAMA_LDLIBS := -lstdc++ -fopenmp
 # include project headers by bare name, so the tree root and each module directory
 # must be on the quoted-include search path for every compile.
 SRC_INCS := -I. -Isrc/core -Isrc/server -Isrc/agent -Isrc/vulkan
-CPU_CFLAGS := $(filter-out -ffast-math,$(CFLAGS)) $(DARWIN_MIN_FLAG) -D_GNU_SOURCE -fno-finite-math-only -DP36_NO_GPU $(SRC_INCS)
-GPU_CFLAGS := $(CFLAGS) $(DARWIN_MIN_FLAG) -D_GNU_SOURCE -fno-finite-math-only $(SRC_INCS)
+CPU_CFLAGS := $(filter-out -ffast-math,$(CFLAGS)) -D_GNU_SOURCE -fno-finite-math-only -DP36_NO_GPU $(SRC_INCS)
+GPU_CFLAGS := $(CFLAGS) -D_GNU_SOURCE -fno-finite-math-only $(SRC_INCS)
 VULKAN_CFLAGS ?=
 LDLIBS ?= -lm -pthread
 GPU_LDLIBS := $(LDLIBS) -ldl -lvulkan
-METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
-METAL_LDFLAGS := $(LDFLAGS) $(DARWIN_MIN_FLAG)
-METAL_SRCS := $(wildcard metal/*.metal)
 VULKAN_SHADERS := \
 	vulkan/gdn_front.spv \
 	vulkan/matmul_f16.spv \
@@ -856,7 +843,6 @@ vulkan/attn_decode_fa_f16_gqa8.spv: vulkan/attn_decode_fa.comp
 # Vulkan is the default backend. CORE_OBJS holds the GPU engine; CPU_CORE_OBJS
 # is the -DP36_NO_GPU reference build selected by `make cpu`.
 CORE_OBJS := p36_gpu_core.o p36_vulkan.o p36_image.o
-METAL_CORE_OBJS := p36_gpu_core_metal.o p36_metal.o p36_image.o
 CPU_CORE_OBJS := p36_cpu.o p36_image.o
 
 # Fragment lists. These are prerequisites so that editing a fragment rebuilds the
@@ -867,7 +853,7 @@ SERVER_INCS := $(wildcard src/server/*.inc)
 AGENT_INCS := $(wildcard src/agent/*.inc)
 VK_INCS := $(wildcard src/vulkan/*.inc)
 
-.PHONY: test-state-machine test-quality test-cli all help cpu gpu vulkan vulkan-generic vulkan-bc250 metal p36-quality-score test test-metal test-metal-model test-qwen27b-metal-parity test-qwen27b-vulkan-parity test-qwen27b-llama-parity test-quick test-all test-unit test-vulkan test-streaming test-mtp test-model test-session-batch test-server-live test-server-live-metal test-server-live-metal-ssd test-server-batching test-server-batching-metal test-server-batching-metal-ssd test-release release-build-check release-build-check-metal benchmark-gate benchmark-session-batch benchmark-qwen27b benchmark-qwen27b-gate benchmark-qwen27b-metal-gate benchmark-qwen27b-vulkan benchmark-qwen27b-metal benchmark-qwen27b-llama test-reference test-reference-local test-vectors-local reference-openrouter test-llama test-llama-long test-llama-batch test-llama-all clean
+.PHONY: test-state-machine test-quality test-cli all help cpu gpu vulkan vulkan-generic vulkan-bc250 p36-quality-score test test-qwen27b-vulkan-parity test-qwen27b-llama-parity test-quick test-all test-unit test-vulkan test-streaming test-mtp test-model test-session-batch test-server-live test-server-batching test-release release-build-check benchmark-gate benchmark-session-batch benchmark-qwen27b benchmark-qwen27b-gate benchmark-qwen27b-vulkan benchmark-qwen27b-llama test-reference test-reference-local test-vectors-local reference-openrouter test-llama test-llama-long test-llama-batch test-llama-all clean
 
 all: p36 p36-server p36-bench p36-agent p36-eval p36_test
 
@@ -876,10 +862,6 @@ help:
 	@echo "  make              Build generic Vulkan with automatic BC-250 fast-path selection (default)"
 	@echo "  make vulkan-generic  Build generic Vulkan for runtime capability detection"
 	@echo "  make vulkan-bc250    Build Vulkan and require an AMD BC-250 at runtime"
-	@echo "  make metal        Build the same binaries with the Metal backend (macOS)"
-	@echo "  make test-metal   Build Metal and run its model-independent unit and kernel tests"
-	@echo "  make test-metal-model  Run Metal model, parity, streaming, and state tests"
-	@echo "  make test-qwen27b-metal-parity  Run short CPU/Metal parity for the IQ3_S 27B model"
 	@echo "  make test-qwen27b-vulkan-parity  Run short CPU/Vulkan parity for the IQ3_S 27B model"
 	@echo "  make test-qwen27b-llama-parity  Run short llama.cpp/CPU parity for the IQ3_S 27B model"
 	@echo "  make cpu          Build CPU-only ./p36, ./p36-server, ./p36-bench, ./p36-agent, ./p36-eval, and ./p36_test"
@@ -889,7 +871,6 @@ help:
 	@echo "  make benchmark-session-batch  Benchmark old, 1/2/4/8-slot, and ordered-fallback server decode"
 	@echo "  make benchmark-qwen27b  Benchmark p36 at 128, 2048, and 4096 prompt tokens, then llama.cpp at its fitting context"
 	@echo "  make benchmark-qwen27b-gate  Quick 128/2048 comparison gate with 32 decode tokens"
-	@echo "  make benchmark-qwen27b-metal-gate  Quick Metal 128/2048 gate with 32 decode tokens"
 	@echo "  make test-reference       Compare P36 CPU against tracked llama.cpp results"
 	@echo "  make test-reference-local Compare P36 CPU against ignored local results"
 	@echo "  make test-vectors-local   Capture ignored local llama.cpp results"
@@ -906,14 +887,6 @@ vulkan-generic:
 
 vulkan-bc250:
 	$(MAKE) -B all VULKAN_CFLAGS=-DP36_VULKAN_REQUIRE_BC250
-
-metal: p36_cli_metal.o p36_server.o p36_bench.o p36_agent.o p36_eval.o p36_eval_cases.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o rax.o p36_test_metal.o p36_gpu_core_metal_test.o $(METAL_CORE_OBJS)
-	$(CC) $(METAL_LDFLAGS) -o p36 p36_cli_metal.o p36_ssd.o p36_prompt_prefix.o linenoise.o $(METAL_CORE_OBJS) $(METAL_LDLIBS)
-	$(CC) $(METAL_LDFLAGS) -o p36-server p36_server.o rax.o p36_ssd.o p36_prompt_prefix.o $(METAL_CORE_OBJS) $(METAL_LDLIBS)
-	$(CC) $(METAL_LDFLAGS) -o p36-bench p36_bench.o p36_ssd.o p36_prompt_prefix.o $(METAL_CORE_OBJS) $(METAL_LDLIBS)
-	$(CC) $(METAL_LDFLAGS) -o p36-agent p36_agent.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o $(METAL_CORE_OBJS) $(METAL_LDLIBS)
-	$(CC) $(METAL_LDFLAGS) -o p36-eval p36_eval.o p36_eval_cases.o p36_help.o p36_ssd.o p36_prompt_prefix.o $(METAL_CORE_OBJS) $(METAL_LDLIBS)
-	$(CC) $(METAL_LDFLAGS) -o p36_test p36_test_metal.o rax.o p36_ssd.o p36_prompt_prefix.o p36_image.o p36_gpu_core_metal_test.o p36_metal.o $(METAL_LDLIBS)
 
 p36: p36_cli.o p36_ssd.o p36_prompt_prefix.o linenoise.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ p36_cli.o p36_ssd.o p36_prompt_prefix.o linenoise.o $(CORE_OBJS) $(GPU_LDLIBS)
@@ -1060,20 +1033,8 @@ cpu: p36_cli_cpu.o linenoise_cpu.o p36_server_cpu.o rax_cpu.o p36_bench_cpu.o p3
 p36_gpu_core.o: p36.c p36.h p36_image.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc $(CORE_INCS)
 	$(CC) $(GPU_CFLAGS) -c -o $@ p36.c
 
-p36_gpu_core_metal.o: p36.c p36.h p36_image.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc $(CORE_INCS)
-	$(CC) $(GPU_CFLAGS) -DP36_METAL -c -o $@ p36.c
-
-p36_gpu_core_metal_test.o: p36.c p36.h p36_gpu.h p36_quant.h p36_ssd.h p36_iq_tables.h p36_iq3s_grid_values.inc p36_streaming_hotlist.inc $(CORE_INCS)
-	$(CC) $(GPU_CFLAGS) -DP36_METAL -DP36_METAL_TEST_COMPAT -c -o $@ p36.c
-
-p36_cli_metal.o: p36_prompt_prefix.h p36_cli.c p36.h p36_cli_args.h p36_ssd.h linenoise.h
-	$(CC) $(GPU_CFLAGS) -DP36_METAL -c -o $@ p36_cli.c
-
 p36_vulkan.o: p36_vulkan.c p36_gpu.h p36_quant.h p36_iq2_tables_vulkan.inc p36_iq_tables.h p36_iq3s_grid_values.inc $(VULKAN_SHADERS) $(VK_INCS)
 	$(CC) $(GPU_CFLAGS) $(VULKAN_CFLAGS) -c -o $@ p36_vulkan.c
-
-p36_metal.o: p36_metal.m p36_gpu.h p36_quant.h p36_ssd.h $(METAL_SRCS)
-	$(CC) $(GPU_CFLAGS) -fobjc-arc -c -o $@ p36_metal.m
 
 p36_cli.o: p36_prompt_prefix.h p36_cli.c p36.h p36_cli_args.h p36_ssd.h linenoise.h
 	$(CC) $(GPU_CFLAGS) -c -o $@ p36_cli.c
@@ -1107,9 +1068,6 @@ p36_remote.o: p36_remote.c p36_remote.h
 
 p36_test.o: tests/p36_test.c p36_server.c p36.h p36_cli_args.h rax.h p36_gpu.h p36_tool_text.h $(SERVER_INCS)
 	$(CC) $(GPU_CFLAGS) -Wno-unused-function -c -o $@ tests/p36_test.c
-
-p36_test_metal.o: tests/p36_test.c p36_server.c p36.h p36_cli_args.h rax.h p36_gpu.h p36_tool_text.h $(SERVER_INCS)
-	$(CC) $(GPU_CFLAGS) -DP36_METAL -Wno-unused-function -c -o $@ tests/p36_test.c
 
 gguf-tools/quality-testing/score_openrouter.o: gguf-tools/quality-testing/score_openrouter.c p36.h p36_cli_args.h p36_ssd.h p36_prompt_prefix.h
 	$(CC) $(GPU_CFLAGS) -I. -c -o $@ gguf-tools/quality-testing/score_openrouter.c
@@ -1207,7 +1165,7 @@ tests/test_sampling.o: tests/test_sampling.c p36.h p36_cli_args.h
 	$(CC) $(CPU_CFLAGS) -DP36_TEST_HOOKS -I. -c -o $@ $<
 
 $(SAMPLING_TEST): tests/test_sampling.o p36_sampling_test_core.o p36_ssd_cpu.o p36_prompt_prefix.o p36_image.o
-	$(CC) $(LDFLAGS) $(DARWIN_MIN_FLAG) -o $@ $^ $(LDLIBS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(WEB_STATE_TEST): tests/test_web_state.c p36_web.c p36_web.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -D_GNU_SOURCE -I. -o $@ $< $(LDLIBS)
@@ -1251,21 +1209,6 @@ check: all $(WEB_STATE_TEST)
 	./p36_test --server
 	@echo "check: ok"
 
-test-metal: metal p36_agent_test_metal $(SAMPLING_TEST)
-	./p36-eval --self-test-extractors
-	./p36_agent_test_metal
-	python3 tests/test_agent_password.py ./p36_agent_test_metal
-	./tests/test_sampling
-	./p36_test --quant-primitives --ssd-cache-shrink --qwen-tool-call-format --vector-fixtures --server
-	./p36_test --vulkan-kernels
-
-test-metal-model: metal
-	@echo "=== Metal model-dependent tests (requires p36moe.gguf) ==="
-	./p36_test --tool-call-quality --qwen-tool-call-quality --thinking-generation --kv-cache-save-restore --session-sync-resume --gpu-cpu-parity --vulkan-fusion-parity --ssd-streaming-parity --mtp-verifier
-
-test-qwen27b-metal-parity: metal
-	./p36_test --dense-quant-model-rows --gpu-cpu-parity --model $(QWEN27B_MODEL) --case short
-
 test-qwen27b-vulkan-parity: p36_test
 	./p36_test --vulkan-cpu-parity --model $(QWEN27B_MODEL) --case short
 
@@ -1295,20 +1238,8 @@ test-session-batch: p36_test
 test-server-live: p36-server
 	./tests/server_live_smoke.sh
 
-test-server-live-metal: metal
-	./tests/server_live_smoke.sh --metal
-
-test-server-live-metal-ssd: metal
-	./tests/server_live_smoke.sh --metal --ssd-streaming
-
 test-server-batching: p36-server
 	./tests/server_batching.sh
-
-test-server-batching-metal: metal
-	./tests/server_batching.sh --metal
-
-test-server-batching-metal-ssd: metal
-	./tests/server_batching.sh --metal --ssd-streaming
 
 benchmark-session-batch: p36-server
 	./tests/benchmark_server_batching.sh
@@ -1322,19 +1253,10 @@ benchmark-qwen27b-gate: p36-bench
 	./p36-bench --vulkan -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 128 --ctx-max 128 --ctx-alloc 512 --prefill-chunk 128 --gen-tokens $(QWEN27B_GATE_GEN)
 	./p36-bench --vulkan -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 2048 --ctx-max 2048 --ctx-alloc 2304 --gen-tokens $(QWEN27B_GATE_GEN)
 
-benchmark-qwen27b-metal-gate: metal
-	./p36-bench --metal -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 128 --ctx-max 128 --ctx-alloc 512 --prefill-chunk 128 --gen-tokens $(QWEN27B_GATE_GEN)
-	./p36-bench --metal -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 2048 --ctx-max 2048 --ctx-alloc 2304 --gen-tokens $(QWEN27B_GATE_GEN)
-
 benchmark-qwen27b-vulkan: p36-bench
 	./p36-bench --vulkan -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 128 --ctx-max 128 --ctx-alloc 512 --prefill-chunk 128 --gen-tokens $(QWEN27B_GEN)
 	./p36-bench --vulkan -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 2048 --ctx-max 2048 --ctx-alloc 2304 --gen-tokens $(QWEN27B_GEN)
 	./p36-bench --vulkan -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 4096 --ctx-max 4096 --ctx-alloc 4352 --gen-tokens $(QWEN27B_GEN)
-
-benchmark-qwen27b-metal: metal
-	./p36-bench --metal -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 128 --ctx-max 128 --ctx-alloc 512 --prefill-chunk 128 --gen-tokens $(QWEN27B_GEN)
-	./p36-bench --metal -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 2048 --ctx-max 2048 --ctx-alloc 2304 --gen-tokens $(QWEN27B_GEN)
-	./p36-bench --metal -m $(QWEN27B_MODEL) --prompt-file $(QWEN27B_PROMPT) --ctx-start 4096 --ctx-max 4096 --ctx-alloc 4352 --gen-tokens $(QWEN27B_GEN)
 
 benchmark-qwen27b-llama:
 	$(QWEN27B_LLAMA_BENCH) -m $(QWEN27B_MODEL) -p $(QWEN27B_LLAMA_PROMPT) -n 0 -r 1 -b $(QWEN27B_LLAMA_PROMPT) -ub $(QWEN27B_LLAMA_PROMPT) -fa off --no-warmup
@@ -1344,9 +1266,6 @@ release-build-check:
 	$(MAKE) -B CFLAGS='$(CFLAGS) -Werror' VULKAN_CFLAGS=-DP36_VULKAN_REQUIRE_BC250 all
 	$(MAKE) -B CFLAGS='$(filter-out -ffast-math,$(CFLAGS)) -Werror' cpu
 	$(MAKE) -B CFLAGS='$(CFLAGS) -Werror' VULKAN_CFLAGS= all
-
-release-build-check-metal:
-	$(MAKE) -B CFLAGS='$(CFLAGS) -Werror' metal
 
 test-release:
 	$(MAKE) test
@@ -1425,14 +1344,8 @@ p36_agent_test.o: p36_loopguard.h p36_remote.h p36_prompt_prefix.h tests/p36_age
 p36_agent_test: p36_agent_test.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o $(CORE_OBJS)
 	$(CC) $(GPU_CFLAGS) -o $@ p36_agent_test.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o $(CORE_OBJS) $(GPU_LDLIBS)
 
-p36_agent_test_metal.o: p36_prompt_prefix.h tests/p36_agent_test.c p36_agent.c p36.h p36_cli_args.h p36_help.h p36_kvstore.h p36_ssd.h p36_web.h linenoise.h p36_tool_text.h $(AGENT_INCS)
-	$(CC) $(GPU_CFLAGS) -DP36_METAL -Wno-unused-function -c -o $@ tests/p36_agent_test.c
-
-p36_agent_test_metal: p36_agent_test_metal.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o $(METAL_CORE_OBJS)
-	$(CC) $(METAL_LDFLAGS) -o $@ p36_agent_test_metal.o p36_help.o p36_kvstore.o p36_ssd.o p36_prompt_prefix.o p36_web.o p36_remote.o linenoise.o $(METAL_CORE_OBJS) $(METAL_LDLIBS)
-
 clean:
-	rm -f p36 p36-server p36-perplexity p36-bench p36-agent p36-eval p36_test p36_reference_test p36_llama_test p36_agent_test p36_agent_test_metal $(SAMPLING_TEST) tests/test_sampling.o tests/test_prompt_prefix tests/test_quality_api gguf-tools/quality-testing/score_openrouter gguf-tools/quality-testing/score_openrouter.o *.o $(VULKAN_SHADERS)
+	rm -f p36 p36-server p36-perplexity p36-bench p36-agent p36-eval p36_test p36_reference_test p36_llama_test p36_agent_test $(SAMPLING_TEST) tests/test_sampling.o tests/test_prompt_prefix tests/test_quality_api gguf-tools/quality-testing/score_openrouter gguf-tools/quality-testing/score_openrouter.o *.o $(VULKAN_SHADERS)
 
 p36_prompt_prefix.o: p36_prompt_prefix.c p36_prompt_prefix.h p36.h
 	$(CC) $(CPU_CFLAGS) -c -o $@ p36_prompt_prefix.c
@@ -1441,7 +1354,7 @@ tests/test_prompt_prefix: tests/test_prompt_prefix.c p36_prompt_prefix.o p36_cli
 	$(CC) $(CPU_CFLAGS) -I. -o $@ $< p36_prompt_prefix.o $(LDLIBS)
 
 tests/test_quality_api: tests/test_quality_api.c gguf-tools/quality-testing/score_openrouter.c p36.h p36_cli_args.h
-	$(CC) $(CPU_CFLAGS) -ffunction-sections -fdata-sections -I. $(if $(filter Darwin,$(shell uname -s)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections) -o $@ $< $(LDLIBS)
+	$(CC) $(CPU_CFLAGS) -ffunction-sections -fdata-sections -I. -Wl$(comma)--gc-sections -o $@ $< $(LDLIBS)
 
 test-quality: tests/test_prompt_prefix tests/test_quality_api
 	./tests/test_prompt_prefix
