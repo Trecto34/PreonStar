@@ -4915,3 +4915,18 @@ was DRAM access order (every WG walking its own 10 KB patch in 72-B steps) plus 
 * Skill bench R2 (ctl/cand/ctl, 6): 81.54 / 81.34 / 81.54 t/s. The harness gain does not survive real data, most
   likely LDS bank conflicts once table indices are random (zero tables make every lane read one address).
   Lesson: harness-test LDS-table changes with real table contents and real weights.
+
+## 2026-11-23 Inkling-2-Mini attention prefill at long context: far-tile rel-bias skip + next-tile K/V prefetch — ACCEPTED, bit-identical
+
+Profile 0->4k vs 0->32k (MiniPlus-R2): everything except `inkling2_attn_prefill_q8` stays ~1.2 ms/token; attention grows
+0.15 -> 0.52 ms/token (12% -> 30%), all from the 8 full-attention logical layers (~100 ms per 1024-token chunk each at
+32k, ~3.9 TFLOPS vs ~5 TFLOPS for the SWA layers). Sweep before: 0-4k 731, 4-8k 687, 8-16k 622, 16-32k 510 t/s.
+
+* **Far-tile rel-bias skip.** rel_bias is 0 beyond rel_extent (1024), yet every tile staged 40x16 bias floats and ran
+  48 FMAs per key. Workgroup-uniform `far_tile = d_base >= rel_extent` skips both (exact: the skipped FMAs add +0.0).
+  16k->32k: 516.9 / **527.4** / 514.8 t/s (+2.2%); 0->16k +1.1%.
+* **Next-tile prefetch.** Raw int8 K/V words of tile kb+32 are loaded into registers before computing tile kb (load ->
+  barrier -> compute was fully exposed at ~2 WGs/CU). VGPR 128 unchanged, LDS unchanged.
+  16k->32k: 532.0 / **542.0** / 528.1 (+1.9%); 0->16k +1.4%.
+* **Parity.** Full logits dumped at an 8k frontier (`p36-bench --dump-frontier-logits-dir`) md5-identical to HEAD for
+  int8 KV (9a9677979a7de5cb) and P36_INK_KV_F16=1 (39bc6455214c37dd). parity.sh alone does not reach far tiles.

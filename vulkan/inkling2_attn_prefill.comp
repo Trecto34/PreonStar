@@ -27,10 +27,19 @@ vec4 kvq8(uint w, uint sw, uint lane) {
 }
 #define LOAD_KV(BUF, hb) kvq8(BUF[(hb) + lane], BUF[(hb) + 32u + (lane >> 4u)], lane)
 #define KV_ELEM uint
+/* Raw words prefetched one tile ahead (16 VGPRs), decoded when written to LDS. */
+#define KV_RAW uvec2
+#define KV_RAW_ZERO uvec2(0u)
+#define LOAD_RAW(BUF, hb) uvec2(BUF[(hb) + lane], BUF[(hb) + 32u + (lane >> 4u)])
+#define DECODE_RAW(u) kvq8((u).x, (u).y, lane)
 #else
 #define KV_HEAD(slot) (((slot) * pc.n_head_kv + kvh) * 32u)
 #define LOAD_KV(BUF, hb) vec4(BUF[(hb) + lane])
 #define KV_ELEM f16vec4
+#define KV_RAW f16vec4
+#define KV_RAW_ZERO f16vec4(0.0)
+#define LOAD_RAW(BUF, hb) BUF[(hb) + lane]
+#define DECODE_RAW(u) vec4(u)
 #endif
 
 layout(set = 0, binding = 0) readonly buffer QBuf { vec4 q_buf[]; };
@@ -119,29 +128,44 @@ void main(void) {
     uint mask = pc.kv_cap - 1u;
     uint q_pos0 = pc.pos0 + t0;
 
+    /* K/V of the next tile are fetched into registers while the current one is computed,
+     * so the global-load latency (DRAM at long context) overlaps the math. */
+    KV_RAW pk[4], pv[4];
+#define FETCH_TILE(KB) \
+    [[unroll]] for (uint r = 0u; r < 4u; r++) { \
+        uint k_idx = (KB) + hw + r * 8u; \
+        pk[r] = KV_RAW_ZERO; pv[r] = KV_RAW_ZERO; \
+        if (k_idx < k_end_tile) { \
+            if (pc.is_swa != 0u && k_idx >= pc.pos0) { \
+                uint kv_base = KV_HEAD(k_idx - pc.pos0); \
+                pk[r] = LOAD_RAW(new_k, kv_base); \
+                pv[r] = LOAD_RAW(new_v, kv_base); \
+            } else { \
+                uint slot = (pc.is_swa != 0u) ? (k_idx & mask) : k_idx; \
+                uint kv_base = KV_HEAD(slot); \
+                pk[r] = LOAD_RAW(cache_k, kv_base); \
+                pv[r] = LOAD_RAW(cache_v, kv_base); \
+            } \
+        } \
+    }
+    FETCH_TILE(k_min_tile)
+
     for (uint kb = k_min_tile; kb < k_end_tile; kb += BK) {
-        /* 256 threads load 32 rows x 32 lanes of K/V (+40 rel_bias rows) into LDS. */
+        /* 256 threads write 32 rows x 32 lanes of K/V (+40 rel_bias rows) into LDS. */
         [[unroll]] for (uint r = 0u; r < 4u; r++) {
             uint row = hw + r * 8u;
-            uint k_idx = kb + row;
-            vec4 kv = vec4(0.0), vv = vec4(0.0);
-            if (k_idx < k_end_tile) {
-                if (pc.is_swa != 0u && k_idx >= pc.pos0) {
-                    uint kv_base = KV_HEAD(k_idx - pc.pos0);
-                    kv = LOAD_KV(new_k, kv_base);
-                    vv = LOAD_KV(new_v, kv_base);
-                } else {
-                    uint slot = (pc.is_swa != 0u) ? (k_idx & mask) : k_idx;
-                    uint kv_base = KV_HEAD(slot);
-                    kv = LOAD_KV(cache_k, kv_base);
-                    vv = LOAD_KV(cache_v, kv_base);
-                }
-            }
+            vec4 kv = DECODE_RAW(pk[r]), vv = DECODE_RAW(pv[r]);
             sh_k[row * K_STRIDE + 2u * lane]      = packFloat2x16(f16vec2(kv.xy));
             sh_k[row * K_STRIDE + 2u * lane + 1u] = packFloat2x16(f16vec2(kv.zw));
             sh_v[row][lane] = f16vec4(vv);
         }
+        if (kb + BK < k_end_tile) FETCH_TILE(kb + BK)
         uint d_base = (q_pos0 >= kb + 31u) ? (q_pos0 - kb - 31u) : 0u;
+        /* Workgroup-uniform: every (query, key) pair of this tile is >= rel_extent apart, so
+         * every rel_bias row is 0 and the bias FMAs would add exact zeros -- skip both
+         * (full-attention layers at long context: almost every tile). */
+        bool far_tile = d_base >= pc.rel_extent;
+        if (!far_tile)
         for (uint idx = tid; idx < RB_ROWS * 16u; idx += 256u) {
             uint rr = idx >> 4u;
             uint cc = idx & 15u;
@@ -166,6 +190,7 @@ void main(void) {
                     a2 += dot8(sh_q[hw][2][c], k0, k1, k2, k3);
                 }
                 uint rbr = (q_pos - key - d_base) * RB_STRIDE;
+                if (!far_tile)
                 [[unroll]] for (uint c = 0u; c < 16u; c++) {
                     float rb = sh_rb[rbr + c];
                     a0 = fma(sh_r[hw][0][c], rb, a0);
