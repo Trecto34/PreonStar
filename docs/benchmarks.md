@@ -101,7 +101,10 @@ about 20-28% slower and looks like a regression.
 
 | Model | Context | Measurement | Result | Date / source |
 |---|---:|---|---:|---|
-| Axion-1.0-35B (MoE) | 1024 | decode, gen 64 | **111.78 t/s** (from ~103.9 at sprint start, bit-identical) | 2026-11-20, ROADMAP.md |
+| Sage-A1.5 NanoPlus-V2.1 (Qwen3.6-35B-A3B finetune) | 2048 | pp2048 / tg128 | **415.2 / 112.7 t/s** | 2026-11-24, `p36-bench`, 1 run |
+| Inkling-2-Mini NanoPlus-V2.1 | 2048 | pp2048 / tg128 | **740.9 / 83.7 t/s** | 2026-11-24, `p36-bench`, 1 run |
+| Inkling-2-Mini MiniPlus-V2.1 | 2048 | pp2048 / tg128 | **740.3 / 83.0 t/s** | 2026-11-24, `p36-bench`, 1 run |
+| Axion-1.0-35B (Qwen3.6-35B-A3B finetune) | 1024 | decode, gen 64 | **111.78 t/s** (from ~103.9 at sprint start, bit-identical) | 2026-11-20, ROADMAP.md |
 | Inkling-2-Mini NanoPlus-V2.1 | 1024 | pp1024 | 655.41 t/s | recorded run, `p36-bench` n=128 |
 | | 1k / 2k | tg128 | 77.08 / 76.89 t/s | llama.cpp inkling2 fork: 47.06 t/s |
 | Inkling-2-Mini MiniPlus-V2.1 | 1024 | pp1024 | 634.28 t/s | recorded run, `p36-bench` n=128 |

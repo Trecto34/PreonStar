@@ -1,7 +1,7 @@
 # Models and weights
 
 This implementation works with the Qwen3.6/3.8 35B-A3B MoE family (e.g.
-Axion-1.0-35B, Sage), dense Qwen3.8-27B (Swift-1.5 IQ3_S), and Inkling-2-Mini
+Axion-1.0-35B and Sage, both finetunes of Qwen3.6-35B-A3B), dense Qwen3.8-27B (Swift-1.5 IQ3_S), and Inkling-2-Mini
 (`inkling2_loop`: NanoPlus-V2.1, MiniPlus-V2.1, with mmproj vision sidecars) GGUFs.
 See [COMPAT.md](../COMPAT.md) for the supported quantization matrix.
 It is not a general GGUF loader: arbitrary GGUF files will not have the

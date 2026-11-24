@@ -11,8 +11,17 @@
 **A small, self-contained inference engine that runs a 35B-parameter model on
 a $150 AMD BC-250 mini-PC** (16 GB unified memory, Vulkan/RADV).
 
-PreonStar is a native C99 engine for the Qwen3.6/3.8 35B-A3B MoE (e.g. Axion-1.0-35B, Sage), dense Qwen3.8-27B (Swift-1.5 IQ3_S), and
-Inkling-2-Mini (`inkling2_loop`) families.
+PreonStar is a native C99 engine for these model families:
+
+| Model | What it is |
+|---|---|
+| **Sage** (e.g. Sage-A1.5) | Finetune of **Qwen3.6-35B-A3B** (MoE, 3B active) |
+| **Axion-1.0-35B** | Finetune of **Qwen3.6-35B-A3B** (MoE, 3B active) |
+| **Swift-1.5** | Finetune of **Qwen3.8-27B** (dense) |
+| **Inkling-2-Mini** | Thinking Machines' own `inkling2_loop` model, *not* Qwen-based |
+
+Sage and Axion are not separate architectures: they run on the Qwen3.6 35B-A3B
+MoE code path, so anything that holds for Qwen3.6-35B-A3B holds for them.
 It ships the whole stack: a CLI, an OpenAI/Anthropic-compatible HTTP server, a
 coding agent, a benchmark harness, and an evaluation runner. No Python in the hot
 path, no framework underneath, no build system beyond `make`.
@@ -136,12 +145,23 @@ backend they affect, not in the general flag list.
 
 ## Performance
 
+**Headline, 2026-11-24** (`p36-bench`, 2048-token prompt, 128 generated tokens,
+greedy, one run each, governor active):
+
+| Model (APEX-I quant) | Base | Prefill pp2048 | Decode tg128 @ 2k |
+|---|---|---:|---:|
+| Sage-A1.5 NanoPlus-V2.1 | Qwen3.6-35B-A3B finetune | **415.2 t/s** | **112.7 t/s** |
+| Inkling-2-Mini NanoPlus-V2.1 | Inkling-2-Mini | **740.9 t/s** | **83.7 t/s** |
+| Inkling-2-Mini MiniPlus-V2.1 | Inkling-2-Mini | **740.3 t/s** | **83.0 t/s** |
+
+Older recorded results follow.
+
 All numbers are from one BC-250 (16 GB UMA, RADV, GPU governor running), greedy
 decoding, Q8_0 K / Q4_0 V cache unless stated. They need
 `systemctl is-active cyan-skillfish-governor-smu` to print `active`: with the
 governor stopped the same build reads 20-28% slower.
 
-**Axion-1.0-35B (Qwen3.6 MoE), ctx 1024, gen 64:** decode **111.78 t/s**, up from
+**Axion-1.0-35B (Qwen3.6-35B-A3B finetune), ctx 1024, gen 64:** decode **111.78 t/s**, up from
 ~103.9 at the start of the 2026-11-20 decode-kernel sprint; every step was
 bit-identical (ROADMAP.md, kernel ledger in [karpathy/AlreadyTried.md](karpathy/AlreadyTried.md)).
 
