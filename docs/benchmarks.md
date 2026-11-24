@@ -101,9 +101,9 @@ about 20-28% slower and looks like a regression.
 
 | Model | Context | Measurement | Result | Date / source |
 |---|---:|---|---:|---|
-| Sage-A1.5 NanoPlus-V2.1 (Qwen3.6-35B-A3B finetune) | 2048 | pp2048 / tg128 | **415.2 / 112.7 t/s** | 2026-11-24, `p36-bench`, 1 run |
-| Inkling-2-Mini NanoPlus-V2.1 | 2048 | pp2048 / tg128 | **740.9 / 83.7 t/s** | 2026-11-24, `p36-bench`, 1 run |
-| Inkling-2-Mini MiniPlus-V2.1 | 2048 | pp2048 / tg128 | **740.3 / 83.0 t/s** | 2026-11-24, `p36-bench`, 1 run |
+| Sage-A1.5 NanoPlus-V2.1 (Qwen3.6-35B-A3B finetune) | 4096 | warm 2048-tok prefill / tg128 | **985-1105 / 118.2 t/s** (cold first frontier ~450-550) | 2026-11-24, `p36-bench` |
+| Inkling-2-Mini NanoPlus-V2.1 | 4096 | warm 2048-tok prefill / tg128 | **739-753 / 84.0 t/s** | 2026-11-24, `p36-bench` |
+| Inkling-2-Mini MiniPlus-V2.1 | 4096 | warm 2048-tok prefill / tg128 | **741-753 / 83.4 t/s** | 2026-11-24, `p36-bench` |
 | Axion-1.0-35B (Qwen3.6-35B-A3B finetune) | 1024 | decode, gen 64 | **111.78 t/s** (from ~103.9 at sprint start, bit-identical) | 2026-11-20, ROADMAP.md |
 | Inkling-2-Mini NanoPlus-V2.1 | 1024 | pp1024 | 655.41 t/s | recorded run, `p36-bench` n=128 |
 | | 1k / 2k | tg128 | 77.08 / 76.89 t/s | llama.cpp inkling2 fork: 47.06 t/s |

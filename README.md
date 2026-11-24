@@ -145,14 +145,16 @@ backend they affect, not in the general flag list.
 
 ## Performance
 
-**Headline, 2026-11-24** (`p36-bench`, 2048-token prompt, 128 generated tokens,
-greedy, one run each, governor active):
+**Headline, 2026-11-24** (`p36-bench`, 2048-token prefill chunks, 128 generated
+tokens, greedy, governor active). Figures are from the 2048-token prefill that
+takes the context from 2048 to 4096; the first frontier of a fresh process runs
+while MoE expert pages are still faulting in from SSD and reads low (Sage: ~450-550 t/s).
 
-| Model (APEX-I quant) | Base | Prefill pp2048 | Decode tg128 @ 2k |
+| Model (APEX-I quant) | Base | Prefill (warm, 2048 tok) | Decode tg128 @ 4k |
 |---|---|---:|---:|
-| Sage-A1.5 NanoPlus-V2.1 | Qwen3.6-35B-A3B finetune | **415.2 t/s** | **112.7 t/s** |
-| Inkling-2-Mini NanoPlus-V2.1 | Inkling-2-Mini | **740.9 t/s** | **83.7 t/s** |
-| Inkling-2-Mini MiniPlus-V2.1 | Inkling-2-Mini | **740.3 t/s** | **83.0 t/s** |
+| Sage-A1.5 NanoPlus-V2.1 | Qwen3.6-35B-A3B finetune | **985-1105 t/s** | **118.2 t/s** |
+| Inkling-2-Mini NanoPlus-V2.1 | Inkling-2-Mini | **739-753 t/s** | **84.0 t/s** |
+| Inkling-2-Mini MiniPlus-V2.1 | Inkling-2-Mini | **741-753 t/s** | **83.4 t/s** |
 
 Older recorded results follow.
 
