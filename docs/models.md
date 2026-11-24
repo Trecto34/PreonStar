@@ -1,6 +1,9 @@
 # Models and weights
 
-This implementation works with Qwen3.6-35B-A3B and dense Qwen3.8-27B GGUFs.
+This implementation works with the Qwen3.6/3.8 35B-A3B MoE family (e.g.
+Axion-1.0-35B, Sage), dense Qwen3.8-27B (Swift-1.5 IQ3_S), and Inkling-2-Mini
+(`inkling2_loop`: NanoPlus-V2.1, MiniPlus-V2.1, with mmproj vision sidecars) GGUFs.
+See [COMPAT.md](../COMPAT.md) for the supported quantization matrix.
 It is not a general GGUF loader: arbitrary GGUF files will not have the
 tensor layout, quantization mix, metadata, or optional MTP state the engine
 expects. The 2-bit quants provided here are verified high quality — they
@@ -96,7 +99,6 @@ Then build for the target platform:
 make                  # Linux / generic Vulkan, automatic BC-250 fast path
 make vulkan-generic   # explicit generic Vulkan build
 make vulkan-bc250     # Vulkan build that requires a BC-250 at runtime
-make metal            # macOS / Apple Silicon
 ```
 
 The normal and CPU-only builds are self-contained. They do not require a

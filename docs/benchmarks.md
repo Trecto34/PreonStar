@@ -48,7 +48,7 @@ Flags that change what the numbers mean -- record them with the result:
 | `--prefill-chunk` | GPU graph prefill width | auto (resident GPU resolves to 1024) |
 | `--ssd-streaming` | stream experts from disk instead of full residency | off |
 | `--think` / `--nothink` | thinking mode changes the generated token distribution | `--think` |
-| `--backend` | `vulkan`, `metal`, `cpu` | platform default |
+| `--backend` | `vulkan`, `cpu` | `vulkan` |
 
 ```sh
 ./p36-bench --help        # full list, including the measured cost of each tradeoff
@@ -94,53 +94,27 @@ field. **Do not add a row with unknown hardware or an unstated KV cache type.**
 
 ### Reference results -- BC-250
 
-Measured on a BC-250 reference configuration (40 CUs unlocked, performance
-governor, 500--2000 MHz, 85 C ceiling), greedy decoding, `--gen-tokens 128`,
-Q8_0 K / Q4_0 V cache, one process at a time. Model: Qwen3.6-35B-A3B (35B total,
-about 3B active), Q2 imatrix quant.
+One BC-250 (16 GB GDDR6 unified, 40 CUs, RADV), greedy decoding, Q8_0 K / Q4_0 V
+cache, one process at a time. **The GPU governor must be running**
+(`systemctl is-active cyan-skillfish-governor-smu`); stopped, the same build reads
+about 20-28% slower and looks like a regression.
 
-| Prompt | Prefill t/s | Decode t/s |
-|---:|---:|---:|
-| 2048 | 640 | 82 |
-| 4096 | 597 | 80 |
-| 8192 | 502 | 75 |
-| 16384 | 373 | 65 |
-| 24576 | 287 | 56 |
-| 32768 | 244 | 51 |
+| Model | Context | Measurement | Result | Date / source |
+|---|---:|---|---:|---|
+| Axion-1.0-35B (MoE) | 1024 | decode, gen 64 | **111.78 t/s** (from ~103.9 at sprint start, bit-identical) | 2026-11-20, ROADMAP.md |
+| Inkling-2-Mini NanoPlus-V2.1 | 1024 | pp1024 | 655.41 t/s | recorded run, `p36-bench` n=128 |
+| | 1k / 2k | tg128 | 77.08 / 76.89 t/s | llama.cpp inkling2 fork: 47.06 t/s |
+| Inkling-2-Mini MiniPlus-V2.1 | 1024 | pp1024 | 634.28 t/s | recorded run, `p36-bench` n=128 |
+| | 1k / 2k | tg128 | 75.42 / 75.09 t/s | |
+| | 8192 | 6,495-token needle | 582.61 pp / 66.53 tg t/s | |
 
-Hardware: 16 GB GDDR6 unified memory, 256-bit bus (vendor spec, about 448 GB/s),
-8-core Zen 2, Linux + RADV.
+Inkling improvements landed after those runs and were not re-tabulated: MoE expert
+re-layout at upload, +4.7% MiniPlus decode, bit-identical (5c08a39); long-context
+attention prefill +4% (MiniPlus 16k->32k prefill 516.9 -> 542.0 t/s,
+bit-identical, 18648e8).
 
-### Reference results -- fused expert pair (APEX-I, 2026-10)
-
-MoE decode defaults to the fused expert pair (gate+up in one dispatch, down sum
-in another, no q8_K staging). Two APEX-I 35B-A3B builds on the same board,
-greedy (`temperature 0`), 192 generated tokens, `--prefill-chunk 512`, Q8_0 K /
-Q4_0 V, one process at a time. Prompt depth is the token count reported by
-`processing N input tokens`, not the word count of the file:
-
-| Context | Occamy 35B-A3B prefill | Occamy decode | MiniCPM-V 35B-A3B prefill | MiniCPM-V decode |
-|---:|---:|---:|---:|---:|
-| 1k | 565 t/s | 76.9 t/s | 518 t/s | 80.0 t/s |
-| 2k | 746 t/s | 76.2 t/s | 788 t/s | 79.0 t/s |
-| 4k | 782 t/s | 73.5 t/s | 830 t/s | 77.1 t/s |
-| 8k | 698 t/s | 69.7 t/s | 778 t/s | 72.6 t/s |
-| 10.8k | 695 t/s | **68.3 t/s** | 736 t/s | **70.7 t/s** |
-| 12.1k | 690 t/s | 66.4 t/s | 730 t/s | 66.6 t/s |
-
-- Prefill at 1k is lower because the 512-token chunk pipeline has not found its
-  stride yet; it saturates from 2k up.
-- Decay past 4k is close to linear, about **-0.9 t/s per 1k tokens**. Attention
-  is 7% of kernel time at 1k and 10-11% at 4k. There is no cliff: the weight
-  stream still dominates at 12k.
-- KV at 10.8k is only ~0.15 GiB (hybrid attention), so the ceiling is the
-  weights, not the cache.
-- `p36-server` matches the CLI at the same depth within noise (68.1-68.7 t/s at
-  10.8k). SSE, sampling and the request loop cost ~0.02 ms/token of caller gap.
-- The q8 route (`P36_VK_MOE_PAIR_DECODE=0`) measures **49.2 t/s at 10.8k** on the
-  same prompt: the fused pair is worth +40% at depth.
-- The kernel profiler (`P36_VK_PROF_KERNEL=1`) itself costs 15-17% of decode rate.
-  Use it for ratios, never for absolute t/s.
+Older Qwen3.6-35B-A3B Q2 imatrix sweep (`speed-bench/bc250.csv`, `--gen-tokens 128`,
+prefill / decode t/s): 2048 640 / 82, 8192 502 / 75, 32768 244 / 51.
 
 ### Rebuild before you measure
 
@@ -154,9 +128,7 @@ ls -l p36 p36-server p36-agent
 ```
 
 A stale `p36-server` does not error. It keeps the old route and reads about 30%
-slow, which is indistinguishable from a real regression: a server binary from
-before the fused pair reported 49 t/s at 10.8k context against the current 68.
-
+slow, which is indistinguishable from a real regression.
 
 **These are reference points, not guarantees.** They were taken on one board in
 one thermal environment, and the board is the variable that moves most: a stock
@@ -164,12 +136,7 @@ one thermal environment, and the board is the variable that moves most: a stock
 with the harness above before quoting them anywhere.
 
 Streaming from disk trades throughput for the ability to run a larger model on the
-same memory; expect roughly an order of magnitude less prefill and decode:
-
-| Prompt | Prefill t/s | Decode t/s |
-|---:|---:|---:|
-| 4096 | 45 | 15 |
-| 8192 | 49 | 14 |
+same memory; expect roughly an order of magnitude less prefill and decode.
 
 ## Interpreting results
 

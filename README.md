@@ -1,3 +1,7 @@
+> **Endorsed quants:** PreonStar approves and endorses the
+> [IsValorum](https://huggingface.co/IsValorum) custom APEX-I quants,
+> **APEX-I-MiniPlus** and **APEX-I-NanoPlus**, for their speed and quality.
+
 <p align="center">
   <img src="logo.svg" alt="PreonStar logo" width="220">
 </p>
@@ -5,9 +9,9 @@
 # PreonStar
 
 **A small, self-contained inference engine that runs a 35B-parameter model on
-hardware you already own** -- a laptop, a workstation, or a $150 mini-PC.
+a $150 AMD BC-250 mini-PC** (16 GB unified memory, Vulkan/RADV).
 
-PreonStar is a native C99 engine for the Qwen3.6-35B-A3B, Qwen3.8-27B, and
+PreonStar is a native C99 engine for the Qwen3.6/3.8 35B-A3B MoE (e.g. Axion-1.0-35B, Sage), dense Qwen3.8-27B (Swift-1.5 IQ3_S), and
 Inkling-2-Mini (`inkling2_loop`) families.
 It ships the whole stack: a CLI, an OpenAI/Anthropic-compatible HTTP server, a
 coding agent, a benchmark harness, and an evaluation runner. No Python in the hot
@@ -27,29 +31,27 @@ answers.
   or streamed.
 - **Talk to it four ways.** Interactive CLI, HTTP server with OpenAI and Anthropic
   wire formats, a native coding agent, and a batch evaluation harness.
-- **Bring your own hardware.** Anything with a working Vulkan 1.1 driver runs.
-  Apple Silicon runs natively through Metal. The AMD BC-250 is the board the fast
-  path was tuned on -- a reference configuration, not a requirement.
+- **Built for the BC-250.** Every kernel is tuned and measured on the AMD BC-250
+  (gfx1013, Vulkan/RADV). Other Vulkan 1.1 devices run through generic fallbacks
+  but are not tuned or validated.
 
 ## Supported runtimes
 
 | Backend | Platform | Status |
 |---|---|---|
-| **Vulkan** | Linux, Vulkan 1.1+ | Primary GPU path. Generic; the BC-250 fast path is selected by device ID |
-| **Metal** | macOS 11+, Apple Silicon M1 or newer | Native graph runtime, same CLI and server |
+| **Vulkan** | Linux, Vulkan 1.1+ | Production path. The BC-250 fast path is selected by device ID |
 | **CPU** | Any C99 platform | Portable reference and debugging runtime, not the production path |
 
-Windows is not a build target.
+Windows and macOS are not build targets.
 
-Both GPU backends are chosen **at build time** (`make` for Vulkan, `make metal` for
-Metal) and produce the same six command names: `p36`, `p36-server`, `p36-agent`,
-`p36-bench`, `p36-eval`, `p36_test`.
+`make` produces six command names: `p36`, `p36-server`, `p36-agent`, `p36-bench`,
+`p36-eval`, `p36_test`.
 
 ## Requirements
 
 **Universal:**
 
-- Linux or macOS, a C99 compiler, GNU `make`.
+- Linux, a C99 compiler, GNU `make`.
 - 16 GB of memory for the default model resident; 8 GB is workable with SSD
   streaming.
 - `glslang-tools` (or `glslc`) to compile the Vulkan shaders.
@@ -59,7 +61,6 @@ Metal) and produce the same six command names: `p36`, `p36-server`, `p36-agent`,
 - **Vulkan**: a driver supporting shader `float64` and `int64`. Subgroup
   arithmetic, 16-bit storage and native `float16` are probed at runtime and the
   optimized kernels fall back when absent. See [backends.md](docs/backends.md).
-- **Metal**: Xcode command line tools. No Vulkan loader needed.
 - **BC-250**: needs a recent Mesa/RADV, a 512 MB UMA split, and a GPU governor to
   hold clocks. Step-by-step in [docs/hardware/bc250.md](docs/hardware/bc250.md).
 
@@ -72,8 +73,7 @@ sudo apt-get update
 sudo apt-get install -y build-essential glslang-tools libvulkan-dev
 ```
 
-Arch and Fedora equivalents are in [docs/hardware/bc250.md](docs/hardware/bc250.md#1-install-linux-and-radv);
-on macOS install the Xcode command line tools instead.
+Arch and Fedora equivalents are in [docs/hardware/bc250.md](docs/hardware/bc250.md#1-install-linux-and-radv).
 
 Build and fetch a model:
 
@@ -82,7 +82,7 @@ git clone https://github.com/Trecto34/PreonStar.git
 cd PreonStar
 
 make -j"$(nproc)"        # Vulkan, with runtime capability detection
-make metal               # Apple Silicon instead
+make vulkan-bc250        # same, plus a BC-250 device check
 
 ./download_model.sh q2-imatrix    # Qwen3.6-35B-A3B, `10 GB
 ```
@@ -114,12 +114,8 @@ make -j"$(nproc)"          # p36, p36-server, p36-agent, p36-bench, p36-eval, p3
 ls -l p36 p36-server p36-agent
 ```
 
-A stale binary does not error, it just keeps running the old route. That cost a
-whole session once: `p36-server` from before the fused expert pair stayed on the
-q8 route and read **49 t/s where the current build does 68 t/s** — a phantom "30%
-server overhead" that was entirely a missing relink. If a number looks worse than
-the table in [Performance](#performance), check the binary timestamp before you
-profile anything.
+A stale binary does not error, it keeps running the old route and reads ~30% slow,
+which looks like a regression. Check the binary timestamp before you profile.
 
 ## Configuration
 
@@ -131,7 +127,7 @@ A few flags cover most use; the rest are in [configuration.md](docs/configuratio
 | `--ctx N` | Context window in tokens |
 | `--ssd-streaming` | Stream experts from disk instead of full residency |
 | `-ctk` / `-ctv` | KV cache types: `f16`, `q8_0`, `q4_0` (GPU default q8_0 / q4_0) |
-| `--backend` | `vulkan`, `metal` or `cpu` |
+| `--backend` | `vulkan` or `cpu` |
 | `--kv-disk-dir DIR` | Persist the KV cache so restarts skip prefill |
 
 Platform-agnostic options behave the same everywhere. Hardware-specific flags
@@ -140,53 +136,14 @@ backend they affect, not in the general flag list.
 
 ## Performance
 
-On the BC-250 reference board (16 GB UMA, RADV), greedy decoding, Q8_0 K / Q4_0 V
-cache. MoE decode uses the **fused expert pair** (gate+up in one dispatch, down
-sum in another, no q8_K staging) by default; `P36_VK_MOE_PAIR_DECODE=0` restores
-the bit-exact q8 route, which is what to use when you need token-for-token
-reproducibility against older builds:
+All numbers are from one BC-250 (16 GB UMA, RADV, GPU governor running), greedy
+decoding, Q8_0 K / Q4_0 V cache unless stated. They need
+`systemctl is-active cyan-skillfish-governor-smu` to print `active`: with the
+governor stopped the same build reads 20-28% slower.
 
-Decode holds up with context — the fused pair keeps **68+ t/s at 10.8k tokens**
-and loses only 11% going from 1k to 10.8k (n=192, temp 0, `--prefill-chunk 512`):
-
-| Context | Occamy 35B-A3B prefill | Occamy decode | MiniCPM-V 35B-A3B prefill | MiniCPM-V decode |
-|---:|---:|---:|---:|---:|
-| 1k | 565 t/s | **76.9 t/s** | 518 t/s | **80.0 t/s** |
-| 2k | 746 t/s | 76.2 t/s | 788 t/s | 79.0 t/s |
-| 4k | 782 t/s | 73.5 t/s | 830 t/s | 77.1 t/s |
-| 8k | 698 t/s | 69.7 t/s | 778 t/s | 72.6 t/s |
-| 10.8k | 695 t/s | **68.3 t/s** | 736 t/s | **70.7 t/s** |
-| 12.1k | 690 t/s | 66.4 t/s | 730 t/s | 66.6 t/s |
-
-The server matches the CLI within noise at the same depth (68.1-68.7 t/s at
-10.8k; SSE, sampling and the request loop cost ~0.02 ms/token). The q8 route is
-the slow one at depth: **49.2 t/s at 10.8k** with `P36_VK_MOE_PAIR_DECODE=0`,
-which is the +40% the fused pair buys.
-
-Long context, measured 2026-11-17 on the current build (`p36-bench`, greedy,
-n=64, `--prefill-chunk 512`, median of 3 runs, Axion-1.0 35B-A3B
-APEX-I-NanoPlus-V2.1). Prefill is the speed of the segment that ends at that
-context. Prefill and decode flash attention stage K/V in LDS as f16 (with
-packed-f16 PV in prefill; `P36_VK_ATTN_FA_F16=0` restores f32 staging); from
-4096 keys decode runs on `attn_decode_fa` (`P36_VK_ATTN_DECODE_FA_MIN=0`
-restores the span kernel, shown in the "decode before" column):
-
-| Context | Axion prefill | Axion decode | decode before |
-|---:|---:|---:|---:|
-| 1k | 757 t/s | 82.7 t/s | same path |
-| 2k | 900 t/s | 83.3 t/s | same path |
-| 4k | 863 t/s | 85.0 t/s | same path |
-| 8k | 803 t/s | **82.6 t/s** | 75.4 t/s |
-| 16k | 690 t/s | **76.6 t/s** | 67.2 t/s |
-| 32k | 537 t/s | **64.9 t/s** | 48.5 t/s |
-
-Dense Qwen3.8-27B (Huihui Coder390 APEX-I-NanoPlus-V3, `--prefill-chunk 256`):
-**207 t/s prefill / 23.0 t/s decode** at 1k, prefill 170 t/s at 4-8k, 155 t/s
-at 8-16k and 134 t/s at 16-32k (decode 22.1 / 21.1 / 17.7 t/s). Its in-file MTP head lifts decode on a coding prompt to **34.1 t/s**
-with `--mtp-draft 4 --mtp-margin 0.5` (30.3 t/s with `--mtp-draft 3 --mtp-margin
-2`, 23.6 t/s plain). Short prompt batches are no longer charged a full tile:
-a 16-token batch prefills at 46 t/s (was 31), 32 tokens at 77 t/s (was 61), 64
-tokens at 139 t/s (was 112).
+**Axion-1.0-35B (Qwen3.6 MoE), ctx 1024, gen 64:** decode **111.78 t/s**, up from
+~103.9 at the start of the 2026-11-20 decode-kernel sprint; every step was
+bit-identical (ROADMAP.md, kernel ledger in [karpathy/AlreadyTried.md](karpathy/AlreadyTried.md)).
 
 ### Inkling-2-Mini (`inkling2_loop`)
 
@@ -210,23 +167,13 @@ ring-buffer wrap, 0.22 GiB context buffers).
 
 **Recommended models:** [IsValorum](https://huggingface.co/IsValorum) on Hugging
 Face. PreonStar is built to run these quants well: the APEX-I NanoPlus files
-measured above (Axion 35B-A3B and the dense Qwen3.8-27B) load as-is and land on
-the engine's tuned Vulkan kernels for prefill, decode and MTP, with no
-conversion step. If you are choosing weights for a 16 GB board, start there.
+(Axion 35B-A3B, Sage, the dense Qwen3.8-27B and Inkling) load as-is and land on
+the engine's tuned Vulkan kernels, with no conversion step. If you are choosing weights for a 16 GB board, start there.
 
-These numbers need the BC-250 GPU governor running
-(`systemctl is-active cyan-skillfish-governor-smu`): with it stopped the same
-build reads about 162 t/s prefill / 18.8 t/s decode on the dense model.
-
-Rotation is what governs, not context: dense Swift 27B does 21-22 t/s with 160-166
-t/s prefill because it reads 12.18 GB per token (267 GB/s effective, the GDDR6
-bus, not the scheduler), and it gains nothing from the pair route.
-
-The fused pair can move a token on some prompts vs the q8 route — the fibonacci
-probe diverges around token 30 — so keep `=0` for parity-sensitive evaluation.
-It held JSON/schema adherence and stop-token precision across a 31k-token agentic
-suite (15.5k prefill + 15.5k decode) with sequential `write`, tool and browser
-calls.
+Later Inkling commits (not re-measured into the table above): MoE expert
+re-layout at upload, +4.7% MiniPlus decode, bit-identical (5c08a39); long-context
+attention prefill +4%, MiniPlus 16k->32k prefill 516.9 -> 542.0 t/s,
+bit-identical (18648e8).
 
 ### 16 GB UMA: what actually fits
 
@@ -241,13 +188,8 @@ calls.
   at 1024 (Axion 76 vs 99 t/s); rebuild before switching a server to 1024.
   Dense (GQA 6) models stay
   clamped to 256 on this board: 512 measured +3% prefill for +93 MiB scratch.
-- Chunk 512 was validated earlier to **22,361 live context tokens** under an
-  agentic workload; a 31k-token agentic session (15.5k prefill + 15.5k decode)
-  ran without a decode stall.
-- **`--kv-disk-dir` is free and worth it.** Decode is unchanged (68.08 vs 68.68
-  t/s at 10.8k), and a repeated 10.8k prompt drops **ttft from 15.88 s to 1.98 s**.
-  KV at 10.8k is only ~0.15 GiB thanks to hybrid attention — the ceiling is the
-  weights, not the cache.
+- **`--kv-disk-dir` is free and worth it.** Decode is unchanged and a repeated
+  prompt skips prefill (ttft 15.88 s -> 1.98 s at 10.8k, earlier build).
 - Rebuild **every** binary after a route change (`make -j16`, not just `make
   p36`): a stale `p36-server` silently keeps the old route and reads ~30% slow.
 
@@ -280,7 +222,7 @@ code is shaped this way, and what each module owns, is in
 - [docs/README.md](docs/README.md) -- index of everything below.
 - [Configuration](docs/configuration.md) -- all flags, KV cache, migration from q36.
 - [Server](docs/server.md) / [Agent](docs/agent.md) -- the two long-running entry points.
-- [Backends](docs/backends.md) -- Vulkan, Metal and CPU capability requirements.
+- [Backends](docs/backends.md) -- Vulkan and CPU requirements.
 - [Benchmarks](docs/benchmarks.md) -- measure it yourself, and how to report it.
 - [Streaming](docs/streaming.md) -- running models larger than memory.
 - [Models](docs/models.md) -- supported families, quants, vision.

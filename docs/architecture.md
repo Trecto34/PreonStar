@@ -18,7 +18,7 @@ decode and prefill paths. The split is for navigation; the compiler still sees
 one file.
 
 **The backend is chosen at build time, not run time.** `make` builds with Vulkan,
-`make metal` builds with Metal. Both produce the same six command names linked
+`make cpu` builds the CPU reference. Both produce the same six command names linked
 against a different graph runtime, so the CLI, server, agent, benchmark, and
 evaluation harness are backend-agnostic above that line.
 
@@ -79,6 +79,6 @@ prefill entirely.
 
 ## Where to look next
 
-- [backends.md](backends.md) -- Vulkan, Metal and CPU differences and requirements.
+- [backends.md](backends.md) -- Vulkan and CPU differences and requirements.
 - [benchmarks.md](benchmarks.md) -- how to measure a change.
 - [configuration.md](configuration.md) -- every runtime flag.

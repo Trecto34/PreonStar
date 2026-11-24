@@ -1,6 +1,6 @@
 # Running models larger than memory
 
-Metal and Vulkan SSD streaming keep non-routed weights resident and load
+Vulkan SSD streaming keeps non-routed weights resident and load
 selected routed experts into a bounded backend cache. The planner reserves memory
 for the configured context, prefill scratch, planned server sessions, and a staging
 margin before assigning the remaining model budget to static weights and experts.
@@ -10,9 +10,8 @@ static weights and the minimum working cache leave insufficient room. Startup
 logs show the resolved context and model budgets.
 
 ```sh
-./p36 --metal --ssd-streaming -p "Explain radix trees."
 ./p36 --vulkan --ssd-streaming --ssd-streaming-cache-experts 256 -p "Hello"
-./p36 --metal --ssd-streaming --ssd-streaming-cache-experts 1GB -p "Hello"
+./p36 --vulkan --ssd-streaming --ssd-streaming-cache-experts 1GB -p "Hello"
 ```
 
 `NGB` is a routed-expert byte budget. P36 converts it to the number of expert
@@ -25,12 +24,8 @@ A built-in or `P36_VK_STREAMING_EXPERT_HOTLIST` profile biases eviction
 without reading expert weights at startup. It does not fill the cache with
 arbitrary experts when no profile exists. Use `--ssd-streaming-cold` for an
 empty cache, or `--ssd-streaming-preload-experts N` to request an explicit
-weight preload. Metal stores mixed expert sizes in component-wise padded cache
-slots, so the IQ2/Q2 and Q4 routed layers share one bounded cache and one
-hotlist policy. Vulkan retains its original single-size-class behavior. The
-`P36_VK_STREAMING_EXPERT_HOTLIST` and
-`P36_VK_DISABLE_STREAMING_EXPERT_HOTLIST` names are retained for compatibility
-and apply to both graph runtimes.
+weight preload. The `P36_VK_STREAMING_EXPERT_HOTLIST` and
+`P36_VK_DISABLE_STREAMING_EXPERT_HOTLIST` variables control that profile.
 
 As in DS4, an explicit routed prefix can stay fully resident:
 
@@ -42,9 +37,3 @@ Full layers are charged at their actual byte size and the remaining budget
 must still hold one layer of dynamic expert slots for prefill. The default is
 zero because the dynamic-only cache is faster on the BC-250. Pass
 `--ssd-streaming-full-layers 0` to disable an explicit setting.
-
-## Metal SSD streaming
-
-Metal uses the same bounded-cache design, backed by shared Metal buffers with
-biased LRU eviction instead of macOS VM-paging hints. The automatic cache
-size uses `recommendedMaxWorkingSetSize`.

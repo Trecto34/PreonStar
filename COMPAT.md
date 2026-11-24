@@ -12,10 +12,11 @@ quantization mix and metadata for one of the models below.
 
 | Model | Status | Notes |
 | --- | --- | --- |
-| Qwen3.6-35B-A3B (MoE) | Primary target, *tested* | Q2 routed experts (IQ2_XXS gate/up, Q2_K down, Q8_0 rest); mixed Q2 + Q4_K on layers 34-39 |
+| Qwen3.6/3.8 35B-A3B MoE family (e.g. Axion-1.0-35B, Sage) | Primary target, *tested* | Q2 routed experts (IQ2_XXS gate/up, Q2_K down, Q8_0 rest); mixed Q2 + Q4_K on layers 34-39 |
 | Qwen3.8-27B (dense) | Supported, *tested* | `UD-IQ3_S`, Swift-1.5 / GSQ-RCO `IQ3_S` derivatives. IQ4_XS was dropped: too slow and triggered the host OOM killer |
 | Ternary-Bonsai-2-27B (PQ2_0) | Supported, *tested* | PQ2_0 / PTQ1_0 have dedicated kernels |
 | Ornith-1.5-35B-A3B and finetunes (e.g. CyberTiel) | Supported, *tested* | P36 re-quants use IQ2_XXS gate/up, Q2_K down, and Q8_0 rest. The APEX-I NanoPlus mix is supported by specialized Vulkan prefill/decode kernels for its three expert recipes. Use `--strip-nextn` when building from a source that carries the MTP block. |
+| Inkling-2-Mini (`inkling2_loop`: NanoPlus-V2.1, MiniPlus-V2.1) | Supported, *tested* | Dedicated `vulkan/inkling2_*.comp` shaders; vision mmproj sidecars |
 | Other GGUFs | No | |
 
 ## Quantization types
@@ -43,13 +44,12 @@ Known gaps:
 | Feature | Status |
 | --- | --- |
 | Vulkan (AMD BC-250, RADV) | Primary, *tested*. Generic Vulkan 1.1+ build exists but is not validated on other GPUs |
-| Metal (Apple Silicon M1+) | Supported, independent of the Vulkan build |
-| CUDA, Windows | No |
+| CUDA, Metal/macOS, Windows | No |
 | CPU backend | Reference/debug only, not a production path |
 | Expert streaming from SSD | Yes (`--ssd-streaming`) for models larger than RAM |
 | MTP (in-file draft head) | Draft depth 1 by default. Depth 2+ rejected; currently a net loss on BC-250 |
 | External draft-model speculative decoding (DFlash, EAGLE, ...) | No |
-| Vision (mmproj sidecar) | Yes, Qwen3.6 and Qwen3.8 |
+| Vision (mmproj sidecar) | Yes, Qwen3.6, Qwen3.8 and Inkling-2-Mini; `p36-server --models` pairs each model with its own sidecar (`--vision-dir`, `--vision-for`) |
 | KV cache types | K and V: f16, q8_0, q4_0. Default K q8_0, V q4_0 |
 
 ## Hardware reference

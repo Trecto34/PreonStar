@@ -26,8 +26,8 @@ file is supplied without an explicit scale:
 
 `--dir-steering-attn F` applies the same edit after attention outputs. With no
 file, or with both scales set to zero, inference follows the normal path. CPU
-and both GPU runtimes apply the same operation during prefill and decode; Metal
-and Vulkan keep the matrix resident and project activations in place.
+and Vulkan apply the same operation during prefill and decode; Vulkan
+keeps the matrix resident and project activations in place.
 
 ## Debugging Notes
 

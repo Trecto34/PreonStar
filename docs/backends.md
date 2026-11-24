@@ -1,24 +1,19 @@
 # Backends
 
-P36 is multi-runtime at the source and API level, but Metal and Vulkan are
-separate native builds rather than one fat executable. Each build produces the
-same command names—`p36`, `p36-server`, `p36-bench`, `p36-agent`, `p36-eval`,
-and `p36_test`—linked to the selected graph runtime:
+P36 targets the AMD BC-250 through Vulkan (production). A CPU runtime exists
+for reference and debugging. Each build produces the same command names --
+`p36`, `p36-server`, `p36-bench`, `p36-agent`, `p36-eval`, and `p36_test`:
 
-| Platform/runtime | Build | Explicit invocation |
+| Runtime | Build | Explicit invocation |
 | --- | --- | --- |
 | Linux / generic Vulkan | `make` or `make vulkan-generic` | `./p36 --vulkan -p "Hello"` |
 | Linux / BC-250 checked Vulkan | `make vulkan-bc250` | `./p36 --vulkan -p "Hello"` |
-| macOS / Metal | `make metal` | `./p36 --metal -p "Hello"` |
 | CPU reference | `make cpu` | `./p36 --cpu -p "Hello"` |
 
 Building another runtime overwrites those local executable names. Use separate
-worktrees or copy build artifacts if Metal, Vulkan, and CPU binaries must be
-kept side by side. The `--backend metal|vulkan|cpu` spelling is equivalent to
-the short backend switches and is accepted by the CLI, server, agent,
-benchmark, and evaluation harness. A Metal-linked binary rejects `--vulkan`,
-and a Vulkan-linked binary rejects `--metal`, so deployment mistakes fail
-before model loading.
+worktrees or copy build artifacts to keep Vulkan and CPU binaries side by side.
+The `--backend vulkan|cpu` spelling is equivalent to the short switches and is
+accepted by the CLI, server, agent, benchmark, and evaluation harness.
 
 ## Vulkan device and compatibility policy
 
@@ -84,34 +79,9 @@ BC-250 at span 128 vs. the default 512). Prefill is unaffected. Measure both
 flags on your own board at the context length you actually run — benefit
 depends on CU count, thermal headroom, and context.
 
-## Metal device and compatibility policy
-
-Like DS4, a normal local Metal process uses `MTLCreateSystemDefaultDevice`.
-Apple Silicon exposes its unified GPU as one logical Metal device, so P36
-needs no device list for M1/M2/M3/M4+; one process owns one default device
-and one model, with no layer split or multi-Mac mode.
-
-The Metal binary targets macOS 11; newer facilities (macOS 15 residency sets,
-`MTLMathMode`) are selected only after a runtime availability check, and host
-code defaults to the Apple M1 instruction baseline so a binary built on a
-newer Mac stays usable on M1 (`NATIVE_CPU_FLAG=-mcpu=native make metal` for a
-local-only build). Routed MoE prefill uses DS4's expert-major batch-MM
-dispatch where the shape is supported, falling back to the exact matvec path
-otherwise (`P36_METAL_MOE_MM=0` forces that fallback). Cache auto-sizing uses
-`recommendedMaxWorkingSetSize`; all model buffers use unified storage, with
-no discrete-GPU/eGPU path.
-
-Metal shaders compile at runtime from `metal/*.metal` — run frontends from
-the project tree and ship the `metal` directory with binary packages. A
-frontend that changes working directory before model startup must set
-absolute paths via `P36_METAL_DENSE_SOURCE`, `P36_METAL_MOE_SOURCE`,
-`P36_METAL_NORM_SOURCE`, `P36_METAL_OPS_SOURCE`,
-`P36_METAL_RECURRENT_SOURCE`, `P36_METAL_KV_SOURCE`, and
-`P36_METAL_ATTN_SOURCE`.
-
 ## CPU reference runtime
 
 Do not treat the CPU path as the production target. The CLI and `p36-server`
 support the CPU backend for reference/debug use and share the same KV
-session and snapshot format as Metal and Vulkan, but normal inference should
-use a GPU graph runtime.
+session and snapshot format as Vulkan, but normal inference should
+use the Vulkan runtime.

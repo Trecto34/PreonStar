@@ -9,14 +9,15 @@ Start a local OpenAI/Anthropic-compatible server:
 ./p36-server --vulkan --ctx 32768 \
   --kv-disk-dir /tmp/p36-kv --kv-disk-space-mb 8192
 
-./p36-server --metal --ctx 32768 \
-  --kv-disk-dir /tmp/p36-kv --kv-disk-space-mb 8192
+# several models, one resident at a time, swapped by the request's "model" field;
+# each model gets its own vision sidecar (matched by width/name)
+./p36-server --models ~/models/llm ~/models/other --vision-dir ~/models/vision
 ```
 
-On an 8 GB Mac, reduce context and use the bounded Metal cache:
+For a model larger than memory, stream experts from SSD:
 
 ```sh
-./p36-server --metal --ssd-streaming \
+./p36-server --vulkan --ssd-streaming \
   --ssd-streaming-cache-experts 512 --ctx 4096
 ```
 
@@ -56,9 +57,7 @@ recurrent state, and graph scratch fit. Backend behavior is:
 | --- | --- |
 | Vulkan resident, 2-8 decode-ready rows | Native row-batched shared projections and FFN work with private positions, recurrent state, and typed KV when graph scratch can hold every row. F16/F16 and Q8_0/Q4_0 KV are supported; other KV pairs and unsupported shapes use ordered fallback. |
 | Vulkan SSD streaming | Deterministic ordered fallback, preserving expert-cache ownership. |
-| Metal resident, 2-8 decode-ready rows | Native row-batched graph execution where the kernel shape is supported; ordered exact fallback otherwise. |
-| Metal SSD streaming | Deterministic ordered fallback, preserving bounded expert-cache ownership. |
-| CPU, batches above 8, or forced `P36_VK_SESSION_BATCH=0` | Deterministic ordered fallback. The compatibility environment variable also controls Metal session batching. |
+| CPU, batches above 8, or forced `P36_VK_SESSION_BATCH=0` | Deterministic ordered fallback.  |
 
 Batch size one calls `p36_session_eval()` directly. If a batched step fails,
 all members are invalidated so none can silently continue from a partially
@@ -102,7 +101,7 @@ p36-server --temp 0.2 --top-p 0.9 --min-p 0.05 --top-k 40 --repeat-penalty 1.05
 is divided by the penalty when positive and multiplied by it when negative.
 Out-of-range request values are clamped to 0.5..2.0. It is disabled inside
 native tool-call syntax, like the other penalties. For coding, keep the V cache
-at `-ctv q8_0` or `f16`; the Vulkan/Metal default is q4_0.
+at `-ctv q8_0` or `f16`; the Vulkan default is q4_0.
 
 Both Qwen3.6 and Qwen3.8 accept the fixed-template controls:
 

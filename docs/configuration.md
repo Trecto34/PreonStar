@@ -66,7 +66,7 @@ independently with `-ctk` and `-ctv`:
 ./p36-server -ctk f16 -ctv f16
 ```
 
-Resident Metal and Vulkan frontends default to Q8_0 keys and Q4_0 values. CPU
+Resident Vulkan frontends default to Q8_0 keys and Q4_0 values. CPU
 and SSD streaming default to F16 for both. Explicit flags always override
 these defaults. KV quantization reduces context memory; it does not change
 model weight quantization or extend Qwen3.6's 262144-token native context.

@@ -22,7 +22,6 @@ change broke something. A red run here is always a real defect.
 ```sh
 make test          # unit, CLI, agent and eval suites against a local model
 make test-vulkan   # Vulkan kernel and parity coverage
-make test-metal    # Metal kernel and parity coverage (macOS)
 ```
 
 These need a downloaded model in `gguf/` and, for the GPU tiers, a working device.
@@ -33,7 +32,6 @@ Parity targets compare backends token-for-token on a short prompt:
 
 ```sh
 make test-qwen27b-vulkan-parity
-make test-qwen27b-metal-parity
 ```
 
 ## Tier 3 -- release

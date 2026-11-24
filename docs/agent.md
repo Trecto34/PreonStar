@@ -53,10 +53,9 @@ Agent user and system messages accept `<|think_on|>` and `<|think_off|>`.
 The marker is removed before rendering and remains in effect for later turns.
 Historical thinking stays in the append-only transcript until compaction.
 
-Resident Metal and Vulkan both use Q8_0 keys with Q4_0 values and default to a
+Resident Vulkan uses Q8_0 keys with Q4_0 values and default to a
 100000-token agent context. The backend's automatic resident GPU prefill width
-resolves to 1024 tokens. Compact Metal attention scratch keeps this faster
-chunk width practical at long contexts. CPU uses F16 KV. SSD-streamed model
+resolves to 1024 tokens. CPU uses F16 KV. SSD-streamed model
 weights also default to a 100000-token context with F16 KV.
 Explicit `--ctx`, `-ctk`, and `-ctv` values override the preset.
 

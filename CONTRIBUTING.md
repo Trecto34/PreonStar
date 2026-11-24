@@ -59,7 +59,7 @@ What they cover:
 - `--qwen-tool-call-quality`: exercises native Qwen tool-call emission through
   the OpenAI-compatible request path.
 - `--vulkan-kernels`: isolated Vulkan kernel numeric checks.
-- `--gpu-cpu-parity`: compares live CPU and Metal/Vulkan logits on the same
+- `--gpu-cpu-parity`: compares live CPU and Vulkan logits on the same
   generated suffix with P36 top-1 and top-k overlap gates.
 
 The runner defaults to the p36 model path compiled into `p36.h`. Override paths
@@ -130,20 +130,13 @@ model:
 make test                 # unit, parser, protocol, cache and fixture tests
 make test-vulkan          # isolated Vulkan kernel coverage
 make test-model           # generation, CPU/Vulkan and fusion parity
-make test-metal           # Metal unit and isolated numeric kernel coverage
-make test-metal-model     # Metal generation, CPU parity, state, and streaming
 make test-session-batch   # Vulkan 1/2/4/8-session full-logit/state oracle
 make test-server-live     # live HTTP, CORS and Responses API smoke test
-make test-server-live-metal # live Metal HTTP/CORS/Responses smoke test
-make test-server-live-metal-ssd # same live Metal surface through SSD streaming
 make test-server-batching # concurrent requests against one 4-slot server
-make test-server-batching-metal # same concurrent server gate on Metal
-make test-server-batching-metal-ssd # Metal batching through bounded SSD cache
 make benchmark-session-batch # old, 1/2/4/8-slot, and ordered-fallback server runs
 make test-streaming       # resident/warm/cold/pressure/full-layer matrix
 make benchmark-gate       # conservative BC-250 throughput floor
 make release-build-check  # generic/BC-250 Vulkan and CPU builds with -Werror
-make release-build-check-metal # Metal release build with -Werror
 ```
 
 `make test-release` runs the complete sequence, including reference vectors.

@@ -1,6 +1,8 @@
 ## Benchmarking
 
-Here we collect prefill and generation speed obtained with the BC-250.
+Prefill and generation speed on the BC-250 (GPU governor `cyan-skillfish-governor-smu` running).
+`bc250.csv` is the older Qwen3.6-35B-A3B Q2 imatrix sweep; current Axion and
+Inkling-2-Mini results are in [docs/benchmarks.md](../docs/benchmarks.md).
 
 Run `p36-bench` as:
 

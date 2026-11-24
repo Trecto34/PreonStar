@@ -1,13 +1,13 @@
 # Speedup Rules
 
-This file is a rulebook for implementing new PreonStar speedups and kernel optimizations to improve prefill and decode tokens per second (t/s) for a target runtime (Vulkan, Metal) and a target model.
+This file is a rulebook for implementing new PreonStar speedups and kernel optimizations to improve prefill and decode tokens per second (t/s) for a target runtime (Vulkan) and a target model.
 
 * A speedup must remain effective as the context size grows. Benchmark `p36_bench.c` with multiple context sizes, such as 128, 2K, and 4K tokens. In some cases, also test 8K and 16K.
 
 * After a change brings a speedup, always verify that it is mathematically equivalent and produces logits consistent with the previous implementation. A good check is the parity test in `p36_test.c`:
 
   * CPU vs. llama: use 16 threads and short prompts only. This is required only if the `p36.c` CPU path was touched by the changes.
-  * CPU vs. GPU (Vulkan or Metal): use short prompts and 16 CPU threads.
+  * CPU vs. GPU (Vulkan): use short prompts and 16 CPU threads.
   * All parity thresholds from top-1 through top-64 must pass.
 
 * RAM efficiency is very important for this tool. Even an additional 100 MB can be a problem. As a general rule, a speedup should not increase RAM usage. An exception can be made for a very good trade-off. For example, a speculative decoding layer that provides a 2x decode speedup at the cost of 500 MB of additional RAM can be a good fit.
