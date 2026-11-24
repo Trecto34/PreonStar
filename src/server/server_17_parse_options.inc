@@ -109,8 +109,26 @@ static server_config parse_options(int argc, char **argv) {
             g_force_nothink = true;
         } else if (!strcmp(arg, "--kv-disk-dir")) {
             c.kv_disk_dir = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--models-dir")) {
-            c.models_dir = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--models-dir") || !strcmp(arg, "--models")) {
+            /* One or more directories: --models A B C (repeatable). */
+            int first = c.n_models_dirs;
+            while (i + 1 < argc && argv[i + 1][0] != '-') {
+                if (c.n_models_dirs == 8) die("--models: at most 8 directories");
+                c.models_dirs[c.n_models_dirs++] = argv[++i];
+            }
+            if (c.n_models_dirs == first) die("--models requires a directory");
+        } else if (!strcmp(arg, "--vision-dir")) {
+            int first = c.n_vision_dirs;
+            while (i + 1 < argc && argv[i + 1][0] != '-') {
+                if (c.n_vision_dirs == 8) die("--vision-dir: at most 8 directories");
+                c.vision_dirs[c.n_vision_dirs++] = argv[++i];
+            }
+            if (c.n_vision_dirs == first) die("--vision-dir requires a directory");
+        } else if (!strcmp(arg, "--vision-for")) {
+            const char *v = need_arg(&i, argc, argv, arg);
+            if (!strchr(v, '=')) die("--vision-for expects MODEL_ID=FILE");
+            if (c.n_vision_for == 32) die("--vision-for: at most 32 pairs");
+            c.vision_for[c.n_vision_for++] = v;
         } else if (!strcmp(arg, "--kv-disk-space-mb")) {
             c.kv_disk_space_mb = (uint64_t)parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--kv-system-checkpoint")) {
@@ -233,15 +251,16 @@ int main(int argc, char **argv) {
 
     server_config cfg = parse_options(argc, argv);
     g_enable_cors = cfg.enable_cors;
-    if (cfg.models_dir && cfg.batched_sessions > 0) {
+    if (cfg.n_models_dirs && cfg.batched_sessions > 0) {
         server_log(P36_LOG_DEFAULT, "p36-server: --models-dir cannot be combined with --batched-session");
         return 2;
     }
     /* Probe the catalog before any GPU state exists: probes fork. */
     server s;
     memset(&s, 0, sizeof(s));
-    if (cfg.models_dir) {
-        s.model_initial = server_models_scan(&s, cfg.models_dir, cfg.engine.model_path);
+    if (cfg.n_models_dirs) {
+        s.model_initial = server_models_scan(&s, cfg.models_dirs, cfg.n_models_dirs,
+                                             cfg.engine.model_path);
         if (s.model_initial < 0) {
             server_log(P36_LOG_DEFAULT, "p36-server: cannot resolve startup model %s",
                        cfg.engine.model_path);
@@ -249,6 +268,9 @@ int main(int argc, char **argv) {
             return 1;
         }
         s.model_current = s.model_initial;
+        server_models_pair_vision(&s, cfg.vision_dirs, cfg.n_vision_dirs, cfg.vision_for,
+                                  cfg.n_vision_for, cfg.engine.vision_path);
+        cfg.engine.vision_path = s.models[s.model_initial].vision;
     }
     bool mtp_requested = cfg.engine.mtp_path != NULL || cfg.engine.mtp_draft_tokens > 1;
     if (cfg.batched_sessions > 0) {

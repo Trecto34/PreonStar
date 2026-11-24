@@ -165,9 +165,7 @@ static bool send_models(server *s, int fd) {
             buf_putc(&b, ',');
             append_model_json_profile(&b, ctx, s->default_tokens,
                                       s->models[i].id, s->models[i].id,
-                                      i == s->model_initial &&
-                                          s->engine_opt.vision_path &&
-                                          s->engine_opt.vision_path[0]);
+                                      s->models[i].vision != NULL);
         }
     }
     buf_puts(&b, "]}\n");
@@ -234,26 +232,208 @@ static bool server_model_probe(const char *path) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+/* Identity read from a GGUF header: lowercase alphanumeric basename (or name),
+ * architecture, and the width that pairs a model with a vision sidecar
+ * (<arch>.embedding_length for models, clip.vision.projection_dim for clip). */
+typedef struct {
+    char key[128];
+    char arch[64];
+    uint64_t width;
+} gguf_ident;
+
+static bool gguf_rd(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
+
+static bool gguf_skip_value(FILE *f, uint32_t t) {
+    static const uint8_t size[13] = {1, 1, 2, 2, 4, 4, 4, 1, 0, 0, 8, 8, 8};
+    if (t > 12) return false;
+    if (t == 8) {
+        uint64_t n;
+        return gguf_rd(f, &n, 8) && fseeko(f, (off_t)n, SEEK_CUR) == 0;
+    }
+    if (t == 9) {
+        uint32_t et;
+        uint64_t n;
+        if (!gguf_rd(f, &et, 4) || !gguf_rd(f, &n, 8)) return false;
+        if (et != 8 && et != 9 && et <= 12) return fseeko(f, (off_t)(n * size[et]), SEEK_CUR) == 0;
+        for (uint64_t i = 0; i < n; i++)
+            if (!gguf_skip_value(f, et)) return false;
+        return true;
+    }
+    return fseeko(f, size[t], SEEK_CUR) == 0;
+}
+
+static void gguf_norm(char *dst, size_t cap, const char *src, size_t n) {
+    size_t o = 0;
+    for (size_t i = 0; i < n && o + 1 < cap; i++)
+        if (isalnum((unsigned char)src[i])) dst[o++] = (char)tolower((unsigned char)src[i]);
+    dst[o] = 0;
+}
+
+static bool gguf_read_ident(const char *path, gguf_ident *id) {
+    memset(id, 0, sizeof(*id));
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    uint32_t magic, ver;
+    uint64_t nt, nk;
+    bool ok = gguf_rd(f, &magic, 4) && magic == 0x46554747u && gguf_rd(f, &ver, 4) && ver >= 2 &&
+              gguf_rd(f, &nt, 8) && gguf_rd(f, &nk, 8);
+    char name[128] = "", base[128] = "";
+    uint64_t emb = 0, proj = 0;
+    char k[256];
+    for (uint64_t i = 0; ok && i < nk; i++) {
+        uint64_t kl;
+        uint32_t t;
+        if (!gguf_rd(f, &kl, 8) || kl >= sizeof(k) || !gguf_rd(f, k, kl) || !gguf_rd(f, &t, 4)) {
+            ok = false;
+            break;
+        }
+        k[kl] = 0;
+        const size_t kn = strlen(k);
+        char *sdst = !strcmp(k, "general.name") ? name : !strcmp(k, "general.basename") ? base
+                   : !strcmp(k, "general.architecture") ? id->arch : NULL;
+        if (t == 8 && sdst) {
+            uint64_t n;
+            char v[256];
+            if (!gguf_rd(f, &n, 8) || n >= sizeof(v) || !gguf_rd(f, v, n)) { ok = false; break; }
+            if (sdst == id->arch) snprintf(id->arch, sizeof(id->arch), "%.*s", (int)n, v);
+            else gguf_norm(sdst, 128, v, n);
+        } else if ((t == 4 || t == 10) &&
+                   (!strcmp(k, "clip.vision.projection_dim") ||
+                    (kn > 17 && !strcmp(k + kn - 17, ".embedding_length") && strncmp(k, "clip.", 5)))) {
+            uint64_t v = 0;
+            if (!gguf_rd(f, &v, t == 4 ? 4 : 8)) { ok = false; break; }
+            if (k[0] == 'c') proj = v; else emb = v;
+        } else {
+            ok = gguf_skip_value(f, t);
+        }
+    }
+    fclose(f);
+    snprintf(id->key, sizeof(id->key), "%s", base[0] ? base : name);
+    id->width = !strcmp(id->arch, "clip") ? proj : emb;
+    return ok && id->arch[0];
+}
+
+/* One prefix of the other, so "qwen36" pairs with "qwen3635ba3b". */
+static bool gguf_keys_match(const char *a, const char *b) {
+    size_t na = strlen(a), nb = strlen(b);
+    return na >= 4 && nb >= 4 && !strncmp(a, b, na < nb ? na : nb);
+}
+
+/* Give each catalog model a vision sidecar: explicit --vision-for ID=FILE
+ * first, then --vision for the startup model, then from --vision-dir a clip
+ * file of the same width whose name matches, or the only one of that width.
+ * Width-compatible is not proof of a real pair (fine-tunes, renamed bases):
+ * ambiguous cases get no vision and need --vision-for. */
+static void server_models_pair_vision(server *s, const char *const *dirs, int n_dirs,
+                                      const char *const *pairs, int n_pairs,
+                                      const char *startup_vision) {
+    typedef struct { char *path; gguf_ident id; } vis;
+    vis *v = NULL;
+    int nv = 0;
+    for (int di = 0; di < n_dirs; di++) {
+        DIR *d = opendir(dirs[di]);
+        if (!d) {
+            server_log(P36_LOG_DEFAULT, "p36-server: vision: skipping directory %s: %s",
+                       dirs[di], strerror(errno));
+            continue;
+        }
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL) {
+            size_t n = strlen(de->d_name);
+            if (n <= 5 || strcmp(de->d_name + n - 5, ".gguf") != 0) continue;
+            buf pb = {0};
+            buf_printf(&pb, "%s/%s", dirs[di], de->d_name);
+            gguf_ident id;
+            if (!gguf_read_ident(pb.ptr, &id) || strcmp(id.arch, "clip") || !id.width) {
+                buf_free(&pb);
+                continue;
+            }
+            v = xrealloc(v, (size_t)(nv + 1) * sizeof(*v));
+            v[nv].path = buf_take(&pb);
+            v[nv++].id = id;
+        }
+        closedir(d);
+    }
+    for (int i = 0; i < s->model_count; i++) {
+        server_model *m = &s->models[i];
+        const char *why = NULL;
+        for (int p = 0; p < n_pairs && !m->vision; p++) {
+            const char *eq = strchr(pairs[p], '=');
+            if (eq && (size_t)(eq - pairs[p]) == strlen(m->id) &&
+                !strncmp(pairs[p], m->id, (size_t)(eq - pairs[p]))) {
+                m->vision = eq + 1;
+                why = "--vision-for";
+            }
+        }
+        if (!m->vision && i == s->model_initial && startup_vision) {
+            m->vision = startup_vision;
+            why = "--vision";
+        }
+        if (!m->vision && nv) {
+            gguf_ident mid;
+            if (gguf_read_ident(m->path, &mid) && mid.width) {
+                int named = -1, fits = -1, n_fits = 0;
+                for (int j = 0; j < nv; j++) {
+                    if (v[j].id.width != mid.width) continue;
+                    n_fits++;
+                    fits = j;
+                    if (named < 0 && gguf_keys_match(mid.key, v[j].id.key)) named = j;
+                }
+                if (named >= 0) {
+                    m->vision = xstrndup(v[named].path, strlen(v[named].path));
+                    why = "name match";
+                } else if (n_fits == 1) {
+                    m->vision = xstrndup(v[fits].path, strlen(v[fits].path));
+                    why = "only sidecar of this width";
+                } else if (n_fits > 1) {
+                    server_log(P36_LOG_DEFAULT, "p36-server: vision: %s: %d candidate sidecars, "
+                               "none by name; use --vision-for", m->id, n_fits);
+                }
+            }
+        }
+        if (m->vision)
+            server_log(P36_LOG_DEFAULT, "p36-server: vision: %s -> %s (%s)", m->id, m->vision, why);
+    }
+    /* ponytail: matched paths were duplicated, sidecar list itself is freed;
+     * the duplicates live for the process lifetime like the catalog. */
+    for (int j = 0; j < nv; j++) free(v[j].path);
+    free(v);
+}
+
 static int server_model_cmp(const void *a, const void *b) {
     return strcmp(((const server_model *)a)->id, ((const server_model *)b)->id);
 }
 
 /* Build the catalog from dir plus the startup model; returns the startup
  * model's index, or -1.  Files that resolve to the same inode appear once. */
-static int server_models_scan(server *s, const char *dir, const char *initial_path) {
+static int server_models_scan(server *s, const char *const *dirs, int n_dirs,
+                              const char *initial_path) {
     char initial_real[PATH_MAX];
     if (!realpath(initial_path, initial_real)) return -1;
+    int cap = 0;
+    for (int di = 0; di < n_dirs; di++) {
+    const char *dir = dirs[di];
     DIR *d = opendir(dir);
     if (!d) {
-        server_log(P36_LOG_DEFAULT, "p36-server: cannot open --models-dir %s: %s",
+        /* e.g. external drive not mounted: serve the rest. */
+        server_log(P36_LOG_DEFAULT, "p36-server: models: skipping directory %s: %s",
                    dir, strerror(errno));
-        return -1;
+        continue;
     }
-    int cap = 0;
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         size_t n = strlen(de->d_name);
         if (n <= 5 || strcmp(de->d_name + n - 5, ".gguf") != 0) continue;
+        /* Same file name in an earlier directory: that one keeps the id. */
+        bool taken = false;
+        for (int j = 0; j < s->model_count && !taken; j++)
+            taken = strlen(s->models[j].id) == n - 5 &&
+                    !strncmp(s->models[j].id, de->d_name, n - 5);
+        if (taken) {
+            server_log(P36_LOG_DEFAULT, "p36-server: models: %s/%s shadowed by an earlier directory",
+                       dir, de->d_name);
+            continue;
+        }
         buf pb = {0};
         buf_printf(&pb, "%s/%s", dir, de->d_name);
         if (s->model_count == cap) {
@@ -266,6 +446,7 @@ static int server_models_scan(server *s, const char *dir, const char *initial_pa
         s->model_count++;
     }
     closedir(d);
+    }
     qsort(s->models, (size_t)s->model_count, sizeof(*s->models), server_model_cmp);
 
     /* Several names for one file (symlinks): list it once, under the name of
@@ -404,9 +585,9 @@ static bool server_model_open_engine(server *s, int idx) {
     if (idx != s->model_initial) {
         /* Sidecars are built for one model; only the startup model gets them. */
         opt.mtp_path = NULL;
-        opt.vision_path = NULL;
         opt.directional_steering_file = NULL;
     }
+    opt.vision_path = s->models[idx].vision;
     p36_engine *engine = NULL;
     if (p36_engine_open(&engine, &opt) != 0) return false;
     p36_session *session = NULL;
@@ -536,9 +717,7 @@ static void *client_main(void *arg) {
                                       s->models[idx].id, s->models[idx].id,
                                       idx == s->model_current
                                           ? p36_engine_has_vision(s->engine)
-                                          : (idx == s->model_initial &&
-                                             s->engine_opt.vision_path &&
-                                             s->engine_opt.vision_path[0]));
+                                          : s->models[idx].vision != NULL);
             buf_putc(&b, '\n');
             http_response(fd, 200, "application/json", b.ptr);
             buf_free(&b);
@@ -686,7 +865,12 @@ typedef struct {
     int n_ban_text;
     const char *trace_path;
     const char *kv_disk_dir;
-    const char *models_dir;
+    const char *models_dirs[8];
+    int n_models_dirs;
+    const char *vision_dirs[8];
+    int n_vision_dirs;
+    const char *vision_for[32];
+    int n_vision_for;
     uint64_t kv_disk_space_mb;
     kv_cache_options kv_cache;
     bool kv_cache_reject_different_quant;
@@ -877,10 +1061,15 @@ static void usage(FILE *fp) {
         "      Keep N resident sessions and batch decode-ready GPU requests.\n"
         "  --mixed-prefill-quantum N\n"
         "      Prefill tokens per scheduling turn while generation is active. Default: 128\n"
-        "  --models-dir DIR\n"
-        "      Expose every loadable *.gguf in DIR on /v1/models. A request whose \"model\" names\n"
+        "  --models DIR [DIR...], --models-dir DIR [DIR...]\n"
+        "      Expose every loadable *.gguf in the DIRs on /v1/models (missing DIRs are skipped). A request whose \"model\" names\n"
         "      one of them swaps it in (one model resident at a time; -m is loaded first).\n"
         "      Unknown model names use the resident model. Not with --batched-session.\n"
+        "  --vision-dir DIR [DIR...]\n"
+        "      With --models: pair each model with a clip sidecar in DIR whose width matches and whose\n"
+        "      name matches (or the only one of that width). Ambiguous models get no vision.\n"
+        "  --vision-for MODEL_ID=FILE\n"
+        "      With --models: explicit sidecar for one catalog id (repeatable; wins over --vision-dir).\n"
         "  --cors\n"
         "      Add Access-Control-Allow-* headers and answer browser preflight requests.\n"
         "\n"

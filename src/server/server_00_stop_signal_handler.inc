@@ -715,6 +715,7 @@ typedef struct server server;
 typedef struct {
     char *id;
     char *path;
+    const char *vision;  /* paired --vision sidecar, or NULL */
 } server_model;
 static void server_inference_lock(server *s);
 static void server_inference_unlock(server *s);
