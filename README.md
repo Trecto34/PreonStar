@@ -8,6 +8,11 @@
 
 # PreonStar
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
+![GPU: AMD BC-250 / Vulkan](https://img.shields.io/badge/GPU-BC--250%20Vulkan-red.svg)
+![Language: C99](https://img.shields.io/badge/language-C99-555.svg)
+
 **A small, self-contained inference engine that runs a 35B-parameter model on
 a $150 AMD BC-250 mini-PC** (16 GB unified memory, Vulkan/RADV).
 
@@ -30,11 +35,23 @@ It runs a mixture-of-experts model at interactive speed on a machine with 16 GB 
 memory, and if the model does not fit, it streams experts from disk and still
 answers.
 
+**Speed on one BC-250** (2026-11-24, `p36-bench`, warm 2048-token prefill, greedy):
+
+| Model | Prefill | Decode |
+|---|---:|---:|
+| Sage-A1.5 (Qwen3.6-35B-A3B finetune), APEX-I-NanoPlus | ~1,000 t/s | 118 t/s |
+| Inkling-2-Mini, APEX-I-NanoPlus | ~750 t/s | 84 t/s |
+
+**Why not llama.cpp?** On the same board, the `llama.cpp` Inkling-2 fork decodes
+Inkling-2-Mini at 47.1 t/s; PreonStar measured 77.1 t/s under the same `tg128`
+conditions (see [Performance](#performance)). PreonStar trades generality for
+that: one board, a few model families, kernels tuned for each.
+
 [Quickstart](#quickstart) | [Documentation](docs/README.md) | [Benchmarks](docs/benchmarks.md) | [Status](#status)
 
 ## What you get
 
-- **Run a capable model locally.** Qwen3.6-35B-A3B (35B total, `3B active),
+- **Run a capable model locally.** Qwen3.6-35B-A3B (35B total, ~3B active),
   dense Qwen3.8-27B, or Thinking Machines' Inkling-2-Mini (`inkling2_loop`,
   24 physical / 48 looped logical layers), in 2-5 bit quantizations, resident
   or streamed.
@@ -93,7 +110,7 @@ cd PreonStar
 make -j"$(nproc)"        # Vulkan, with runtime capability detection
 make vulkan-bc250        # same, plus a BC-250 device check
 
-./download_model.sh q2-imatrix    # Qwen3.6-35B-A3B, `10 GB
+./download_model.sh q2-imatrix    # Qwen3.6-35B-A3B, ~10 GB
 ```
 
 Run it:
@@ -101,7 +118,7 @@ Run it:
 ```sh
 ./p36 -p "Explain Redis streams in one paragraph."
 
-./p36-server --ctx 32768 --kv-disk-dir `/.p36/server-kv --kv-disk-space-mb 8192
+./p36-server --ctx 32768 --kv-disk-dir ~/.p36/server-kv --kv-disk-space-mb 8192
 
 ./p36-agent
 ```
@@ -111,20 +128,6 @@ Verify the build without a model or a GPU:
 ```sh
 make check
 ```
-
-### Rebuild before you benchmark
-
-`make` builds six binaries from shared objects. Almost every runtime change is
-compiled into the common objects, so **rebuild all of them, not one** — then
-confirm the clock on each is fresh:
-
-```sh
-make -j"$(nproc)"          # p36, p36-server, p36-agent, p36-bench, p36-eval, p36_test
-ls -l p36 p36-server p36-agent
-```
-
-A stale binary does not error, it keeps running the old route and reads ~30% slow,
-which looks like a regression. Check the binary timestamp before you profile.
 
 ## Configuration
 
