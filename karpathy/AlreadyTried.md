@@ -4896,3 +4896,22 @@ was DRAM access order (every WG walking its own 10 KB patch in 72-B steps) plus 
 * **Parity.** 64-step top-20 logprob md5 identical off/on on MiniPlus-R2, APEX-I MiniPlus/NanoPlus V2.1, UD-IQ3_XXS;
   Sage-A1.5 NanoPlus unchanged. Independent code review of both parts: no findings.
 * **Rejected on the way.** Activations staged in LDS (+10%), full 9-step unroll of the split kernel (+59%).
+
+## 2026-11-23 Sage-A1.5 APEX-I NanoPlus (Qwen3.6): force wave32 on moe_down_q2k_sum_decode — REJECTED (null), bit-identical
+
+* `P36_VK_WAVE32_MOE_DOWN=1` (existing switch, previously only measured on Inkling). The iq3xxs4r4 build declares a
+  32-thread workgroup and RADV compiles it wave64, so ISA shows half of every wave idle; wave32 cuts ACO's latency
+  estimate 20545 -> 12168 at the same instruction count. Logits md5 unchanged (92a93e7400aa).
+* Skill bench (ctl/cand/ctl, 6 samples): 119.58 / 119.57 / 119.35 t/s. The idle half-wave is not what limits this kernel.
+* Same ISA audit: per weight ~4 VALU (cvt_f32_ubyte, cmp_class sign test, cndmask negate, mac); grid/sign tables read
+  from a global buffer (24 buffer_load_dword per loop pass, LDS 0) — candidates if this kernel is revisited.
+
+## 2026-11-23 Inkling-2-Mini IQ3 gate_up decode: precomputed f16 sign-XOR mask tables in LDS — REJECTED (null on real weights), bit-identical
+
+* IQ3_XXS: 128 x uvec4 table (ksigns entry -> masks for 8 weights); IQ3_S: 16 x uvec2 nibble table (256 x uvec4
+  halved occupancy). Replaces ~10 VALU of mask arithmetic per 4 weights; IQ3_XXS VALU 1964 -> 1363.
+* Harness (zero-filled tables): IQ3_XXS 58.8 -> 50.1 us (-15%), IQ3_S 66.1 -> 60.9 us (-8%). Parity md5 identical on
+  all 4 Inkling GGUFs; independent review clean.
+* Skill bench R2 (ctl/cand/ctl, 6): 81.54 / 81.34 / 81.54 t/s. The harness gain does not survive real data, most
+  likely LDS bank conflicts once table indices are random (zero tables make every lane read one address).
+  Lesson: harness-test LDS-table changes with real table contents and real weights.
